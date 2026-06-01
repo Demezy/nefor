@@ -18,7 +18,7 @@ local M = {}
 
 local HELP_BODY = [[Keys:
   Enter        send message
-  Shift+Enter  insert newline
+  Ctrl+J       insert newline (also Shift+Enter)
   Esc          cancel current turn
   Esc Esc      cancel everything (within 600ms)
   Ctrl+B       toggle sidebar

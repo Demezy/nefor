@@ -148,6 +148,8 @@ pub fn is_editing_key(key: &KeyMessage, max_lines: u16) -> bool {
         // for terminal apps; absorbing it here would strand the user.
         // The remaining readline shortcuts (Ctrl+A/E/U/K/W) absorb
         // here so the editor handles them inline.
+        // Ctrl+J (ASCII LF) — universal newline for terminals that can't distinguish Shift+Enter from Enter.
+        "j" if has_ctrl && !has_alt && !has_super => allows_newline_insert(max_lines),
         "a" | "e" | "u" | "k" | "w" | "v" | "z" | "y" if has_ctrl && !has_alt && !has_super => true,
         "space" => solo_modifier,
         // Single-char printable: route as text input. Names from
@@ -285,6 +287,13 @@ pub fn apply_editing_key(
         }
         "z" if has_ctrl => state.undo(),
         "y" if has_ctrl => state.redo(),
+        "j" if has_ctrl => {
+            if allows_newline_insert(max_lines) {
+                state.insert_char('\n')
+            } else {
+                EditOutcome::default()
+            }
+        }
         "space" => state.insert_char(' '),
         name => {
             // Single printable.
@@ -552,6 +561,56 @@ mod tests {
     fn editing_key_classifier_shift_enter_only_when_multiline() {
         assert!(!is_editing_key(&key("enter", vec!["shift"]), 1));
         assert!(is_editing_key(&key("enter", vec!["shift"]), 4));
+    }
+
+    #[test]
+    fn editing_key_classifier_ctrl_j_only_when_multiline() {
+        assert!(!is_editing_key(&key("j", vec!["ctrl"]), 1));
+        assert!(is_editing_key(&key("j", vec!["ctrl"]), 4));
+    }
+
+    #[test]
+    fn ctrl_j_inserts_newline_on_multiline() {
+        let multi = WidgetDescription::TextInput {
+            key: Some("input".into()),
+            value: "hi".into(),
+            focused: true,
+            on_change: None,
+            on_submit: None,
+            min_lines: 1,
+            max_lines: 4,
+            placeholder: None,
+            cursor_blink: false,
+            style: None,
+            selectable: false,
+        };
+        let mut r = build(multi);
+        let root = r.root.as_mut().unwrap();
+        let _ = route_key(root, &key("end", vec![]));
+        let decision = route_key(root, &key("j", vec!["ctrl"]));
+        match decision {
+            RouteDecision::HandledByTextInput {
+                value,
+                value_changed,
+                ..
+            } => {
+                assert_eq!(value, "hi\n");
+                assert!(value_changed);
+            }
+            other => panic!("expected HandledByTextInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ctrl_j_bubbles_on_single_line() {
+        let mut r = build(ti("input", true, "hi"));
+        let root = r.root.as_mut().unwrap();
+        let decision = route_key(root, &key("j", vec!["ctrl"]));
+        assert_eq!(
+            decision,
+            RouteDecision::BubbleToLua,
+            "Ctrl+J on single-line input must bubble"
+        );
     }
 
     #[test]
