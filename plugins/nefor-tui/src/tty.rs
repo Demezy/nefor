@@ -10,10 +10,12 @@ use std::io::Write;
 
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 
 /// Open the controlling terminal for read+write. Each caller gets its
@@ -44,6 +46,7 @@ pub fn open_tty() -> std::io::Result<File> {
 /// mutation, one render. Disabled on drop alongside the other modes.
 pub struct RawModeGuard {
     writer: File,
+    keyboard_enhancement: bool,
 }
 
 impl RawModeGuard {
@@ -73,7 +76,25 @@ impl RawModeGuard {
         if let Err(e) = execute!(&mut writer, EnableBracketedPaste) {
             tracing::warn!(error = %e, "failed to enable bracketed-paste; pastes will arrive char-by-char");
         }
-        Ok(RawModeGuard { writer })
+        // Kitty keyboard protocol: lets crossterm distinguish Ctrl+J
+        // from Enter, Shift+Enter from Enter, etc. Graceful fallback —
+        // terminals that don't support it simply ignore the escape.
+        let keyboard_enhancement =
+            supports_keyboard_enhancement().unwrap_or(false);
+        if keyboard_enhancement {
+            if let Err(e) = execute!(
+                &mut writer,
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                )
+            ) {
+                tracing::warn!(error = %e, "failed to enable kitty keyboard protocol");
+            }
+        }
+        Ok(RawModeGuard {
+            writer,
+            keyboard_enhancement,
+        })
     }
 }
 
@@ -84,6 +105,11 @@ impl Drop for RawModeGuard {
         // the user's original terminal contents), show the cursor,
         // flush, then drop raw mode. Errors here are best-effort: by
         // the time the guard runs there's nothing the caller can do.
+        if self.keyboard_enhancement {
+            if let Err(e) = execute!(&mut self.writer, PopKeyboardEnhancementFlags) {
+                tracing::error!(error = %e, "failed to pop kitty keyboard flags on tui exit");
+            }
+        }
         if let Err(e) = execute!(&mut self.writer, DisableBracketedPaste) {
             tracing::error!(error = %e, "failed to disable bracketed paste on tui exit");
         }
