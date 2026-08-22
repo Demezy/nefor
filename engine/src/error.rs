@@ -5,8 +5,8 @@
 //! `Error` enum; [`NeforError`] aggregates them for the binary's return type.
 
 use crate::config::ConfigError;
-use crate::lua::LuaError;
-use crate::ncp::BrokerError;
+use nefor::lua::LuaError;
+use nefor::ncp::BrokerError;
 
 /// Top-level error for the nefor binary.
 #[derive(Debug, thiserror::Error)]

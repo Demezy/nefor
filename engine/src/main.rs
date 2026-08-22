@@ -28,12 +28,7 @@
 mod cli;
 mod config;
 mod error;
-mod event_log;
-mod events;
 mod log;
-mod lua;
-mod ncp;
-mod paths;
 
 use std::sync::{Arc, Mutex};
 
@@ -41,10 +36,10 @@ use anyhow::Context as _;
 
 use crate::cli::{engine_mode_from_cli, runtime_argv_from_cli, EngineMode};
 use crate::error::NeforError;
-use crate::events::EventBus;
-use crate::lua::bindings::EngineOps;
-use crate::lua::LuaHost;
-use crate::ncp::{
+use nefor::events::EventBus;
+use nefor::lua::bindings::EngineOps;
+use nefor::lua::LuaHost;
+use nefor::ncp::{
     spawn_plugin, Broker, BrokerOps, BrokerShared, PluginRegistry, PluginSpec, SharedPluginRegistry,
 };
 
@@ -256,7 +251,7 @@ async fn run_plugin_dispatch(
     // Bridge the binary's stdin into nefor.io.read_line. Done before
     // the broker takes ownership of the host so the read_line binding
     // sees the pump receiver before the cli function ever runs.
-    let stdin_rx = lua::bindings::spawn_stdin_pump();
+    let stdin_rx = nefor::lua::bindings::spawn_stdin_pump();
     host.attach_stdin_pump(stdin_rx);
 
     let mut broker = Broker::new(Arc::clone(&shared), host);
@@ -348,7 +343,7 @@ fn spawn_specs(broker: &mut Broker, specs: &[PluginSpec]) {
                 );
                 broker.queue_process_fact(
                     spec.name.clone(),
-                    crate::ncp::transport::ExitOutcome::SpawnFailure {
+                    nefor::ncp::transport::ExitOutcome::SpawnFailure {
                         reason: e.to_string(),
                     },
                 );
@@ -360,17 +355,18 @@ fn spawn_specs(broker: &mut Broker, specs: &[PluginSpec]) {
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
+    use nefor::ncp::PluginKind;
     use nefor_protocol::PluginName;
 
     fn spec(name: &str, has_cli: bool) -> PluginSpec {
         PluginSpec {
             name: PluginName::new(name).expect("valid"),
             kind: if has_cli {
-                ncp::PluginKind::Both {
+                PluginKind::Both {
                     command: vec!["echo".into()],
                 }
             } else {
-                ncp::PluginKind::Command(vec!["echo".into()])
+                PluginKind::Command(vec!["echo".into()])
             },
         }
     }

@@ -84,10 +84,10 @@ pub enum Command {
     },
 }
 
-// EngineMode lives in `crate::lua::mode` so it can be referenced by the
+// EngineMode lives in `nefor::lua::mode` so it can be referenced by the
 // binding modules (which are part of the lib surface) without having
 // `cli` (binary-only) on their import path.
-pub use crate::lua::mode::EngineMode;
+pub use nefor::lua::mode::EngineMode;
 
 /// Derive the engine mode from a parsed [`Cli`].
 pub fn engine_mode_from_cli(cli: &Cli) -> EngineMode {

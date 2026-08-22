@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use crate::cli::Cli;
 use crate::log::LogDestination;
-use crate::paths::{ConfigDir, DataDir};
+use nefor::paths::{ConfigDir, DataDir};
 
 /// Typed errors produced during directory resolution.
 #[derive(Debug, thiserror::Error)]
