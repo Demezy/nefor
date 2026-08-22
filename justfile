@@ -65,6 +65,10 @@ test-provider:
     cargo test -p nefor --test openai_provider_lib_test
     cargo test -p nefor --test starter_openai_provider_test
 
+# Build, sign, and verify the runtime helpers used by the MAG process E2E tests.
+prepare-mag-e2e:
+    cargo run --quiet -p nefor-cargo-test-harness -- --prepare-mag-e2e
+
 # Explicit live check of the OpenAI-compatible HTTP/SSE client using repository-root .env inputs.
 test-provider-live:
     #!/usr/bin/env bash

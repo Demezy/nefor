@@ -6,6 +6,7 @@
 //! structured final answer after observing the real file contents. Provider
 //! native request/HTTP lowering is covered by the provider-owned suites.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -17,6 +18,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::time::timeout;
 
+mod support;
+
 const READ_TIMEOUT: Duration = Duration::from_secs(90);
 const PROVIDER: &str = "chatgpt-tools-e2e";
 const FIXTURE_CONTENT: &str = "content from shipped basic-tools";
@@ -25,40 +28,24 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn built_binary(package: &str, binary: &str) -> PathBuf {
-    let root = repo_root();
-    let target_dir = root.join("target/chatgpt-tools-e2e");
-    let prepared = nefor_cargo_test_harness::run_cargo_and_prepare(
-        &root,
-        &["build", "--locked", "-p", package, "--bin", binary],
-        Some(&target_dir),
-        &target_dir.join("harness-artifacts").join(binary),
-    )
-    .unwrap_or_else(|error| panic!("build and prepare {package}: {error}"));
-    prepared
-        .paths
-        .into_iter()
-        .find(|path| path.file_name().is_some_and(|name| name == binary))
-        .unwrap_or_else(|| panic!("Cargo did not report executable {binary}"))
+fn prepared_binaries() -> &'static HashMap<&'static str, PathBuf> {
+    static BINARIES: OnceLock<HashMap<&'static str, PathBuf>> = OnceLock::new();
+    BINARIES.get_or_init(|| {
+        support::require_prepared_binaries(
+            "chatgpt_tools_e2e",
+            &["mag-plugin", "tool-gate", "basic-tools"],
+        )
+    })
 }
 
-fn tool_gate_binary() -> &'static PathBuf {
-    static BINARY: OnceLock<PathBuf> = OnceLock::new();
-    BINARY.get_or_init(|| built_binary("tool-gate-plugin", "tool-gate"))
-}
-
-fn basic_tools_binary() -> &'static PathBuf {
-    static BINARY: OnceLock<PathBuf> = OnceLock::new();
-    BINARY.get_or_init(|| built_binary("basic-tools-plugin", "basic-tools"))
-}
-
-fn mag_binary() -> &'static PathBuf {
-    static BINARY: OnceLock<PathBuf> = OnceLock::new();
-    BINARY.get_or_init(|| built_binary("mag-plugin", "mag-plugin"))
+fn prepared_binary(name: &str) -> &PathBuf {
+    prepared_binaries()
+        .get(name)
+        .unwrap_or_else(|| panic!("{name} is in the declared prerequisite set"))
 }
 
 async fn spawn_mag(data_dir: &Path) -> Child {
-    tokio::process::Command::new(mag_binary())
+    tokio::process::Command::new(prepared_binary("mag-plugin"))
         .arg("--kernel")
         .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lua/mag-kernel/init.lua"))
         .arg("--tool-gate")
@@ -73,7 +60,7 @@ async fn spawn_mag(data_dir: &Path) -> Child {
 }
 
 async fn spawn_tool_gate() -> Child {
-    tokio::process::Command::new(tool_gate_binary())
+    tokio::process::Command::new(prepared_binary("tool-gate"))
         .arg("--prompt")
         .arg("read_file")
         .arg("--deny")
@@ -89,7 +76,7 @@ async fn spawn_tool_gate() -> Child {
 }
 
 async fn spawn_basic_tools() -> Child {
-    tokio::process::Command::new(basic_tools_binary())
+    tokio::process::Command::new(prepared_binary("basic-tools"))
         .arg("--gate")
         .arg("tool-gate")
         .arg("--read-file-max-bytes")

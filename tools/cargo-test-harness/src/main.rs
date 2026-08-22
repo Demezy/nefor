@@ -20,6 +20,7 @@ fn run() -> io::Result<u8> {
     let mut args = env::args_os().skip(1);
     let first = args.next();
     let prepare_only = first.as_deref() == Some(std::ffi::OsStr::new("--prepare-only"));
+    let prepare_mag_e2e = first.as_deref() == Some(std::ffi::OsStr::new("--prepare-mag-e2e"));
     let timeout = if prepare_only {
         OsString::from("7200")
     } else {
@@ -28,11 +29,47 @@ fn run() -> io::Result<u8> {
     if args.next().is_some() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: nefor-cargo-test-harness [TIMEOUT_SECONDS | --prepare-only]",
+            "usage: nefor-cargo-test-harness [TIMEOUT_SECONDS | --prepare-only | --prepare-mag-e2e]",
         ));
     }
     let root = repository_root()?;
     let artifact_dir = unique_artifact_dir(&root.join("tmp/macos-test-signing"))?;
+    if prepare_mag_e2e {
+        let prepared = nefor_cargo_test_harness::run_cargo_and_prepare(
+            &root,
+            &[
+                "build",
+                "--locked",
+                "-p",
+                "mag-plugin",
+                "--bin",
+                "mag-plugin",
+                "-p",
+                "tool-gate-plugin",
+                "--bin",
+                "tool-gate",
+                "-p",
+                "basic-tools-plugin",
+                "--bin",
+                "basic-tools",
+                "-p",
+                "openai-provider",
+                "--bin",
+                "openai-provider",
+                "-p",
+                "chatgpt-provider",
+                "--bin",
+                "chatgpt-provider",
+            ],
+            None,
+            &artifact_dir.join("mag-e2e-runtime-helpers"),
+        )?;
+        eprintln!(
+            "=== MAG E2E PREPARATION COMPLETE: {} executables ===",
+            prepared.paths.len()
+        );
+        return Ok(0);
+    }
     let cargo_args = ["test", "--workspace", "--exclude", "nefor-tui"];
 
     let watchdog = cargo_target_dir(&root).join("debug/nefor-test-watchdog");

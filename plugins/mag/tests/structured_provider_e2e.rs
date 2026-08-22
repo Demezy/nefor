@@ -22,6 +22,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::time::timeout;
 
+mod support;
+
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_ID: &str = "structured-provider-e2e";
 
@@ -51,42 +53,13 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn mag_binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_mag-plugin"))
-}
-
 fn provider_binaries() -> &'static HashMap<&'static str, PathBuf> {
     static BINARIES: OnceLock<HashMap<&'static str, PathBuf>> = OnceLock::new();
     BINARIES.get_or_init(|| {
-        let root = repo_root();
-        let target_dir = root.join("target/structured-provider-e2e");
-        let prepared = nefor_cargo_test_harness::run_cargo_and_prepare(
-            &root,
-            &[
-                "build",
-                "--locked",
-                "-p",
-                "openai-provider",
-                "-p",
-                "chatgpt-provider",
-            ],
-            Some(&target_dir),
-            &target_dir.join("harness-artifacts"),
+        support::require_prepared_binaries(
+            "structured_provider_e2e",
+            &["mag-plugin", "openai-provider", "chatgpt-provider"],
         )
-        .expect("build and prepare isolated providers");
-
-        ["openai-provider", "chatgpt-provider"]
-            .into_iter()
-            .map(|name| {
-                let binary = prepared
-                    .paths
-                    .iter()
-                    .find(|path| path.file_name().is_some_and(|file| file == name))
-                    .cloned()
-                    .unwrap_or_else(|| panic!("Cargo did not report executable {name}"));
-                (name, binary)
-            })
-            .collect()
     })
 }
 
@@ -99,18 +72,22 @@ fn starter_dir() -> PathBuf {
 }
 
 async fn spawn_mag(data_dir: &Path) -> Child {
-    tokio::process::Command::new(mag_binary())
-        .arg("--kernel")
-        .arg(kernel_path())
-        .arg("--tool-gate")
-        .arg("tool-gate")
-        .env("NEFOR_DATA_DIR", data_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn mag-plugin")
+    tokio::process::Command::new(
+        provider_binaries()
+            .get("mag-plugin")
+            .expect("mag-plugin is in the declared prerequisite set"),
+    )
+    .arg("--kernel")
+    .arg(kernel_path())
+    .arg("--tool-gate")
+    .arg("tool-gate")
+    .env("NEFOR_DATA_DIR", data_dir)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .kill_on_drop(true)
+    .spawn()
+    .expect("spawn mag-plugin")
 }
 
 async fn spawn_provider(kind: ProviderKind, base_url: &str, data_dir: &Path) -> Child {
