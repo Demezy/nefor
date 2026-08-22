@@ -10,6 +10,7 @@ repository.workspace = true
 [[bin]]
 name = "mag"
 path = "src/main.rs"
+test = false
 
 [[bench]]
 name = "mag_compile"
