@@ -32,6 +32,7 @@ jobs:
         run: |
           cargo test --workspace --exclude nefor-tui --locked
           cargo test -p nefor-tui --lib --locked
+          cargo test -p nefor-tui --bin nefor-tui --locked
           cargo test -p nefor-tui --test animation_test --locked
           cargo test -p nefor-tui --test engine_test --locked
           cargo test -p nefor-tui --test layout_test --locked

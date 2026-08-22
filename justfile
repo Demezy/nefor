@@ -148,6 +148,7 @@ test-tui-chat:
 test-all timeout="7200":
     cargo run --quiet -p nefor-cargo-test-harness -- "{{timeout}}"
     cargo test -p nefor-tui --lib
+    cargo test -p nefor-tui --bin nefor-tui
     cargo test -p nefor-tui --test animation_test
     cargo test -p nefor-tui --test engine_test
     cargo test -p nefor-tui --test layout_test
