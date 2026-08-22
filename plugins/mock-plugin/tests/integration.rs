@@ -5,11 +5,8 @@
 //! binary with `--script <file>`, walks the handshake, streams a few
 //! engine-authored lines, and reads back whatever the plugin emits.
 //!
-//! NOTE: all tests are `#[ignore]` — they time out waiting for plugin
-//! output both in parallel and serial (`--test-threads=1`). The
-//! mock-plugin binary's startup or handshake behavior has likely
-//! changed since these tests were written. Needs investigation of the
-//! binary's ready/ready_ok handshake path before un-ignoring.
+//! The target exercises only deterministic local process and protocol
+//! boundaries, so every test runs in an ordinary Cargo invocation.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -100,7 +97,6 @@ fn cleanup(path: &PathBuf) {
 }
 
 #[tokio::test]
-#[ignore]
 async fn minimal_script_sends_hello_and_exits_on_shutdown() {
     let script = temp_script(
         "minimal",
@@ -152,7 +148,6 @@ async fn minimal_script_sends_hello_and_exits_on_shutdown() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn echo_script_mirrors_events_back() {
     let script = temp_script(
         "echo",
@@ -205,40 +200,37 @@ async fn echo_script_mirrors_events_back() {
 
     send_shutdown(&mut stdin).await;
     drop(stdin);
-    let _ = timeout(Duration::from_secs(5), child.wait())
+    let status = timeout(Duration::from_secs(5), child.wait())
         .await
         .expect("exit in time")
         .expect("wait");
+    assert!(status.success(), "plugin did not exit cleanly: {status:?}");
 
     cleanup(&script);
 }
 
 /// Pinned regression for the cancel-mid-stream bug: while a Lua handler
-/// streams chunks via `nefor.sleep`-paced loops, an inbound `interrupt`
-/// envelope must land at the next sleep yield rather than waiting for
-/// the full stream to drain. The mock plugin's `chat.complete` handler
-/// can run for a long time (paced canned text); the wrapper translates
-/// `chat.interrupt` to `<NAME>.interrupt`, and the handler is expected
-/// to flip a per-chat flag the streaming loop checks. The fix has two
-/// halves: (a) `main::run_dispatch_loop` spawns each `chat.complete`
+/// streams chunks via `nefor.sleep`-paced loops, an inbound
+/// `completion.cancel` envelope must land at the next sleep yield rather
+/// than waiting for the full stream to drain. The handler flips a flag the
+/// streaming loop checks at every chunk boundary. The fix has two
+/// halves: (a) `main::run_dispatch_loop` spawns each `completion.request`
 /// dispatch as its own tokio task so the loop itself never blocks on
 /// an in-flight stream; (b) the streaming script uses `nefor.sleep`
 /// (yields the runtime) and checks the flag between chunks. This test
 /// exercises both.
 ///
-/// The script uses a `*.chat.complete`-shaped kind because that's the
+/// The script uses a `*.completion.request`-shaped kind because that's the
 /// kind the dispatch loop spawns for. Non-streaming kinds dispatch
-/// inline post batch-protocol refactor (so back-to-back deliveries of
-/// `chat.create` + `chat.append` + `chat.complete` from the engine's
-/// batched fan-out keep deterministic ordering).
+/// direct provider request kind the dispatch loop spawns for. Other kinds
+/// dispatch inline and retain input ordering.
 #[tokio::test]
-#[ignore]
-async fn interrupt_envelope_breaks_streaming_loop_at_next_sleep_yield() {
+async fn completion_cancel_breaks_streaming_loop_at_next_sleep_yield() {
     let script = temp_script(
         "interrupt-mid-stream",
         r#"
         local interrupted = false
-        nefor.on("peer.chat.complete", function()
+        nefor.on("peer.completion.request", function()
             for i = 1, 50 do
                 if interrupted then
                     nefor.emit("stopped", { at = i })
@@ -249,7 +241,7 @@ async fn interrupt_envelope_breaks_streaming_loop_at_next_sleep_yield() {
             end
             nefor.emit("done", {})
         end)
-        nefor.on("peer.stop", function()
+        nefor.on("peer.completion.cancel", function()
             interrupted = true
         end)
         "#,
@@ -266,7 +258,7 @@ async fn interrupt_envelope_breaks_streaming_loop_at_next_sleep_yield() {
     let mut start_body = serde_json::Map::new();
     start_body.insert(
         "kind".into(),
-        serde_json::Value::String("peer.chat.complete".into()),
+        serde_json::Value::String("peer.completion.request".into()),
     );
     let start = Envelope::event(
         PluginName::new("peer").expect("valid"),
@@ -293,9 +285,12 @@ async fn interrupt_envelope_breaks_streaming_loop_at_next_sleep_yield() {
         "second line should be a tick: {tick2}"
     );
 
-    // Send the interrupt while the loop is paused at `nefor.sleep`.
+    // Send the cancellation while the loop is paused at `nefor.sleep`.
     let mut stop_body = serde_json::Map::new();
-    stop_body.insert("kind".into(), serde_json::Value::String("peer.stop".into()));
+    stop_body.insert(
+        "kind".into(),
+        serde_json::Value::String("peer.completion.cancel".into()),
+    );
     let stop = Envelope::event(
         PluginName::new("peer").expect("valid"),
         Timestamp::now(),
@@ -330,10 +325,11 @@ async fn interrupt_envelope_breaks_streaming_loop_at_next_sleep_yield() {
 
     send_shutdown(&mut stdin).await;
     drop(stdin);
-    let _ = timeout(Duration::from_secs(5), child.wait())
+    let status = timeout(Duration::from_secs(5), child.wait())
         .await
         .expect("exit in time")
         .expect("wait");
+    assert!(status.success(), "plugin did not exit cleanly: {status:?}");
 
     assert!(
         saw_stopped,
@@ -348,7 +344,6 @@ async fn interrupt_envelope_breaks_streaming_loop_at_next_sleep_yield() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn emit_before_ready_errors_in_script_load() {
     // Calling nefor.emit at top level runs before the handshake, so the
     // script exec fails immediately and the binary exits non-zero
@@ -372,38 +367,14 @@ async fn emit_before_ready_errors_in_script_load() {
     cleanup(&script);
 }
 
-/// Regression: when /cancel fires mid-stream, the partial assistant
-/// text the model has emitted so far MUST be persisted into the chat's
-/// history table on the provider binary, so the next turn's request
-/// includes "what the model was saying before being cut off". The
-/// user-facing motivation is the "you started thinking wrongly,
-/// reconsider" follow-up: without the partial in context the model
-/// has nothing to reconsider against.
-///
-/// Mirrors the openai-provider's existing `push_assistant` on
-/// `outcome.interrupted` (plugins/openai-provider/src/main.rs around
-/// line 751) — both providers share the same wrapper, so the user-
-/// visible chat-side `[interrupted]` system message is unchanged
-/// here; the fix is purely on the provider binary's per-chat history
-/// table.
-///
-/// Probe: production `mock_provider.lua` exposes a debug-only
-/// `<NAME>.debug.history.dump` handler that emits
-/// `<NAME>.debug.history.result { messages }`. Production code paths
-/// don't subscribe to it; tests use it to peek at the in-process chats
-/// table without re-driving a full chat.complete cycle.
-///
-/// Drive: spawn the production lua → chat.create → chat.append (user)
-/// → chat.complete (long help-fallback canned text streams paced at
-/// 20ms/chunk) → wait until enough deltas land that we know we're
-/// mid-stream → interrupt → wait for chat.error("interrupted") →
-/// debug.history.dump → assert the dump contains an assistant message
-/// whose content is a non-empty prefix of the canned text.
+/// The bundled mock provider uses the same stateless direct-completion
+/// contract as openai-provider: history arrives on each correlated request,
+/// and a hard cancellation suppresses that request's terminal result. The
+/// cancellation handler must nevertheless settle its registry entry
+/// immediately so the correlation id can be reused without racing the
+/// detached stream task.
 #[tokio::test]
-#[ignore]
-async fn interrupt_mid_stream_persists_partial_assistant_text_to_history() {
-    // Production lua, not a temp script — we want this test to fail if
-    // anyone reverts the partial-persistence in the real provider.
+async fn production_completion_cancel_settles_request_without_terminal_result() {
     let script_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("plugins/")
@@ -418,9 +389,8 @@ async fn interrupt_mid_stream_persists_partial_assistant_text_to_history() {
     let mut child = Command::new(binary_path())
         .arg("--script")
         .arg(&script_path)
-        // NEFOR_TEST_FAST_MOCK is the opt-in for instant streaming used
-        // by agentic_cli_mock_e2e — leave it UNSET here so pacing is
-        // active and the interrupt actually catches mid-stream.
+        // Leave pacing active so cancellation lands while the help response
+        // is suspended between chunks.
         .env_remove("NEFOR_TEST_FAST_MOCK")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -431,239 +401,137 @@ async fn interrupt_mid_stream_persists_partial_assistant_text_to_history() {
     let stdout = child.stdout.take().expect("stdout");
     let mut reader = BufReader::new(stdout);
 
-    // Handshake.
-    let _ready = read_line(&mut reader).await.expect("ready");
+    let ready_line = read_line(&mut reader).await.expect("ready");
+    let ready = parse_outgoing(&ready_line).await.expect("parse ready");
+    assert!(matches!(
+        ready.body,
+        nefor_protocol::Body::System(SystemBody::Ready { .. })
+    ));
     send_ready_ok(&mut stdin).await;
 
-    // The production lua emits a few setup envelopes on ready_ok
-    // (`hello`, `auth.status`). Drain them so subsequent reads are
-    // deterministic against our test envelopes.
-    let mut setup_drained = 0;
-    while setup_drained < 4 {
-        match timeout(Duration::from_millis(500), read_line(&mut reader)).await {
-            Ok(Some(_)) => setup_drained += 1,
-            _ => break,
-        }
+    // Ready completion has exactly two observable provider announcements.
+    for expected_kind in ["mock-plugin.hello", "mock-plugin.auth.status"] {
+        let line = read_line(&mut reader).await.expect("ready announcement");
+        let outgoing = parse_outgoing(&line).await.expect("parse announcement");
+        let nefor_protocol::Body::Event(body) = outgoing.body else {
+            panic!("expected ready announcement event: {line}");
+        };
+        assert_eq!(
+            body.get("kind").and_then(serde_json::Value::as_str),
+            Some(expected_kind),
+        );
     }
 
-    let chat_id = "regress-interrupt-c1";
+    let request_id = "cancel-and-reuse-1";
     let plugin = PluginName::new("mock-plugin").expect("valid");
-
-    // 1. chat.create
-    let mut create_body = serde_json::Map::new();
-    create_body.insert(
-        "kind".into(),
-        serde_json::Value::String("mock-plugin.chat.create".into()),
-    );
-    create_body.insert("chat_id".into(), serde_json::Value::String(chat_id.into()));
-    let create = Envelope::event(plugin.clone(), Timestamp::now(), create_body);
+    let request_body = serde_json::json!({
+        "kind": "mock-plugin.completion.request",
+        "request_id": request_id,
+        "messages": [{
+            "role": "user",
+            "content": "zxqv-no-trigger-route-to-help"
+        }]
+    })
+    .as_object()
+    .expect("request object")
+    .clone();
+    let request = Envelope::event(plugin.clone(), Timestamp::now(), request_body);
     stdin
-        .write_all(create.to_line().as_bytes())
-        .await
-        .expect("w");
-    stdin.write_all(b"\n").await.expect("nl");
-
-    // 2. chat.append { role=user, content=<gibberish, hits help fallback> }.
-    //    The help fallback streams the long HELP_TEXT (~3KB), paced at
-    //    20ms per chunk → plenty of room for the interrupt to land
-    //    mid-stream.
-    let mut append_body = serde_json::Map::new();
-    append_body.insert(
-        "kind".into(),
-        serde_json::Value::String("mock-plugin.chat.append".into()),
-    );
-    append_body.insert("chat_id".into(), serde_json::Value::String(chat_id.into()));
-    let mut msg = serde_json::Map::new();
-    msg.insert("role".into(), serde_json::Value::String("user".into()));
-    msg.insert(
-        "content".into(),
-        serde_json::Value::String("zxqv-no-trigger-route-to-help".into()),
-    );
-    append_body.insert("message".into(), serde_json::Value::Object(msg));
-    let append = Envelope::event(plugin.clone(), Timestamp::now(), append_body);
-    stdin
-        .write_all(append.to_line().as_bytes())
+        .write_all(request.to_line().as_bytes())
         .await
         .expect("w");
     stdin.write_all(b"\n").await.expect("nl");
     stdin.flush().await.expect("flush");
 
-    // 3. chat.complete — kicks off streaming.
-    let mut complete_body = serde_json::Map::new();
-    complete_body.insert(
-        "kind".into(),
-        serde_json::Value::String("mock-plugin.chat.complete".into()),
-    );
-    complete_body.insert("chat_id".into(), serde_json::Value::String(chat_id.into()));
-    let complete = Envelope::event(plugin.clone(), Timestamp::now(), complete_body);
-    stdin
-        .write_all(complete.to_line().as_bytes())
-        .await
-        .expect("w");
-    stdin.write_all(b"\n").await.expect("nl");
-    stdin.flush().await.expect("flush");
-
-    // 4. Wait until enough stream.delta envelopes have landed that we
-    //    know we're mid-stream (and the partial buffer holds something).
-    //    Three deltas is plenty — the help text is ~3KB / 16-char
-    //    chunks ≈ 200 deltas, so we're far from the end at three.
+    // Three correlated deltas establish that the request is actively
+    // streaming through yield points, rather than merely queued.
     let mut delta_count = 0;
-    let mut accumulated_partial = String::new();
     while delta_count < 3 {
-        let line = match timeout(Duration::from_secs(3), read_line(&mut reader)).await {
-            Ok(Some(l)) => l,
-            _ => panic!(
-                "timed out waiting for stream.delta #{}; saw {delta_count} so far",
-                delta_count + 1,
-            ),
+        let line = read_line(&mut reader).await.expect("completion delta");
+        let outgoing = parse_outgoing(&line).await.expect("parse completion delta");
+        let nefor_protocol::Body::Event(body) = outgoing.body else {
+            panic!("expected completion event: {line}");
         };
-        if line.contains("\"mock-plugin.stream.delta\"") {
+        if body.get("kind").and_then(serde_json::Value::as_str)
+            == Some("mock-plugin.completion.event")
+            && body.get("request_id").and_then(serde_json::Value::as_str) == Some(request_id)
+            && body.get("event").and_then(serde_json::Value::as_str) == Some("text_delta")
+        {
             delta_count += 1;
-            // Extract the text field — the partial we expect to see
-            // mirrored in history.
-            if let Ok(env) = parse_outgoing(&line).await {
-                if let nefor_protocol::Body::Event(map) = env.body {
-                    if let Some(t) = map.get("text").and_then(|v| v.as_str()) {
-                        accumulated_partial.push_str(t);
-                    }
-                }
-            }
         }
     }
-    assert!(
-        !accumulated_partial.is_empty(),
-        "partial accumulator should be non-empty after 3 deltas",
-    );
 
-    // 5. interrupt — flips the per-chat flag the streaming loop checks
-    //    on each chunk boundary.
-    let mut interrupt_body = serde_json::Map::new();
-    interrupt_body.insert(
-        "kind".into(),
-        serde_json::Value::String("mock-plugin.interrupt".into()),
-    );
-    interrupt_body.insert("chat_id".into(), serde_json::Value::String(chat_id.into()));
-    let interrupt = Envelope::event(plugin.clone(), Timestamp::now(), interrupt_body);
+    let cancel_body = serde_json::json!({
+        "kind": "mock-plugin.completion.cancel",
+        "request_id": request_id,
+    })
+    .as_object()
+    .expect("cancel object")
+    .clone();
+    let cancel = Envelope::event(plugin.clone(), Timestamp::now(), cancel_body);
     stdin
-        .write_all(interrupt.to_line().as_bytes())
+        .write_all(cancel.to_line().as_bytes())
+        .await
+        .expect("w");
+    stdin.write_all(b"\n").await.expect("nl");
+
+    // Reusing the id is the protocol-visible settlement probe. The new error
+    // request must be accepted; "already in flight" would prove cancellation
+    // left stale ownership behind. The cancelled request itself must not emit
+    // usage or a successful terminal result.
+    let reuse_body = serde_json::json!({
+        "kind": "mock-plugin.completion.request",
+        "request_id": request_id,
+        "messages": [{"role": "user", "content": "fail"}]
+    })
+    .as_object()
+    .expect("reuse object")
+    .clone();
+    let reuse = Envelope::event(plugin, Timestamp::now(), reuse_body);
+    stdin
+        .write_all(reuse.to_line().as_bytes())
         .await
         .expect("w");
     stdin.write_all(b"\n").await.expect("nl");
     stdin.flush().await.expect("flush");
 
-    // 6. Drain remaining envelopes until chat.error lands. Anything else
-    //    in between is a leftover delta or stream.end — just skip.
-    let mut saw_chat_error = false;
-    for _ in 0..400 {
-        let line = match timeout(Duration::from_secs(3), read_line(&mut reader)).await {
-            Ok(Some(l)) => l,
-            _ => break,
+    loop {
+        let line = read_line(&mut reader)
+            .await
+            .expect("reused request terminal");
+        let outgoing = parse_outgoing(&line)
+            .await
+            .expect("parse reused request event");
+        let nefor_protocol::Body::Event(body) = outgoing.body else {
+            panic!("expected completion event: {line}");
         };
-        if line.contains("\"mock-plugin.chat.error\"") {
-            saw_chat_error = true;
-            break;
+        if body.get("kind").and_then(serde_json::Value::as_str)
+            != Some("mock-plugin.completion.event")
+            || body.get("request_id").and_then(serde_json::Value::as_str) != Some(request_id)
+        {
+            continue;
         }
-    }
-    assert!(
-        saw_chat_error,
-        "expected mock-plugin.chat.error after interrupt"
-    );
-
-    // 7. debug.history.dump — peek at the in-process chats table.
-    let mut dump_body = serde_json::Map::new();
-    dump_body.insert(
-        "kind".into(),
-        serde_json::Value::String("mock-plugin.debug.history.dump".into()),
-    );
-    dump_body.insert("chat_id".into(), serde_json::Value::String(chat_id.into()));
-    let dump = Envelope::event(plugin, Timestamp::now(), dump_body);
-    stdin.write_all(dump.to_line().as_bytes()).await.expect("w");
-    stdin.write_all(b"\n").await.expect("nl");
-    stdin.flush().await.expect("flush");
-
-    // 8. Read the result.
-    let mut history_messages: Option<Vec<serde_json::Value>> = None;
-    for _ in 0..20 {
-        let line = match timeout(Duration::from_secs(3), read_line(&mut reader)).await {
-            Ok(Some(l)) => l,
-            _ => break,
-        };
-        if line.contains("\"mock-plugin.debug.history.result\"") {
-            let env = parse_outgoing(&line).await.expect("parse history result");
-            if let nefor_protocol::Body::Event(map) = env.body {
-                if let Some(serde_json::Value::Array(msgs)) = map.get("messages").cloned() {
-                    history_messages = Some(msgs);
-                    break;
-                }
+        match body.get("event").and_then(serde_json::Value::as_str) {
+            Some("text_delta") => {}
+            Some("error") => {
+                assert_eq!(
+                    body.get("message").and_then(serde_json::Value::as_str),
+                    Some("Mock provider triggered error on user request."),
+                    "the reused request must be accepted after cancellation",
+                );
+                break;
+            }
+            other => {
+                panic!("cancelled request emitted unexpected terminal event {other:?}: {line}")
             }
         }
     }
-    let messages = history_messages.expect("debug.history.result with messages array");
 
     send_shutdown(&mut stdin).await;
     drop(stdin);
-    let _ = timeout(Duration::from_secs(5), child.wait())
+    let status = timeout(Duration::from_secs(5), child.wait())
         .await
         .expect("exit in time")
         .expect("wait");
-
-    // Expected layout: [user, assistant<partial>]. The partial assistant
-    // message MUST exist with non-empty content matching the deltas
-    // we observed on the wire.
-    assert_eq!(
-        messages.len(),
-        2,
-        "expected [user, assistant] in history; got {} messages: {:?}",
-        messages.len(),
-        messages,
-    );
-    let user = &messages[0];
-    assert_eq!(
-        user.get("role").and_then(|v| v.as_str()),
-        Some("user"),
-        "first history entry should be the user message; got: {user:?}",
-    );
-    let assistant = &messages[1];
-    assert_eq!(
-        assistant.get("role").and_then(|v| v.as_str()),
-        Some("assistant"),
-        "second history entry should be the assistant message; got: {assistant:?}",
-    );
-    let content = assistant
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    assert!(
-        !content.is_empty(),
-        "assistant content must be non-empty (the partial streamed text); \
-         this is the regression — pre-fix the chat.complete handler stored \
-         an empty string. accumulated_partial on wire was {} chars.",
-        accumulated_partial.len(),
-    );
-    // The persisted partial must be a prefix of (or equal to) the wire
-    // partial — `emit_stream` accumulates the same chunks it emits.
-    // Streaming may have advanced one or two chunks past our last read
-    // before the interrupt landed, so we accept "wire partial is a
-    // prefix of stored partial OR stored partial is a prefix of wire
-    // partial": both indicate the same underlying buffer.
-    assert!(
-        content.starts_with(&accumulated_partial) || accumulated_partial.starts_with(content),
-        "stored partial and wire partial must share a prefix; \
-         stored={:?} wire={:?}",
-        truncate_str(content, 80),
-        truncate_str(&accumulated_partial, 80),
-    );
-}
-
-fn truncate_str(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        s.to_owned()
-    } else {
-        // Snap to a char boundary so multibyte sequences aren't sliced.
-        let mut idx = n;
-        while idx > 0 && !s.is_char_boundary(idx) {
-            idx -= 1;
-        }
-        format!("{}…", &s[..idx])
-    }
+    assert!(status.success(), "plugin did not exit cleanly: {status:?}");
 }

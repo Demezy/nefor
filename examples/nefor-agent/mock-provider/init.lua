@@ -950,8 +950,14 @@ nefor.on(NAME .. ".completion.request", complete_request)
 
 nefor.on(NAME .. ".completion.cancel", function(body)
   local request_id = body and body.request_id
-  if type(request_id) == "string" and completion_runs[request_id] then
-    completion_runs[request_id].cancelled = true
+  local run = type(request_id) == "string" and completion_runs[request_id] or nil
+  if run then
+    run.cancelled = true
+    -- Cancellation settles ownership of this request immediately. The
+    -- detached completion still holds `run` and observes its flag at the
+    -- next yield; clearing only the registry slot lets a caller reuse the
+    -- correlation id without the cancelled task deleting its replacement.
+    completion_runs[request_id] = nil
     nefor.log("completion.cancel request_id=" .. request_id)
   end
 end)

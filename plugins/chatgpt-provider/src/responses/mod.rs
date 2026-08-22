@@ -6,7 +6,7 @@
 //! typed SSE event enum. NCP wiring and the chat event-loop land in
 //! Phase 4.
 //!
-//! ```ignore
+//! ```text
 //! use chatgpt_provider::responses::{
 //!     ResponsesApiRequest, ResponsesClient, ResponsesTurnContext,
 //! };

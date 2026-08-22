@@ -21,7 +21,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```console
 //! openai-provider \
 //!   --name ollama \
 //!   --base-url http://localhost:11434 \
