@@ -168,19 +168,53 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    fn clear_env() {
-        std::env::remove_var("OPENAI_PROVIDER_API_KEY");
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let lock = env_lock();
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self {
+                key,
+                previous,
+                _lock: lock,
+            }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let lock = env_lock();
+            let previous = std::env::var_os(key);
+            std::env::remove_var(key);
+            Self {
+                key,
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
     }
 
     /// Parse with the env lock held + the OPENAI_PROVIDER_API_KEY env var
     /// cleared, so default-case assertions about `api_key` aren't racing
     /// the env-fallback tests.
-    fn parse_clean(args: &[&str]) -> (std::sync::MutexGuard<'static, ()>, Config) {
-        let g = env_lock();
-        clear_env();
+    fn parse_clean(args: &[&str]) -> (ScopedEnvVar, Config) {
+        let env = ScopedEnvVar::remove("OPENAI_PROVIDER_API_KEY");
         let mut c = Config::try_parse_from(args).expect("parse args");
         c.normalize();
-        (g, c)
+        (env, c)
     }
 
     #[test]
@@ -251,24 +285,34 @@ mod tests {
 
     #[test]
     fn api_key_falls_back_to_env_var() {
-        let _g = env_lock();
-        clear_env();
-        std::env::set_var("OPENAI_PROVIDER_API_KEY", "env-secret");
+        let _env = ScopedEnvVar::set("OPENAI_PROVIDER_API_KEY", "env-secret");
         let mut c = Config::try_parse_from(["openai-provider"]).expect("parse args");
         c.normalize();
         assert_eq!(c.api_key.as_deref(), Some("env-secret"));
-        clear_env();
     }
 
     #[test]
     fn explicit_flag_beats_env_var() {
-        let _g = env_lock();
-        clear_env();
-        std::env::set_var("OPENAI_PROVIDER_API_KEY", "env-secret");
+        let _env = ScopedEnvVar::set("OPENAI_PROVIDER_API_KEY", "env-secret");
         let mut c = Config::try_parse_from(["openai-provider", "--api-key", "flag-secret"])
             .expect("parse args");
         c.normalize();
         assert_eq!(c.api_key.as_deref(), Some("flag-secret"));
-        clear_env();
+    }
+
+    #[test]
+    fn scoped_env_restores_during_unwind() {
+        const KEY: &str = "NEFOR_TEST_OPENAI_SCOPED_ENV_UNWIND";
+        std::env::set_var(KEY, "original");
+        let result = std::panic::catch_unwind(|| {
+            let _env = ScopedEnvVar::set(KEY, "temporary");
+            panic!("deliberate unwind");
+        });
+        assert!(result.is_err());
+        assert_eq!(
+            std::env::var_os(KEY).as_deref(),
+            Some(std::ffi::OsStr::new("original"))
+        );
+        std::env::remove_var(KEY);
     }
 }

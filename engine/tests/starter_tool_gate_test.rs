@@ -18,6 +18,10 @@ use std::sync::Mutex;
 
 use mlua::{Function, Lua, Table, Value};
 
+mod support;
+
+use support::ScopedEnvVar;
+
 fn starter_dir() -> PathBuf {
     repo_root().join("examples/nefor-agent")
 }
@@ -44,9 +48,7 @@ fn small_string_output_does_not_dump() {
     // point of the threshold is to leave normal-size tool calls
     // untouched (no disk write, no summary swap).
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -69,11 +71,6 @@ fn small_string_output_does_not_dump() {
         .eval()
         .expect("nil should_dump");
     assert!(!nil_dump, "nil output must not trigger dump");
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -84,9 +81,7 @@ fn large_output_writes_full_contents_to_file_and_returns_summary() {
     // includes the "Output written to" + "use `grep` … to extract
     // more" framing that the model reads to decide its next move.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -188,11 +183,6 @@ fn large_output_writes_full_contents_to_file_and_returns_summary() {
         meta.contains("read_file"),
         "meta should record the tool name: {meta}"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -202,9 +192,7 @@ fn large_output_preview_stays_json_encodable_when_cutting_multibyte_text() {
     // as a byte array and nefor.json.encode failed while publishing the
     // tool.result back onto the bus.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -242,11 +230,6 @@ fn large_output_preview_stays_json_encodable_when_cutting_multibyte_text() {
         on_disk.contains("€"),
         "dump file must preserve the original multibyte payload"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -256,9 +239,7 @@ fn missing_chat_id_falls_back_to_unscoped_directory() {
     // path stable for results whose chat scoping isn't wired through
     // to the wrapper layer.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -285,11 +266,6 @@ fn missing_chat_id_falls_back_to_unscoped_directory() {
         std::path::Path::new(&path).exists(),
         "dump file missing: {path}"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -299,9 +275,7 @@ fn table_output_is_json_encoded_for_disk_write() {
     // AND for the on-disk write so the model can grep a textual form.
     // The summary still names the file — model reads it the same way.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -335,11 +309,6 @@ fn table_output_is_json_encoded_for_disk_write() {
         body.contains("needle-1234"),
         "dumped JSON must preserve seeded markers"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 // ----------------------------------------------------------------
@@ -356,9 +325,7 @@ fn tool_gate_wrapper_swaps_huge_tool_result_output_to_summary() {
     // gets the small summary in its history. Smaller envelopes pass
     // through unchanged.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor_with_send_recorder(&lua).expect("stub");
@@ -470,11 +437,6 @@ fn tool_gate_wrapper_swaps_huge_tool_result_output_to_summary() {
         "PAYLOAD-LINE\n".repeat(5000),
         "dump file must contain the full original payload"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 // ----------------------------------------------------------------
@@ -889,9 +851,7 @@ fn starter_read_only_tools_does_not_advertise_basic_tools_search_text() {
 #[test]
 fn read_only_discover_instruction_files_returns_no_found_message() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor_with_send_recorder(&lua).expect("stub");
@@ -926,11 +886,6 @@ fn read_only_discover_instruction_files_returns_no_found_message() {
         payload.contains("No instruction files found"),
         "explicit discovery should answer empty results: {payload}"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 // ----------------------------------------------------------------

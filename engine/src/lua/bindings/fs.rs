@@ -207,6 +207,33 @@ fn ok_or_err(lua: &Lua, result: std::io::Result<()>) -> mlua::Result<Table> {
 mod tests {
     use super::*;
 
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct CwdGuard {
+        original: PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl CwdGuard {
+        fn capture() -> Self {
+            let lock = CWD_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let original = std::env::current_dir().expect("current directory");
+            Self {
+                original,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let restored = std::env::set_current_dir(&self.original);
+            if !std::thread::panicking() {
+                restored.expect("restore current directory");
+            }
+        }
+    }
+
     fn setup() -> Lua {
         setup_with_data_dir(PathBuf::from("/var/empty/nefor-test-data-dir"))
     }
@@ -435,12 +462,12 @@ mod tests {
 
     #[test]
     fn getcwd_returns_current_directory() {
+        let _lock = CWD_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let lua = setup();
         let cwd: Option<String> = lua.load("return nefor.fs.getcwd()").eval().unwrap();
         let cwd = cwd.expect("getcwd should return Some");
-        // Don't compare against std::env::current_dir() — the chdir test
-        // mutates the process-wide cwd in parallel. Just verify the
-        // returned path is a real directory.
+        // The lock prevents the chdir regression from changing the
+        // process-wide directory between the binding and this assertion.
         assert!(
             std::path::Path::new(&cwd).is_dir(),
             "getcwd returned a path that is not a directory: {cwd:?}"
@@ -450,7 +477,7 @@ mod tests {
     #[test]
     fn chdir_changes_directory_and_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
-        let original = std::env::current_dir().unwrap();
+        let _cwd = CwdGuard::capture();
         let lua = setup();
         lua.globals()
             .set("test_path", tmp.path().to_str().unwrap())
@@ -468,12 +495,25 @@ mod tests {
         let expected = tmp.path().canonicalize().unwrap();
         let actual = PathBuf::from(&after).canonicalize().unwrap();
         assert_eq!(actual, expected);
-        // Restore so other tests aren't affected.
-        std::env::set_current_dir(&original).unwrap();
+    }
+
+    #[test]
+    fn cwd_guard_restores_during_unwind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let original = std::env::current_dir().unwrap();
+        let result = std::panic::catch_unwind(|| {
+            let _cwd = CwdGuard::capture();
+            std::env::set_current_dir(tmp.path()).unwrap();
+            panic!("deliberate unwind");
+        });
+        assert!(result.is_err());
+        let _lock = CWD_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(std::env::current_dir().unwrap(), original);
     }
 
     #[test]
     fn chdir_missing_path_returns_error() {
+        let _lock = CWD_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let lua = setup();
         let ok: bool = lua
             .load(r#"return nefor.fs.chdir("/nope/definitely/not/here").ok"#)

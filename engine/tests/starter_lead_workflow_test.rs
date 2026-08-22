@@ -4,8 +4,15 @@
 //! then load the Lua test driver at `examples/nefor-agent/lead_workflow_test.lua`.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use mlua::{Function, Lua, Table, Value};
+
+mod support;
+
+use support::ScopedEnvVar;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn starter_dir() -> PathBuf {
     repo_root().join("examples/nefor-agent")
@@ -26,8 +33,7 @@ fn repo_root() -> PathBuf {
 #[test]
 fn starter_lead_workflow_full() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let prev_data_dir = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -42,17 +48,40 @@ fn starter_lead_workflow_full() {
         .set_name(test_path.display().to_string())
         .exec()
     {
-        match prev_data_dir {
-            Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-            None => std::env::remove_var("NEFOR_DATA_DIR"),
-        }
         panic!("lead_workflow_test.lua failed:\n{e}");
     }
+}
 
-    match prev_data_dir {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
+#[test]
+fn scoped_env_restores_after_normal_completion() {
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    const KEY: &str = "NEFOR_TEST_SCOPED_ENV_NORMAL";
+    std::env::remove_var(KEY);
+    {
+        let _env = ScopedEnvVar::set(&TEST_LOCK, KEY, "temporary");
+        assert_eq!(
+            std::env::var_os(KEY).as_deref(),
+            Some(std::ffi::OsStr::new("temporary"))
+        );
     }
+    assert_eq!(std::env::var_os(KEY), None);
+}
+
+#[test]
+fn scoped_env_restores_during_unwind() {
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    const KEY: &str = "NEFOR_TEST_SCOPED_ENV_UNWIND";
+    std::env::set_var(KEY, "original");
+    let result = std::panic::catch_unwind(|| {
+        let _env = ScopedEnvVar::set(&TEST_LOCK, KEY, "temporary");
+        panic!("deliberate unwind");
+    });
+    assert!(result.is_err());
+    assert_eq!(
+        std::env::var_os(KEY).as_deref(),
+        Some(std::ffi::OsStr::new("original"))
+    );
+    std::env::remove_var(KEY);
 }
 
 #[test]

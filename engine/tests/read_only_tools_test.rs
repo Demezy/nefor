@@ -4,8 +4,15 @@
 //! tree, and runs it.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use mlua::{Function, Lua, Value};
+
+mod support;
+
+use support::ScopedEnvVar;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn repo_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -17,7 +24,7 @@ fn repo_root() -> PathBuf {
 
 #[test]
 fn read_only_tools_include_seam() {
-    std::env::set_var("NEFOR_REPO_ROOT", repo_root());
+    let _repo_root = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_REPO_ROOT", repo_root());
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
     set_package_path(&lua).expect("set package.path");

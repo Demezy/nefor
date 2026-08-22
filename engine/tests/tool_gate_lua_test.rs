@@ -18,6 +18,10 @@ use std::sync::Mutex;
 
 use mlua::{Function, Lua, Table, Value};
 
+mod support;
+
+use support::ScopedEnvVar;
+
 fn repo_root() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest
@@ -521,9 +525,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 #[test]
 fn maybe_dump_output_passes_through_small_output_unchanged() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("nefor stub");
@@ -548,19 +550,12 @@ fn maybe_dump_output_passes_through_small_output_unchanged() {
     assert!(same, "small output should not be copied — same table back");
     assert_eq!(output, "small");
     assert!(path.is_none());
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
 fn maybe_dump_output_rewrites_huge_output_into_summary_and_writes_disk() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("nefor stub");
@@ -614,19 +609,12 @@ fn maybe_dump_output_rewrites_huge_output_into_summary_and_writes_disk() {
     );
     let on_disk = std::fs::read_to_string(&path).expect("read dump");
     assert_eq!(on_disk, "PAYLOAD\n".repeat(5000));
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
 fn maybe_dump_output_preserves_structured_process_results() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("nefor stub");
@@ -666,19 +654,12 @@ fn maybe_dump_output_preserves_structured_process_results() {
     assert!(path.is_none());
     assert_eq!(stdout, "PAYLOAD\n".repeat(5000));
     assert_eq!(code, 0);
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
 fn maybe_dump_output_ignores_bodies_without_string_id() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("nefor stub");
@@ -703,11 +684,6 @@ fn maybe_dump_output_ignores_bodies_without_string_id() {
     let path: Option<String> = result.get("path").expect("path");
     assert!(same);
     assert!(path.is_none());
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 // ----------------------------------------------------------------

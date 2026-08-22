@@ -8,6 +8,10 @@ use std::sync::Mutex;
 
 use mlua::{Function, Lua, Table, Value};
 
+mod support;
+
+use support::ScopedEnvVar;
+
 fn starter_dir() -> PathBuf {
     repo_root().join("examples/nefor-agent")
 }
@@ -34,9 +38,7 @@ fn jsonl_excludes_session_control_events() {
     // the normal one (plus the header).
     let tempdir = tempfile::tempdir().expect("tempdir");
     // Point sessions.lua's data root at our tempdir.
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -185,12 +187,6 @@ fn jsonl_excludes_session_control_events() {
             "provider runtime event leaked into jsonl: {line}",
         );
     }
-
-    // Restore env.
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -202,9 +198,7 @@ fn inbound_outbound_cycle_lands_in_jsonl() {
     // payload}` row the engine used to write, so chat.lua's session
     // picker keeps working unchanged.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -287,11 +281,6 @@ fn inbound_outbound_cycle_lands_in_jsonl() {
         "second inbound entry shape wrong: {}",
         lines[3]
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -314,9 +303,7 @@ fn resume_emits_lifecycle_markers_in_order() {
     // We monkey-patch `nefor.engine.send` to capture every emission's
     // kind into a trace; the order assertion below is the contract.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
     let target_id = "11111111-2222-4333-8444-555555555555";
     std::fs::create_dir_all(tempdir.path().join("sessions")).expect("sessions dir");
     std::fs::write(
@@ -388,11 +375,6 @@ fn resume_emits_lifecycle_markers_in_order() {
         expected,
         "resume must emit lifecycle markers in this order; got {ordered:?}"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -405,9 +387,7 @@ fn shutdown_prunes_truly_empty_session_preserves_session_with_any_envelope() {
     //   (a) no user submit → no file.
     //   (b) at least one user submit → preserved.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     // (a) empty session.
     {
@@ -474,11 +454,6 @@ fn shutdown_prunes_truly_empty_session_preserves_session_with_any_envelope() {
             "session with a user submit must be preserved on shutdown: {path}"
         );
     }
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -494,9 +469,7 @@ fn new_mints_fresh_session_and_prunes_empty_outgoing() {
     // changed, (b) neither the empty outgoing nor fresh idle session
     // leaves a file behind.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -549,11 +522,6 @@ fn new_mints_fresh_session_and_prunes_empty_outgoing() {
         !std::path::Path::new(&boot_path).exists(),
         "outgoing empty session file should be pruned by /new: {boot_path}"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -565,9 +533,7 @@ fn resume_to_existing_session_appends_in_order() {
     // the persistence hook, and asserts the file ends with both
     // submits in the original order.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let target_id = "44444444-2222-4333-8444-555555555555";
     let sessions_dir = tempdir.path().join("sessions");
@@ -635,11 +601,6 @@ fn resume_to_existing_session_appends_in_order() {
         "second-to-last line must be the preexisting first submit \
          (resume must not corrupt the prior content): {prior}"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -667,9 +628,7 @@ fn resume_to_self_replays_log_so_chat_repaints() {
     //   2. the on-disk persisted entry (a chat.input.submit) is replayed
     //      to its original target (broadcast, target=nil here).
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -743,19 +702,12 @@ fn resume_to_self_replays_log_so_chat_repaints() {
          persisted entries so chat.lua's pre-cleared transcript repaints; \
          got {ordered:?}"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
 fn failed_resume_retains_current_session() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
     set_package_path(&lua).expect("set package.path");
@@ -776,18 +728,12 @@ fn failed_resume_retains_current_session() {
         unchanged,
         "failed activation must retain the current session"
     );
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
 fn init_with_resume_id_cold_starts_without_session_end() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -843,11 +789,6 @@ fn init_with_resume_id_cold_starts_without_session_end() {
         !saw_end,
         "cold-start --session must not emit session_end for a nil outgoing session"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 // `data_root_resolves_xdg_then_home_fallback` was deleted alongside the
@@ -862,9 +803,7 @@ fn new_then_new_prunes_each_empty_predecessor() {
     // Repeated `/new` without typing must not leave a trail of empty
     // stubs. Each cycle prunes the prior file; the picker stays clean.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -904,19 +843,12 @@ fn new_then_new_prunes_each_empty_predecessor() {
         entries.len(),
         entries.iter().map(|e| e.path()).collect::<Vec<_>>(),
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
 fn failed_new_preserves_current_identity_and_emits_correlated_failure() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -960,11 +892,6 @@ fn failed_new_preserves_current_identity_and_emits_correlated_failure() {
         }
     }
     assert!(found, "missing correlated transition failure");
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -973,9 +900,7 @@ fn new_after_submit_preserves_prior_session() {
     // SURVIVE `/new`. Otherwise the user's first session of the day
     // would vanish the moment they typed `/new`.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -1014,11 +939,6 @@ fn new_after_submit_preserves_prior_session() {
         "/new must not open a fresh file until the next submit: {new_path}"
     );
     assert_ne!(boot_path, new_path, "/new must mint a different id");
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -1030,9 +950,7 @@ fn replay_window_frames_resume_and_skips_persistence_inside() {
     // disk (which would duplicate state on the next resume). The
     // markers themselves are NOT persisted (sessions.* filter).
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     // Pre-seed a target session jsonl with one step-origin entry so
     // replay_jsonl has something to do. The header line carries the
@@ -1170,11 +1088,6 @@ fn replay_window_frames_resume_and_skips_persistence_inside() {
         !body.contains("sessions.replay.start") && !body.contains("sessions.replay.end"),
         "replay markers must not be persisted: {body}"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -1184,9 +1097,7 @@ fn resume_sets_global_replay_window_during_replay_burst() {
     // true while it emits replay.start, replayed envelopes, and replay.end,
     // then release it before returning.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let target_id = "77777777-2222-4333-8444-555555555555";
     let sessions_dir = tempdir.path().join("sessions");
@@ -1256,19 +1167,12 @@ fn resume_sets_global_replay_window_during_replay_burst() {
         !active_after,
         "replay_window.active() must be false after resume"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
 fn large_resume_replays_complete_burst_without_progress_workaround() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let target_id = "99999999-2222-4333-8444-555555555555";
     let sessions_dir = tempdir.path().join("sessions");
@@ -1325,11 +1229,6 @@ fn large_resume_replays_complete_burst_without_progress_workaround() {
         elapsed < std::time::Duration::from_secs(5),
         "10k-row focused reproduction stalled for {elapsed:?}"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
@@ -1338,9 +1237,7 @@ fn resume_skips_malformed_and_non_object_jsonl_rows() {
     // should not abort resume. Only valid object rows with origin=="step" are
     // replayed and counted.
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let target_id = "88888888-2222-4333-8444-555555555555";
     let sessions_dir = tempdir.path().join("sessions");
@@ -1405,19 +1302,12 @@ fn resume_skips_malformed_and_non_object_jsonl_rows() {
         kinds.iter().any(|k| k == "chat.message.append"),
         "valid row should still replay after malformed rows: {kinds:?}"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
 fn session_switch_cancels_stale_replay_before_new_window() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
     let sessions_dir = tempdir.path().join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
     for id in [
@@ -1475,19 +1365,12 @@ fn session_switch_cancels_stale_replay_before_new_window() {
         ],
         "an unstarted stale continuation emits no framing before the winning replay"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
 fn cooperative_resume_exposes_numeric_byte_progress_before_completion() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let session_id = "77777777-2222-4333-8444-555555555555";
     let sessions_dir = tempdir.path().join("sessions");
@@ -1549,19 +1432,12 @@ fn cooperative_resume_exposes_numeric_byte_progress_before_completion() {
         .expect("drain replay");
     let done: bool = lua.load("return _done").eval().expect("completion");
     assert!(done, "bounded continuations must eventually complete");
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
 fn resume_progress_is_monotonic_and_bounded() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let session_id = "11111111-2222-4333-8444-555555555555";
     let sessions_dir = tempdir.path().join("sessions");
@@ -1613,19 +1489,12 @@ fn resume_progress_is_monotonic_and_bounded() {
         values.windows(2).all(|pair| pair[0] < pair[1]),
         "progress must be strictly monotonic: {values:?}"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 #[test]
 fn failed_resume_preserves_current_identity_and_writable_history() {
     let tempdir = tempfile::tempdir().expect("tempdir");
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let prev = std::env::var("NEFOR_DATA_DIR").ok();
-    std::env::set_var("NEFOR_DATA_DIR", tempdir.path());
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
 
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -1667,11 +1536,6 @@ fn failed_resume_preserves_current_identity_and_writable_history() {
         jsonl.contains("before") && jsonl.contains("after"),
         "{jsonl}"
     );
-
-    match prev.as_deref() {
-        Some(v) => std::env::set_var("NEFOR_DATA_DIR", v),
-        None => std::env::remove_var("NEFOR_DATA_DIR"),
-    }
 }
 
 // Process-global lock to serialise tests that mutate NEFOR_DATA_DIR.
