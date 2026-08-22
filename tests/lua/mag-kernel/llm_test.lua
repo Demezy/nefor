@@ -6,8 +6,8 @@
 -- factory in isolation: a capturing `emit` stands in for the kernel outbound,
 -- so no real provider, bus, or router is needed. Covers the task's factory-
 -- level list: capability.invoke on a graph activation; tool-calls reply →
--- ToolCalls + mag.complete; no-tool-calls reply → TextAnswer + mag.complete;
--- provider-error reply → mag.failed; kill mid-flight → provider cancel
+-- ToolCalls + mag.complete; no-tool-calls reply → typed Result + mag.complete;
+-- provider-error reply → typed AgentError result; kill mid-flight → provider cancel
 -- envelope; drain idle vs in-flight. Plus transcript seeding (params.history):
 -- seed replays ahead of the round-1 activation, seed + accumulated turns stay
 -- ordered across a tool round, malformed seeds fail construction with the
@@ -124,11 +124,21 @@ local function conversation_messages(facts)
   return completed
 end
 
+local function with_contracts(params)
+  local resolved = {
+    output_type = "text-answer-id",
+    error_type = "agent-error-id",
+    provider_error_type = "provider-error-id",
+  }
+  for key, value in pairs(params or {}) do resolved[key] = value end
+  return resolved
+end
+
 -- Construct an llm instance with a fresh capture. Consumes the ready confirm.
 local function make(id, params)
   local msgs, emit = capture()
   local dependency, facts = conversation(id)
-  local instance = llm.construct(id, params or {}, emit, { conversation = dependency })
+  local instance = llm.construct(id, with_contracts(params), emit, { conversation = dependency })
   return instance, msgs, facts
 end
 
@@ -154,7 +164,7 @@ do
   local outs = {}
   for _, t in ipairs(reg:declaration("llm").outputs) do outs[t] = true end
   assert_true(outs["generic-tool.ToolCalls"], "declares the ToolCalls exit")
-  assert_true(outs["generic-provider.TextAnswer"], "declares the TextAnswer exit")
+  assert_true(outs["nefor.agent.Result"], "declares the typed agent result exit")
 
   local sigs = {}
   for _, s in ipairs(reg:declaration("llm").signals) do sigs[s] = true end
@@ -177,7 +187,7 @@ do
     result = { text = "current answer", finish_reason = "stop" },
   })
 
-  assert_true(find_kind(msgs, "generic-provider.TextAnswer") == nil,
+  assert_true(find_kind(msgs, "nefor.agent.Result") == nil,
     "a queued steer keeps the run open instead of finishing after the current answer")
   local second = find_last_kind(msgs, "capability.invoke")
   local history = conversation_messages(facts)
@@ -277,8 +287,8 @@ do
   assert_eq(calls.calls[1].args.path, "x", "the provider arguments are normalized to .args")
   assert_true(calls.tool_calls == nil, "the raw provider tool_calls field is not surfaced")
   assert_true(find_kind(msgs, "mag.complete") ~= nil, "deferred success signalled with mag.complete")
-  assert_true(find_kind(msgs, "generic-provider.TextAnswer") == nil,
-    "no TextAnswer when tool calls are present")
+  assert_true(find_kind(msgs, "nefor.agent.Result") == nil,
+    "no terminal result when tool calls are present")
 end
 
 -- ==================================================================
@@ -374,12 +384,15 @@ do
     result = { tool_calls = { { id = "bad-2", name = "read", arguments = "[]" } } } })
   assert_eq(count_kind(msgs, "capability.invoke"), 2,
     "repeated malformed calls stop at the configured correction bound")
-  assert_true(find_kind(msgs, "mag.failed") ~= nil,
-    "exhausting correction feedback settles the actor instead of looping")
+  local failed = find_kind(msgs, "nefor.agent.Result")
+  assert_true(failed ~= nil and failed.semantic_type_id == "agent-error-id",
+    "exhausting correction feedback settles as a typed agent error")
+  assert_true(failed.value.reason.value.message:find("correction limit reached", 1, true) ~= nil,
+    "the typed agent error retains the correction-limit detail")
 end
 
 -- ==================================================================
--- reply without tool calls → generic-provider.TextAnswer + mag.complete
+-- reply without tool calls → typed nefor.agent.Result + mag.complete
 -- ==================================================================
 
 do
@@ -393,9 +406,10 @@ do
     result = { text = "done", text_answer = { text = "done" } },
   })
 
-  local final = find_kind(msgs, "generic-provider.TextAnswer")
-  assert_true(final ~= nil, "a reply without tool calls emits generic-provider.TextAnswer")
-  assert_eq(final.text, "done", "TextAnswer carries the provider text")
+  local final = find_kind(msgs, "nefor.agent.Result")
+  assert_true(final ~= nil, "a reply without tool calls emits a typed result")
+  assert_eq(final.semantic_type_id, "text-answer-id", "result carries the compiler-selected constructor")
+  assert_eq(final.value, "done", "TextAnswer result carries the provider text")
   assert_true(find_kind(msgs, "mag.complete") ~= nil, "deferred success signalled with mag.complete")
   assert_true(find_kind(msgs, "generic-tool.ToolCalls") == nil,
     "no ToolCalls when the result has none")
@@ -404,8 +418,8 @@ do
   local i2, m2 = make("x.llm", { provider = "p" })
   i2.deliver(turn({}))
   i2.deliver({ kind = "reply", ref = find_kind(m2, "capability.invoke").ref, result = { tool_calls = {}, text = "hi" } })
-  assert_true(find_kind(m2, "generic-provider.TextAnswer") ~= nil,
-    "an empty tool_calls array classifies as a TextAnswer")
+  assert_true(find_kind(m2, "nefor.agent.Result") ~= nil,
+    "an empty tool_calls array classifies as a terminal result")
 end
 
 -- ==================================================================
@@ -600,9 +614,9 @@ do
   end
   instance.deliver({ kind = "reply", ref = r2.ref, result = { text = "the answer" } })
 
-  local final = find_kind(msgs, "generic-provider.TextAnswer")
-  assert_true(final ~= nil, "the run ends in a TextAnswer")
-  assert_eq(final.transcript_delta, nil, "TextAnswer carries no transcript reconstruction data")
+  local final = find_kind(msgs, "nefor.agent.Result")
+  assert_true(final ~= nil, "the run ends in a typed result")
+  assert_eq(final.transcript_delta, nil, "typed result carries no transcript reconstruction data")
   assert_eq(facts[1].kind, "created", "the logical actor conversation is explicit")
   assert_eq(facts[#facts].kind, "turn_completed", "the turn closes at final output")
   local started, exchanges, results = 0, 0, 0
@@ -619,7 +633,7 @@ do
   local i2, m2, f2facts = make("plain.llm", { provider = "p" })
   i2.deliver(turn({ messages = { { role = "user", content = "go" } } }))
   i2.deliver({ kind = "reply", ref = find_kind(m2, "capability.invoke").ref, result = { text = "done" } })
-  local f2 = find_kind(m2, "generic-provider.TextAnswer")
+  local f2 = find_kind(m2, "nefor.agent.Result")
   assert_eq(f2.transcript_delta, nil, "unseeded turns also rely on canonical facts")
   assert_eq(f2facts[#f2facts].kind, "turn_completed", "unseeded turn closes")
 end
@@ -767,7 +781,7 @@ end
 do
   local msgs, emit = capture()
   local facts = {}
-  local instance = assert(llm.construct("lead.llm", { provider = "p" }, emit, {
+  local instance = assert(llm.construct("lead.llm", with_contracts({ provider = "p" }), emit, {
     conversation = {
       id = "root-conversation",
       root_id = "root-conversation",
@@ -795,25 +809,25 @@ end
 do
   local _, emit = capture()
 
-  local inst, err = llm.construct("bad.llm", { provider = "p", history = "not a list" }, emit)
+  local inst, err = llm.construct("bad.llm", with_contracts({ provider = "p", history = "not a list" }), emit)
   assert_true(inst == nil, "a non-table params.history does not construct")
   assert_true(err:find("params.history", 1, true) ~= nil and err:find("string", 1, true) ~= nil,
     "the error names params.history and the offending type")
 
-  local i2, e2 = llm.construct("bad.llm", { provider = "p", history = { role = "user", content = "x" } }, emit)
+  local i2, e2 = llm.construct("bad.llm", with_contracts({ provider = "p", history = { role = "user", content = "x" } }), emit)
   assert_true(i2 == nil, "a single message passed instead of a list does not construct")
   assert_true(e2:find("not a map", 1, true) ~= nil, "the error explains the array requirement")
 
-  local i3, e3 = llm.construct("bad.llm", { provider = "p", history = { { role = "user" }, "loose string" } }, emit)
+  local i3, e3 = llm.construct("bad.llm", with_contracts({ provider = "p", history = { { role = "user" }, "loose string" } }), emit)
   assert_true(i3 == nil, "a non-table entry does not construct")
   assert_true(e3:find("params.history[2]", 1, true) ~= nil, "the error points at the offending index")
 
-  local i4, e4 = llm.construct("bad.llm", { provider = "p", history = { { content = "no role" } } }, emit)
+  local i4, e4 = llm.construct("bad.llm", with_contracts({ provider = "p", history = { { content = "no role" } } }), emit)
   assert_true(i4 == nil, "an entry without a role does not construct")
   assert_true(e4:find("missing a role", 1, true) ~= nil, "the error names the missing role")
 
-  local i5, e5 = llm.construct("bad.llm",
-    { provider = "p", history = { { role = "assistant", tool_calls = "call-1" } } }, emit)
+  local i5, e5 = llm.construct("bad.llm", with_contracts(
+    { provider = "p", history = { { role = "assistant", tool_calls = "call-1" } } }), emit)
   assert_true(i5 == nil, "a non-array tool_calls does not construct")
   assert_true(e5:find("tool_calls", 1, true) ~= nil, "the error names the malformed tool_calls")
 end
@@ -851,7 +865,7 @@ do
 end
 
 -- ==================================================================
--- a result with finish_reason "error" is a suffered failure, never a TextAnswer
+-- a result with finish_reason "error" becomes a typed AgentError result
 -- ==================================================================
 
 do
@@ -865,13 +879,13 @@ do
     result = { text = "", finish_reason = "error", error = "HTTP 400: boom" },
   })
 
-  local failed = find_kind(msgs, "mag.failed")
-  assert_true(failed ~= nil, "a finish_reason error emits mag.failed")
-  assert_eq(failed.failure, "mag.Failed", "mag.failed names the reserved suffered-failure tag")
-  assert_eq(failed.value.error, "HTTP 400: boom", "the failure threads the provider's detail")
-  assert_true(find_kind(msgs, "generic-provider.TextAnswer") == nil,
-    "an errored round must never classify as a TextAnswer (error masking)")
-  assert_true(find_kind(msgs, "mag.complete") == nil, "an errored round does not complete-ok")
+  local failed = find_kind(msgs, "nefor.agent.Result")
+  assert_true(failed ~= nil, "a finish_reason error emits a typed result")
+  assert_eq(failed.semantic_type_id, "agent-error-id", "the error selects the AgentError constructor")
+  assert_eq(failed.value.reason.type, "provider-error-id", "the error identifies its provider cause")
+  assert_eq(failed.value.reason.value.message, "HTTP 400: boom",
+    "the typed failure threads the provider's detail")
+  assert_true(find_kind(msgs, "mag.complete") ~= nil, "the computed AgentError completes normally")
 
   -- A detail-less provider error still carries a readable failure.
   local i2, m2 = make("x.llm", { provider = "p" })
@@ -881,8 +895,9 @@ do
     ref = find_kind(m2, "capability.invoke").ref,
     result = { text = "", finish_reason = "error" },
   })
-  local f2 = find_kind(m2, "mag.failed")
-  assert_true(f2 ~= nil and type(f2.value.error) == "string" and #f2.value.error > 0,
+  local f2 = find_kind(m2, "nefor.agent.Result")
+  assert_true(f2 ~= nil and type(f2.value.reason.value.message) == "string"
+      and #f2.value.reason.value.message > 0,
     "a detail-less provider error still names the failure")
 end
 
@@ -892,26 +907,26 @@ end
 
 do
   local _, emit = capture()
-  local inst, err = llm.construct("naked.llm", {}, emit)
+  local inst, err = llm.construct("naked.llm", with_contracts({}), emit)
   assert_true(inst == nil, "an llm with no params.provider does not construct")
   assert_true(type(err) == "string" and err:find("provider", 1, true) ~= nil,
     "the construction error names the missing provider requirement")
 
   -- An empty-string provider is likewise rejected (not a valid capability name).
-  local i2, e2 = llm.construct("naked2.llm", { provider = "" }, emit)
+  local i2, e2 = llm.construct("naked2.llm", with_contracts({ provider = "" }), emit)
   assert_true(i2 == nil and type(e2) == "string", "an empty provider string also fails construction")
 
   -- Registry construction propagates the same nil + error (init.lua's
   -- set_construct then logs it and never binds, so the actor never readies).
   local reg = Registry.new()
   reg:register({ declaration = llm.declaration, construct = llm.construct })
-  local rinst, rerr = reg:construct("llm", "r.llm", {}, emit, {})
+  local rinst, rerr = reg:construct("llm", "r.llm", with_contracts({}), emit, {})
   assert_true(rinst == nil and type(rerr) == "string" and rerr:find("provider", 1, true) ~= nil,
     "registry:construct forwards the missing-provider error")
 end
 
 -- ==================================================================
--- provider-error reply → mag.failed (suffered failure)
+-- provider-error reply → typed AgentError result
 -- ==================================================================
 
 do
@@ -921,13 +936,14 @@ do
 
   instance.deliver({ kind = "reply", ref = invoke.ref, error = "provider timed out" })
 
-  local failed = find_kind(msgs, "mag.failed")
-  assert_true(failed ~= nil, "a provider error in the reply emits mag.failed")
-  assert_eq(failed.failure, "mag.Failed", "mag.failed names the reserved suffered-failure tag")
-  assert_eq(failed.value.error, "provider timed out", "the failure carries the provider error")
-  assert_true(find_kind(msgs, "mag.complete") == nil, "an errored reply does not also complete-ok")
-  assert_true(find_kind(msgs, "generic-provider.TextAnswer") == nil,
-    "an errored reply emits no data output")
+  local failed = find_kind(msgs, "nefor.agent.Result")
+  assert_true(failed ~= nil, "a provider error in the reply emits a typed result")
+  assert_eq(failed.semantic_type_id, "agent-error-id", "provider error selects AgentError")
+  assert_eq(failed.value.reason.type, "provider-error-id", "provider cause is typed")
+  assert_eq(failed.value.reason.value.message, "provider timed out",
+    "the failure carries the provider error")
+  assert_true(find_kind(msgs, "mag.complete") ~= nil,
+    "a computed AgentError completes the actor normally")
 end
 
 -- ==================================================================
@@ -950,7 +966,7 @@ do
 
   -- A late reply after kill is ignored (pending was cleared).
   instance.deliver({ kind = "reply", ref = invoke.ref, result = { text = "late" } })
-  assert_true(find_kind(msgs, "generic-provider.TextAnswer") == nil,
+  assert_true(find_kind(msgs, "nefor.agent.Result") == nil,
     "a reply arriving after kill produces no output")
 end
 
@@ -979,7 +995,7 @@ do
   assert_eq(invokes, 1, "no second provider request is started while draining")
 
   busy.deliver({ kind = "reply", ref = invoke.ref, result = { text = "flush" } })
-  assert_true(find_kind(bm, "generic-provider.TextAnswer") ~= nil,
+  assert_true(find_kind(bm, "nefor.agent.Result") ~= nil,
     "the pending reply flushes its output during drain")
   assert_true(find_kind(bm, "mag.complete") ~= nil, "and signals deferred completion")
 end

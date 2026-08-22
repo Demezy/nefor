@@ -1,3 +1,22 @@
+package.preload["nefor-tui"] = function()
+  local nil_sentinel = {}
+  return {
+    widget = {},
+    util = {
+      NIL = nil_sentinel,
+      shallow_merge = function(base, patch)
+        local merged = {}
+        for key, value in pairs(base or {}) do merged[key] = value end
+        for key, value in pairs(patch or {}) do
+          if value == nil_sentinel then merged[key] = nil else merged[key] = value end
+        end
+        return merged
+      end,
+      bordered_box = function() end,
+    },
+  }
+end
+
 local context_usage = require("libs.chat.context_usage")
 
 local function eq(actual, expected, label)

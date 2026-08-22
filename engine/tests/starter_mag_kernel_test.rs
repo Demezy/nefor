@@ -131,7 +131,9 @@ fn run_lua_test(rel_path: &str) {
 /// queue seam, appended to a global `__emitted` array so tests loading the
 /// full kernel entry (multi_run_test) can assert on the wire traffic, plus a
 /// deterministic `nefor.opaque_id` matching the host binding used for provider
-/// routing correlation. Kernel modules take their logger by injection.
+/// routing correlation, and the compiler-owned semantic identity/compatibility
+/// operations used by typed fixture validation. Kernel modules take their
+/// logger by injection.
 fn install_stub_nefor(lua: &Lua) -> mlua::Result<()> {
     let nefor = lua.create_table()?;
     let log: Function = lua.create_function(|_, _: Variadic<Value>| Ok(()))?;
@@ -180,6 +182,26 @@ fn install_stub_nefor(lua: &Lua) -> mlua::Result<()> {
     })?;
     json.set("mark_array", mark_array)?;
     nefor.set("json", json)?;
+
+    let semantic_type = lua.create_table()?;
+    let id = lua.create_function(|lua, descriptor: Value| {
+        let descriptor: serde_json::Value = lua.from_value(descriptor)?;
+        let descriptor = nefor_mag::json::concrete_type_from_json(&descriptor)
+            .map_err(|error| mlua::Error::runtime(error.to_string()))?;
+        Ok(descriptor.stable_id().to_string())
+    })?;
+    semantic_type.set("id", id)?;
+    let accepts = lua.create_function(|lua, (target, source): (Value, Value)| {
+        let target: serde_json::Value = lua.from_value(target)?;
+        let source: serde_json::Value = lua.from_value(source)?;
+        let target = nefor_mag::json::concrete_type_from_json(&target)
+            .map_err(|error| mlua::Error::runtime(error.to_string()))?;
+        let source = nefor_mag::json::concrete_type_from_json(&source)
+            .map_err(|error| mlua::Error::runtime(error.to_string()))?;
+        Ok(target.accepts_edge_source(&source))
+    })?;
+    semantic_type.set("accepts", accepts)?;
+    nefor.set("semantic_type", semantic_type)?;
 
     lua.globals().set("nefor", nefor)?;
     Ok(())

@@ -267,9 +267,16 @@ local function install_conversation_output(format, state, gate)
           if #input > 80 then input = input:sub(1, 77) .. "..." end
           write_stderr("[tool: " .. tostring(item.name) .. "(" .. input .. ")]\n")
         end
-        if state.on_tool_started then state.on_tool_started(item.name, item.arguments) end
-      elseif item.kind == "tool_completed" and item.error and format == "text" then
-        write_stderr("[tool error: " .. preview(item.output) .. "]\n")
+        if state.on_tool_started then
+          state.on_tool_started(item.exchange_id, item.name, item.arguments)
+        end
+      elseif item.kind == "tool_completed" then
+        if item.error and format == "text" then
+          write_stderr("[tool error: " .. preview(item.output) .. "]\n")
+        end
+        if state.on_tool_completed then
+          state.on_tool_completed(item.exchange_id, item.completion_delivery)
+        end
       elseif item.kind == "turn_completed" and state.on_terminal then
         state.on_terminal(item.turn_id, "success", item.answer, item.terminal)
       elseif item.kind == "turn_failed" and state.on_terminal then
@@ -324,16 +331,25 @@ end
 
 local function run_single_shot(prompt, format, state, turn_start_ms, gate)
   local async_dispatch_inflight = false
+  local dispatch_exchanges = {}
   local already_exited = false
 
-  state.on_tool_started = function(name, input)
+  state.on_tool_started = function(exchange_id, name, input)
     if is_async_dispatch(name, input) then
-      async_dispatch_inflight = true
+      dispatch_exchanges[exchange_id] = "pending"
       -- Suppress text streaming for the first turn — the user wants
       -- the final relayed answer, not the transitional dispatch ack.
-      -- The relay turn re-opens the gate.
+      -- A synchronous completion re-opens it as soon as the tool result
+      -- identifies that no relay turn will follow.
       if gate then gate.suppress_stream = true end
     end
+  end
+
+  state.on_tool_completed = function(exchange_id, completion_delivery)
+    if not dispatch_exchanges[exchange_id] then return end
+    dispatch_exchanges[exchange_id] = completion_delivery == "async" and "async" or nil
+    async_dispatch_inflight = next(dispatch_exchanges) ~= nil
+    if gate then gate.suppress_stream = async_dispatch_inflight end
   end
 
   local function emit_completion(status, answer, terminal)
@@ -389,6 +405,7 @@ end
 -- next user line after the relay turn lands.
 local function run_repl(format, state, gate)
   local async_dispatch_inflight = false
+  local dispatch_exchanges = {}
 
   local function reset_json_state()
     if format == "json" then
@@ -409,11 +426,18 @@ local function run_repl(format, state, gate)
     end
   end
 
-  state.on_tool_started = function(name, input)
+  state.on_tool_started = function(exchange_id, name, input)
     if is_async_dispatch(name, input) then
-      async_dispatch_inflight = true
+      dispatch_exchanges[exchange_id] = "pending"
       if gate then gate.suppress_stream = true end
     end
+  end
+
+  state.on_tool_completed = function(exchange_id, completion_delivery)
+    if not dispatch_exchanges[exchange_id] then return end
+    dispatch_exchanges[exchange_id] = completion_delivery == "async" and "async" or nil
+    async_dispatch_inflight = next(dispatch_exchanges) ~= nil
+    if gate then gate.suppress_stream = async_dispatch_inflight end
   end
 
   local function read_and_submit()

@@ -341,6 +341,26 @@ local function pick_response_for(history)
     }
   end
 
+  -- Fast MAG runs return their terminal receipt through the original tool
+  -- exchange instead of creating a deferred turn. Relay the typed TextAnswer
+  -- value just as the deferred branch above relays its framed output.
+  if type(last_tool) == "string" then
+    local ok, receipt = pcall(nefor.json.decode, last_tool)
+    local result = ok and type(receipt) == "table" and receipt.result or nil
+    local semantic = type(result) == "table" and result.semantic_type or nil
+    if type(receipt) == "table"
+        and receipt.status == "completed"
+        and type(semantic) == "table"
+        and semantic.name == "nefor.contracts.TextAnswer"
+        and type(result.value) == "string" then
+      return {
+        text = result.value,
+        finish_reason = "stop",
+        with_reasoning = true,
+      }
+    end
+  end
+
   -- Async ack branch: the pending tool message is the mag execute's
   -- immediate ack. We can't relay that to the user as a final answer —
   -- emit a short transitional ack so the turn terminates and the chat
@@ -826,16 +846,10 @@ local function complete_request(body)
   completion_runs[request_id] = run
 
   local resp = pick_response_for(history)
-  -- The starter's agent boundary is typed: successful terminal text must be
-  -- a bare JSON TextAnswer value. Tool-call and error turns use their own
-  -- wire shapes and deliberately bypass this encoding. Keep `resp.text`
-  -- human-readable for stream events; only the terminal provider result and
-  -- provider-side history carry the typed JSON wire value.
+  -- TextAnswer is the direct-text provider path: the LLM factory assigns the
+  -- semantic constructor, while providers return the ordinary response text.
+  -- Tool-call and error turns use their own wire shapes.
   local result_text = resp.text
-  if not (type(resp.tool_calls) == "table" and #resp.tool_calls > 0)
-      and type(resp.text) == "string" and resp.finish_reason ~= "error" then
-    result_text = nefor.json.encode({ content = resp.text })
-  end
   nefor.log(string.format(
     "completion.request request_id=%s finish=%s text_len=%d tool_calls=%s",
     request_id,

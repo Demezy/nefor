@@ -99,7 +99,7 @@ do
   assert_eq(history[#history - 1].content, rejected,
     "rejected candidate stays in canonical correction history")
   assert_true(history[#history].content:find(
-    'Return only a JSON object of the form {"value": <corrected value>}.', 1, true) ~= nil,
+    'The required root envelope is {"value": <corrected value>}.', 1, true) ~= nil,
     "retry prompt preserves wrapped provider envelope guidance")
   assert_true(history[#history].content:find(rejected, 1, true) == nil,
     "retry prompt does not repeat the rejected candidate")

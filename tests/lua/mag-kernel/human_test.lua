@@ -383,6 +383,9 @@ end
 do
   local log = new_logger()
   local reg = Registry.new()
+  local function named(name)
+    return { kind = "named", name = name, arguments = nefor.json.mark_array({}) }
+  end
   for _, mod in ipairs({ llm, human, adapter, sink }) do
     local _, err = reg:register({ declaration = mod.declaration, construct = mod.construct })
     assert_true(err == nil, "shipped factory registers: " .. tostring(err))
@@ -401,15 +404,18 @@ do
       },
       {
         id = "review.produce", factory = "llm",
-        params = { provider = "chatgpt-provider", model = "opus" },
+        params = { provider = "chatgpt-provider", model = "opus",
+          output_type = "nefor.contracts.TextAnswer",
+          error_type = "nefor.contracts.AgentError",
+          provider_error_type = "nefor.contracts.ProviderError" },
         evidence={version=2,identity="nefor.factory.llm",arguments={},input={kind="named",name="nefor.contracts.ProviderInput",arguments={}},output={kind="union",items={{kind="named",name="nefor.contracts.ToolCalls",arguments={}},{kind="named",name="nefor.contracts.TextAnswer",arguments={}}}}},
-        input={type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"},outputs={{type={kind="named",name="nefor.contracts.ToolCalls",arguments={}},wire="generic-tool.ToolCalls"},{type={kind="named",name="nefor.contracts.TextAnswer",arguments={}},wire="generic-provider.TextAnswer"}},
-        routes = { ["generic-provider.TextAnswer"] = { { actor = "review.approve", wire = "generic-provider.TextAnswer" } } },
+        input={type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"},outputs={{type={kind="named",name="nefor.contracts.ToolCalls",arguments={}},wire="generic-tool.ToolCalls"},{type={kind="union",items={named("nefor.contracts.AgentError"),named("nefor.contracts.TextAnswer")}},wire="nefor.agent.Result"}},
+        routes = { ["nefor.agent.Result"] = { { actor = "review.approve", wire = "generic-provider.TextAnswer" } } },
       },
       {
         id = "review.approve", factory = "human", params = { prompt = "Approve this result?" },
         evidence={version=2,identity="nefor.factory.human",arguments={},input={kind="named",name="nefor.contracts.TextAnswer",arguments={}},output={kind="union",items={{kind="named",name="nefor.contracts.Approved",arguments={}},{kind="named",name="nefor.contracts.Rejected",arguments={}}}}},
-        input={type={kind="named",name="nefor.contracts.TextAnswer",arguments={}},wire="generic-provider.TextAnswer"},outputs={{type={kind="named",name="test.Approved",arguments={}},wire="human.Approved"},{type={kind="named",name="test.Rejected",arguments={}},wire="human.Rejected"}},
+        input={type=named("nefor.contracts.TextAnswer"),wire="generic-provider.TextAnswer"},outputs={{type={kind="named",name="test.Approved",arguments={}},wire="human.Approved"},{type={kind="named",name="test.Rejected",arguments={}},wire="human.Rejected"}},
         routes = {
           ["human.Approved"] = { { actor = "sink", wire = "human.Approved" } },
           ["human.Rejected"] = { { actor = "review.rework", wire = "human.Rejected" } },

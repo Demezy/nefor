@@ -4546,7 +4546,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_append_normalizes_native_tool_arguments_and_adds_correction_feedback() {
+    async fn chat_append_rejects_malformed_native_tool_arguments() {
         let (auth, tx, mut rx) = auth_test_rig(None);
         let chats = fresh_chats("m");
         let catalog = Arc::new(ToolCatalog::new());
@@ -4589,32 +4589,14 @@ mod tests {
         .await
         .expect("dispatch");
         let emitted = drain(&mut rx).await;
-        assert_eq!(emitted[0]["kind"], "ollama.chat.appended");
+        assert_eq!(emitted[0]["kind"], "ollama.chat.error");
 
         let history = chats.history_snapshot(&chat_id).await.expect("history");
-        assert_eq!(
-            history.len(),
-            2,
-            "assistant call plus correction tool result"
-        );
-        let arguments = &history[0].tool_calls()[0].function.arguments;
-        assert_eq!(arguments, raw, "history preserves the source text");
-        let wire = serde_json::to_value(&history[0]).expect("provider serialization");
-        let provider_arguments = wire["tool_calls"][0]["function"]["arguments"]
-            .as_str()
-            .expect("arguments string");
-        assert_eq!(
-            serde_json::from_str::<Value>(provider_arguments).unwrap(),
-            raw
-        );
-        assert!(history[1]
-            .content()
-            .unwrap_or_default()
-            .contains("function.arguments is not valid JSON"));
+        assert!(history.is_empty(), "invalid assistant call is quarantined");
     }
 
     #[tokio::test]
-    async fn chat_restore_normalizes_native_tool_arguments_and_adds_correction_feedback() {
+    async fn chat_restore_rejects_malformed_native_tool_arguments() {
         let (auth, tx, mut rx) = auth_test_rig(None);
         let chats = fresh_chats("m");
         let catalog = Arc::new(ToolCatalog::new());
@@ -4652,31 +4634,11 @@ mod tests {
         .await
         .expect("dispatch");
         let emitted = drain(&mut rx).await;
-        assert_eq!(emitted[0]["kind"], "ollama.chat.appended");
-
-        let history = chats
-            .history_snapshot(&ChatId::new("restore-malformed"))
-            .await
-            .expect("history");
-        assert_eq!(
-            history.len(),
-            2,
-            "restored call plus correction tool result"
+        assert_eq!(emitted[0]["kind"], "ollama.chat.error");
+        assert!(
+            !chats.exists(&ChatId::new("restore-malformed")).await,
+            "invalid restored history cannot create a chat"
         );
-        let arguments = &history[0].tool_calls()[0].function.arguments;
-        assert_eq!(arguments, raw, "history preserves the source text");
-        let wire = serde_json::to_value(&history[0]).expect("provider serialization");
-        let provider_arguments = wire["tool_calls"][0]["function"]["arguments"]
-            .as_str()
-            .expect("arguments string");
-        assert_eq!(
-            serde_json::from_str::<Value>(provider_arguments).unwrap(),
-            raw
-        );
-        assert!(history[1]
-            .content()
-            .unwrap_or_default()
-            .contains("function.arguments is not valid JSON"));
     }
 
     #[tokio::test]

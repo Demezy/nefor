@@ -294,7 +294,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         .iter()
         .map(|path| format!("(require \"{}\")", module_name(&lib_root, path)))
         .chain(std::iter::once(
-            "(artifact \"test.mag-corpus/v1\" {})".to_owned(),
+            "(artifact \"nefor.graph-modification/v1\" {})".to_owned(),
         ))
         .collect::<Vec<_>>()
         .join("\n");

@@ -78,9 +78,11 @@ local function program()
       {
         id = "agent",
         factory = "llm",
-        params = { model = "m", provider = "prov", system = "answer" },
+        params = { model = "m", provider = "prov", system = "answer",
+          output_type = "text-answer-id", error_type = "agent-error-id",
+          provider_error_type = "provider-error-id" },
         evidence={version=2,identity="nefor.factory.llm",arguments={},input={kind="named",name="nefor.contracts.ProviderInput",arguments={}},output={kind="union",items={{kind="named",name="nefor.contracts.ToolCalls",arguments={}},{kind="named",name="nefor.contracts.TextAnswer",arguments={}}}}},
-        input={type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"},outputs={{type={kind="named",name="nefor.contracts.ToolCalls",arguments={}},wire="generic-tool.ToolCalls"},{type={kind="named",name="nefor.contracts.TextAnswer",arguments={}},wire="generic-provider.TextAnswer"}},
+        input={type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"},outputs={{type={kind="named",name="nefor.contracts.ToolCalls",arguments={}},wire="generic-tool.ToolCalls"},{type={kind="union",items={{kind="named",name="nefor.contracts.TextAnswer",arguments={}},{kind="named",name="nefor.contracts.AgentError",arguments={}}}},wire="nefor.agent.Result"}},
         routes = {},
       },
     },
@@ -94,7 +96,8 @@ local function program()
     rules = {},
     result = { from = {
       actor = "agent",
-      wire = "generic-provider.TextAnswer",
+      type = "nefor.agent.Result",
+      wire = "nefor.agent.Result",
     } },
   }
 end
@@ -183,7 +186,7 @@ assert_eq(b_complete[1].run_id, "run-B", "run_complete carries run_id")
 
 local rc_b = kernel.take_run_complete("run-B")
 assert_true(rc_b ~= nil, "run-B terminal capture is set")
-assert_eq(rc_b.result.text, "answer-B", "run-B's result is run-B's answer")
+assert_eq(rc_b.result.value, "answer-B", "run-B's typed result is run-B's answer")
 assert_true(kernel.take_run_complete("run-A") == nil,
   "run-A is still in flight — B's completion is not A's")
 
