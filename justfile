@@ -148,7 +148,14 @@ test-tui-chat:
 test-all timeout="7200":
     cargo run --quiet -p nefor-cargo-test-harness -- "{{timeout}}"
     cargo test -p nefor-tui --lib
+    cargo test -p nefor-tui --test animation_test
+    cargo test -p nefor-tui --test engine_test
+    cargo test -p nefor-tui --test layout_test
+    cargo test -p nefor-tui --test scrollable_test
+    cargo test -p nefor-tui --test snapshot_test
+    cargo test -p nefor-tui --test text_input_test
     cargo test -p nefor-tui --test chat_test -- --test-threads=1
+    cargo test -p nefor-tui --doc
 
 # Validate that a built workspace becomes a complete installable distribution.
 test-release-bundle:

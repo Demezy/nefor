@@ -32,7 +32,14 @@ jobs:
         run: |
           cargo test --workspace --exclude nefor-tui --locked
           cargo test -p nefor-tui --lib --locked
+          cargo test -p nefor-tui --test animation_test --locked
+          cargo test -p nefor-tui --test engine_test --locked
+          cargo test -p nefor-tui --test layout_test --locked
+          cargo test -p nefor-tui --test scrollable_test --locked
+          cargo test -p nefor-tui --test snapshot_test --locked
+          cargo test -p nefor-tui --test text_input_test --locked
           cargo test -p nefor-tui --test chat_test --locked -- --test-threads=1
+          cargo test -p nefor-tui --doc --locked
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
