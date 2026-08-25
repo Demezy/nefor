@@ -82,7 +82,6 @@ pub struct RunCompletion {
 #[derive(Debug, Clone)]
 pub struct RuleTrigger {
     pub rule_id: String,
-    pub function: String,
     pub source_actor: String,
     pub source_wire: String,
     pub emission_seq: u64,
@@ -160,7 +159,7 @@ impl LuaHost {
         }
     }
 
-    /// Serializable foreign declarations for MAG library validation. This is
+    /// Serializable factory declarations for MAG library validation. This is
     /// plain immutable data: no Lua constructor or other runtime capability
     /// crosses the evaluation boundary.
     pub fn registry_contracts(&self) -> Result<JsonValue, MagError> {
@@ -172,6 +171,20 @@ impl LuaHost {
             }
             None => Ok(JsonValue::Array(Vec::new())),
         }
+    }
+
+    /// Create the run's kernel context (inventory, router, modlog, observer)
+    /// and emit `mag.run_started`. Run identity is injected, never ambient
+    /// (docs/ir.md). The outcome carries the stale run ids the kernel reaped
+    /// at the session boundary; a duplicate live `run_id` rejects.
+    #[cfg(test)]
+    pub fn begin_run(
+        &self,
+        run_id: &str,
+        run_name: &str,
+        session_id: Option<&str>,
+    ) -> Result<BeginRunOutcome, MagError> {
+        self.begin_run_with_principal(run_id, run_name, session_id, None, None)
     }
 
     pub fn begin_run_with_principal(
@@ -239,7 +252,6 @@ impl LuaHost {
                 let source: Table = trigger.get("source")?;
                 Ok(RuleTrigger {
                     rule_id: trigger.get("rule_id")?,
-                    function: trigger.get("fn")?,
                     source_actor: source.get("actor")?,
                     source_wire: source.get("wire")?,
                     emission_seq: trigger.get("emission_seq")?,

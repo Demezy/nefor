@@ -362,8 +362,8 @@ local function emit_termination_outcome(firing_id, run, terminal)
     ": " .. tostring(status or "unknown"))
 end
 
--- The kernel's foreign-contract registry is the source of truth for actor
--- capabilities. Library validation already checks the complete contracts;
+-- The kernel's factory registry is the source of truth for actors. Library
+-- validation already checks the complete contracts;
 -- this control-plane pass keeps its pre-execute error localized.
 --
 -- When no snapshot exists yet (mag plugin not up, or an older plugin that does
@@ -383,10 +383,10 @@ local function validate_factories(actors, firing_id)
     return true -- no registry snapshot yet; runtime spawn is the backstop
   end
   for _, actor in ipairs(actors or {}) do
-    if set[actor.foreign] ~= true then
+    if set[actor.factory] ~= true then
       emit_tool_result_err(firing_id,
-        "mag execute: actor '" .. tostring(actor.id) .. "' uses unknown foreign '" ..
-        tostring(actor.foreign) .. "'. Known capabilities: " ..
+        "mag execute: actor '" .. tostring(actor.id) .. "' uses unknown factory '" ..
+        tostring(actor.factory) .. "'. Known factories: " ..
         table.concat(sorted_keys(set), ", ") .. ".")
       return false
     end
@@ -428,8 +428,8 @@ local function compose_agent_system(base, positional_overlay)
 end
 
 local function is_llm_actor(actor)
-  return actor.foreign == "nefor.factory.llm"
-      or actor.foreign == "nefor.factory.structured-output"
+  return actor.factory == "nefor.factory.llm"
+      or actor.factory == "nefor.factory.structured-output"
 end
 
 local function selected_profile(value)
@@ -909,8 +909,8 @@ register_active_run = function(run_id, actors, terminal, firing_id, run_name, se
       nodes_order[#nodes_order + 1] = id
       nodes[id] = {
         id = id,
-        role = actor.foreign,
-        reasoner = actor.foreign,
+        role = actor.factory,
+        reasoner = actor.factory,
         status = "pending",
       }
     end
@@ -1064,9 +1064,9 @@ end
 -- body. This is the source of truth for factory validation
 -- (validate_factories).
 local function capture_kernel_factories(body)
-  if type(body.foreign_contracts) ~= "table" then return end
+  if type(body.factory_contracts) ~= "table" then return end
   local set = {}
-  for _, contract in ipairs(body.foreign_contracts) do
+  for _, contract in ipairs(body.factory_contracts) do
     local identity = type(contract) == "table" and contract.identity or nil
     if type(identity) == "string" then set[identity] = true end
   end
@@ -1924,10 +1924,10 @@ end
 -- path, so lifecycle/control/rendering/archival/cleanup have one owner.
 submit_loaded_run = function(pending, body, error_prefix)
   local artifact = body.artifact
-  local modification = type(artifact) == "table" and artifact.data or nil
+  local modification = type(artifact) == "table" and artifact or nil
   if type(modification) ~= "table" then
     emit_tool_result_err(pending.firing_id,
-      error_prefix .. ": mag.loaded reply carried no artifact data")
+      error_prefix .. ": mag.loaded reply carried no graph artifact")
     return false
   end
   local actors = modification.actors or {}
@@ -2001,10 +2001,10 @@ local function resume_pending_load(body)
   state.pending_mag_load[load_id] = nil
 
   local artifact = body.artifact
-  local modification = type(artifact) == "table" and artifact.data or nil
+  local modification = type(artifact) == "table" and artifact or nil
   if type(modification) ~= "table" then
     emit_tool_result_err(pending.firing_id,
-      "mag " .. pending.action .. ": mag.loaded reply carried no artifact data")
+      "mag " .. pending.action .. ": mag.loaded reply carried no graph artifact")
     return
   end
   local actors = modification.actors or {}

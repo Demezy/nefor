@@ -166,7 +166,7 @@ receives the shared bus; each consumer actor projects the facts it needs in its
 own Lua state.
 
 - `mag.actor_spawned { run_id, id, factory, spec }` owns the immutable actor
-  structure once: params, input/output endpoints, evidence, and routes.
+  structure once: factory, type arguments, params, input/output endpoints, and routes.
 - `mag.arrival { run_id, arrival_id, from, edge_id, wire,
 semantic_type_id, semantic_type, constructor_id, value }` owns one complete
   payload. Fan-out reuses the same arrival; it does not copy the value per

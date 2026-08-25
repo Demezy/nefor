@@ -479,10 +479,10 @@ async fn load_text_answer_program(
 (require "nefor.contracts")
 (require "nefor.graph")
 
-(let [start (nefor.graph.source "task"
+(let start (nefor.graph.source "task"
               (type-tag nefor.contracts.Task)
-              (as nefor.contracts.Task {:prompt "return done"}))
-      answer (nefor.actors.agent
+              (as nefor.contracts.Task {:prompt "return done"})))
+(let answer (nefor.actors.agent
                (as nefor.actors.AgentConfig {:id "answer"
                 :model (nefor.contracts.identifier "test-model")
                 :profile (nefor.contracts.no-identifier)
@@ -493,14 +493,14 @@ async fn load_text_answer_program(
                 :max-corrections 0})
                (type-tag nefor.contracts.Task)
                "task"
-               (type-tag nefor.contracts.TextAnswer))
-      output (nefor.graph.output "result"
-               (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError)))
-      topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+               (type-tag nefor.contracts.TextAnswer)))
+(let output (nefor.graph.output "result"
+               (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
                  (nefor.graph.add-edges graph
                    [(nefor.graph.edge start answer)
-                    (nefor.graph.edge answer output)]))]
-  (nefor.artifact.compile topology))
+                    (nefor.graph.edge answer output)])))
+(nefor.artifact.compile topology)
 "#;
     tokio::fs::write(source_dir.join("final-answer.mag"), source)
         .await
@@ -547,11 +547,11 @@ async fn run_case(kind: ProviderKind) {
     }
 
     let artifact = load_text_answer_program(&mut mag_out, &mut mag_in, temp.path()).await;
-    let constructor_id = artifact["data"]["actors"]
+    let constructor_id = artifact["actors"]
         .as_array()
         .expect("artifact actors")
         .iter()
-        .find(|actor| actor["foreign"] == "nefor.factory.llm")
+        .find(|actor| actor["factory"] == "nefor.factory.llm")
         .and_then(|actor| actor["params"]["output_type"].as_str())
         .expect("compiler-derived TextAnswer constructor identity")
         .to_owned();

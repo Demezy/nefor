@@ -77,7 +77,7 @@ end
 -- The comparable core of an actor spec — factory, params, routes. `id` is
 -- excluded (it is the key), so this answers "is this the *same* spec?".
 local function spec_of(actor)
-  return { factory = actor.factory, evidence = actor.evidence,
+  return { factory = actor.factory, type_arguments = actor.type_arguments,
     input = actor.input, outputs = actor.outputs,
     params = actor.params or {}, routes = actor.routes or {} }
 end
@@ -96,6 +96,9 @@ local function validate_actor_shape(actor, idx)
   end
   if type(actor.factory) ~= "string" or actor.factory == "" then
     return string.format("actor '%s' missing string factory", actor.id)
+  end
+  if not is_array(actor.type_arguments) then
+    return string.format("actor '%s' type_arguments must be a dense list", actor.id)
   end
   if actor.params ~= nil and type(actor.params) ~= "table" then
     return string.format("actor '%s' params must be a table", actor.id)
@@ -306,7 +309,7 @@ local function do_spawn(self, actor)
     id = actor.id,
     factory = actor.factory,
     params = actor.params or {},
-    evidence = actor.evidence,
+    type_arguments = actor.type_arguments,
     input = actor.input,
     outputs = actor.outputs,
     semantic_strict = actor.semantic_strict == true,

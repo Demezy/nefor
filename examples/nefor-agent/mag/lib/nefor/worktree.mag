@@ -15,31 +15,29 @@
                      :kind String
                      :message String})
 
-(foreign nefor.factory.worktree-create
-  {:params CreateSpec :input Unit :output Worktree})
-(foreign nefor.factory.worktree-open
-  {:params OpenSpec :input Unit :output Worktree})
+(let create-factory "nefor.factory.worktree-create")
+(let open-factory "nefor.factory.worktree-open")
 
-(def create (fn [[id String] [spec CreateSpec]] -> (nefor.graph.Node Unit Worktree)
-  (let [input (nefor.graph.port id (type-tag Unit) "mag.Unit")
-        output (nefor.graph.port id (type-tag Worktree) "nefor.worktree.Ready")]
-    (as (nefor.graph.Node Unit Worktree)
-      {:id id :role "ordinary" :actors [(nefor.graph.actor id nefor.factory.worktree-create spec
+(let create (fn [[id String] [spec CreateSpec]] -> (nefor.graph.Node Unit Worktree)
+  (let input (nefor.graph.port id (type-tag Unit) "mag.Unit"))
+  (let output (nefor.graph.port id (type-tag Worktree) "nefor.worktree.Ready"))
+  (as (nefor.graph.Node Unit Worktree)
+      {:id id :role "ordinary" :actors [(nefor.graph.actor id create-factory [] spec
                   (nefor.graph.store-port input)
                   [(nefor.graph.store-port output)])]
        :routes (as (List nefor.graph.StoredRoute) [])
        :messages []
        :input input
-       :output output}))))
+       :output output})))
 
-(def open (fn [[id String] [spec OpenSpec]] -> (nefor.graph.Node Unit Worktree)
-  (let [input (nefor.graph.port id (type-tag Unit) "mag.Unit")
-        output (nefor.graph.port id (type-tag Worktree) "nefor.worktree.Ready")]
-    (as (nefor.graph.Node Unit Worktree)
-      {:id id :role "ordinary" :actors [(nefor.graph.actor id nefor.factory.worktree-open spec
+(let open (fn [[id String] [spec OpenSpec]] -> (nefor.graph.Node Unit Worktree)
+  (let input (nefor.graph.port id (type-tag Unit) "mag.Unit"))
+  (let output (nefor.graph.port id (type-tag Worktree) "nefor.worktree.Ready"))
+  (as (nefor.graph.Node Unit Worktree)
+      {:id id :role "ordinary" :actors [(nefor.graph.actor id open-factory [] spec
                   (nefor.graph.store-port input)
                   [(nefor.graph.store-port output)])]
        :routes (as (List nefor.graph.StoredRoute) [])
        :messages []
        :input input
-       :output output}))))
+       :output output})))

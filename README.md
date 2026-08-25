@@ -27,10 +27,10 @@ model.
 
 The example proves the shape with a chat surface, providers, tool gates,
 sessions, and a MAG-based agentic loop. MAG itself is a pure, namespaced typed
-language; shipped libraries declare foreign capabilities, validate graph data,
-and lower it to a generic runtime artifact. The lead composes work by writing
-tiny MAG programs the runtime folds into live actor constellations. Keep it, strip
-it down, or use it as a reference for your own distribution.
+language; shipped libraries construct ordinary actor data, validate graphs,
+and lower them to generic runtime artifacts. The lead composes work by writing
+tiny MAG programs the runtime folds into live actor constellations. Keep it,
+strip it down, or use it as a reference for your own distribution.
 
 ## What You Can Compose
 

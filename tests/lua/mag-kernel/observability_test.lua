@@ -61,7 +61,7 @@ local function silent_log()
 end
 
 local function actor_spec(id, factory, params, routes)
-  return { id = id, factory = factory, params = params or {}, routes = routes or {} }
+  return { id = id, factory = factory, type_arguments = {}, params = params or {}, routes = routes or {} }
 end
 
 -- ==================================================================

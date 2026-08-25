@@ -78,6 +78,7 @@ local function program()
       {
         id = "agent",
         factory = "llm",
+        type_arguments = {},
         params = { model = "m", provider = "prov", system = "answer",
           output_type = "text-answer-id", error_type = "agent-error-id",
           provider_error_type = "provider-error-id" },

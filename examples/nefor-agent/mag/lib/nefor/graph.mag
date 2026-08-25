@@ -9,8 +9,8 @@
                   :type_id SemanticTypeId
                   :wire String})
 (type Actor {:id String
-             :foreign String
-             :evidence ForeignEvidence
+             :factory String
+             :type_arguments (List TypeDescriptor)
              :params PackedValue
              :input StoredPort
              :outputs (List StoredPort)})
@@ -41,10 +41,12 @@
 ;; not vertices or edges and therefore do not participate in edge-set algebra.
 (type Program {:graph Graph :rules (List Rule)})
 
-(type ForeignTypeScheme {:input_tags (List String)
+(type FactoryTypeScheme {:input_tags (List String)
                          :outputs (List String)})
-(type ForeignContract {:identity String
-                       :type_scheme ForeignTypeScheme})
+(type FactoryContract {:identity String
+                       :type_scheme FactoryTypeScheme})
+(type SourceParams [T] {:value T :value_type SemanticTypeId})
+(type OutputParams {})
 (type LowerDestination {:actor String
                         :wire String
                         :edge_id String
@@ -53,8 +55,8 @@
                         :product_position Int})
 (type AssignedRoute {:route StoredRoute :product_position Int})
 (type LowerActor {:id String
-                  :foreign String
-                  :evidence ForeignEvidence
+                  :factory String
+                  :type_arguments (List TypeDescriptor)
                   :input StoredPort
                   :outputs (List StoredPort)
                   :params PackedValue
@@ -86,100 +88,104 @@
                   :rules (List LowerRule)
                   :types (Map String TypeDescriptor)})
 
-(def port (fn [T] [[actor String] [semantic-type (TypeTag T)] [wire-type String]] -> (Port T)
+(let port (fn [T] [[actor String] [semantic-type (TypeTag T)] [wire-type String]] -> (Port T)
   (as (Port T) {:actor actor :type semantic-type :wire wire-type})))
 
-(def store-port (fn [T] [[value (Port T)]] -> StoredPort
-  (let [descriptor (type-evidence (get value "type"))]
-    (as StoredPort {:actor (get value "actor")
+(let store-port (fn [T] [[value (Port T)]] -> StoredPort
+  (let descriptor (type-evidence (get value "type")))
+  (as StoredPort {:actor (get value "actor")
                     :type descriptor
                     :type_id (type-id descriptor)
-                    :wire (get value "wire")}))))
+                    :wire (get value "wire")})))
 
-(def actor (fn [P I O] [[id String] [capability (Foreign P I O)] [params P]
+(let actor (fn [P] [[id String] [factory String]
+                [type-arguments (List TypeDescriptor)] [params P]
                 [input StoredPort] [outputs (List StoredPort)]] -> Actor
-  (as Actor {:id id :foreign (foreign-id capability)
-             :evidence (foreign-evidence capability)
+  (as Actor {:id id :factory factory
+             :type_arguments type-arguments
              :params (pack params) :input input :outputs outputs})))
 
-(def node (fn [I O] [[id String] [role String] [actors (List Actor)]
+(let node (fn [I O] [[id String] [role String] [actors (List Actor)]
                      [routes (List StoredRoute)] [messages (List Message)]
                      [input (Port I)] [output (Port O)]] -> (Node I O)
   (as (Node I O) {:id id :role role :actors actors :routes routes
                   :messages messages :input input :output output})))
 
-(def store-node (fn [I O] [[value (Node I O)]] -> StoredNode
+(let store-node (fn [I O] [[value (Node I O)]] -> StoredNode
   (as StoredNode {:id (get value "id") :role (get value "role")
                   :actors (get value "actors") :routes (get value "routes")
                   :messages (get value "messages")
                   :input (store-port (get value "input"))
                   :output (store-port (get value "output"))})))
 
-(def stored-route (fn [A B] [[from (Port A)] [to (Port B)]] -> StoredRoute
-  (let [stored-from (store-port from) stored-to (store-port to)]
-    (as StoredRoute
+(let stored-route (fn [A B] [[from (Port A)] [to (Port B)]] -> StoredRoute
+  (let stored-from (store-port from))
+  (let stored-to (store-port to))
+  (as StoredRoute
       {:id (canonical {:from stored-from :to stored-to})
        :from stored-from
-       :to stored-to}))))
+       :to stored-to})))
 
-(def edge (fn [I T U O] [[from (Node I T)] [to (Node U O)]] -> Edge
+(let edge (fn [I T U O] [[from (Node I T)] [to (Node U O)]] -> Edge
   (as Edge {:from (store-node from) :to (store-node to)
             :route (stored-route (get from "output") (get to "input"))})))
 
-(def stored-message (fn [P] [[to StoredPort] [content P]] -> Message
+(let stored-message (fn [P] [[to StoredPort] [content P]] -> Message
   (as Message {:to to
                :semantic_type (get to "type")
                :semantic_type_id (get to "type_id")
                :content (pack content)})))
-(def message (fn [T P] [[to (Port T)] [content P]] -> Message
+(let message (fn [T P] [[to (Port T)] [content P]] -> Message
   (stored-message (store-port to) content)))
-(def typed-message (fn [T] [[to (Port T)] [value T]] -> Message
-  (let [stored (store-port to)
-        selected (value-type-evidence value (get stored "type"))]
-    (as Message {:to stored
+(let typed-message (fn [T] [[to (Port T)] [value T]] -> Message
+  (let stored (store-port to))
+  (let selected (value-type-evidence value (get stored "type")))
+  (as Message {:to stored
                  :semantic_type selected
                  :semantic_type_id (type-id selected)
-                 :content (pack {:kind (get to "wire") :value value})}))))
-(def rule (fn [T] [[id String] [on (Port T)] [fn-name String]] -> Rule
+                 :content (pack {:kind (get to "wire") :value value})})))
+(let rule (fn [T] [[id String] [on (Port T)] [fn-name String]] -> Rule
   (as Rule {:id id :on (store-port on) :fn fn-name})))
 
-(def source (fn [T] [[id String] [type (TypeTag T)] [value T]] -> (Node Unit T)
-  (let [input (port id (type-tag Unit) "mag.Unit")
-        output (port id type "nefor.graph.Value")
-        source-actor (actor id (specialize nefor.factory.source [T])
-                       (as (nefor.contracts.SourceParams T)
+(let source-factory "nefor.factory.source")
+(let source (fn [T] [[id String] [type (TypeTag T)] [value T]] -> (Node Unit T)
+  (let input (port id (type-tag Unit) "mag.Unit"))
+  (let output (port id type "nefor.graph.Value"))
+  (let source-actor (actor id source-factory [(type-evidence type)]
+                       (as (SourceParams T)
                          {:value value :value_type (value-type-id value type)})
-                       (store-port input) [(store-port output)])]
-    (node id "source" [source-actor] (as (List StoredRoute) [])
-      [(message input {:kind "mag.Unit"})] input output))))
+                       (store-port input) [(store-port output)]))
+  (node id "source" [source-actor] (as (List StoredRoute) [])
+      [(message input {:kind "mag.Unit"})] input output)))
 
-(def output (fn [T] [[id String] [type (TypeTag T)]] -> (Node T T)
-  (let [input (port id type "nefor.graph.Value")
-        result (port id type "nefor.graph.Value")
-        output-actor (actor id (specialize nefor.factory.output [T])
-                       (as nefor.contracts.OutputParams {})
-                       (store-port input) [(store-port result)])]
-    (node id "output" [output-actor]
-      (as (List StoredRoute) []) (as (List Message) []) input result))))
+(let output-factory "nefor.factory.output")
+(let output (fn [T] [[id String] [type (TypeTag T)]] -> (Node T T)
+  (let input (port id type "nefor.graph.Value"))
+  (let result (port id type "nefor.graph.Value"))
+  (let output-actor (actor id output-factory [(type-evidence type)]
+                       (as OutputParams {})
+                       (store-port input) [(store-port result)]))
+  (node id "output" [output-actor]
+      (as (List StoredRoute) []) (as (List Message) []) input result)))
 
-(def output-for (fn [I T] [[id String] [from (Node I T)]] -> (Node T T)
+(let output-for (fn [I T] [[id String] [from (Node I T)]] -> (Node T T)
   (output id (get (get from "output") "type"))))
 
-(def same-edge? (fn [[left Edge] [right Edge]] -> Bool
+(let same-edge? (fn [[left Edge] [right Edge]] -> Bool
   (if (= (get (get left "from") "id") (get (get right "from") "id"))
     (if (= (get (get left "to") "id") (get (get right "to") "id"))
       (= (get left "route") (get right "route")) false)
     false)))
-(def edge-key (fn [[value Edge]] -> String
+(let edge-key (fn [[value Edge]] -> String
   (canonical {:from-node (get (get value "from") "id")
               :to-node (get (get value "to") "id")
               :route (get value "route")})))
-(def edge-in? (fn [[edges (List Edge)] [candidate Edge]] -> Bool
+(let edge-in? (fn [[edges (List Edge)] [candidate Edge]] -> Bool
   (not (= (count (filter (fn [[value Edge]] -> Bool
                            (same-edge? value candidate)) edges)) 0))))
-(def same-edge-definition? (fn [[left Edge] [right Edge]] -> Bool
+(let same-edge-definition? (fn [[left Edge] [right Edge]] -> Bool
   (= left right)))
-(def insert-edge (fn [[edges (List Edge)] [candidate Edge]] -> (List Edge)
+(let insert-edge (fn [[edges (List Edge)] [candidate Edge]] -> (List Edge)
   ;; Equal logical edges are set-idempotent. A duplicate logical edge whose
   ;; embedded node definition differs is retained long enough for validate to
   ;; reject the conflicting node identity; silently dropping it would hide an
@@ -191,94 +197,94 @@
       edges
       (concat edges [candidate]))
     (concat edges [candidate]))))
-(def normalize-edges (fn [[edges (List Edge)]] -> (List Edge)
+(let normalize-edges (fn [[edges (List Edge)]] -> (List Edge)
   (sort-by edge-key (fold insert-edge (as (List Edge) []) edges))))
 
-(def empty-graph (as Graph {:edges (as (List Edge) [])}))
-(def graph (fn [[edges (List Edge)]] -> Graph
+(let empty-graph (as Graph {:edges (as (List Edge) [])}))
+(let graph (fn [[edges (List Edge)]] -> Graph
   (as Graph {:edges (normalize-edges edges)})))
-(def add-edges (fn [[value Graph] [added (List Edge)]] -> Graph
+(let add-edges (fn [[value Graph] [added (List Edge)]] -> Graph
   (graph (concat (get value "edges") added))))
-(def remove-edges (fn [[value Graph] [removed (List Edge)]] -> Graph
+(let remove-edges (fn [[value Graph] [removed (List Edge)]] -> Graph
   (graph (filter (fn [[candidate Edge]] -> Bool
                    (not (edge-in? removed candidate)))
                  (get value "edges")))))
-(def program (fn [[value Graph] [rules (List Rule)]] -> Program
+(let program (fn [[value Graph] [rules (List Rule)]] -> Program
   (as Program {:graph value :rules rules})))
 
-(def nodes-from-edge (fn [[value Edge]] -> (List StoredNode)
+(let nodes-from-edge (fn [[value Edge]] -> (List StoredNode)
   [(get value "from") (get value "to")]))
-(def all-nodes (fn [[value Graph]] -> (List StoredNode)
+(let all-nodes (fn [[value Graph]] -> (List StoredNode)
   (flat-map nodes-from-edge (get value "edges"))))
-(def same-node-id? (fn [[left StoredNode] [right StoredNode]] -> Bool
+(let same-node-id? (fn [[left StoredNode] [right StoredNode]] -> Bool
   (= (get left "id") (get right "id"))))
-(def node-in? (fn [[nodes (List StoredNode)] [candidate StoredNode]] -> Bool
+(let node-in? (fn [[nodes (List StoredNode)] [candidate StoredNode]] -> Bool
   (not (= (count (filter (fn [[value StoredNode]] -> Bool
                            (same-node-id? value candidate)) nodes)) 0))))
-(def insert-node (fn [[nodes (List StoredNode)] [candidate StoredNode]] -> (List StoredNode)
+(let insert-node (fn [[nodes (List StoredNode)] [candidate StoredNode]] -> (List StoredNode)
   (if (node-in? nodes candidate) nodes (concat nodes [candidate]))))
-(def graph-nodes (fn [[value Graph]] -> (List StoredNode)
+(let graph-nodes (fn [[value Graph]] -> (List StoredNode)
   (fold insert-node (as (List StoredNode) []) (all-nodes value))))
 
-(def conflicting-node? (fn [[nodes (List StoredNode)] [candidate StoredNode]] -> Bool
+(let conflicting-node? (fn [[nodes (List StoredNode)] [candidate StoredNode]] -> Bool
   (not (= (count
     (filter (fn [[value StoredNode]] -> Bool
       (if (same-node-id? value candidate) (not (= value candidate)) false)) nodes)) 0))))
-(def has-node-conflicts? (fn [[value Graph]] -> Bool
+(let has-node-conflicts? (fn [[value Graph]] -> Bool
   (not (= (count (filter (fn [[candidate StoredNode]] -> Bool
                            (conflicting-node? (all-nodes value) candidate))
                          (all-nodes value))) 0))))
 
-(def external-routes (fn [[value Graph]] -> (List StoredRoute)
+(let external-routes (fn [[value Graph]] -> (List StoredRoute)
   (map (fn [[candidate Edge]] -> StoredRoute (get candidate "route"))
        (get value "edges"))))
-(def graph-routes (fn [[value Graph]] -> (List StoredRoute)
+(let graph-routes (fn [[value Graph]] -> (List StoredRoute)
   (concat (flat-map (fn [[candidate StoredNode]] -> (List StoredRoute)
                       (get candidate "routes"))
                     (graph-nodes value))
           (external-routes value))))
-(def graph-actors (fn [[value Graph]] -> (List Actor)
+(let graph-actors (fn [[value Graph]] -> (List Actor)
   (flat-map (fn [[candidate StoredNode]] -> (List Actor)
               (get candidate "actors"))
             (graph-nodes value))))
-(def graph-messages (fn [[value Graph]] -> (List Message)
+(let graph-messages (fn [[value Graph]] -> (List Message)
   (flat-map (fn [[candidate StoredNode]] -> (List Message)
               (get candidate "messages"))
             (graph-nodes value))))
 
-(def incoming-count (fn [[value Graph] [id String]] -> Int
+(let incoming-count (fn [[value Graph] [id String]] -> Int
   (count (filter (fn [[candidate Edge]] -> Bool
                    (= (get (get candidate "to") "id") id))
                  (get value "edges")))))
-(def outgoing-count (fn [[value Graph] [id String]] -> Int
+(let outgoing-count (fn [[value Graph] [id String]] -> Int
   (count (filter (fn [[candidate Edge]] -> Bool
                    (= (get (get candidate "from") "id") id))
                  (get value "edges")))))
-(def role? (fn [[candidate StoredNode] [role String]] -> Bool
+(let role? (fn [[candidate StoredNode] [role String]] -> Bool
   (= (get candidate "role") role)))
-(def sources (fn [[value Graph]] -> (List StoredNode)
+(let sources (fn [[value Graph]] -> (List StoredNode)
   (filter (fn [[candidate StoredNode]] -> Bool (role? candidate "source"))
           (graph-nodes value))))
-(def outputs (fn [[value Graph]] -> (List StoredNode)
+(let outputs (fn [[value Graph]] -> (List StoredNode)
   (filter (fn [[candidate StoredNode]] -> Bool (role? candidate "output"))
           (graph-nodes value))))
-(def source-shape-valid? (fn [[value Graph] [candidate StoredNode]] -> Bool
+(let source-shape-valid? (fn [[value Graph] [candidate StoredNode]] -> Bool
   (if (= (incoming-count value (get candidate "id")) 0)
     (role? candidate "source")
     (not (role? candidate "source")))))
-(def output-shape-valid? (fn [[value Graph] [candidate StoredNode]] -> Bool
+(let output-shape-valid? (fn [[value Graph] [candidate StoredNode]] -> Bool
   (if (role? candidate "output")
     (if (not (= (incoming-count value (get candidate "id")) 0))
       (= (outgoing-count value (get candidate "id")) 0)
       false)
     true)))
 
-(def next-node-ids (fn [[value Graph] [id String]] -> (List String)
+(let next-node-ids (fn [[value Graph] [id String]] -> (List String)
   (map (fn [[candidate Edge]] -> String (get (get candidate "to") "id"))
     (filter (fn [[candidate Edge]] -> Bool
               (= (get (get candidate "from") "id") id))
             (get value "edges")))))
-(def path-to? (fn [[value Graph] [id String] [target String]
+(let path-to? (fn [[value Graph] [id String] [target String]
                     [visited (List String)]] -> Bool
   (if (= id target)
     true
@@ -288,65 +294,54 @@
         (filter (fn [[next String]] -> Bool
                   (path-to? value next target (concat visited [id])))
                 (next-node-ids value id))) 0))))))
-(def reachable-from-source? (fn [[value Graph] [candidate StoredNode]] -> Bool
+(let reachable-from-source? (fn [[value Graph] [candidate StoredNode]] -> Bool
   (not (= (count
     (filter (fn [[start StoredNode]] -> Bool
               (path-to? value (get start "id") (get candidate "id")
                         (as (List String) [])))
             (sources value))) 0))))
-(def reaches-output? (fn [[value Graph] [candidate StoredNode]] -> Bool
-  (let [result (first (outputs value))]
-    (path-to? value (get candidate "id") (get result "id")
-              (as (List String) [])))))
+(let reaches-output? (fn [[value Graph] [candidate StoredNode]] -> Bool
+  (let result (first (outputs value)))
+  (path-to? value (get candidate "id") (get result "id")
+              (as (List String) []))))
 
-(def foreign-contract
+(let factory-contract
   (fn [[entry {:identity String
                :type_scheme {:input_tags (List String)
                              :outputs (List String)}}]]
-      -> ForeignContract
-    (as ForeignContract
+      -> FactoryContract
+    (as FactoryContract
       {:identity (get entry "identity")
-       :type_scheme (as ForeignTypeScheme
+       :type_scheme (as FactoryTypeScheme
                       {:input_tags (get (get entry "type_scheme") "input_tags")
                        :outputs (get (get entry "type_scheme") "outputs")})})))
 
-(def contains-string? (fn [[values (List String)] [value String]] -> Bool
+(let contains-string? (fn [[values (List String)] [value String]] -> Bool
   (not (= (count (filter (fn [[candidate String]] -> Bool (= candidate value)) values)) 0))))
-(def all-strings-in? (fn [[left (List String)] [right (List String)]] -> Bool
+(let all-strings-in? (fn [[left (List String)] [right (List String)]] -> Bool
   (= (count (filter (fn [[value String]] -> Bool
                       (not (contains-string? right value))) left)) 0)))
-(def one-port? (fn [[ports (List StoredPort)] [expected StoredPort]] -> Bool
+(let one-port? (fn [[ports (List StoredPort)] [expected StoredPort]] -> Bool
   (= ports [expected])))
-(def empty-packed-map? (fn [[value PackedValue]] -> Bool
+(let empty-packed-map? (fn [[value PackedValue]] -> Bool
   (packed-empty-record? value)))
-(def source-params-valid? (fn [[value PackedValue]] -> Bool
+(let source-params-valid? (fn [[value PackedValue]] -> Bool
   (packed-record-has-only-keys? value ["value" "value_type"])))
-(def source-value-valid? (fn [[value Actor] [output StoredPort]] -> Bool
+(let source-value-valid? (fn [[value Actor] [output StoredPort]] -> Bool
   (packed-field-conforms? (get value "params") "value"
                           (get output "type"))))
-(def source-evidence-valid? (fn [[value Actor] [output StoredPort]] -> Bool
-  (let [output-type (get output "type")]
-    (= (canonical (get value "evidence"))
-       (canonical {:version 2
-                   :identity "nefor.factory.source"
-                   :arguments [output-type]
-                   :input (type-evidence (type-tag Unit))
-                   :output output-type})))))
-(def output-evidence-valid? (fn [[value Actor] [port StoredPort]] -> Bool
-  (let [semantic-type (get port "type")]
-    (= (canonical (get value "evidence"))
-       (canonical {:version 2
-                   :identity "nefor.factory.output"
-                   :arguments [semantic-type]
-                   :input semantic-type
-                   :output semantic-type})))))
-(def concrete-source? (fn [[candidate StoredNode]] -> Bool
-  (let [id (get candidate "id") actors (get candidate "actors")
-        input (get candidate "input") output (get candidate "output")]
-    (if (= (count actors) 1)
-      (let [boundary (first actors)]
+(let one-type-argument? (fn [[value Actor] [expected TypeDescriptor]] -> Bool
+  (= (get value "type_arguments") [expected])))
+(let concrete-source? (fn [[candidate StoredNode]] -> Bool
+  (let id (get candidate "id"))
+  (let actors (get candidate "actors"))
+  (let input (get candidate "input"))
+  (let output (get candidate "output"))
+  (if (= (count actors) 1)
+      ((fn [] -> Bool
+        (let boundary (first actors))
         (if (= (get boundary "id") id)
-          (if (= (get boundary "foreign") "nefor.factory.source")
+          (if (= (get boundary "factory") source-factory)
             (if (= input (as StoredPort
                     {:actor id
                      :type (type-evidence (type-tag Unit))
@@ -355,7 +350,7 @@
               (if (= (get output "actor") id)
                 (if (= (get output "wire") "nefor.graph.Value")
                   (if (= (get boundary "input") input)
-                    (if (source-evidence-valid? boundary output)
+                    (if (one-type-argument? boundary (get output "type"))
                       (if (one-port? (get boundary "outputs") output)
                         (if (= (count (get candidate "routes")) 0)
                           (if (= (get candidate "messages")
@@ -371,22 +366,25 @@
                 false)
               false)
             false)
-          false))
-      false))))
-(def concrete-output? (fn [[candidate StoredNode]] -> Bool
-  (let [id (get candidate "id") actors (get candidate "actors")
-        input (get candidate "input") output (get candidate "output")]
-    (if (= (count actors) 1)
-      (let [boundary (first actors)]
+          false)))
+      false)))
+(let concrete-output? (fn [[candidate StoredNode]] -> Bool
+  (let id (get candidate "id"))
+  (let actors (get candidate "actors"))
+  (let input (get candidate "input"))
+  (let output (get candidate "output"))
+  (if (= (count actors) 1)
+      ((fn [] -> Bool
+        (let boundary (first actors))
         (if (= (get boundary "id") id)
-          (if (= (get boundary "foreign") "nefor.factory.output")
+          (if (= (get boundary "factory") output-factory)
             (if (= (get input "actor") id)
               (if (= (get output "actor") id)
                 (if (= (get input "wire") "nefor.graph.Value")
                   (if (= (get output "wire") "nefor.graph.Value")
                     (if (= (get input "type") (get output "type"))
                       (if (= (get boundary "input") input)
-                        (if (output-evidence-valid? boundary input)
+                        (if (one-type-argument? boundary (get input "type"))
                           (if (one-port? (get boundary "outputs") output)
                             (if (empty-packed-map? (get boundary "params"))
                               (if (= (count (get candidate "routes")) 0)
@@ -401,9 +399,9 @@
                 false)
               false)
             false)
-          false))
-      false))))
-(def boundary-valid? (fn [[candidate StoredNode]] -> Bool
+          false)))
+      false)))
+(let boundary-valid? (fn [[candidate StoredNode]] -> Bool
   (if (role? candidate "source")
     (concrete-source? candidate)
     (if (role? candidate "output")
@@ -411,111 +409,110 @@
       (if (role? candidate "ordinary")
         (= (count (get candidate "messages")) 0)
         false)))))
-(def actor-output-wires (fn [[value Actor]] -> (List String)
+(let actor-output-wires (fn [[value Actor]] -> (List String)
   (map (fn [[output StoredPort]] -> String (get output "wire"))
        (get value "outputs"))))
-(def actor-contract-errors (fn [[contracts (List ForeignContract)] [value Actor]]
+(let actor-contract-errors (fn [[contracts (List FactoryContract)] [value Actor]]
   -> (List String)
-  (let [identity (get value "foreign")
-        matching (filter (fn [[contract ForeignContract]] -> Bool
+  (let identity (get value "factory"))
+  (let matching (filter (fn [[contract FactoryContract]] -> Bool
                            (= (get contract "identity") identity))
-                         contracts)]
-    (if (= (count matching) 0)
+                         contracts))
+  (if (= (count matching) 0)
       [(str (str (str "actor " (canonical (get value "id")))
-                 ": foreign identity ")
+                 ": factory identity ")
             (str (canonical identity) " is not present in the runtime inventory"))]
-      (let [scheme (get (first matching) "type_scheme")
-            input-wire (get (get value "input") "wire")
-            accepted-inputs (get scheme "input_tags")
-            output-wires (actor-output-wires value)
-            accepted-outputs (get scheme "outputs")
-            input-errors
-              (if (contains-string? accepted-inputs input-wire)
+      ((fn [] -> (List String)
+      (let scheme (get (first matching) "type_scheme"))
+      (let input-wire (get (get value "input") "wire"))
+      (let accepted-inputs (get scheme "input_tags"))
+      (let output-wires (actor-output-wires value))
+      (let accepted-outputs (get scheme "outputs"))
+      (let input-errors (if (contains-string? accepted-inputs input-wire)
                 (as (List String) [])
                 [(str
                    (str (str (str (str "actor " (canonical (get value "id")))
-                                      ": foreign ")
+                                      ": factory ")
                                  (canonical identity))
                             (str " rejects input wire " (canonical input-wire)))
-                   (str "; accepted input wires: " (canonical accepted-inputs)))])
-            output-errors
-              (if (all-strings-in? output-wires accepted-outputs)
+                   (str "; accepted input wires: " (canonical accepted-inputs)))]))
+      (let output-errors (if (all-strings-in? output-wires accepted-outputs)
                 (as (List String) [])
                 [(str
                    (str (str (str (str "actor " (canonical (get value "id")))
-                                      ": foreign ")
+                                      ": factory ")
                                  (canonical identity))
                             (str " exposes output wires " (canonical output-wires)))
-                   (str "; accepted output wires: " (canonical accepted-outputs)))])]
-        (concat input-errors output-errors))))))
+                   (str "; accepted output wires: " (canonical accepted-outputs)))]))
+      (concat input-errors output-errors))))))
 
-(def actor-id-count (fn [[actors (List Actor)] [id String]] -> Int
+(let actor-id-count (fn [[actors (List Actor)] [id String]] -> Int
   (count (filter (fn [[candidate Actor]] -> Bool (= (get candidate "id") id)) actors))))
-(def actor-ids-valid? (fn [[value Graph]] -> Bool
+(let actor-ids-valid? (fn [[value Graph]] -> Bool
   (= (count (filter (fn [[candidate Actor]] -> Bool
                       (not (= (actor-id-count (graph-actors value)
                                               (get candidate "id")) 1)))
                     (graph-actors value))) 0)))
-(def actor-by-id-exists? (fn [[actors (List Actor)] [id String]] -> Bool
+(let actor-by-id-exists? (fn [[actors (List Actor)] [id String]] -> Bool
   (= (actor-id-count actors id) 1)))
-(def port-is-output? (fn [[actors (List Actor)] [value StoredPort]] -> Bool
+(let port-is-output? (fn [[actors (List Actor)] [value StoredPort]] -> Bool
   (= (count (flat-map (fn [[candidate Actor]] -> (List StoredPort)
     (filter (fn [[output StoredPort]] -> Bool (= output value))
             (get candidate "outputs"))) actors)) 1)))
-(def port-is-input? (fn [[actors (List Actor)] [value StoredPort]] -> Bool
+(let port-is-input? (fn [[actors (List Actor)] [value StoredPort]] -> Bool
   (= (count (filter (fn [[candidate Actor]] -> Bool
     (if (= (get candidate "id") (get value "actor"))
       (= (get candidate "input") value) false)) actors)) 1)))
-(def route-id (fn [[value StoredRoute]] -> String (get value "id")))
-(def incoming-routes-to (fn [[routes (List StoredRoute)] [input StoredPort]]
+(let route-id (fn [[value StoredRoute]] -> String (get value "id")))
+(let incoming-routes-to (fn [[routes (List StoredRoute)] [input StoredPort]]
   -> (List StoredRoute)
   (sort-by route-id
     (filter (fn [[candidate StoredRoute]] -> Bool
               (= (get candidate "to") input))
             routes))))
-(def messages-to (fn [[messages (List Message)] [input StoredPort]] -> (List Message)
+(let messages-to (fn [[messages (List Message)] [input StoredPort]] -> (List Message)
   (filter (fn [[candidate Message]] -> Bool
             (= (get candidate "to") input))
           messages)))
-(def actor-input-source-types (fn [[value Graph] [candidate Actor]]
+(let actor-input-source-types (fn [[value Graph] [candidate Actor]]
   -> (List TypeDescriptor)
-  (let [input (get candidate "input")]
-    (concat
+  (let input (get candidate "input"))
+  (concat
       (map (fn [[route StoredRoute]] -> TypeDescriptor
              (get (get route "from") "type"))
            (incoming-routes-to (graph-routes value) input))
       (map (fn [[message Message]] -> TypeDescriptor
              (get (get message "to") "type"))
-           (messages-to (graph-messages value) input))))))
-(def actor-input-coverage-valid? (fn [[value Graph] [candidate Actor]] -> Bool
+           (messages-to (graph-messages value) input)))))
+(let actor-input-coverage-valid? (fn [[value Graph] [candidate Actor]] -> Bool
   (descriptor-input-covered-by?
     (get (get candidate "input") "type")
     (actor-input-source-types value candidate))))
-(def route-handler-types (fn [[routes (List StoredRoute)] [output StoredPort]]
+(let route-handler-types (fn [[routes (List StoredRoute)] [output StoredPort]]
   -> (List TypeDescriptor)
   (map (fn [[route StoredRoute]] -> TypeDescriptor
          (get (get route "to") "type"))
        (filter (fn [[candidate StoredRoute]] -> Bool
                  (= (get candidate "from") output))
                routes))))
-(def rule-handler-types (fn [[rules (List Rule)] [output StoredPort]]
+(let rule-handler-types (fn [[rules (List Rule)] [output StoredPort]]
   -> (List TypeDescriptor)
   (map (fn [[candidate Rule]] -> TypeDescriptor
          (get (get candidate "on") "type"))
        (filter (fn [[candidate Rule]] -> Bool
-                 (let [handler (get candidate "on")]
-                   (if (= (get handler "actor") (get output "actor"))
+                 (let handler (get candidate "on"))
+                 (if (= (get handler "actor") (get output "actor"))
                      (= (get handler "wire") (get output "wire"))
-                     false)))
+                     false))
                rules))))
-(def terminal-output? (fn [[value Graph] [output StoredPort]] -> Bool
+(let terminal-output? (fn [[value Graph] [output StoredPort]] -> Bool
   (not (= (count
     (filter (fn [[candidate StoredNode]] -> Bool
               (if (= (get candidate "role") "output")
                 (= (get candidate "output") output)
                 false))
             (graph-nodes value))) 0))))
-(def actor-output-coverage-valid? (fn [[value Graph] [rules (List Rule)]
+(let actor-output-coverage-valid? (fn [[value Graph] [rules (List Rule)]
                                          [output StoredPort]] -> Bool
   (if (terminal-output? value output)
     true
@@ -523,14 +520,14 @@
       (get output "type")
       (concat (route-handler-types (graph-routes value) output)
               (rule-handler-types rules output))))))
-(def actor-outputs-coverage-valid? (fn [[value Graph] [rules (List Rule)]
+(let actor-outputs-coverage-valid? (fn [[value Graph] [rules (List Rule)]
                                           [candidate Actor]] -> Bool
   (= (count
        (filter (fn [[output StoredPort]] -> Bool
                  (not (actor-output-coverage-valid? value rules output)))
                (get candidate "outputs")))
      0)))
-(def route-valid? (fn [[actors (List Actor)] [value StoredRoute]] -> Bool
+(let route-valid? (fn [[actors (List Actor)] [value StoredRoute]] -> Bool
   (if (port-is-output? actors (get value "from"))
     (if (port-is-input? actors (get value "to"))
       (descriptor-accepts? (get (get value "to") "type")
@@ -538,34 +535,34 @@
       false)
     false)))
 
-(def validate-with-rules (fn [[value Graph] [rules (List Rule)]
-                              [contracts (List ForeignContract)]]
+(let validate-with-rules (fn [[value Graph] [rules (List Rule)]
+                              [contracts (List FactoryContract)]]
   -> (core.validated.Validated String Graph)
-  (as (core.validated.Validated String Graph)
-    (let [nodes (graph-nodes value)
-          actors (graph-actors value)
-          bad-shapes (filter (fn [[candidate StoredNode]] -> Bool
+  (let nodes (graph-nodes value))
+    (let actors (graph-actors value))
+    (let bad-shapes (filter (fn [[candidate StoredNode]] -> Bool
                        (not (if (source-shape-valid? value candidate)
-                              (output-shape-valid? value candidate) false))) nodes)
-          unreachable (filter (fn [[candidate StoredNode]] -> Bool
-                        (not (reachable-from-source? value candidate))) nodes)
-          dead (if (= (count (outputs value)) 1)
+                              (output-shape-valid? value candidate) false))) nodes))
+    (let unreachable (filter (fn [[candidate StoredNode]] -> Bool
+                        (not (reachable-from-source? value candidate))) nodes))
+    (let dead (if (= (count (outputs value)) 1)
                  (filter (fn [[candidate StoredNode]] -> Bool
                            (not (reaches-output? value candidate))) nodes)
-                 nodes)
-          contract-errors (flat-map
+                 nodes))
+    (let contract-errors (flat-map
                             (fn [[candidate Actor]] -> (List String)
                               (actor-contract-errors contracts candidate))
-                            actors)
-          bad-boundaries (filter (fn [[candidate StoredNode]] -> Bool
-                            (not (boundary-valid? candidate))) nodes)
-          bad-input-coverage (filter (fn [[candidate Actor]] -> Bool
-                                (not (actor-input-coverage-valid? value candidate))) actors)
-          bad-output-coverage (filter (fn [[candidate Actor]] -> Bool
-                                 (not (actor-outputs-coverage-valid? value rules candidate))) actors)
-          bad-routes (filter (fn [[candidate StoredRoute]] -> Bool
-                        (not (route-valid? actors candidate))) (graph-routes value))]
-      (if (= (count (get value "edges")) 0)
+                            actors))
+    (let bad-boundaries (filter (fn [[candidate StoredNode]] -> Bool
+                            (not (boundary-valid? candidate))) nodes))
+    (let bad-input-coverage (filter (fn [[candidate Actor]] -> Bool
+                                (not (actor-input-coverage-valid? value candidate))) actors))
+    (let bad-output-coverage (filter (fn [[candidate Actor]] -> Bool
+                                 (not (actor-outputs-coverage-valid? value rules candidate))) actors))
+    (let bad-routes (filter (fn [[candidate StoredRoute]] -> Bool
+                        (not (route-valid? actors candidate))) (graph-routes value)))
+    (as (core.validated.Validated String Graph)
+    (if (= (count (get value "edges")) 0)
         (core.validated.invalid ["graph needs at least one edge"])
         (if (has-node-conflicts? value)
           (core.validated.invalid ["one node id must denote one immutable node definition"])
@@ -589,13 +586,13 @@
                       (core.validated.invalid ["every actor output alternative must have an ordinary route, resident subscription, or terminal output path"]))
                     (core.validated.invalid ["actor input incoming types must be compatible and exactly cover every product occurrence"]))
                   (core.validated.invalid ["boundary node roles require their concrete source/output factory shape, and ordinary nodes cannot contain initial messages"]))
-                (core.validated.invalid ["only source nodes may have zero incoming edges, and output nodes are terminal"]))))))))))
+                (core.validated.invalid ["only source nodes may have zero incoming edges, and output nodes are terminal"])))))))))
 
-(def validate (fn [[value Graph] [contracts (List ForeignContract)]]
+(let validate (fn [[value Graph] [contracts (List FactoryContract)]]
   -> (core.validated.Validated String Graph)
   (validate-with-rules value (as (List Rule) []) contracts)))
 
-(def zip-route-assignments (fn [[routes (List StoredRoute)] [positions (List Int)]]
+(let zip-route-assignments (fn [[routes (List StoredRoute)] [positions (List Int)]]
   -> (List AssignedRoute)
   (if (= (count routes) 0)
     (as (List AssignedRoute) [])
@@ -603,85 +600,87 @@
       [(as AssignedRoute {:route (first routes)
                           :product_position (first positions)})]
       (zip-route-assignments (remove-at routes 0) (remove-at positions 0))))))
-(def assigned-routes-to (fn [[routes (List StoredRoute)] [input StoredPort]]
+(let assigned-routes-to (fn [[routes (List StoredRoute)] [input StoredPort]]
   -> (List AssignedRoute)
-  (let [incoming (incoming-routes-to routes input)
-        sources (map (fn [[candidate StoredRoute]] -> TypeDescriptor
+  (let incoming (incoming-routes-to routes input))
+  (let sources (map (fn [[candidate StoredRoute]] -> TypeDescriptor
                        (get (get candidate "from") "type"))
-                     incoming)]
-    (if (= (count incoming) 0)
+                     incoming))
+  (if (= (count incoming) 0)
       (as (List AssignedRoute) [])
-      (let [positions (descriptor-input-assignments (get input "type") sources)]
+      ((fn [] -> (List AssignedRoute)
+        (let positions (descriptor-input-assignments (get input "type") sources))
         (zip-route-assignments incoming positions))))))
-(def assigned-route (fn [[routes (List StoredRoute)] [candidate StoredRoute]]
+(let assigned-route (fn [[routes (List StoredRoute)] [candidate StoredRoute]]
   -> AssignedRoute
   (first
     (filter (fn [[assigned AssignedRoute]] -> Bool
               (= (get (get assigned "route") "id") (get candidate "id")))
             (assigned-routes-to routes (get candidate "to"))))))
-(def assigned-routes (fn [[routes (List StoredRoute)]]
+(let assigned-routes (fn [[routes (List StoredRoute)]]
   -> (List AssignedRoute)
   (map (fn [[candidate StoredRoute]] -> AssignedRoute
          (assigned-route routes candidate))
        routes)))
-(def assigned-routes-from (fn [[routes (List AssignedRoute)] [actor-id String]]
+(let assigned-routes-from (fn [[routes (List AssignedRoute)] [actor-id String]]
   -> (List AssignedRoute)
   (filter (fn [[candidate AssignedRoute]] -> Bool
             (= (get (get (get candidate "route") "from") "actor") actor-id))
           routes)))
-(def actor-routes (fn [[routes (List AssignedRoute)] [value Actor]]
+(let actor-routes (fn [[routes (List AssignedRoute)] [value Actor]]
   -> (Map String (List LowerDestination))
   (fold (fn [[out (Map String (List LowerDestination))] [assigned AssignedRoute]]
     -> (Map String (List LowerDestination))
-    (let [candidate (get assigned "route")
-          from (get candidate "from") to (get candidate "to")
-          wire (get from "wire")
-          old (or (get out wire) (as (List LowerDestination) []))
-          destination (as LowerDestination {:actor (get to "actor")
+    (let candidate (get assigned "route"))
+    (let from (get candidate "from"))
+    (let to (get candidate "to"))
+    (let wire (get from "wire"))
+    (let old (or (get out wire) (as (List LowerDestination) [])))
+    (let destination (as LowerDestination {:actor (get to "actor")
                                              :wire (get to "wire")
                                              :edge_id (get candidate "id")
                                              :source_type_id (get from "type_id")
                                              :destination_type_id (get to "type_id")
-                                             :product_position (get assigned "product_position")})]
-      (assoc out wire (concat old [destination]))))
+                                             :product_position (get assigned "product_position")}))
+    (assoc out wire (concat old [destination])))
     (as (Map String (List LowerDestination)) {})
     (assigned-routes-from routes (get value "id")))))
-(def lower-actor-with-routes (fn [[routes (List AssignedRoute)] [value Actor]] -> LowerActor
-  (as LowerActor {:id (get value "id") :foreign (get value "foreign")
-                  :evidence (get value "evidence") :input (get value "input")
+(let lower-actor-with-routes (fn [[routes (List AssignedRoute)] [value Actor]] -> LowerActor
+  (as LowerActor {:id (get value "id") :factory (get value "factory")
+                  :type_arguments (get value "type_arguments") :input (get value "input")
                   :outputs (get value "outputs") :params (get value "params")
                   :routes (actor-routes routes value)})))
-(def lower-message (fn [[value Message]] -> LowerMessage
-  (let [to (get value "to")]
-    (as LowerMessage {:to (get to "actor")
+(let lower-message (fn [[value Message]] -> LowerMessage
+  (let to (get value "to"))
+  (as LowerMessage {:to (get to "actor")
                       :semantic_type (get value "semantic_type")
                       :semantic_type_id (get value "semantic_type_id")
-                      :content (get value "content")}))))
-(def lower-rule (fn [[value Rule]] -> LowerRule
+                      :content (get value "content")})))
+(let lower-rule (fn [[value Rule]] -> LowerRule
   (as LowerRule {:id (get value "id") :on (get value "on") :fn (get value "fn")})))
-(def result-boundary (fn [[value Graph]] -> ResultBoundary
+(let result-boundary (fn [[value Graph]] -> ResultBoundary
   (as ResultBoundary {:from (get (first (outputs value)) "output")})))
-(def actor-descriptors (fn [[actors (List Actor)]] -> (List TypeDescriptor)
+(let actor-descriptors (fn [[actors (List Actor)]] -> (List TypeDescriptor)
   (flat-map (fn [[candidate Actor]] -> (List TypeDescriptor)
               (concat [(get (get candidate "input") "type")]
                       (map (fn [[output StoredPort]] -> TypeDescriptor
                              (get output "type"))
                            (get candidate "outputs"))))
             actors)))
-(def route-descriptors (fn [[routes (List StoredRoute)]] -> (List TypeDescriptor)
+(let route-descriptors (fn [[routes (List StoredRoute)]] -> (List TypeDescriptor)
   (flat-map (fn [[candidate StoredRoute]] -> (List TypeDescriptor)
               [(get (get candidate "from") "type")
                (get (get candidate "to") "type")])
             routes)))
-(def message-descriptors (fn [[messages (List Message)]] -> (List TypeDescriptor)
+(let message-descriptors (fn [[messages (List Message)]] -> (List TypeDescriptor)
   (map (fn [[candidate Message]] -> TypeDescriptor
          (get candidate "semantic_type"))
        messages)))
-(def rule-descriptors (fn [[rules (List Rule)]] -> (List TypeDescriptor)
+(let rule-descriptors (fn [[rules (List Rule)]] -> (List TypeDescriptor)
   (map (fn [[candidate Rule]] -> TypeDescriptor
          (get (get candidate "on") "type"))
        rules)))
-(def program-descriptors (fn [[topology Graph] [rules (List Rule)]]
+(let program-descriptors (fn [[topology Graph] [rules (List Rule)]]
   -> (List TypeDescriptor)
   (concat
     (concat
@@ -692,17 +691,17 @@
         (message-descriptors (graph-messages topology))
         (rule-descriptors rules)))
     [(get (get (first (outputs topology)) "output") "type")])))
-(def delta-descriptors (fn [[value Delta]] -> (List TypeDescriptor)
+(let delta-descriptors (fn [[value Delta]] -> (List TypeDescriptor)
   (concat
     (concat
       (actor-descriptors (get value "actors"))
       (route-descriptors (get value "routes")))
     (message-descriptors (get value "messages")))))
-(def lower-program (fn [[value Program]] -> Modification
-  (let [topology (get value "graph")
-        actors (graph-actors topology)
-        routes (assigned-routes (graph-routes topology))]
-    (as Modification
+(let lower-program (fn [[value Program]] -> Modification
+  (let topology (get value "graph"))
+  (let actors (graph-actors topology))
+  (let routes (assigned-routes (graph-routes topology)))
+  (as Modification
       {:actors (map (fn [[candidate Actor]] -> LowerActor
                       (lower-actor-with-routes routes candidate))
                     actors)
@@ -710,61 +709,61 @@
        :kills (as (List String) [])
        :rules (map lower-rule (get value "rules"))
        :types (descriptor-table (program-descriptors topology (get value "rules")))
-       :result (result-boundary topology)}))))
-(def lower (fn [[value Graph]] -> Modification
+       :result (result-boundary topology)})))
+(let lower (fn [[value Graph]] -> Modification
   (lower-program (program value (as (List Rule) [])))))
 
 ;; Resident rule deltas are operational artifacts, not graph values.
-(def delta (fn [[actors (List Actor)] [routes (List StoredRoute)]
+(let delta (fn [[actors (List Actor)] [routes (List StoredRoute)]
                 [messages (List Message)] [kills (List String)]] -> Delta
   (as Delta {:actors actors :routes routes :messages messages :kills kills})))
-(def node-delta (fn [I O] [[value (Node I O)]] -> Delta
+(let node-delta (fn [I O] [[value (Node I O)]] -> Delta
   (as Delta {:actors (get value "actors") :routes (get value "routes")
              :messages (get value "messages") :kills []})))
-(def merge-delta (fn [[left Delta] [right Delta]] -> Delta
+(let merge-delta (fn [[left Delta] [right Delta]] -> Delta
   (as Delta {:actors (concat (get left "actors") (get right "actors"))
              :routes (concat (get left "routes") (get right "routes"))
              :messages (concat (get left "messages") (get right "messages"))
              :kills (concat (get left "kills") (get right "kills"))})))
-(def delta-edge (fn [I T O] [[change Delta] [from (Node I T)] [to (Node T O)]] -> Delta
+(let delta-edge (fn [I T O] [[change Delta] [from (Node I T)] [to (Node T O)]] -> Delta
   (as Delta {:actors (get change "actors")
              :routes (concat (get change "routes")
                              [(stored-route (get from "output") (get to "input"))])
              :messages (get change "messages") :kills (get change "kills")})))
-(def delta-route (fn [T] [[change Delta] [from (Port T)] [to (Port T)]] -> Delta
+(let delta-route (fn [T] [[change Delta] [from (Port T)] [to (Port T)]] -> Delta
   (as Delta {:actors (get change "actors")
              :routes (concat (get change "routes") [(stored-route from to)])
              :messages (get change "messages") :kills (get change "kills")})))
-(def delta-message (fn [T] [[change Delta] [to (Port T)] [value T]] -> Delta
+(let delta-message (fn [T] [[change Delta] [to (Port T)] [value T]] -> Delta
   (as Delta {:actors (get change "actors") :routes (get change "routes")
              :messages (concat (get change "messages") [(typed-message to value)])
              :kills (get change "kills")})))
-(def delta-message-front (fn [T] [[change Delta] [to (Port T)] [value T]] -> Delta
+(let delta-message-front (fn [T] [[change Delta] [to (Port T)] [value T]] -> Delta
   (as Delta {:actors (get change "actors") :routes (get change "routes")
              :messages (concat [(typed-message to value)] (get change "messages"))
              :kills (get change "kills")})))
-(def lower-delta (fn [[value Delta]] -> LowerDelta
-  (let [actors (get value "actors")
-        routes (assigned-routes (get value "routes"))]
-    (as LowerDelta
+(let lower-delta (fn [[value Delta]] -> LowerDelta
+  (let actors (get value "actors"))
+  (let routes (assigned-routes (get value "routes")))
+  (as LowerDelta
     {:actors (map (fn [[candidate Actor]] -> LowerActor
                     (lower-actor-with-routes routes candidate))
                   actors)
      :messages (map lower-message (get value "messages"))
      :kills (get value "kills")
      :rules (as (List LowerRule) [])
-     :types (descriptor-table (delta-descriptors value))}))))
+     :types (descriptor-table (delta-descriptors value))})))
 
 ;; A resident program may begin with rule-observed exits that only become
 ;; connected after a rule returns its operational delta. Its explicit boundary
 ;; remains outside Graph validation for that reason.
-(def lower-resident (fn [T] [[change Delta] [rules (List Rule)] [result (Port T)]] -> Modification
-  (let [lowered (lower-delta change)]
-    (as Modification {:actors (get lowered "actors")
+(let lower-resident (fn [T] [[change Delta] [rules (List Rule)] [result (Port T)]] -> Modification
+  (let lowered (lower-delta change))
+  (as Modification {:actors (get lowered "actors")
                       :messages (get lowered "messages")
                       :kills (get lowered "kills")
                       :rules (map lower-rule rules)
                       :types (descriptor-table
                                (concat (delta-descriptors change)
                                        [(get (store-port result) "type")]))
-                      :result (as ResultBoundary {:from (store-port result)})}))))
+                      :result (as ResultBoundary {:from (store-port result)})})))

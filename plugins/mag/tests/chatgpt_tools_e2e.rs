@@ -225,16 +225,16 @@ async fn chatgpt_projects_stale_allowlist_and_returns_tool_result_through_gate()
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
-(let [start (nefor.graph.source "task" (type-tag nefor.contracts.Task) (as nefor.contracts.Task {:prompt "read fixture"}))
-      answer (nefor.actors.agent
+(let start (nefor.graph.source "task" (type-tag nefor.contracts.Task) (as nefor.contracts.Task {:prompt "read fixture"})))
+(let answer (nefor.actors.agent
                (as nefor.actors.AgentConfig {:id "answer" :model (nefor.contracts.identifier "test-model")
                 :profile (nefor.contracts.no-identifier) :provider "provider" :system "Read fixture.txt, then answer."
                 :tools ["read_file" "python-read"] :da-policy (nefor.contracts.no-da-policy) :max-corrections 0})
-               (type-tag nefor.contracts.Task) "task" (type-tag nefor.contracts.TextAnswer))
-      output (nefor.graph.output "result" (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError)))
-      topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-                 (nefor.graph.add-edges graph [(nefor.graph.edge start answer) (nefor.graph.edge answer output)]))]
-  (nefor.artifact.compile topology))
+               (type-tag nefor.contracts.Task) "task" (type-tag nefor.contracts.TextAnswer)))
+(let output (nefor.graph.output "result" (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+                 (nefor.graph.add-edges graph [(nefor.graph.edge start answer) (nefor.graph.edge answer output)])))
+(nefor.artifact.compile topology)
 "#;
     tokio::fs::write(temp.path().join("tool.mag"), source)
         .await

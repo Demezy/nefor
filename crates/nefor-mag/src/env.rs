@@ -1,13 +1,16 @@
-use crate::ast::{FnValue, TypeDecl, Value};
+use crate::ast::{
+    BindingId, BindingSlot, CheckedExpr, FnValue, FrameId, Scope, ScopeFrame, TypeDecl, Value,
+};
 use crate::error::MagError;
 use crate::profile::{CompileProfiler, Phase};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
 const MEMOIZED_CALL_LIMIT: usize = 16_384;
+const FRAME_COLLECTION_THRESHOLD: usize = 1_024;
 
 // Compound MAG values are immutable shared allocations. Holding the Value in
 // the key both keeps its allocation alive and lets repeated uses compare by
@@ -54,8 +57,6 @@ impl PartialEq for MemoArg {
             (Value::Type(left), Value::Type(right)) => left == right,
             (Value::TypeTag(left), Value::TypeTag(right)) => left == right,
             (Value::TypeDecl(left), Value::TypeDecl(right)) => left == right,
-            (Value::Foreign(left), Value::Foreign(right)) => left == right,
-            (Value::ForeignEvidence(left), Value::ForeignEvidence(right)) => left == right,
             (Value::Typed(left, left_type), Value::Typed(right, right_type)) => {
                 left_type == right_type && Arc::ptr_eq(left, right)
             }
@@ -86,8 +87,6 @@ impl Hash for MemoArg {
             Value::Type(value) => value.hash(state),
             Value::TypeTag(value) => value.hash(state),
             Value::TypeDecl(value) => value.hash(state),
-            Value::Foreign(value) => value.hash(state),
-            Value::ForeignEvidence(value) => value.hash(state),
             Value::Typed(value, ty) => {
                 Arc::as_ptr(value).hash(state);
                 ty.hash(state);
@@ -106,12 +105,15 @@ impl Hash for MemoArg {
 #[derive(Debug, Clone)]
 struct MemoCall {
     function: Arc<FnValue>,
+    resolved_signature: Option<crate::types::MagType>,
     args: Vec<MemoArg>,
 }
 
 impl PartialEq for MemoCall {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.function, &other.function) && self.args == other.args
+        Arc::ptr_eq(&self.function, &other.function)
+            && self.args == other.args
+            && self.resolved_signature == other.resolved_signature
     }
 }
 
@@ -120,28 +122,89 @@ impl Eq for MemoCall {}
 impl Hash for MemoCall {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Arc::as_ptr(&self.function).hash(state);
+        self.resolved_signature.hash(state);
         self.args.hash(state);
     }
 }
 
 #[derive(Debug, Default)]
 struct CompilationState {
-    loaded: HashMap<String, BTreeMap<String, Value>>,
+    next_binding_id: u64,
+    next_frame_id: u64,
+    bindings: HashMap<BindingId, BindingMetadata>,
+    frames: HashMap<FrameId, ScopeFrame>,
+    frame_roots: HashMap<FrameId, usize>,
+    loaded: HashMap<String, BTreeMap<String, Vec<Value>>>,
     loading: Vec<String>,
-    foreign_identities: HashSet<String>,
     file_reads: HashMap<PathBuf, Result<String, String>>,
     memoized_calls: HashMap<MemoCall, Value>,
 }
 
 #[derive(Debug, Clone)]
+pub struct BindingMetadata {
+    pub name: String,
+    pub ty: Option<crate::types::MagType>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BindingHandle {
+    pub id: BindingId,
+    pub frame: Scope,
+    state: Weak<Mutex<CompilationState>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BindingForce {
+    Ready(Value),
+    Initialize {
+        handle: BindingHandle,
+        initializer: Arc<CheckedExpr>,
+    },
+}
+
+#[derive(Debug)]
 pub struct Env {
-    scopes: Vec<HashMap<String, Value>>,
+    scopes: Vec<Scope>,
     source_dir: PathBuf,
     module_roots: Vec<PathBuf>,
     module: String,
     state: Arc<Mutex<CompilationState>>,
     imports: HashSet<String>,
     profiler: Option<CompileProfiler>,
+}
+
+impl Clone for Env {
+    fn clone(&self) -> Self {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            for frame in &self.scopes {
+                *state.frame_roots.entry(*frame).or_default() += 1;
+            }
+        }
+        Self {
+            scopes: self.scopes.clone(),
+            source_dir: self.source_dir.clone(),
+            module_roots: self.module_roots.clone(),
+            module: self.module.clone(),
+            state: self.state.clone(),
+            imports: self.imports.clone(),
+            profiler: self.profiler.clone(),
+        }
+    }
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        for frame in &self.scopes {
+            if let Some(count) = state.frame_roots.get_mut(frame) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    state.frame_roots.remove(frame);
+                }
+            }
+        }
+    }
 }
 
 impl Default for Env {
@@ -151,6 +214,13 @@ impl Default for Env {
 }
 
 impl Env {
+    pub(crate) fn owns_binding_handle(&self, handle: &BindingHandle) -> bool {
+        handle
+            .state
+            .upgrade()
+            .is_some_and(|state| Arc::ptr_eq(&state, &self.state))
+    }
+
     pub fn new() -> Self {
         Self::new_in(
             Path::new("."),
@@ -167,8 +237,9 @@ impl Env {
         state: Arc<Mutex<CompilationState>>,
         profiler: Option<CompileProfiler>,
     ) -> Self {
+        let root = Self::allocate_frame_in(&state);
         let mut env = Self {
-            scopes: vec![HashMap::new()],
+            scopes: vec![root],
             source_dir: source_dir.into(),
             module_roots,
             module: module.into(),
@@ -176,54 +247,10 @@ impl Env {
             imports: HashSet::new(),
             profiler,
         };
-        for name in [
-            "str",
-            "map",
-            "indexed-map",
-            "filter",
-            "flat-map",
-            "fold",
-            "concat",
-            "get",
-            "assoc",
-            "keys",
-            "count",
-            "first",
-            "canonical",
-            "sort-by",
-            "remove-at",
-            "conforms?",
-            "or",
-            "not",
-            "=",
-            "fail",
-            "foreign-id",
-            "foreign-evidence",
-            "type-evidence",
-            "read",
-            "read-json",
-            "require",
-            "artifact",
-            "type-schema",
-            "type-id",
-            "value-type-id",
-            "value-type-evidence",
-            "pack",
-            "packed-empty-record?",
-            "packed-record-has-only-key?",
-            "packed-record-has-only-keys?",
-            "packed-field-conforms?",
-            "descriptor-accepts?",
-            "descriptor-input-covered-by?",
-            "descriptor-input-assignments",
-            "descriptor-output-covered-by?",
-            "descriptor-table",
-            "foreign-contracts",
-        ] {
+        for &name in crate::checker::BUILTIN_NAMES {
             env.define(name, Value::BuiltinFn(name.into()));
         }
         for (name, ty) in [
-            ("ForeignEvidence", crate::types::MagType::ForeignEvidence),
             ("Artifact", crate::types::MagType::Artifact),
             ("JsonValue", crate::types::MagType::JsonValue),
             ("TypeDescriptor", crate::types::MagType::TypeDescriptor),
@@ -239,6 +266,14 @@ impl Env {
             env.define(name, Value::Type(ty));
         }
         env
+    }
+    fn allocate_frame_in(state: &Arc<Mutex<CompilationState>>) -> FrameId {
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        let id = FrameId(state.next_frame_id);
+        state.next_frame_id = state.next_frame_id.saturating_add(1);
+        state.frames.insert(id, ScopeFrame::default());
+        *state.frame_roots.entry(id).or_default() += 1;
+        id
     }
     pub fn new_with_stdlib() -> Self {
         Self::new()
@@ -282,31 +317,434 @@ impl Env {
         }
     }
     pub fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(Self::allocate_frame_in(&self.state));
     }
     pub fn pop_scope(&mut self) {
         if self.scopes.len() > 1 {
-            self.scopes.pop();
-        }
-    }
-    pub fn define(&mut self, name: &str, value: Value) {
-        if let Some(s) = self.scopes.last_mut() {
-            s.insert(name.into(), value);
-        }
-    }
-    pub fn lookup(&self, name: &str) -> Result<&Value, MagError> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(v) = scope.get(name) {
-                return Ok(v);
+            if let Some(frame) = self.scopes.pop() {
+                self.release_frame_root(frame);
             }
         }
-        Err(MagError::Unresolved(name.into()))
     }
-    pub fn type_decl(&self, canonical: &str) -> Option<&TypeDecl> {
+    fn release_frame_root(&self, frame: FrameId) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(count) = state.frame_roots.get_mut(&frame) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                state.frame_roots.remove(&frame);
+            }
+        }
+    }
+    pub fn allocate_binding_id(&self, name: &str, ty: Option<crate::types::MagType>) -> BindingId {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let id = BindingId(state.next_binding_id);
+        state.next_binding_id = state.next_binding_id.saturating_add(1);
+        state.bindings.insert(
+            id,
+            BindingMetadata {
+                name: name.to_owned(),
+                ty,
+            },
+        );
+        id
+    }
+    pub fn binding_metadata(&self, id: BindingId) -> Option<BindingMetadata> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .bindings
+            .get(&id)
+            .cloned()
+    }
+    pub fn set_binding_type(&self, id: BindingId, ty: crate::types::MagType) {
+        if let Some(binding) = self
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .bindings
+            .get_mut(&id)
+        {
+            binding.ty = Some(ty);
+        }
+    }
+    pub fn declare_binding_slot(
+        &mut self,
+        id: BindingId,
+        name: &str,
+        initializer: Arc<CheckedExpr>,
+    ) -> Result<(), MagError> {
+        let frame = self
+            .scopes
+            .last()
+            .ok_or_else(|| MagError::Eval("binding declaration requires a scope".into()))?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let frame = state
+            .frames
+            .get_mut(frame)
+            .ok_or_else(|| MagError::Eval("binding declaration frame was reclaimed".into()))?;
+        if frame.slots.contains_key(&id) {
+            return Err(MagError::Eval(format!(
+                "binding slot {} is already declared",
+                id.0
+            )));
+        }
+        frame.names.entry(name.to_owned()).or_default().push(id);
+        frame
+            .slots
+            .insert(id, BindingSlot::Uninitialized(initializer));
+        Ok(())
+    }
+    pub fn define_ready(&mut self, id: BindingId, name: &str, value: Value) {
+        if let Some(frame) = self.scopes.last() {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(frame) = state.frames.get_mut(frame) else {
+                return;
+            };
+            let ids = frame.names.entry(name.to_owned()).or_default();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+            frame.slots.insert(id, BindingSlot::Ready(value));
+        }
+    }
+    pub fn lookup_candidate_ids(&self, name: &str) -> Vec<BindingId> {
+        let mut seen = HashSet::new();
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         self.scopes
             .iter()
             .rev()
-            .flat_map(|scope| scope.values())
+            .flat_map(|scope| {
+                state
+                    .frames
+                    .get(scope)
+                    .and_then(|frame| frame.names.get(name))
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .filter(|id| seen.insert(*id))
+            .collect()
+    }
+    pub fn lookup_handles(&self, name: &str) -> Vec<BindingHandle> {
+        let mut seen = HashSet::new();
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        self.scopes
+            .iter()
+            .rev()
+            .flat_map(|scope| {
+                let ids = state
+                    .frames
+                    .get(scope)
+                    .and_then(|frame| frame.names.get(name))
+                    .cloned()
+                    .unwrap_or_default();
+                ids.into_iter().map(|id| BindingHandle {
+                    id,
+                    frame: *scope,
+                    state: Arc::downgrade(&self.state),
+                })
+            })
+            .filter(|handle| seen.insert(handle.id))
+            .collect()
+    }
+    fn frame_for_binding(&self, id: BindingId) -> Option<Scope> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        self.scopes.iter().rev().find_map(|scope| {
+            state
+                .frames
+                .get(scope)
+                .is_some_and(|frame| frame.slots.contains_key(&id))
+                .then_some(*scope)
+        })
+    }
+    pub fn binding_handle(&self, id: BindingId) -> Result<BindingHandle, MagError> {
+        let frame = self
+            .frame_for_binding(id)
+            .ok_or_else(|| MagError::Unresolved(format!("binding#{}", id.0)))?;
+        Ok(BindingHandle {
+            id,
+            frame,
+            state: Arc::downgrade(&self.state),
+        })
+    }
+    pub fn begin_binding_force(&self, id: BindingId) -> Result<BindingForce, MagError> {
+        Self::begin_handle_force(&self.binding_handle(id)?)
+    }
+    pub fn begin_handle_force(handle: &BindingHandle) -> Result<BindingForce, MagError> {
+        let state = handle
+            .state
+            .upgrade()
+            .ok_or_else(|| MagError::Eval("binding program has been dropped".into()))?;
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        let frame = state
+            .frames
+            .get_mut(&handle.frame)
+            .ok_or_else(|| MagError::Eval("binding frame was reclaimed".into()))?;
+        match frame.slots.get_mut(&handle.id) {
+            Some(BindingSlot::Ready(value)) => Ok(BindingForce::Ready(value.clone())),
+            Some(slot @ BindingSlot::Uninitialized(_)) => {
+                let BindingSlot::Uninitialized(initializer) =
+                    std::mem::replace(slot, BindingSlot::Initializing)
+                else {
+                    unreachable!()
+                };
+                Ok(BindingForce::Initialize {
+                    handle: handle.clone(),
+                    initializer,
+                })
+            }
+            Some(BindingSlot::Initializing) => Err(MagError::Eval(format!(
+                "binding initialization cycle at binding#{}",
+                handle.id.0
+            ))),
+            None => Err(MagError::Unresolved(format!("binding#{}", handle.id.0))),
+        }
+    }
+    pub fn complete_binding_force(&self, id: BindingId, value: Value) -> Result<(), MagError> {
+        let frame = self
+            .frame_for_binding(id)
+            .ok_or_else(|| MagError::Unresolved(format!("binding#{}", id.0)))?;
+        Self::complete_handle_force(
+            &BindingHandle {
+                id,
+                frame,
+                state: Arc::downgrade(&self.state),
+            },
+            value,
+        )
+    }
+    pub fn complete_handle_force(handle: &BindingHandle, value: Value) -> Result<(), MagError> {
+        let state = handle
+            .state
+            .upgrade()
+            .ok_or_else(|| MagError::Eval("binding program has been dropped".into()))?;
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        let frame = state
+            .frames
+            .get_mut(&handle.frame)
+            .ok_or_else(|| MagError::Eval("binding frame was reclaimed".into()))?;
+        match frame.slots.get_mut(&handle.id) {
+            Some(slot @ BindingSlot::Initializing) => {
+                *slot = BindingSlot::Ready(value);
+                Ok(())
+            }
+            Some(_) => Err(MagError::Eval(format!(
+                "binding#{} completed outside initialization",
+                handle.id.0
+            ))),
+            None => Err(MagError::Unresolved(format!("binding#{}", handle.id.0))),
+        }
+    }
+    pub fn reset_binding_force(
+        &self,
+        id: BindingId,
+        initializer: Arc<CheckedExpr>,
+    ) -> Result<(), MagError> {
+        let frame = self
+            .frame_for_binding(id)
+            .ok_or_else(|| MagError::Unresolved(format!("binding#{}", id.0)))?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let frame = state
+            .frames
+            .get_mut(&frame)
+            .ok_or_else(|| MagError::Eval("binding frame was reclaimed".into()))?;
+        match frame.slots.get_mut(&id) {
+            Some(slot @ BindingSlot::Initializing) => {
+                *slot = BindingSlot::Uninitialized(initializer);
+                Ok(())
+            }
+            Some(_) => Err(MagError::Eval(format!(
+                "binding#{} reset outside initialization",
+                id.0
+            ))),
+            None => Err(MagError::Unresolved(format!("binding#{}", id.0))),
+        }
+    }
+    pub fn reset_handle_force(
+        handle: &BindingHandle,
+        initializer: Arc<CheckedExpr>,
+    ) -> Result<(), MagError> {
+        let state = handle
+            .state
+            .upgrade()
+            .ok_or_else(|| MagError::Eval("binding program has been dropped".into()))?;
+        let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
+        let frame = state
+            .frames
+            .get_mut(&handle.frame)
+            .ok_or_else(|| MagError::Eval("binding frame was reclaimed".into()))?;
+        match frame.slots.get_mut(&handle.id) {
+            Some(slot @ BindingSlot::Initializing) => {
+                *slot = BindingSlot::Uninitialized(initializer);
+                Ok(())
+            }
+            Some(_) => Err(MagError::Eval(format!(
+                "binding#{} reset outside initialization",
+                handle.id.0
+            ))),
+            None => Err(MagError::Unresolved(format!("binding#{}", handle.id.0))),
+        }
+    }
+    pub fn ready_handle(handle: &BindingHandle) -> Result<Value, MagError> {
+        match Self::begin_handle_force(handle)? {
+            BindingForce::Ready(value) => Ok(value),
+            BindingForce::Initialize {
+                handle,
+                initializer,
+            } => {
+                Self::reset_handle_force(&handle, initializer)?;
+                Err(MagError::Eval(format!(
+                    "binding#{} has not been initialized",
+                    handle.id.0
+                )))
+            }
+        }
+    }
+    pub fn ready_binding(&self, id: BindingId) -> Result<Value, MagError> {
+        match self.begin_binding_force(id)? {
+            BindingForce::Ready(value) => Ok(value),
+            BindingForce::Initialize {
+                handle,
+                initializer,
+            } => {
+                Self::reset_handle_force(&handle, initializer)?;
+                Err(MagError::Eval(format!(
+                    "binding#{} has not been initialized",
+                    id.0
+                )))
+            }
+        }
+    }
+    pub fn define(&mut self, name: &str, value: Value) {
+        let ty = crate::checker::value_type(&value);
+        let id = self.allocate_binding_id(name, ty);
+        self.define_ready(id, name, value);
+    }
+    pub fn define_binding(&mut self, name: &str, value: Value) -> Result<(), MagError> {
+        if let Some(candidate_type) = crate::checker::canonical_value_type(&value) {
+            for existing in self.lookup_candidates(name) {
+                if crate::checker::canonical_value_type(&existing).as_ref() == Some(&candidate_type)
+                {
+                    return Err(MagError::Type(format!(
+                        "duplicate visible overload {name}: {candidate_type}"
+                    )));
+                }
+            }
+        }
+        self.define(name, value);
+        Ok(())
+    }
+    pub fn lookup_candidates(&self, name: &str) -> Vec<Value> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        self.scopes
+            .iter()
+            .rev()
+            .flat_map(|scope| {
+                let Some(frame) = state.frames.get(scope) else {
+                    return Vec::new();
+                };
+                frame
+                    .names
+                    .get(name)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| match frame.slots.get(id) {
+                        Some(BindingSlot::Ready(value)) => Some(value.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+    pub fn lookup(&self, name: &str) -> Result<Value, MagError> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let candidates = self
+            .scopes
+            .iter()
+            .rev()
+            .find_map(|scope| {
+                let frame = state.frames.get(scope)?;
+                let values = frame
+                    .names
+                    .get(name)?
+                    .iter()
+                    .filter_map(|id| match frame.slots.get(id) {
+                        Some(BindingSlot::Ready(value)) => Some(value.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                Some(values)
+            })
+            .ok_or_else(|| MagError::Unresolved(name.into()))?;
+        let values = candidates
+            .iter()
+            .filter(|value| !matches!(value, Value::Type(_)))
+            .cloned()
+            .collect::<Vec<_>>();
+        let candidates = if values.is_empty() {
+            candidates
+        } else {
+            values
+        };
+        let data_candidates = candidates
+            .iter()
+            .filter(|value| !matches!(value, Value::Fn(_) | Value::BuiltinFn(_)))
+            .cloned()
+            .collect::<Vec<_>>();
+        if let [value] = data_candidates.as_slice() {
+            return Ok(value.clone());
+        }
+        match candidates.as_slice() {
+            [] => Err(MagError::Unresolved(name.into())),
+            [value] => Ok(value.clone()),
+            values => Err(MagError::Type(format!(
+                "ambiguous overload {name}; candidates: {}",
+                values
+                    .iter()
+                    .filter_map(crate::checker::value_type)
+                    .map(|ty| ty.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
+    }
+    pub fn lookup_by_type(
+        &self,
+        name: &str,
+        expected: &crate::types::MagType,
+    ) -> Result<Value, MagError> {
+        let matches = self
+            .lookup_candidates(name)
+            .into_iter()
+            .filter(|value| crate::checker::value_type(value).as_ref() == Some(expected))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [value] => Ok(value.clone()),
+            [] => Err(MagError::Type(format!(
+                "no overload {name} matches {expected}"
+            ))),
+            _ => Err(MagError::Type(format!(
+                "ambiguous overload {name} for {expected}"
+            ))),
+        }
+    }
+    pub fn type_decl(&self, canonical: &str) -> Option<TypeDecl> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        self.scopes
+            .iter()
+            .rev()
+            .flat_map(|scope| {
+                let Some(frame) = state.frames.get(scope) else {
+                    return Vec::new();
+                };
+                frame
+                    .slots
+                    .values()
+                    .filter_map(|slot| match slot {
+                        BindingSlot::Ready(value) => Some(value.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
             .find_map(|value| match value {
                 Value::TypeDecl(decl) if decl.name == canonical => Some(decl),
                 _ => None,
@@ -314,19 +752,48 @@ impl Env {
     }
     // Nominal declarations are the compilation-wide type namespace, not dynamic values.
     pub fn define_type_declarations_from(&mut self, source: &Self) {
-        for (name, value) in source.scopes.iter().flat_map(|scope| scope.iter()) {
-            if matches!(value, Value::TypeDecl(_)) {
-                self.define(name, value.clone());
+        let declarations = {
+            let state = source
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            source
+                .scopes
+                .iter()
+                .filter_map(|scope| state.frames.get(scope))
+                .flat_map(|frame| {
+                    frame
+                        .names
+                        .iter()
+                        .map(|(name, ids)| {
+                            let values = ids
+                                .iter()
+                                .filter_map(|id| match frame.slots.get(id) {
+                                    Some(BindingSlot::Ready(value)) => Some(value.clone()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>();
+                            (name.clone(), values)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        for (name, values) in declarations {
+            for value in values {
+                if matches!(value, Value::TypeDecl(_))
+                    && !self
+                        .lookup_candidates(&name)
+                        .iter()
+                        .any(|existing| crate::eval::equal(existing, &value))
+                {
+                    self.define(&name, value);
+                }
             }
         }
     }
-    pub fn snapshot(&self) -> Vec<(String, Value)> {
-        let snapshot = self
-            .scopes
-            .iter()
-            .flat_map(|scope| scope.iter())
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect::<Vec<_>>();
+    pub fn snapshot(&self) -> Vec<Scope> {
+        let snapshot = self.scopes.clone();
         self.profile_counters(|counters| {
             counters.environment_snapshots = counters.environment_snapshots.saturating_add(1);
             counters.environment_snapshot_bindings = counters
@@ -335,9 +802,90 @@ impl Env {
         });
         snapshot
     }
+    pub fn replace_scopes(&mut self, scopes: Vec<Scope>) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            for frame in &self.scopes {
+                if let Some(count) = state.frame_roots.get_mut(frame) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        state.frame_roots.remove(frame);
+                    }
+                }
+            }
+            for frame in &scopes {
+                *state.frame_roots.entry(*frame).or_default() += 1;
+            }
+        }
+        self.scopes = scopes;
+    }
+    pub fn live_frame_count(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .frames
+            .len()
+    }
+    pub fn frame_collection_due(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.frames.len().saturating_sub(state.frame_roots.len()) >= FRAME_COLLECTION_THRESHOLD
+    }
+    pub fn collect_frames(&self, extra_values: &[Value]) -> usize {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let before = state.frames.len();
+        let mut reachable = HashSet::new();
+        let mut pending_frames = state.frame_roots.keys().copied().collect::<Vec<_>>();
+        let mut pending_values = extra_values.to_vec();
+        pending_values.extend(
+            state
+                .loaded
+                .values()
+                .flat_map(|module| module.values())
+                .flatten()
+                .cloned(),
+        );
+        for (call, result) in &state.memoized_calls {
+            pending_values.push(Value::Fn(call.function.clone()));
+            pending_values.extend(call.args.iter().map(|argument| argument.0.clone()));
+            pending_values.push(result.clone());
+        }
+
+        while !pending_frames.is_empty() || !pending_values.is_empty() {
+            while let Some(value) = pending_values.pop() {
+                match value {
+                    Value::Fn(function) => pending_frames.extend(function.closure.iter().copied()),
+                    Value::List(values) | Value::Vector(values) | Value::Product(values) => {
+                        pending_values.extend(values.iter().cloned());
+                    }
+                    Value::Map(values) => pending_values.extend(values.values().cloned()),
+                    Value::Typed(value, _) | Value::PackedValue(value) => {
+                        pending_values.push(value.as_ref().clone());
+                    }
+                    _ => {}
+                }
+            }
+            let Some(frame_id) = pending_frames.pop() else {
+                continue;
+            };
+            if !reachable.insert(frame_id) {
+                continue;
+            }
+            if let Some(frame) = state.frames.get(&frame_id) {
+                pending_values.extend(frame.slots.values().filter_map(|slot| match slot {
+                    BindingSlot::Ready(value) => Some(value.clone()),
+                    BindingSlot::Uninitialized(_) | BindingSlot::Initializing => None,
+                }));
+            }
+        }
+
+        state.frames.retain(|id, _| reachable.contains(id));
+        state.frame_roots.retain(|id, _| reachable.contains(id));
+        before.saturating_sub(state.frames.len())
+    }
     pub fn child_for_call(&self) -> Self {
+        let frame = Self::allocate_frame_in(&self.state);
         Self {
-            scopes: vec![HashMap::new()],
+            scopes: vec![frame],
             source_dir: self.source_dir.clone(),
             module_roots: self.module_roots.clone(),
             module: self.module.clone(),
@@ -346,19 +894,40 @@ impl Env {
             profiler: self.profiler.clone(),
         }
     }
-    pub fn user_defs(&self) -> BTreeMap<String, Value> {
+    pub fn user_defs(&self) -> BTreeMap<String, Vec<Value>> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         self.scopes
             .first()
             .into_iter()
-            .flat_map(|s| s.iter())
-            .filter(|(name, v)| {
-                !matches!(v, Value::BuiltinFn(_) | Value::Type(_))
-                    && (!name.contains('.') || matches!(v, Value::Foreign(_)))
+            .flat_map(|s| {
+                let Some(frame) = state.frames.get(s) else {
+                    return Vec::new();
+                };
+                frame
+                    .names
+                    .iter()
+                    .map(|(name, ids)| {
+                        let values = ids
+                            .iter()
+                            .filter_map(|id| match frame.slots.get(id) {
+                                Some(BindingSlot::Ready(value)) => Some(value.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        (name.clone(), values)
+                    })
+                    .collect::<Vec<_>>()
             })
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .filter_map(|(name, values)| {
+                let values = values
+                    .into_iter()
+                    .filter(|v| !matches!(v, Value::BuiltinFn(_) | Value::Type(_)))
+                    .collect::<Vec<_>>();
+                (!name.contains('.') && !values.is_empty()).then_some((name, values))
+            })
             .collect()
     }
-    pub fn module_cached(&self, name: &str) -> Option<BTreeMap<String, Value>> {
+    pub fn module_cached(&self, name: &str) -> Option<BTreeMap<String, Vec<Value>>> {
         let cached = self
             .state
             .lock()
@@ -374,7 +943,7 @@ impl Env {
         });
         cached
     }
-    pub fn loaded_modules(&self) -> Vec<(String, BTreeMap<String, Value>)> {
+    pub fn loaded_modules(&self) -> Vec<(String, BTreeMap<String, Vec<Value>>)> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -396,16 +965,7 @@ impl Env {
         m.loading.push(name.into());
         Ok(())
     }
-    pub fn register_foreign(&self, identity: &str) -> Result<(), MagError> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if !state.foreign_identities.insert(identity.to_string()) {
-            return Err(MagError::Type(format!(
-                "duplicate foreign declaration for {identity}"
-            )));
-        }
-        Ok(())
-    }
-    pub fn finish_module(&mut self, name: &str, defs: BTreeMap<String, Value>) {
+    pub fn finish_module(&mut self, name: &str, defs: BTreeMap<String, Vec<Value>>) {
         let mut m = self.state.lock().unwrap_or_else(|e| e.into_inner());
         m.loading.pop();
         m.loaded.insert(name.into(), defs.clone());
@@ -415,15 +975,23 @@ impl Env {
         });
         self.install_module(name, defs);
     }
-    pub fn install_module(&mut self, name: &str, defs: BTreeMap<String, Value>) {
+    pub fn install_module(&mut self, name: &str, defs: BTreeMap<String, Vec<Value>>) {
         self.imports.insert(name.into());
-        for (local, value) in defs {
+        for (local, values) in defs {
             let qualified = if local.contains('.') {
                 local
             } else {
                 format!("{name}.{local}")
             };
-            self.define(&qualified, value);
+            for value in values {
+                if !self
+                    .lookup_candidates(&qualified)
+                    .iter()
+                    .any(|existing| crate::eval::equal(existing, &value))
+                {
+                    self.define(&qualified, value);
+                }
+            }
         }
     }
     pub fn module_env(&self, name: &str) -> Self {
@@ -434,8 +1002,8 @@ impl Env {
             self.state.clone(),
             self.profiler.clone(),
         );
-        if let Ok(inputs) = self.lookup("inputs") {
-            env.define("inputs", inputs.clone());
+        if let Ok(inputs) = self.lookup_by_type("inputs", &crate::types::MagType::HostInputs) {
+            env.define("inputs", inputs);
         }
         env
     }
@@ -463,7 +1031,12 @@ impl Env {
         result
     }
 
-    pub fn memoized_call(&self, function: &Arc<FnValue>, args: &[Value]) -> Option<Value> {
+    pub fn memoized_call(
+        &self,
+        function: &Arc<FnValue>,
+        resolved_signature: Option<&crate::types::MagType>,
+        args: &[Value],
+    ) -> Option<Value> {
         let args = args.iter().map(MemoArg::new).collect::<Option<Vec<_>>>()?;
         let cached = self
             .state
@@ -472,6 +1045,7 @@ impl Env {
             .memoized_calls
             .get(&MemoCall {
                 function: function.clone(),
+                resolved_signature: resolved_signature.cloned(),
                 args,
             })
             .cloned();
@@ -485,7 +1059,13 @@ impl Env {
         cached
     }
 
-    pub fn memoize_call(&self, function: &Arc<FnValue>, args: &[Value], result: &Value) {
+    pub fn memoize_call(
+        &self,
+        function: &Arc<FnValue>,
+        resolved_signature: Option<&crate::types::MagType>,
+        args: &[Value],
+        result: &Value,
+    ) {
         let Some(args) = args.iter().map(MemoArg::new).collect::<Option<Vec<_>>>() else {
             return;
         };
@@ -498,6 +1078,7 @@ impl Env {
         state.memoized_calls.insert(
             MemoCall {
                 function: function.clone(),
+                resolved_signature: resolved_signature.cloned(),
                 args,
             },
             result.clone(),
@@ -525,5 +1106,80 @@ impl Env {
         if let (Some(profiler), Some(started)) = (&self.profiler, started) {
             profiler.add_phase(phase, started.elapsed());
         }
+    }
+}
+
+#[cfg(test)]
+mod frame_arena_tests {
+    use super::*;
+
+    fn closure(captures: Vec<Scope>) -> Value {
+        Value::Fn(Arc::new(FnValue {
+            name: None,
+            type_params: vec![],
+            params: vec![],
+            param_types: vec![],
+            return_type: crate::types::MagType::Unit,
+            body: vec![],
+            checked: None,
+            closure: captures,
+        }))
+    }
+
+    #[test]
+    fn self_referential_activation_is_reclaimed() {
+        let mut env = Env::new();
+        let baseline = env.live_frame_count();
+        env.push_scope();
+        let activation = *env.scopes.last().unwrap();
+        env.define("recursive", closure(vec![activation]));
+        env.pop_scope();
+
+        assert_eq!(env.collect_frames(&[]), 1);
+        assert_eq!(env.live_frame_count(), baseline);
+    }
+
+    #[test]
+    fn escaped_closure_keeps_its_activation_until_the_external_root_is_gone() {
+        let mut env = Env::new();
+        let baseline = env.live_frame_count();
+        env.push_scope();
+        let activation = *env.scopes.last().unwrap();
+        let escaped = closure(vec![activation]);
+        env.define("recursive", escaped.clone());
+        env.pop_scope();
+
+        assert_eq!(env.collect_frames(std::slice::from_ref(&escaped)), 0);
+        assert_eq!(env.live_frame_count(), baseline + 1);
+        assert_eq!(env.collect_frames(&[]), 1);
+        assert_eq!(env.live_frame_count(), baseline);
+    }
+
+    #[test]
+    fn repeated_activations_do_not_accumulate_frames() {
+        let mut env = Env::new();
+        let baseline = env.live_frame_count();
+        for _ in 0..128 {
+            env.push_scope();
+            let activation = *env.scopes.last().unwrap();
+            env.define("recursive", closure(vec![activation]));
+            env.pop_scope();
+            env.collect_frames(&[]);
+            assert_eq!(env.live_frame_count(), baseline);
+        }
+    }
+
+    #[test]
+    fn binding_handles_do_not_keep_a_dropped_program_alive() {
+        let handle = {
+            let mut env = Env::new();
+            env.define("answer", Value::Int(42));
+            env.lookup_handles("answer").pop().unwrap()
+        };
+
+        assert!(matches!(
+            Env::ready_handle(&handle),
+            Err(MagError::Eval(message)) if message == "binding program has been dropped"
+        ));
     }
 }

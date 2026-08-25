@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Parser, Subcommand};
 use nefor_mag::error::MagError;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 const ENVELOPE_VERSION: u8 = 1;
 
@@ -20,7 +20,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Compile and validate a MAG program; never executes the resulting graph
+    /// Compile a MAG program to an artifact; never executes it
     Compile(CompileArgs),
 }
 
@@ -37,9 +37,9 @@ struct CompileArgs {
     #[arg(long = "module-root")]
     module_roots: Vec<PathBuf>,
 
-    /// Registry definition (.lua) or JSON contract snapshot; repeat to combine contracts
-    #[arg(long = "registry")]
-    registries: Vec<PathBuf>,
+    /// Immutable JSON host input as NAME=PATH; repeat for multiple inputs
+    #[arg(long = "input", value_name = "NAME=PATH")]
+    inputs: Vec<String>,
 
     /// Include phase timings and deterministic operation counters in the success envelope
     #[arg(long)]
@@ -47,7 +47,7 @@ struct CompileArgs {
 }
 
 #[derive(Serialize)]
-struct Envelope<T> {
+struct CliEnvelope<T> {
     version: u8,
     ok: bool,
     #[serde(flatten)]
@@ -56,7 +56,7 @@ struct Envelope<T> {
 
 #[derive(Serialize)]
 struct Success {
-    artifact: nefor_mag::ast::Artifact,
+    artifact: Value,
     hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     profile: Option<nefor_mag::profile::CompileProfile>,
@@ -82,14 +82,14 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         Command::Compile(args) => match compile(args) {
-            Ok(success) => print_json(&Envelope {
+            Ok(success) => print_json(&CliEnvelope {
                 version: ENVELOPE_VERSION,
                 ok: true,
                 payload: success,
             }),
             Err(error) => {
                 eprintln!("mag: {}", error.message);
-                print_json(&Envelope {
+                print_json(&CliEnvelope {
                     version: ENVELOPE_VERSION,
                     ok: false,
                     payload: Failure { error },
@@ -110,8 +110,7 @@ fn compile(args: CompileArgs) -> Result<Success, Diagnostic> {
     for root in &module_roots {
         require_directory(root, "module_root")?;
     }
-    let contracts = load_registries(&args.registries)?;
-    let inputs = serde_json::json!({ "foreign_contracts": contracts });
+    let inputs = load_inputs(&args.inputs)?;
     let profiler = args.profile.then(nefor_mag::profile::CompileProfiler::new);
     let loaded = if let Some(profiler) = &profiler {
         nefor_mag::load_with_profiler(
@@ -130,11 +129,6 @@ fn compile(args: CompileArgs) -> Result<Success, Diagnostic> {
         )
     }
     .map_err(mag_diagnostic)?;
-    if let Some(profiler) = &profiler {
-        nefor_mag::validate_loaded_rules_profiled(&loaded, profiler).map_err(mag_diagnostic)?;
-    } else {
-        nefor_mag::validate_loaded_rules(&loaded).map_err(mag_diagnostic)?;
-    }
     Ok(Success {
         artifact: loaded.artifact,
         hash: loaded.hash,
@@ -158,73 +152,52 @@ fn require_directory(path: &Path, kind: &'static str) -> Result<(), Diagnostic> 
     }
 }
 
-fn load_registries(paths: &[PathBuf]) -> Result<Vec<Value>, Diagnostic> {
-    let mut contracts = Vec::new();
-    for path in paths {
-        if path.extension().and_then(|extension| extension.to_str()) == Some("lua") {
-            let value = nefor_mag::registry::load_registry_contracts(path).map_err(|error| {
-                path_diagnostic(
-                    "registry_load",
-                    path,
-                    format!("cannot load registry {}: {error}", path.display()),
-                )
-            })?;
-            let entries = value.as_array().cloned().ok_or_else(|| {
-                path_diagnostic(
-                    "registry_shape",
-                    path,
-                    format!(
-                        "registry {} exported a non-array contract snapshot",
-                        path.display()
-                    ),
-                )
-            })?;
-            contracts.extend(entries);
-            continue;
+fn load_inputs(specs: &[String]) -> Result<Value, Diagnostic> {
+    let mut inputs = Map::new();
+    for spec in specs {
+        let (name, raw_path) = spec.split_once('=').ok_or_else(|| Diagnostic {
+            code: "input_argument",
+            stage: "input",
+            message: format!("host input must be NAME=PATH, got {spec}"),
+            path: None,
+            diagnostic: None,
+        })?;
+        if name.is_empty() || raw_path.is_empty() {
+            return Err(Diagnostic {
+                code: "input_argument",
+                stage: "input",
+                message: format!("host input must have a non-empty name and path, got {spec}"),
+                path: None,
+                diagnostic: None,
+            });
         }
-        let source = std::fs::read_to_string(path).map_err(|error| {
+        if inputs.contains_key(name) {
+            return Err(Diagnostic {
+                code: "input_duplicate",
+                stage: "input",
+                message: format!("host input {name:?} was supplied more than once"),
+                path: None,
+                diagnostic: None,
+            });
+        }
+        let path = PathBuf::from(raw_path);
+        let source = std::fs::read_to_string(&path).map_err(|error| {
             path_diagnostic(
-                "registry_read",
-                path,
-                format!("cannot read registry {}: {error}", path.display()),
+                "input_read",
+                &path,
+                format!("cannot read host input {}: {error}", path.display()),
             )
         })?;
-        let value: Value = serde_json::from_str(&source).map_err(|error| {
+        let value = serde_json::from_str(&source).map_err(|error| {
             path_diagnostic(
-                "registry_json",
-                path,
-                format!("invalid registry JSON {}: {error}", path.display()),
+                "input_json",
+                &path,
+                format!("invalid host input JSON {}: {error}", path.display()),
             )
         })?;
-        let entries = match value {
-            Value::Array(entries) => entries,
-            Value::Object(mut object) => object
-                .remove("foreign_contracts")
-                .and_then(|value| value.as_array().cloned())
-                .ok_or_else(|| {
-                    path_diagnostic(
-                        "registry_shape",
-                        path,
-                        format!(
-                            "registry {} must be an array or an object with foreign_contracts",
-                            path.display()
-                        ),
-                    )
-                })?,
-            _ => {
-                return Err(path_diagnostic(
-                    "registry_shape",
-                    path,
-                    format!(
-                        "registry {} must be an array or an object with foreign_contracts",
-                        path.display()
-                    ),
-                ))
-            }
-        };
-        contracts.extend(entries);
+        inputs.insert(name.to_owned(), value);
     }
-    Ok(contracts)
+    Ok(Value::Object(inputs))
 }
 
 fn mag_diagnostic(error: MagError) -> Diagnostic {

@@ -25,6 +25,26 @@ Declare nominal records and algebraic types with `type`:
 
 `A | B` is a one-of union. `A + B` is an all-of product. Product occurrences matter: `T + T` requires two matching incoming edges from distinct senders.
 
+## Bindings and lexical blocks
+
+MAG has one binding form:
+
+```lisp
+(let prefix "hello")
+(let message (str prefix " world"))
+```
+
+A source file and every function body are lexical blocks. Each direct
+`(let name value)` declaration adds one immutable typed binding to that block;
+`let` is not valid inside an argument, collection, or `if` branch. Extract a
+helper function when a nested expression needs several declarations.
+
+Peer declarations are mutually visible, so functions can call later functions
+and form mutually recursive families. Strict values remain eager: acyclic
+forward references are scheduled automatically, while an eager initialization
+cycle is rejected. A name denotes typed overloads, so the same spelling may be
+used for different semantic types but not twice for the same type.
+
 ## A complete graph
 
 ```lisp
@@ -33,12 +53,10 @@ Declare nominal records and algebraic types with `type`:
 (require "nefor.contracts")
 (require "nefor.graph")
 
-(let [start
-      (nefor.graph.source "task"
+(let start (nefor.graph.source "task"
         (type-tag nefor.contracts.Task)
-        (as nefor.contracts.Task {:prompt "Inspect the repository."}))
-      worker
-      (nefor.actors.agent
+        (as nefor.contracts.Task {:prompt "Inspect the repository."})))
+(let worker (nefor.actors.agent
         (as nefor.actors.AgentConfig
           {:id "worker"
            :model (nefor.contracts.no-identifier)
@@ -50,16 +68,15 @@ Declare nominal records and algebraic types with `type`:
            :max-corrections 2})
         (type-tag nefor.contracts.Task)
         "task"
-        (type-tag nefor.contracts.TextAnswer))
-      result
-      (nefor.graph.output "result"
+        (type-tag nefor.contracts.TextAnswer)))
+(let result (nefor.graph.output "result"
         (type-tag (| nefor.contracts.TextAnswer
-                     nefor.contracts.AgentError)))]
-  (nefor.artifact.compile
+                     nefor.contracts.AgentError))))
+(nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
         [(nefor.graph.edge start worker)
-         (nefor.graph.edge worker result)]))))
+         (nefor.graph.edge worker result)])))
 ```
 
 An authored program is a pure `Graph -> Graph` function. `nefor.artifact.compile` applies it to `nefor.graph.empty-graph`, validates the complete topology, and prepares a fresh run. Build one flat edge list; compose edge families with `concat` and `map` rather than nested lists.
@@ -116,7 +133,7 @@ operation:
 
 (nefor.process.exec
   "search"
-  (as nefor.contracts.ProcessExecParams
+  (as nefor.process.ProcessExecParams
     {:argv ["rg" "-n" "TODO" "src/"]
      :cwd nefor.process.cwd
      :timeout (nefor.contracts.no-timeout)}))
@@ -132,7 +149,7 @@ For shell syntax, use explicit POSIX `shell.script`, which lowers to
 
 (nefor.shell.script
   "bounded-search"
-  (as nefor.contracts.ShellScriptParams
+  (as nefor.shell.ShellScriptParams
     {:script "rg -n TODO src/ | sort"
      :cwd "."
      :timeout (nefor.contracts.timeout-ms 30000)}))

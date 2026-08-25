@@ -144,8 +144,8 @@ do
   local h = harness()
   local result = h.obs:apply({
     actors = {
-      { id = "s", factory = "src", params = {}, routes = { ["t.Alt"] = { { actor = "d", wire = "t.Alt" } } } },
-      { id = "d", factory = "dst", params = {}, routes = {} },
+      { id = "s", factory = "src", type_arguments = {}, params = {}, routes = { ["t.Alt"] = { { actor = "d", wire = "t.Alt" } } } },
+      { id = "d", factory = "dst", type_arguments = {}, params = {}, routes = {} },
     },
   })
   assert_eq(result.ok, false, "the incompatible wiring rejects the modification")
@@ -169,8 +169,8 @@ do
   local h = harness()
   local result = h.obs:apply({
     actors = {
-      { id = "s", factory = "src", params = {}, routes = { ["t.Nope"] = { { actor = "d", wire = "t.Nope" } } } },
-      { id = "d", factory = "dst", params = {}, routes = {} },
+      { id = "s", factory = "src", type_arguments = {}, params = {}, routes = { ["t.Nope"] = { { actor = "d", wire = "t.Nope" } } } },
+      { id = "d", factory = "dst", type_arguments = {}, params = {}, routes = {} },
     },
   })
   assert_eq(result.ok, false, "an undeclared route key rejects")
@@ -188,16 +188,16 @@ do
   local result = h.obs:apply({
     actors = {
       {
-        id = "s", factory = "src", params = {},
+        id = "s", factory = "src", type_arguments = {}, params = {},
         routes = {
           ["t.Out"] = { { actor = "d", wire = "t.Out" }, { actor = "f", wire = "t.Out" } }, -- fanout: single port + union port
           ["t.Alt"] = { { actor = "f", wire = "t.Alt" } }, -- second union variant
           ["mag.Unit"] = { { actor = "u", wire = "mag.Unit" } }, -- dependency edge: reserved key, undeclared
         },
       },
-      { id = "d", factory = "dst", params = {}, routes = {} },
-      { id = "f", factory = "fan", params = {}, routes = {} },
-      { id = "u", factory = "unit", params = {}, routes = {} },
+      { id = "d", factory = "dst", type_arguments = {}, params = {}, routes = {} },
+      { id = "f", factory = "fan", type_arguments = {}, params = {}, routes = {} },
+      { id = "u", factory = "unit", type_arguments = {}, params = {}, routes = {} },
     },
   })
   assert_eq(result.ok, true, "compatible wiring (union ports, reserved keys) applies: "
@@ -214,8 +214,8 @@ do
   local h = harness()
   local result = h.obs:apply({
     actors = {
-      { id = "s", factory = "src", params = {}, routes = { ["mag.Unit"] = { { actor = "d", wire = "mag.Unit" } } } },
-      { id = "d", factory = "dst", params = {}, routes = {} },
+      { id = "s", factory = "src", type_arguments = {}, params = {}, routes = { ["mag.Unit"] = { { actor = "d", wire = "mag.Unit" } } } },
+      { id = "d", factory = "dst", type_arguments = {}, params = {}, routes = {} },
     },
   })
   assert_eq(result.ok, false, "a dependency edge into a non-Unit port rejects")
@@ -232,20 +232,20 @@ do
   local h = harness()
   -- d lives from an earlier modification.
   local first = h.obs:apply({
-    actors = { { id = "d", factory = "dst", params = {}, routes = {} } },
+    actors = { { id = "d", factory = "dst", type_arguments = {}, params = {}, routes = {} } },
   })
   assert_eq(first.ok, true, "the first modification applies")
 
   -- A later spawn routing an unaccepted tag AT THE LIVE d rejects.
   local bad = h.obs:apply({
-    actors = { { id = "s", factory = "src", params = {}, routes = { ["t.Alt"] = { { actor = "d", wire = "t.Alt" } } } } },
+    actors = { { id = "s", factory = "src", type_arguments = {}, params = {}, routes = { ["t.Alt"] = { { actor = "d", wire = "t.Alt" } } } } },
   })
   assert_eq(bad.ok, false, "wiring into a live destination is validated")
   assert_contains(bad.error, 'wiring "s" -t.Alt-> "d"', "the live-destination error is precise")
 
   -- A route at a never-existed id rejects (a typo, not a race).
   local ghost = h.obs:apply({
-    actors = { { id = "s2", factory = "src", params = {}, routes = { ["t.Out"] = { { actor = "ghost", wire = "t.Out" } } } } },
+    actors = { { id = "s2", factory = "src", type_arguments = {}, params = {}, routes = { ["t.Out"] = { { actor = "ghost", wire = "t.Out" } } } } },
   })
   assert_eq(ghost.ok, false, "a never-existed route destination rejects")
   assert_contains(ghost.error, '"ghost" does not exist', "the error names the missing destination")
@@ -254,7 +254,7 @@ do
   -- (delivery drops those sends as logged no-ops).
   assert_eq(h.obs:apply({ kills = { "d" } }).ok, true, "the kill applies")
   local dead = h.obs:apply({
-    actors = { { id = "s3", factory = "src", params = {}, routes = { ["t.Out"] = { { actor = "d", wire = "t.Out" } } } } },
+    actors = { { id = "s3", factory = "src", type_arguments = {}, params = {}, routes = { ["t.Out"] = { { actor = "d", wire = "t.Out" } } } } },
   })
   assert_eq(dead.ok, true, "a route at a dead destination passes (settled race semantics): "
     .. tostring(dead.error))
@@ -269,7 +269,7 @@ end
 do
   local h = harness()
   local result = h.obs:apply({
-    actors = { { id = "d", factory = "dst", params = {}, routes = {} } },
+    actors = { { id = "d", factory = "dst", type_arguments = {}, params = {}, routes = {} } },
     messages = { { to = "d", content = { kind = "t.Weird", payload = 1 } } },
   })
   -- The modification itself applies (message kinds are dynamic; only routes
@@ -290,7 +290,7 @@ end
 do
   local h = harness()
   assert_eq(h.obs:apply({
-    actors = { { id = "d", factory = "dst", params = {}, routes = {} } },
+    actors = { { id = "d", factory = "dst", type_arguments = {}, params = {}, routes = {} } },
   }).ok, true, "spawn applies")
   assert_eq(h.obs:apply({ kills = { "d" } }).ok, true, "kill applies")
   h.router:deliver("d", "elsewhere", "t.Out", { kind = "t.Out" })
@@ -311,7 +311,7 @@ end
 do
   local h = harness()
   assert_eq(h.obs:apply({
-    actors = { { id = "g", factory = "gate", params = {}, routes = {} } },
+    actors = { { id = "g", factory = "gate", type_arguments = {}, params = {}, routes = {} } },
     messages = { { to = "g", content = { kind = "t.Sub", text = "subject" } } },
   }).ok, true, "the gate spawns and constructs on its subject")
   assert_eq(#h.delivered, 1, "the subject activated the gate")
@@ -323,7 +323,7 @@ do
 
   -- A reply at a spawned-but-never-constructed gate: nothing awaits it.
   assert_eq(h.obs:apply({
-    actors = { { id = "g2", factory = "gate", params = {}, routes = {} } },
+    actors = { { id = "g2", factory = "gate", type_arguments = {}, params = {}, routes = {} } },
   }).ok, true, "the second gate registers")
   h.router:deliver("g2", "mag.control", "mag.ApprovalReply", { approved = true })
   assert_eq(#h.delivered, 2, "an unconstructed gate receives nothing")

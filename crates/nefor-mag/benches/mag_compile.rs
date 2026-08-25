@@ -1,6 +1,7 @@
+use mlua::{Lua, LuaSerdeExt, Table, Value as LuaValue};
 use nefor_mag::profile::CompileProfile;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 use std::collections::BTreeMap;
 use std::fs;
 use std::hint::black_box;
@@ -198,7 +199,6 @@ fn compile_unprofiled(case: &Case) -> Result<nefor_mag::LoadedProgram, nefor_mag
         case.inputs.clone(),
         &case.module_roots,
     )?;
-    nefor_mag::validate_loaded_rules(&program)?;
     Ok(program)
 }
 
@@ -213,7 +213,6 @@ fn compile_profiled(
         &case.module_roots,
         &profiler,
     )?;
-    nefor_mag::validate_loaded_rules_profiled(&program, &profiler)?;
     Ok((program, profiler.snapshot()))
 }
 
@@ -222,23 +221,20 @@ fn cases(root: &Path, scratch: &Path) -> Vec<Case> {
     cases.push(write_case(
         scratch,
         "trivial",
-        "(artifact \"bench.trivial/v1\" {})",
+        "(artifact {})",
         vec![scratch.into()],
         json!({}),
         None,
     ));
 
     let lead = root.join("examples/nefor-agent/agentic-loop/lead-turn.mag");
-    let contracts = nefor_mag::registry::load_registry_contracts(
-        &root.join("plugins/mag/lua/mag-kernel/init.lua"),
-    )
-    .expect("load shipped MAG registry contracts");
+    let contracts = load_runtime_contracts(&root.join("plugins/mag/lua/mag-kernel/init.lua"));
     cases.push(Case {
         name: "shipped-lead-turn".into(),
         source_dir: root.join("examples/nefor-agent"),
         entry: "agentic-loop/lead-turn.mag".into(),
         module_roots: vec![root.join("examples/nefor-agent/mag/lib")],
-        inputs: json!({"foreign_contracts": contracts.clone()}),
+        inputs: json!({"factory_contracts": contracts.clone()}),
         input_bytes: fs::metadata(lead).map(|m| m.len() as usize).unwrap_or(0),
         expected_error: None,
     });
@@ -250,7 +246,7 @@ fn cases(root: &Path, scratch: &Path) -> Vec<Case> {
             &format!("linear-{size}"),
             &source,
             vec![scratch.into(), root.join("examples/nefor-agent/mag/lib")],
-            json!({"foreign_contracts": contracts.clone()}),
+            json!({"factory_contracts": contracts.clone()}),
             None,
         ));
     }
@@ -261,7 +257,7 @@ fn cases(root: &Path, scratch: &Path) -> Vec<Case> {
             &format!("product-fan-in-{size}"),
             &source,
             vec![scratch.into(), root.join("examples/nefor-agent/mag/lib")],
-            json!({"foreign_contracts": contracts.clone()}),
+            json!({"factory_contracts": contracts.clone()}),
             None,
         ));
     }
@@ -274,6 +270,70 @@ fn cases(root: &Path, scratch: &Path) -> Vec<Case> {
         Some(ExpectedError::CallDepthBudget),
     ));
     cases
+}
+
+fn load_runtime_contracts(path: &Path) -> JsonValue {
+    let source = fs::read_to_string(path).expect("read shipped MAG registry");
+    let lua = Lua::new();
+    install_runtime_registry_host(&lua);
+    let directory = path.parent().expect("registry parent");
+    let package: Table = lua.globals().get("package").expect("Lua package table");
+    let current: String = package.get("path").expect("Lua package path");
+    let prefix = [
+        directory.join("?.lua"),
+        directory.join("?/init.lua"),
+        directory.join("../../../../lua/?.lua"),
+        directory.join("../../../../lua/?/init.lua"),
+    ]
+    .iter()
+    .map(|pattern| pattern.display().to_string())
+    .collect::<Vec<_>>()
+    .join(";");
+    package
+        .set("path", format!("{prefix};{current}"))
+        .expect("set Lua package path");
+    let registry: Table = lua
+        .load(&source)
+        .set_name(path.display().to_string())
+        .eval()
+        .expect("load shipped MAG registry");
+    let contracts: mlua::Function = registry
+        .get("registry_contracts")
+        .expect("registry_contracts export");
+    let value: LuaValue = contracts
+        .call(lua.array_metatable())
+        .expect("read registry contracts");
+    lua.from_value(value).expect("serialize registry contracts")
+}
+
+fn install_runtime_registry_host(lua: &Lua) {
+    let nefor = lua.create_table().expect("create registry host");
+    nefor
+        .set(
+            "log",
+            lua.create_function(|_, _: String| Ok(()))
+                .expect("create registry log binding"),
+        )
+        .expect("install registry log binding");
+    let semantic = lua.create_table().expect("create semantic host");
+    semantic
+        .set(
+            "id",
+            lua.create_function(|lua, descriptor: LuaValue| {
+                let descriptor: JsonValue = lua.from_value(descriptor)?;
+                let descriptor = nefor_mag::json::concrete_type_from_json(&descriptor)
+                    .map_err(|error| mlua::Error::runtime(error.to_string()))?;
+                Ok(descriptor.stable_id().to_string())
+            })
+            .expect("create semantic id binding"),
+        )
+        .expect("install semantic id binding");
+    nefor
+        .set("semantic_type", semantic)
+        .expect("install semantic host");
+    lua.globals()
+        .set("nefor", nefor)
+        .expect("install registry host");
 }
 
 fn write_case(
@@ -299,12 +359,12 @@ fn write_case(
 
 fn linear_graph(size: usize) -> String {
     let mut source = String::from(
-        "(require \"nefor.artifact\")\n(require \"nefor.contracts\")\n(require \"nefor.graph\")\n(def pass (fn [[id String]] -> (nefor.graph.Node Int Int) (let [input (nefor.graph.port id (type-tag Int) \"nefor.graph.Value\") output (nefor.graph.port id (type-tag Int) \"nefor.graph.Value\") actor (nefor.graph.actor id (specialize nefor.factory.output [Int]) (as nefor.contracts.OutputParams {}) (nefor.graph.store-port input) [(nefor.graph.store-port output)])] (nefor.graph.node id \"ordinary\" [actor] (as (List nefor.graph.StoredRoute) []) (as (List nefor.graph.Message) []) input output))))\n(let [start (nefor.graph.source \"start\" (type-tag Int) 1)\n",
+        "(require \"nefor.artifact\")\n(require \"nefor.contracts\")\n(require \"nefor.graph\")\n(let pass (fn [[id String]] -> (nefor.graph.Node Int Int) (let input (nefor.graph.port id (type-tag Int) \"nefor.graph.Value\")) (let output (nefor.graph.port id (type-tag Int) \"nefor.graph.Value\")) (let actor (nefor.graph.actor id \"nefor.factory.output\" [(type-evidence (type-tag Int))] (as nefor.graph.OutputParams {}) (nefor.graph.store-port input) [(nefor.graph.store-port output)])) (nefor.graph.node id \"ordinary\" [actor] (as (List nefor.graph.StoredRoute) []) (as (List nefor.graph.Message) []) input output)))\n(let start (nefor.graph.source \"start\" (type-tag Int) 1))\n",
     );
     for index in 0..size {
-        source.push_str(&format!("n{index} (pass \"n{index}\")\n"));
+        source.push_str(&format!("(let n{index} (pass \"n{index}\"))\n"));
     }
-    source.push_str("out (nefor.graph.output \"out\" (type-tag Int))\ntopology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph (nefor.graph.add-edges graph [");
+    source.push_str("(let out (nefor.graph.output \"out\" (type-tag Int)))\n(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph (nefor.graph.add-edges graph [");
     if size == 0 {
         source.push_str("(nefor.graph.edge start out)");
     } else {
@@ -314,29 +374,28 @@ fn linear_graph(size: usize) -> String {
         }
         source.push_str(&format!("(nefor.graph.edge n{} out)", size - 1));
     }
-    source.push_str("]))]\n(nefor.artifact.compile topology))");
+    source.push_str("])))\n(nefor.artifact.compile topology)");
     source
 }
 
 fn product_fan_in(size: usize) -> String {
     let types = (0..size).map(|_| "Int").collect::<Vec<_>>().join(" ");
-    let mut source =
-        String::from("(require \"nefor.artifact\")\n(require \"nefor.graph\")\n(let [");
+    let mut source = String::from("(require \"nefor.artifact\")\n(require \"nefor.graph\")\n");
     for index in 0..size {
         source.push_str(&format!(
-            "s{index} (nefor.graph.source \"s{index}\" (type-tag Int) {index})\n"
+            "(let s{index} (nefor.graph.source \"s{index}\" (type-tag Int) {index}))\n"
         ));
     }
-    source.push_str(&format!("out (nefor.graph.output \"out\" (type-tag (+ {types})))\ntopology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph (nefor.graph.add-edges graph ["));
+    source.push_str(&format!("(let out (nefor.graph.output \"out\" (type-tag (+ {types}))))\n(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph (nefor.graph.add-edges graph ["));
     for index in 0..size {
         source.push_str(&format!("(nefor.graph.edge s{index} out) "));
     }
-    source.push_str("]))]\n(nefor.artifact.compile topology))");
+    source.push_str("])))\n(nefor.artifact.compile topology)");
     source
 }
 
 fn recursive_limit() -> String {
-    "(def loop (fn [[n Int]] -> Artifact (loop n)))\n(loop 1)".into()
+    "(let loop (fn [[n Int]] -> Artifact (loop n)))\n(loop 1)".into()
 }
 
 fn distribution(samples: &[u64]) -> Distribution {

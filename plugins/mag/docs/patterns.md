@@ -17,7 +17,7 @@ Every shipped pattern here has a clean expression in routes or input contracts.
 If a program needs one of these behaviors, use the listed shape — inventing a
 workaround (sentinel messages, polling actors, hand-rolled wait nodes) means
 the type system can no longer see what the program does. Dynamic expansion uses
-typed resident MAG rule functions returning `nefor.graph-delta/v1`; actors
+typed resident MAG rule functions returning raw `Delta` artifacts; actors
 still receive no graph authority.
 
 This is the canonical catalog; a lead-facing distillation ships with the
@@ -64,7 +64,7 @@ kill/interrupt. Never encode "give up after N tries" in a prompt.
 
 "If the build fails, route the evidence to a fixer."
 
-**Shape:** foreign/completion failures are typed outputs when an implementation returns
+**Shape:** factory/completion failures are typed outputs when an implementation returns
 a failure tag (for example the shell capability's `mag.CommandFailed`). Route that failure
 type to the repair actor; compose produce → check → repair as an ordinary cycle.
 Unhandled failures escalate to `mag.run_failed`. `kill` removes actors and voids

@@ -1,15 +1,14 @@
 # IR — graph modifications
 
-## Generic foreign specialization
+## Factory specialization as ordinary data
 
-Lowered actors retain an opaque `ForeignEvidence` value produced by
-`specialize`: version, foreign identity, concrete arguments, and instantiated
-semantic input/output. Ordinary MAG maps cannot construct this
-value. At the artifact boundary it becomes a versioned descriptor; the runtime
-checks identity, arity, registry scheme instantiation, semantic endpoints, and
-fixed wire tags before spawning anything. Non-generic actors remain unchanged.
-Dynamic routes to static actors are validated against the live inventory
-atomically with new actors.
+Lowered actors contain `factory` and `type_arguments` fields authored by
+ordinary actor-specific MAG functions. `type_arguments` is empty for a
+non-generic factory and contains concrete structural type descriptors for a
+generic factory. The runtime checks identity, arity, registry scheme
+instantiation, semantic endpoints, and fixed wire tags before spawning
+anything. Dynamic routes to static actors are validated against the live
+inventory atomically with new actors.
 
 The artifact carries version-2 structural type nodes directly: primitives,
 qualified nominal applications with their concrete substituted bodies, lists,
@@ -17,8 +16,8 @@ maps, records, unions, and products.
 Registry schemes use the same representation plus explicit variables. The
 runtime validates every node recursively, substitutes concrete arguments, and
 compares the result structurally; it never reparses a display string. Functions,
-type tags, foreign capabilities, artifacts, empty-list placeholders, and
-unresolved variables are rejected at the evidence boundary.
+type tags, artifacts, empty-list placeholders, and unresolved variables cannot
+enter a concrete type descriptor.
 
 Registry semantic endpoints are declared as `{wire, type}` pairs. Validation
 checks each instantiated pair, so matching the set of wires and the set of
@@ -28,44 +27,42 @@ require compatibility according to the same Rust `ConcreteType` relation used
 while compiling the graph. Lua does not maintain a second union/product
 compatibility algorithm.
 Registration first requires the semantic input/output wire sets to exactly
-match the factory's runtime shapes. Every factory carrying such a semantic
-contract requires compiler evidence, including non-generic factories; only
-runtime-only factories without a semantic contract may omit it.
+match the factory's runtime shapes. Every actor carries `type_arguments`; the
+executor registry remains authoritative even when the actor came from compiled
+MAG.
 
 ## Host artifact boundary
 
-MAG programs return a generic artifact rather than a bare modification:
+MAG serializes the value passed to `artifact` without imposing an envelope.
+Nefor's MAG library returns a graph modification directly:
 
 ```json
 {
-  "format": "nefor.graph-modification/v1",
-  "data": {
-    "actors": [
-      {
-        "id": "answer",
-        "foreign": "nefor.factory.llm",
-        "params": {},
-        "routes": {}
-      }
-    ],
-    "messages": [],
-    "kills": [],
-    "rules": []
-  }
+  "actors": [
+    {
+      "id": "answer",
+      "factory": "nefor.factory.llm",
+      "type_arguments": [],
+      "params": {},
+      "routes": {}
+    }
+  ],
+  "messages": [],
+  "kills": [],
+  "rules": []
 }
 ```
 
-`foreign` is a qualified identity exported by the runtime registry contract
-snapshot. At the host boundary the plugin resolves it into the kernel's
-`factory` field; the kernel then revalidates concrete contracts before applying
-the normalized modification below.
+`factory` is the qualified registry identity and `type_arguments` supplies its
+concrete generic specialization. The plugin passes both fields through
+unchanged; the kernel validates them before applying the modification.
 
 The registry snapshot is plain immutable data. Each entry carries `identity`,
 the parameter schema, and a `type_scheme` containing explicit variables plus
 input and output contracts. Runtime constructors never cross this boundary.
 
-`data.result.from` selects the structural result boundary by actor id and
-declared wire tag. The kernel validates that the actor exists and its foreign
+`result.from` selects the structural result boundary by actor id and
+declared wire tag. The kernel validates that the actor exists and its factory
 contract declares that output. When the selected output is emitted, the kernel
 persists it through the ordinary per-node writer and completes the run directly;
 no sink actor, concrete terminal type, or route is synthesized.
@@ -147,8 +144,8 @@ modifications — running a workflow _is_ this fold.
 
 ## Running a program — registration, then lazy firing
 
-Program start is one fold application, no barrier. A rule produces the distinct
-`nefor.graph-delta/v1` artifact: it may spawn, send, kill, and route against
+Program start is one fold application, no barrier. A rule produces a `Delta`
+artifact: it may spawn, send, kill, and route against
 actors already live in the run, but has no result boundary. Applying a program's
 _initial_ modification:
 
@@ -224,7 +221,7 @@ Dependencies use the same language: "A depends on C finishing" is the edge
 `C -> A` carrying `mag.Unit` — an informationless payload whose sole purpose
 is to encode the ordering. No second vocabulary exists.
 
-The shipped shell library leans on exactly this algebra: its foreign actor's
+The shipped shell library leans on exactly this algebra: its process actor's
 input contract is the union `(mag.Unit | mag.Text)`. A Unit firing runs the
 command with no stdin; a Text firing supplies upstream stdout. The library
 constructs the initial Unit message explicitly, so pipe semantics require no
@@ -336,8 +333,8 @@ initial-execute rejection is itself terminal.
 ## Rules are names, not code
 
 A rule's `fn` is a reference to a function defined in the program's source
-snapshot, with declared shape `T -> Artifact` where the artifact format is
-`nefor.graph-delta/v1`. Load rejects missing, non-unary, or non-Artifact
+snapshot, with declared shape `T -> Artifact`. The Nefor host interprets the
+returned raw value as a delta. Load rejects missing, non-unary, or non-Artifact
 functions. A source emission is an ordinary output envelope that must contain
 the matching non-empty `kind` and a non-null `value`; extra transport fields
 are allowed. The host never guesses from `result`, `content`, or
@@ -348,7 +345,7 @@ Each run owns a FIFO trigger queue. A source emission is consumed once under
 the key `(rule id, source emission sequence)`. The host evaluates a trigger
 under the normal MAG fuel budget, validates and atomically applies its delta,
 then continues with any nested triggers until quiescence. Evaluation errors,
-wrong artifact formats, malformed/rejected deltas, and noncanonical source
+non-object or malformed/rejected deltas, and noncanonical source
 payloads fail the run explicitly. Terminal settlement waits for this drain.
 
 - Name-plus-snapshot instead of embedded code: a MAG function closes over

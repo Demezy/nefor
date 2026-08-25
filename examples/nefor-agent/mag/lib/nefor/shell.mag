@@ -1,20 +1,25 @@
 (require "nefor.graph")
 (require "nefor.contracts")
 
-(def script (fn [[name String] [params nefor.contracts.ShellScriptParams]]
+(let factory "nefor.factory.shell-script")
+(type ShellScriptParams {:script String
+                         :cwd String
+                         :timeout nefor.contracts.Timeout})
+
+(let script (fn [[name String] [params ShellScriptParams]]
   -> (nefor.graph.Node (| Unit nefor.contracts.Text) nefor.contracts.ProcessResult)
-  (let [input (nefor.graph.port name
+  (let input (nefor.graph.port name
                 (type-tag (| Unit nefor.contracts.Text))
-                "nefor.process.Input")
-        output (nefor.graph.port name
+                "nefor.process.Input"))
+  (let output (nefor.graph.port name
                  (type-tag nefor.contracts.ProcessResult)
-                 "nefor.process.Result")]
-    (as (nefor.graph.Node (| Unit nefor.contracts.Text) nefor.contracts.ProcessResult)
+                 "nefor.process.Result"))
+  (as (nefor.graph.Node (| Unit nefor.contracts.Text) nefor.contracts.ProcessResult)
       {:id name :role "ordinary"
-       :actors [(nefor.graph.actor name nefor.factory.shell-script params
+       :actors [(nefor.graph.actor name factory [] params
                    (nefor.graph.store-port input)
                    [(nefor.graph.store-port output)])]
        :routes (as (List nefor.graph.StoredRoute) [])
        :messages []
        :input input
-       :output output}))))
+       :output output})))

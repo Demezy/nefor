@@ -106,15 +106,15 @@ local function harness()
   -- run-tool --ToolHandle--> tool-result --ProviderInput--> capture-sink.
   local res = inv.apply({
     actors = {
-      { id = "rt", factory = "run-tool", params = {},
+      { id = "rt", factory = "run-tool", type_arguments = {}, params = {},
         evidence={version=2,identity="nefor.factory.run-tool",arguments={},input={kind="named",name="nefor.contracts.ToolCalls",arguments={}},output={kind="named",name="nefor.contracts.ToolHandle",arguments={}}},
         input={type={kind="named",name="nefor.contracts.ToolCalls",arguments={}},wire="generic-tool.ToolCalls"},outputs={{type={kind="named",name="nefor.contracts.ToolHandle",arguments={}},wire="generic-tool.ToolHandle"}},
         routes = { ["generic-tool.ToolHandle"] = { { actor = "tr", wire = "generic-tool.ToolHandle" } } } },
-      { id = "tr", factory = "tool-result", params = {},
+      { id = "tr", factory = "tool-result", type_arguments = {}, params = {},
         evidence={version=2,identity="nefor.factory.tool-result",arguments={},input={kind="named",name="nefor.contracts.ToolHandle",arguments={}},output={kind="named",name="nefor.contracts.ProviderInput",arguments={}}},
         input={type={kind="named",name="nefor.contracts.ToolHandle",arguments={}},wire="generic-tool.ToolHandle"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
         routes = { ["generic-provider.ProviderOut"] = { { actor = "cap", wire = "generic-provider.ProviderOut" } } } },
-      { id = "cap", factory = "capture-sink", params = {}, routes = {},
+      { id = "cap", factory = "capture-sink", type_arguments = {}, params = {}, routes = {},
         input={type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"},outputs={} },
     },
   })

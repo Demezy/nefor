@@ -4,9 +4,9 @@
 
 ;; Initial messages are boundary authority, not a capability ordinary nodes
 ;; may obtain by placing a message in their record.
-(let [start (nefor.graph.source "start" (type-tag Unit) nil)
-      operation (nefor.shell.script "operation" (as nefor.contracts.ShellScriptParams {:script "true" :cwd "." :timeout (nefor.contracts.no-timeout)}))
-      injected (nefor.graph.node
+(let start (nefor.graph.source "start" (type-tag Unit) nil))
+(let operation (nefor.shell.script "operation" (as nefor.shell.ShellScriptParams {:script "true" :cwd "." :timeout (nefor.contracts.no-timeout)})))
+(let injected (nefor.graph.node
                  (get operation "id")
                  "ordinary"
                  (get operation "actors")
@@ -14,10 +14,10 @@
                  [(nefor.graph.message (get operation "input")
                                        {:kind "mag.Unit"})]
                  (get operation "input")
-                 (get operation "output"))
-      result (nefor.graph.output-for "result" injected)]
-  (nefor.artifact.compile
+                 (get operation "output")))
+(let result (nefor.graph.output-for "result" injected))
+(nefor.artifact.compile
     (fn [[base nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges base
         [(nefor.graph.edge start injected)
-         (nefor.graph.edge injected result)]))))
+         (nefor.graph.edge injected result)])))

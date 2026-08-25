@@ -1,10 +1,70 @@
-use crate::ast::{Artifact, Expr, FnValue, ForeignDecl, TypeDecl, Value};
-use crate::env::Env;
+use crate::ast::{
+    BindingId, CheckedBlock, CheckedExpr, CheckedExprKind, Expr, FnValue, FrameId, TypeDecl, Value,
+};
+use crate::env::{BindingForce, BindingHandle, Env};
 use crate::error::MagError;
 use crate::profile::Phase;
 use crate::types::{ConcreteType, MagType};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path, PathBuf};
+
+thread_local! {
+    static FORCE_STACK: std::cell::RefCell<Vec<(FrameId, BindingId, String, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+struct ForceStackGuard;
+
+impl Drop for ForceStackGuard {
+    fn drop(&mut self) {
+        FORCE_STACK.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+fn enter_force(env: &Env, handle: &BindingHandle) -> Result<ForceStackGuard, MagError> {
+    let id = handle.id;
+    let frame = handle.frame;
+    let name = env
+        .binding_metadata(id)
+        .map(|binding| binding.name)
+        .unwrap_or_else(|| format!("binding#{}", id.0));
+    FORCE_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if let Some(start) = stack
+            .iter()
+            .position(|(active_frame, active, _, initializing)| {
+                *active_frame == frame && *active == id && *initializing
+            })
+        {
+            let mut cycle = stack[start..]
+                .iter()
+                .map(|(_, _, name, _)| name.clone())
+                .collect::<Vec<_>>();
+            cycle.push(name);
+            return Err(MagError::Eval(format!(
+                "binding initialization cycle: {}",
+                cycle.join(" -> ")
+            )));
+        }
+        stack.push((frame, id, name, true));
+        Ok(ForceStackGuard)
+    })
+}
+
+fn enter_call_binding(env: &Env, id: BindingId) -> Result<ForceStackGuard, MagError> {
+    let handle = env.binding_handle(id)?;
+    let name = env
+        .binding_metadata(id)
+        .map(|binding| binding.name)
+        .unwrap_or_else(|| format!("binding#{}", id.0));
+    FORCE_STACK.with(|stack| stack.borrow_mut().push((handle.frame, id, name, false)));
+    Ok(ForceStackGuard)
+}
+
+fn force_stack_active() -> bool {
+    FORCE_STACK.with(|stack| !stack.borrow().is_empty())
+}
 
 pub mod fuel {
     use crate::error::MagError;
@@ -108,11 +168,195 @@ pub mod fuel {
 
 pub fn eval_program(env: &mut Env, exprs: &[Expr]) -> Result<Value, MagError> {
     let _fuel = fuel::ensure(crate::EVALUATION_STEP_LIMIT);
+    let mut declarations = vec![false; exprs.len()];
+    for (index, expr) in exprs.iter().enumerate() {
+        let Expr::List(items) = expr else { continue };
+        if matches!(items.first(), Some(Expr::Symbol(head)) if matches!(head.as_str(), "require" | "type"))
+        {
+            eval_expr(env, expr)?;
+            declarations[index] = true;
+        }
+    }
+    let source = exprs
+        .iter()
+        .zip(&declarations)
+        .filter_map(|(expr, declaration)| (!declaration).then_some(expr.clone()))
+        .collect::<Vec<_>>();
+    let checking_started = env.profile_started();
+    let checked = crate::checker::compile_block(env, &source)?;
+    env.profile_elapsed(Phase::Checking, checking_started);
+    let evaluated = eval_checked_block(env, &checked);
+    match &evaluated {
+        Ok(result) => {
+            env.collect_frames(std::slice::from_ref(result));
+        }
+        Err(_) => {
+            env.collect_frames(&[]);
+        }
+    }
+    evaluated
+}
+
+fn eval_checked_block(env: &mut Env, block: &CheckedBlock) -> Result<Value, MagError> {
+    for binding in &block.bindings {
+        env.declare_binding_slot(binding.id, &binding.name, binding.initializer.clone())?;
+    }
+    for binding in &block.bindings {
+        force_binding(env, binding.id)
+            .map_err(|error| binding_initialization_error(&binding.name, error))?;
+    }
     let mut result = Value::Unit;
-    for expr in exprs {
-        result = eval_expr(env, expr)?;
+    for expression in &block.expressions {
+        result = eval_checked_expr(env, expression)?;
     }
     Ok(result)
+}
+
+fn force_binding(env: &mut Env, id: crate::ast::BindingId) -> Result<Value, MagError> {
+    let handle = env.binding_handle(id)?;
+    let _force = enter_force(env, &handle)?;
+    match Env::begin_handle_force(&handle)? {
+        BindingForce::Ready(value) => Ok(value),
+        BindingForce::Initialize {
+            handle,
+            initializer,
+        } => match eval_checked_expr(env, &initializer) {
+            Ok(value) => {
+                Env::complete_handle_force(&handle, value.clone())?;
+                Ok(value)
+            }
+            Err(error) => {
+                Env::reset_handle_force(&handle, initializer)?;
+                Err(error)
+            }
+        },
+    }
+}
+
+fn eval_checked_expr(env: &mut Env, expression: &CheckedExpr) -> Result<Value, MagError> {
+    let _depth = fuel::enter_expr()?;
+    fuel::step()?;
+    env.profile_counters(|counters| {
+        counters.evaluator_steps = counters.evaluator_steps.saturating_add(1);
+    });
+    match &expression.kind {
+        CheckedExprKind::Unit => Ok(Value::Unit),
+        CheckedExprKind::Str(value) => Ok(Value::Str(value.clone())),
+        CheckedExprKind::Int(value) => Ok(Value::Int(*value)),
+        CheckedExprKind::Float(value) => Ok(Value::Float(*value)),
+        CheckedExprKind::Bool(value) => Ok(Value::Bool(*value)),
+        CheckedExprKind::Keyword(value) => Ok(Value::Keyword(value.clone())),
+        CheckedExprKind::BindingRef(id) => force_binding(env, *id),
+        CheckedExprKind::Vector(items) => Ok(Value::Vector(std::sync::Arc::new(
+            items
+                .iter()
+                .map(|item| eval_checked_expr(env, item))
+                .collect::<Result<_, _>>()?,
+        ))),
+        CheckedExprKind::Map(fields) => {
+            let fields = fields
+                .iter()
+                .map(|(name, value)| Ok((name.clone(), eval_checked_expr(env, value)?)))
+                .collect::<Result<BTreeMap<_, _>, MagError>>()?;
+            Ok(Value::Map(std::sync::Arc::new(fields)))
+        }
+        CheckedExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            if truthy(&eval_checked_expr(env, condition)?) {
+                eval_checked_expr(env, then_branch)
+            } else {
+                eval_checked_expr(env, else_branch)
+            }
+        }
+        CheckedExprKind::Call { callee, args } => {
+            let function = eval_checked_expr(env, callee)?;
+            let args = args
+                .iter()
+                .map(|argument| eval_checked_expr(env, argument))
+                .collect::<Result<Vec<_>, _>>()?;
+            let _call_binding = match &callee.kind {
+                CheckedExprKind::BindingRef(id) if force_stack_active() => {
+                    Some(enter_call_binding(env, *id)?)
+                }
+                _ => None,
+            };
+            let resolved_signature = runtime_type(env, &callee.ty);
+            apply_resolved(env, &function, &args, &resolved_signature)
+        }
+        CheckedExprKind::Function(function) => Ok(Value::Fn(std::sync::Arc::new(FnValue {
+            name: function.name.clone(),
+            type_params: function.type_params.clone(),
+            params: function
+                .params
+                .iter()
+                .map(|parameter| parameter.name.clone())
+                .collect(),
+            param_types: function
+                .params
+                .iter()
+                .map(|parameter| parameter.ty.clone())
+                .collect(),
+            return_type: function.result.clone(),
+            body: vec![],
+            checked: Some(function.clone()),
+            closure: env.snapshot(),
+        }))),
+        CheckedExprKind::Ascribe { target, value } => {
+            let value = eval_checked_expr(env, value)?;
+            checked_typed_value(env, value, runtime_type(env, target))
+        }
+        CheckedExprKind::TypeTag(ty) => Ok(Value::TypeTag(ConcreteType::resolve(
+            env,
+            &runtime_type(env, ty),
+        )?)),
+    }
+}
+
+fn runtime_type(env: &Env, ty: &MagType) -> MagType {
+    match ty {
+        MagType::Var(name) => match env.lookup(name) {
+            Ok(Value::Type(ty)) => ty,
+            _ => ty.clone(),
+        },
+        MagType::Named(name, args) => MagType::Named(
+            name.clone(),
+            args.iter().map(|ty| runtime_type(env, ty)).collect(),
+        ),
+        MagType::TypeTag(ty) => MagType::TypeTag(Box::new(runtime_type(env, ty))),
+        MagType::List(ty) => MagType::List(Box::new(runtime_type(env, ty))),
+        MagType::Map(key, value) => MagType::Map(
+            Box::new(runtime_type(env, key)),
+            Box::new(runtime_type(env, value)),
+        ),
+        MagType::Record(fields) => MagType::Record(
+            fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), runtime_type(env, ty)))
+                .collect(),
+        ),
+        MagType::Union(types) => {
+            MagType::Union(types.iter().map(|ty| runtime_type(env, ty)).collect())
+        }
+        MagType::Product(types) => {
+            MagType::Product(types.iter().map(|ty| runtime_type(env, ty)).collect())
+        }
+        MagType::Function(params, result) => MagType::Function(
+            params.iter().map(|ty| runtime_type(env, ty)).collect(),
+            Box::new(runtime_type(env, result)),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn binding_initialization_error(name: &str, error: MagError) -> MagError {
+    match error {
+        MagError::Type(message) => MagError::Type(format!("initializing {name}: {message}")),
+        MagError::Eval(message) => MagError::Eval(format!("initializing {name}: {message}")),
+        other => other,
+    }
 }
 
 fn eval_expr(env: &mut Env, expr: &Expr) -> Result<Value, MagError> {
@@ -128,7 +372,7 @@ fn eval_expr(env: &mut Env, expr: &Expr) -> Result<Value, MagError> {
         Expr::Bool(v) => Ok(Value::Bool(*v)),
         Expr::Nil => Ok(Value::Unit),
         Expr::Keyword(v) => Ok(Value::Keyword(v.clone())),
-        Expr::Symbol(v) => env.lookup(v).cloned(),
+        Expr::Symbol(v) => env.lookup(v),
         Expr::Vector(xs) => Ok(Value::Vector(std::sync::Arc::new(
             xs.iter()
                 .map(|x| eval_expr(env, x))
@@ -160,15 +404,16 @@ fn eval_list(env: &mut Env, items: &[Expr]) -> Result<Value, MagError> {
     }
     if let Expr::Symbol(head) = &items[0] {
         match head.as_str() {
-            "def" => return eval_def(env, &items[1..]),
             "fn" => return eval_fn_form(env, &items[1..]),
-            "let" => return eval_let(env, &items[1..]),
+            "let" => {
+                return Err(MagError::Eval(
+                    "let is only valid directly in a source or function block".into(),
+                ))
+            }
             "if" => return eval_if(env, &items[1..]),
             "type" => return eval_type_decl(env, &items[1..]),
-            "foreign" => return eval_foreign(env, &items[1..]),
             "as" => return eval_as(env, &items[1..]),
             "type-tag" => return eval_type_tag(env, &items[1..]),
-            "specialize" => return eval_specialize(env, &items[1..]),
             "|" | "+" => {
                 return Ok(Value::Type(parse_type(
                     env,
@@ -179,27 +424,49 @@ fn eval_list(env: &mut Env, items: &[Expr]) -> Result<Value, MagError> {
             _ => {}
         }
     }
-    let f = eval_expr(env, &items[0])?;
     let args = items[1..]
         .iter()
         .map(|x| eval_expr(env, x))
         .collect::<Result<Vec<_>, _>>()?;
-    apply(env, &f, &args)
-}
-
-fn eval_def(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
-    arity(args, 2)?;
-    let name = args[0]
-        .as_symbol()
-        .ok_or_else(|| MagError::Eval("def requires a symbol".into()))?;
-    let value = match &args[1] {
-        Expr::List(items) if matches!(items.first(), Some(Expr::Symbol(head)) if head == "fn") => {
-            eval_fn_form_with_binding(env, &items[1..], Some(name))?
+    let f = if let Expr::Symbol(name) = &items[0] {
+        let candidates = env.lookup_candidates(name);
+        if candidates.len() <= 1 {
+            candidates
+                .into_iter()
+                .next()
+                .ok_or_else(|| MagError::Unresolved(name.clone()))?
+        } else {
+            let mut matching = candidates
+                .into_iter()
+                .filter(|candidate| match candidate {
+                    Value::Fn(function) => crate::checker::check_call(env, function, &args).is_ok(),
+                    _ => false,
+                })
+                .collect::<Vec<_>>();
+            if matching.len() > 1 {
+                let concrete = matching
+                    .iter()
+                    .filter(|candidate| matches!(candidate, Value::Fn(function) if function.type_params.is_empty()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if concrete.len() == 1 {
+                    matching = concrete;
+                }
+            }
+            match matching.as_slice() {
+                [function] => function.clone(),
+                [] => return Err(MagError::Type(format!("no overload {name} matches call"))),
+                _ => {
+                    return Err(MagError::Type(format!(
+                        "ambiguous overload {name} for call"
+                    )))
+                }
+            }
         }
-        expr => eval_expr(env, expr)?,
+    } else {
+        eval_expr(env, &items[0])?
     };
-    env.define(name, value.clone());
-    Ok(value)
+    apply(env, &f, &args)
 }
 
 fn eval_fn_form(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
@@ -207,6 +474,28 @@ fn eval_fn_form(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
 }
 
 fn eval_fn_form_with_binding(
+    env: &mut Env,
+    args: &[Expr],
+    binding: Option<&str>,
+) -> Result<Value, MagError> {
+    let value = eval_fn_form_with_binding_unchecked(env, args, binding)?;
+    let Value::Fn(function) = &value else {
+        unreachable!()
+    };
+    let checking_started = env.profile_started();
+    crate::checker::check_function_with_binding(
+        env,
+        binding,
+        &function.params,
+        &function.param_types,
+        &function.return_type,
+        &function.body,
+    )?;
+    env.profile_elapsed(Phase::Checking, checking_started);
+    Ok(value)
+}
+
+fn eval_fn_form_with_binding_unchecked(
     env: &mut Env,
     args: &[Expr],
     binding: Option<&str>,
@@ -263,16 +552,6 @@ fn eval_fn_form_with_binding(
         }
     }
     let return_type = parse_type(env, return_expr, &vars)?;
-    let checking_started = env.profile_started();
-    crate::checker::check_function_with_binding(
-        env,
-        binding,
-        &params,
-        &param_types,
-        &return_type,
-        body,
-    )?;
-    env.profile_elapsed(Phase::Checking, checking_started);
     Ok(Value::Fn(std::sync::Arc::new(FnValue {
         name: binding.map(str::to_owned),
         type_params,
@@ -280,6 +559,7 @@ fn eval_fn_form_with_binding(
         param_types,
         return_type,
         body: body.to_vec(),
+        checked: None,
         closure: env.snapshot(),
     })))
 }
@@ -287,7 +567,12 @@ fn eval_fn_form_with_binding(
 fn eval_as(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
     arity(args, 2)?;
     let ty = parse_type(env, &args[0], &HashSet::new())?;
-    let value = eval_expr(env, &args[1])?;
+    let value = match &args[1] {
+        Expr::Symbol(name) if env.lookup_candidates(name).len() > 1 => {
+            env.lookup_by_type(name, &ty)?
+        }
+        expr => eval_expr(env, expr)?,
+    };
     checked_typed_value(env, value, ty)
 }
 
@@ -297,82 +582,6 @@ fn eval_type_tag(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
     Ok(Value::TypeTag(crate::types::ConcreteType::resolve(
         env, &ty,
     )?))
-}
-
-fn eval_specialize(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
-    arity(args, 2)?;
-    let decl = match eval_expr(env, &args[0])? {
-        Value::Foreign(decl) => decl,
-        _ => {
-            return Err(MagError::Type(
-                "specialize expects a Foreign declaration".into(),
-            ))
-        }
-    };
-    let type_exprs = match &args[1] {
-        Expr::Vector(items) => items,
-        _ => {
-            return Err(MagError::Type(
-                "specialize type arguments must be a vector".into(),
-            ))
-        }
-    };
-    if type_exprs.len() != decl.type_params.len() {
-        return Err(MagError::Type(format!(
-            "{} expects {} type arguments, got {}",
-            decl.name,
-            decl.type_params.len(),
-            type_exprs.len()
-        )));
-    }
-    let types = type_exprs
-        .iter()
-        .map(|expr| parse_type(env, expr, &HashSet::new()))
-        .collect::<Result<Vec<_>, _>>()?;
-    for ty in &types {
-        crate::types::ConcreteType::resolve(env, ty)?;
-    }
-    let subst = decl
-        .type_params
-        .iter()
-        .cloned()
-        .zip(types.clone())
-        .collect();
-    Ok(Value::Foreign(ForeignDecl {
-        name: decl.name,
-        type_params: vec![],
-        specialization: types,
-        params: crate::checker::substitute(&decl.params, &subst),
-        input: crate::checker::substitute(&decl.input, &subst),
-        output: crate::checker::substitute(&decl.output, &subst),
-    }))
-}
-
-fn eval_let(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
-    if args.len() < 2 {
-        return Err(MagError::Eval("let requires bindings and body".into()));
-    }
-    let pairs = match &args[0] {
-        Expr::Vector(xs) if xs.len() % 2 == 0 => xs,
-        _ => return Err(MagError::Eval("let bindings must be pairs".into())),
-    };
-    env.push_scope();
-    let result = (|| {
-        for pair in pairs.chunks(2) {
-            let n = pair[0]
-                .as_symbol()
-                .ok_or_else(|| MagError::Eval("let binding must be a symbol".into()))?;
-            let v = eval_expr(env, &pair[1])?;
-            env.define(n, v);
-        }
-        let mut out = Value::Unit;
-        for expr in &args[1..] {
-            out = eval_expr(env, expr)?;
-        }
-        Ok(out)
-    })();
-    env.pop_scope();
-    result
 }
 
 fn eval_if(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
@@ -429,71 +638,6 @@ fn eval_type_decl(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
     Ok(value)
 }
 
-fn eval_foreign(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
-    if args.len() != 2 && args.len() != 3 {
-        return Err(MagError::Eval(
-            "foreign requires a name, optional generic binders, and a schema".into(),
-        ));
-    }
-    let local = args[0]
-        .as_symbol()
-        .ok_or_else(|| MagError::Eval("foreign name must be a symbol".into()))?;
-    let (binder_names, schema_expr) = if args.len() == 3 {
-        let names = match &args[1] {
-            Expr::Vector(xs) => xs
-                .iter()
-                .map(|x| {
-                    x.as_symbol().map(str::to_owned).ok_or_else(|| {
-                        MagError::Type("foreign generic parameters must be symbols".into())
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            _ => {
-                return Err(MagError::Type(
-                    "foreign generic parameters must be a vector".into(),
-                ))
-            }
-        };
-        (names, &args[2])
-    } else {
-        (Vec::new(), &args[1])
-    };
-    let binders = binder_names.iter().cloned().collect::<HashSet<_>>();
-    let schema = match schema_expr {
-        Expr::Map(m) => m,
-        _ => {
-            return Err(MagError::Type(
-                "foreign declaration requires a schema map".into(),
-            ))
-        }
-    };
-    let field = |name: &str| {
-        schema
-            .iter()
-            .find(|(k, _)| matches!(k,Expr::Keyword(s)|Expr::Symbol(s) if s==name))
-            .map(|(_, v)| v)
-            .ok_or_else(|| MagError::Type(format!("foreign declaration missing :{name}")))
-    };
-    let name = if local.contains('.') {
-        local.to_string()
-    } else {
-        env.qualify(local)
-    };
-    let decl = ForeignDecl {
-        name,
-        type_params: binder_names,
-        specialization: vec![],
-        params: parse_type(env, field("params")?, &binders)?,
-        input: parse_type(env, field("input")?, &binders)?,
-        output: parse_type(env, field("output")?, &binders)?,
-    };
-    env.register_foreign(&decl.name)?;
-    let value = Value::Foreign(decl.clone());
-    env.define(local, value.clone());
-    env.define(&decl.name, value.clone());
-    Ok(value)
-}
-
 pub(crate) fn parse_type(
     env: &Env,
     expr: &Expr,
@@ -501,14 +645,23 @@ pub(crate) fn parse_type(
 ) -> Result<MagType, MagError> {
     match expr {
         Expr::Symbol(name) if vars.contains(name) => Ok(MagType::Var(name.clone())),
-        Expr::Symbol(name) => match env.lookup(name)? {
-            Value::Type(t) => Ok(t.clone()),
-            Value::TypeDecl(d) => Ok(MagType::Named(d.name.clone(), vec![])),
-            other => Err(MagError::Type(format!(
-                "{name} is {}, not a type",
-                other.type_name()
-            ))),
-        },
+        Expr::Symbol(name) => {
+            let candidates = env.lookup_candidates(name);
+            let types = candidates
+                .iter()
+                .filter_map(|value| match value {
+                    Value::Type(ty) => Some(ty.clone()),
+                    Value::TypeDecl(decl) => Some(MagType::Named(decl.name.clone(), vec![])),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            match types.as_slice() {
+                [ty] => Ok(ty.clone()),
+                [] if candidates.is_empty() => Err(MagError::Unresolved(name.clone())),
+                [] => Err(MagError::Type(format!("{name} is not a type"))),
+                _ => Err(MagError::Type(format!("ambiguous type name {name}"))),
+            }
+        }
         Expr::Map(fields) => {
             let mut out = BTreeMap::new();
             for (k, v) in fields {
@@ -561,11 +714,6 @@ pub(crate) fn parse_type(
                         .ok_or_else(|| MagError::Type("Fn requires a return type".into()))?;
                     Ok(MagType::Function(params.to_vec(), Box::new(result.clone())))
                 }
-                "Foreign" if xs.len() == 4 => Ok(MagType::Foreign(
-                    Box::new(parse_type(env, &xs[1], vars)?),
-                    Box::new(parse_type(env, &xs[2], vars)?),
-                    Box::new(parse_type(env, &xs[3], vars)?),
-                )),
                 _ => {
                     let decl = match env.lookup(head)? {
                         Value::TypeDecl(d) => d,
@@ -626,7 +774,21 @@ fn record_field_diff(env: &Env, value: &Value, ty: &MagType) -> Option<String> {
         .filter(|key| !expected.contains_key(*key))
         .cloned()
         .collect::<Vec<_>>();
-    if missing.is_empty() && unexpected.is_empty() {
+    let invalid = expected
+        .iter()
+        .filter_map(|(key, ty)| {
+            let value = actual.get(key)?;
+            validate_value(env, value, ty).is_err().then(|| {
+                format!(
+                    "{key}: expected {ty}, got {}",
+                    crate::checker::value_type(value)
+                        .map(|actual| actual.to_string())
+                        .unwrap_or_else(|| value.type_name().to_owned())
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if missing.is_empty() && unexpected.is_empty() && invalid.is_empty() {
         return None;
     }
     let mut details = Vec::new();
@@ -635,6 +797,9 @@ fn record_field_diff(env: &Env, value: &Value, ty: &MagType) -> Option<String> {
     }
     if !unexpected.is_empty() {
         details.push(format!("unexpected fields: {}", unexpected.join(", ")));
+    }
+    if !invalid.is_empty() {
+        details.push(format!("invalid fields: {}", invalid.join(", ")));
     }
     Some(details.join("; "))
 }
@@ -768,7 +933,6 @@ fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError
                 if crate::types::ConcreteType::resolve(env, expected)
                     .is_ok_and(|expected| actual == &expected)
         ),
-        MagType::ForeignEvidence => matches!(value, Value::ForeignEvidence(_)),
         MagType::Union(types) => types.iter().any(|t| validate_value(env, value, t).is_ok()),
         MagType::Product(types) => match value {
             Value::List(values) | Value::Vector(values) | Value::Product(values) => {
@@ -781,7 +945,6 @@ fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError
             _ => false,
         },
         MagType::Function(_, _) => matches!(value, Value::Fn(_)),
-        MagType::Foreign(_, _, _) => matches!(value, Value::Foreign(_)),
         MagType::Var(_) => true,
     };
     if valid {
@@ -796,6 +959,24 @@ fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError
 }
 
 fn apply(caller: &Env, f: &Value, args: &[Value]) -> Result<Value, MagError> {
+    apply_with_signature(caller, f, args, None)
+}
+
+fn apply_resolved(
+    caller: &Env,
+    f: &Value,
+    args: &[Value],
+    resolved_signature: &MagType,
+) -> Result<Value, MagError> {
+    apply_with_signature(caller, f, args, Some(resolved_signature))
+}
+
+fn apply_with_signature(
+    caller: &Env,
+    f: &Value,
+    args: &[Value],
+    resolved_signature: Option<&MagType>,
+) -> Result<Value, MagError> {
     caller.profile_counters(|counters| {
         counters.function_calls = counters.function_calls.saturating_add(1);
         if matches!(f, Value::BuiltinFn(_)) {
@@ -811,37 +992,71 @@ fn apply(caller: &Env, f: &Value, args: &[Value]) -> Result<Value, MagError> {
                     got: args.len(),
                 });
             }
-            if let Some(result) = caller.memoized_call(fun, args) {
+            let (expected_return, type_bindings) = match resolved_signature {
+                Some(signature) => crate::checker::check_resolved_call(caller, fun, signature),
+                None => crate::checker::check_call(caller, fun, args),
+            }
+            .map_err(|error| match &fun.name {
+                Some(name) => MagError::Type(format!("calling {name}: {error}")),
+                None => error,
+            })?;
+            if let Some(result) = caller.memoized_call(fun, resolved_signature, args) {
                 return Ok(result);
             }
-            let (expected_return, type_bindings) = crate::checker::check_call(caller, fun, args)
-                .map_err(|error| match &fun.name {
-                    Some(name) => MagError::Type(format!("calling {name}: {error}")),
-                    None => error,
-                })?;
             let mut env = caller.child_for_call();
-            env.define_type_declarations_from(caller);
-            for (k, v) in &fun.closure {
-                env.define(k, v.clone());
-            }
-            if let Some(name) = &fun.name {
-                env.define(name, Value::Fn(fun.clone()));
-            }
+            env.replace_scopes(fun.closure.clone());
             env.push_scope();
+            env.define_type_declarations_from(caller);
             for (name, ty) in type_bindings {
                 env.define(&name, Value::Type(ty));
             }
-            for (p, v) in fun.params.iter().zip(args) {
-                env.define(p, v.clone());
+            let evaluated = (|| {
+                let out = if let Some(checked) = &fun.checked {
+                    for (parameter, value) in checked.params.iter().zip(args) {
+                        env.define_ready(parameter.id, &parameter.name, value.clone());
+                    }
+                    eval_checked_block(&mut env, &checked.body)?
+                } else {
+                    for (p, v) in fun.params.iter().zip(args) {
+                        env.define_binding(p, v.clone())?;
+                    }
+                    let mut result = Value::Unit;
+                    for expression in &fun.body {
+                        result = eval_expr(&mut env, expression)?;
+                    }
+                    result
+                };
+                validate_value(caller, &out, &expected_return).map_err(|error| {
+                    match &fun.name {
+                        Some(name) => MagError::Type(format!("returning from {name}: {error}")),
+                        None => error,
+                    }
+                })?;
+                checked_typed_value(caller, out, expected_return)
+            })();
+            drop(env);
+            match evaluated {
+                Ok(result) => {
+                    caller.memoize_call(fun, resolved_signature, args, &result);
+                    if caller.frame_collection_due() {
+                        let mut roots = Vec::with_capacity(args.len() + 2);
+                        roots.push(Value::Fn(fun.clone()));
+                        roots.extend_from_slice(args);
+                        roots.push(result.clone());
+                        caller.collect_frames(&roots);
+                    }
+                    Ok(result)
+                }
+                Err(error) => {
+                    if caller.frame_collection_due() {
+                        let mut roots = Vec::with_capacity(args.len() + 1);
+                        roots.push(Value::Fn(fun.clone()));
+                        roots.extend_from_slice(args);
+                        caller.collect_frames(&roots);
+                    }
+                    Err(error)
+                }
             }
-            let mut out = Value::Unit;
-            for expr in &fun.body {
-                out = eval_expr(&mut env, expr)?;
-            }
-            validate_value(caller, &out, &expected_return)?;
-            let result = checked_typed_value(caller, out, expected_return)?;
-            caller.memoize_call(fun, args, &result);
-            Ok(result)
         }
         Value::BuiltinFn(name) => builtin(caller, name, args),
         _ => Err(MagError::Eval(format!("cannot call {}", f.type_name()))),
@@ -849,24 +1064,35 @@ fn apply(caller: &Env, f: &Value, args: &[Value]) -> Result<Value, MagError> {
 }
 
 pub fn apply_named(env: &Env, name: &str, arg: Value) -> Result<Value, MagError> {
-    let f = env.lookup(name)?.clone();
-    apply(env, &f, &[arg])
+    let matching = env
+        .lookup_candidates(name)
+        .into_iter()
+        .filter(|candidate| match candidate {
+            Value::Fn(function) => {
+                crate::checker::check_call(env, function, std::slice::from_ref(&arg)).is_ok()
+            }
+            Value::BuiltinFn(_) => true,
+            _ => false,
+        })
+        .collect::<Vec<_>>();
+    match matching.as_slice() {
+        [function] => apply(env, function, &[arg]),
+        [] => Err(MagError::Type(format!("no overload {name} matches call"))),
+        _ => Err(MagError::Type(format!(
+            "ambiguous overload {name} for call"
+        ))),
+    }
+}
+
+pub(crate) fn apply_value(env: &Env, function: &Value, args: &[Value]) -> Result<Value, MagError> {
+    apply(env, function, args)
 }
 
 fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
     match name {
         "artifact" => {
-            arity(args, 2)?;
-            let format = args[0].as_str().ok_or_else(|| {
-                MagError::Eval("artifact format must be a qualified string".into())
-            })?;
-            if !format.contains('.') && !format.contains('/') {
-                return Err(MagError::Eval("artifact format must be qualified".into()));
-            }
-            Ok(Value::Artifact(Artifact {
-                format: format.into(),
-                data: crate::json::value_to_json(env, &args[1])?,
-            }))
+            arity(args, 1)?;
+            Ok(Value::Artifact(crate::json::value_to_json(env, &args[0])?))
         }
         "str" => Ok(Value::Str(
             args.iter().map(value_string).collect::<Vec<_>>().join(""),
@@ -991,32 +1217,25 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             let diagnostic = crate::json::value_to_json(env, &args[0])?;
             Err(MagError::Eval(format!("validation failed: {diagnostic}")))
         }
-        "foreign-id" => {
-            arity(args, 1)?;
-            match raw(&args[0]) {
-                Value::Foreign(decl) => Ok(Value::Str(decl.name.clone())),
-                _ => Err(MagError::Type(
-                    "foreign-id expects a Foreign capability".into(),
-                )),
-            }
-        }
-        "foreign-evidence" => {
-            arity(args, 1)?;
-            match raw(&args[0]) {
-                Value::Foreign(decl) => Ok(Value::ForeignEvidence(crate::ast::ForeignEvidence {
-                    identity: decl.name.clone(),
-                    arguments: decl
-                        .specialization
-                        .iter()
-                        .map(|ty| crate::types::ConcreteType::resolve(env, ty))
-                        .collect::<Result<_, _>>()?,
-                    input: crate::types::ConcreteType::resolve(env, &decl.input)?,
-                    output: crate::types::ConcreteType::resolve(env, &decl.output)?,
-                })),
-                _ => Err(MagError::Type(
-                    "foreign-evidence expects a Foreign capability".into(),
-                )),
-            }
+        "host-input" => {
+            arity(args, 2)?;
+            let key = raw(&args[0])
+                .as_str()
+                .ok_or_else(|| MagError::Type("host-input key must be a String".into()))?;
+            let Value::TypeTag(expected) = raw(&args[1]) else {
+                return Err(MagError::Type("host-input expects a TypeTag".into()));
+            };
+            let host_inputs = env.lookup_by_type("inputs", &MagType::HostInputs)?;
+            let Value::HostInputs(inputs) = raw(&host_inputs) else {
+                return Err(MagError::Type(
+                    "host-input requires compiler host inputs".into(),
+                ));
+            };
+            let value = inputs
+                .get(key)
+                .ok_or_else(|| MagError::Type(format!("host input {key:?} is not present")))?;
+            crate::json::json_to_typed_value(env, value, &expected.to_mag_type())
+                .map_err(|error| MagError::Type(format!("host input {key:?}: {error}")))
         }
         "type-evidence" => {
             arity(args, 1)?;
@@ -1250,101 +1469,6 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                     .collect(),
             )))
         }
-        "foreign-contracts" => {
-            arity(args, 0)?;
-            let Value::HostInputs(inputs) = raw(env.lookup("inputs")?) else {
-                return Err(MagError::Type(
-                    "foreign-contracts requires compiler host inputs".into(),
-                ));
-            };
-            let contracts = inputs
-                .get("foreign_contracts")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| {
-                    MagError::Type("host inputs need a foreign_contracts list".into())
-                })?;
-            let projected = contracts
-                .iter()
-                .map(|contract| {
-                    let identity = contract
-                        .get("identity")
-                        .and_then(serde_json::Value::as_str)
-                        .ok_or_else(|| {
-                            MagError::Type("foreign contract needs string identity".into())
-                        })?;
-                    let scheme = contract.get("type_scheme").ok_or_else(|| {
-                        MagError::Type("foreign contract needs type_scheme".into())
-                    })?;
-                    let input_tags = scheme
-                        .get("input_tags")
-                        .and_then(serde_json::Value::as_array)
-                        .ok_or_else(|| {
-                            MagError::Type(
-                                "foreign contract type_scheme needs input_tags".into(),
-                            )
-                        })?;
-                    let outputs = scheme
-                        .get("outputs")
-                        .and_then(serde_json::Value::as_array)
-                        .ok_or_else(|| {
-                            MagError::Type("foreign contract type_scheme needs outputs".into())
-                        })?;
-                    Ok(Value::Map(std::sync::Arc::new(
-                        [
-                            ("identity".into(), Value::Str(identity.into())),
-                            (
-                                "type_scheme".into(),
-                                Value::Map(std::sync::Arc::new(
-                                    [
-                                        (
-                                            "input_tags".into(),
-                                            Value::Vector(std::sync::Arc::new(
-                                                input_tags
-                                                    .iter()
-                                                    .map(|tag| {
-                                                        tag.as_str()
-                                                            .map(|tag| Value::Str(tag.into()))
-                                                            .ok_or_else(|| {
-                                                                MagError::Type(
-                                                                    "foreign input tag must be String"
-                                                                        .into(),
-                                                                )
-                                                            })
-                                                    })
-                                                    .collect::<Result<_, _>>()?,
-                                            )),
-                                        ),
-                                        (
-                                            "outputs".into(),
-                                            Value::Vector(std::sync::Arc::new(
-                                                outputs
-                                                    .iter()
-                                                    .map(|tag| {
-                                                        tag.as_str()
-                                                            .map(|tag| Value::Str(tag.into()))
-                                                            .ok_or_else(|| {
-                                                                MagError::Type(
-                                                                    "foreign output tag must be String"
-                                                                        .into(),
-                                                                )
-                                                            })
-                                                    })
-                                                    .collect::<Result<_, _>>()?,
-                                            )),
-                                        ),
-                                    ]
-                                    .into_iter()
-                                    .collect(),
-                                )),
-                            ),
-                        ]
-                        .into_iter()
-                        .collect(),
-                    )))
-                })
-                .collect::<Result<Vec<_>, MagError>>()?;
-            Ok(Value::Vector(std::sync::Arc::new(projected)))
-        }
         "not" => {
             arity(args, 1)?;
             Ok(Value::Bool(!truthy(&args[0])))
@@ -1553,11 +1677,10 @@ fn value_string(v: &Value) -> String {
         Value::Type(t) => t.to_string(),
         Value::TypeDecl(d) => d.name.clone(),
         Value::TypeTag(t) => t.to_mag_type().to_string(),
-        Value::Foreign(d) => d.name.clone(),
         _ => format!("<{:?}>", v.type_name()),
     }
 }
-fn equal(a: &Value, b: &Value) -> bool {
+pub(crate) fn equal(a: &Value, b: &Value) -> bool {
     match (raw(a), raw(b)) {
         (Value::Unit, Value::Unit) => true,
         (Value::Str(a), Value::Str(b)) => a == b,
@@ -1566,6 +1689,8 @@ fn equal(a: &Value, b: &Value) -> bool {
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Keyword(a), Value::Keyword(b)) => a == b,
         (Value::Symbol(a), Value::Symbol(b)) => a == b,
+        (Value::BuiltinFn(a), Value::BuiltinFn(b)) => a == b,
+        (Value::Fn(a), Value::Fn(b)) => std::sync::Arc::ptr_eq(a, b),
         (Value::List(a), Value::List(b))
         | (Value::Vector(a), Value::Vector(b))
         | (Value::Product(a), Value::Product(b)) => {
@@ -1582,8 +1707,6 @@ fn equal(a: &Value, b: &Value) -> bool {
         (Value::Type(a), Value::Type(b)) => a == b,
         (Value::TypeTag(a), Value::TypeTag(b)) => a == b,
         (Value::TypeDecl(a), Value::TypeDecl(b)) => a == b,
-        (Value::Foreign(a), Value::Foreign(b)) => a == b,
-        (Value::ForeignEvidence(a), Value::ForeignEvidence(b)) => a == b,
         (Value::TypeDescriptor(a), Value::TypeDescriptor(b)) => a == b,
         (Value::TypeSchema(a), Value::TypeSchema(b)) => a == b,
         (Value::SemanticTypeId(a), Value::SemanticTypeId(b)) => a == b,
@@ -1639,7 +1762,7 @@ fn module_path(name: &str) -> Result<String, MagError> {
 fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
     if let Some(defs) = env.module_cached(name) {
         env.install_module(name, defs.clone());
-        return Ok(Value::Map(std::sync::Arc::new(defs)));
+        return Ok(Value::Map(std::sync::Arc::new(module_value_map(&defs))));
     }
     env.begin_module(name)?;
     let resolve_started = env.profile_started();
@@ -1695,10 +1818,16 @@ fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
             for (module_name, module_defs) in env.loaded_modules() {
                 env.install_module(&module_name, module_defs);
             }
-            Ok(Value::Map(std::sync::Arc::new(defs)))
+            Ok(Value::Map(std::sync::Arc::new(module_value_map(&defs))))
         }
         Err(e) => Err(e),
     }
+}
+
+fn module_value_map(defs: &BTreeMap<String, Vec<Value>>) -> BTreeMap<String, Value> {
+    defs.iter()
+        .filter_map(|(name, values)| values.first().cloned().map(|value| (name.clone(), value)))
+        .collect()
 }
 
 pub(crate) fn resolve_workspace_path(root: &Path, relative: &str) -> Result<PathBuf, MagError> {
@@ -1744,7 +1873,12 @@ fn maybe_require(env: &mut Env, items: &[Expr]) -> Option<Result<Value, MagError
 mod tests {
     use super::*;
 
-    fn constant_function(name: &str, closure: Vec<(String, Value)>) -> Value {
+    fn constant_function(env: &Env, name: &str, closure: Vec<(String, Value)>) -> Value {
+        let mut captured = env.child_for_call();
+        for (name, value) in closure {
+            captured.define(&name, value);
+        }
+        let closure = captured.snapshot();
         Value::Fn(std::sync::Arc::new(FnValue {
             name: None,
             type_params: vec![],
@@ -1752,6 +1886,7 @@ mod tests {
             param_types: vec![],
             return_type: MagType::Int,
             body: vec![Expr::Symbol(name.into())],
+            checked: None,
             closure,
         }))
     }
@@ -1767,8 +1902,8 @@ mod tests {
     }
 
     #[test]
-    fn default_evaluation_budget_allows_exactly_500_000_steps() {
-        assert_eq!(crate::EVALUATION_STEP_LIMIT, 500_000);
+    fn default_evaluation_budget_allows_exactly_1_000_000_steps() {
+        assert_eq!(crate::EVALUATION_STEP_LIMIT, 1_000_000);
         let _fuel = fuel::install(crate::EVALUATION_STEP_LIMIT);
 
         for _ in 0..crate::EVALUATION_STEP_LIMIT {
@@ -1783,7 +1918,7 @@ mod tests {
     fn lexical_closure_overrides_colliding_caller_binding() {
         let mut caller = Env::new();
         caller.define("value", Value::Int(99));
-        let function = constant_function("value", vec![("value".into(), Value::Int(1))]);
+        let function = constant_function(&caller, "value", vec![("value".into(), Value::Int(1))]);
         let _fuel = fuel::install(100);
 
         assert_eq!(typed_int(apply(&caller, &function, &[]).unwrap()), 1);
@@ -1793,7 +1928,7 @@ mod tests {
     fn caller_only_late_binding_is_invisible() {
         let mut caller = Env::new();
         caller.define("late", Value::Int(42));
-        let function = constant_function("late", vec![]);
+        let function = constant_function(&caller, "late", vec![]);
         let _fuel = fuel::install(100);
 
         assert!(matches!(
@@ -1803,8 +1938,10 @@ mod tests {
     }
 
     #[test]
-    fn nested_closure_shadowing_keeps_the_innermost_binding() {
+    fn unchecked_same_type_closure_duplicates_are_ambiguous() {
+        let caller = Env::new();
         let function = constant_function(
+            &caller,
             "value",
             vec![
                 ("value".into(), Value::Int(1)),
@@ -1813,7 +1950,10 @@ mod tests {
         );
         let _fuel = fuel::install(100);
 
-        assert_eq!(typed_int(apply(&Env::new(), &function, &[]).unwrap()), 2);
+        assert!(apply(&caller, &function, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("ambiguous overload value"));
     }
 
     #[test]
@@ -1825,6 +1965,7 @@ mod tests {
             param_types: vec![MagType::Var("T".into())],
             return_type: MagType::Var("T".into()),
             body: vec![Expr::Symbol("T".into())],
+            checked: None,
             closure: vec![],
         }));
         let _fuel = fuel::install(100);
@@ -1837,8 +1978,12 @@ mod tests {
 
     #[test]
     fn memoized_result_is_independent_of_caller_only_bindings() {
-        let function = constant_function("value", vec![("value".into(), Value::Int(1))]);
         let mut first_caller = Env::new();
+        let function = constant_function(
+            &first_caller,
+            "value",
+            vec![("value".into(), Value::Int(1))],
+        );
         first_caller.define("value", Value::Int(99));
         let mut second_caller = first_caller.child_for_call();
         second_caller.define("value", Value::Int(100));
@@ -1851,10 +1996,10 @@ mod tests {
     #[test]
     fn repeated_call_reuses_the_cached_shared_result_without_spending_fuel() {
         let source = r#"
-            (def values [1 2 3])
-            (def copy (fn [[items (List Int)]] -> (List Int)
+            (let values [1 2 3])
+            (let copy (fn [[items (List Int)]] -> (List Int)
               (map (fn [[item Int]] -> Int item) items)))
-            (artifact "test.memo/v1" {})
+            (artifact {})
         "#;
         let expressions = crate::parser::parse(&crate::lexer::tokenize(source).unwrap()).unwrap();
         let mut env = Env::new();

@@ -1,30 +1,30 @@
 # Lowering — library data to a runtime artifact
 
-`Foreign<P,I,O>` lowers its runtime identity plus opaque compiler evidence for
-the concrete specialization and instantiated semantic endpoints. Semantic MAG
-types remain separate from runtime wire tags: libraries choose the wire
-protocol; the compiler proves which `T` instantiated the foreign contract.
+Actor-specific MAG libraries construct ordinary values containing a runtime
+factory identity, explicit concrete type arguments, parameters, and semantic
+ports. Semantic MAG types remain separate from runtime wire tags: libraries
+choose the wire protocol and generic functions preserve their typed relations.
 
 MAG has no graph syntax or graph-specific lowering pass. It evaluates pure,
 typed library code. The shipped Nefor libraries represent actors, ports,
 routes, messages, rules, and result selection as nominal data whose semantic
 fields contain opaque compiler descriptors. Graph validation delegates
 compatibility and product coverage to the compiler rather than interpreting
-descriptor maps in MAG, then returns the one host-recognized wrapper:
+descriptor maps in MAG, then marks the lowered value as the compilation result:
 
 ```lisp
-(artifact "nefor.graph-modification/v1" modification-data)
+(artifact modification-data)
 ```
 
 The complete path is:
 
 ```text
 namespaced modules
-  -> typed values and Foreign<P, I, O> specializations
+  -> ordinary typed actor values
   -> nefor.graph.Graph
   -> nefor.graph.validate
   -> nefor.graph.lower
-  -> Artifact("nefor.graph-modification/v1", data)
+  -> Artifact(raw value)
   -> runtime binding and defensive validation
 ```
 
@@ -39,7 +39,7 @@ A typed port records two identities:
 
 - `type`: a compiler-created `TypeTag<T>` witness, used by generic library
   composition and lowered to a complete canonical structural descriptor;
-- `wire`: the runtime tag emitted or accepted by the foreign implementation.
+- `wire`: the runtime tag emitted or accepted by the implementation.
 
 This lets an agent node expose `(CodeAudit | AgentError)` on the stable
 `nefor.agent.Result` wire. The success type is declared with
@@ -49,14 +49,16 @@ Resident rules use `nefor.actors.result-arm` to subscribe to one constructor
 on the same actor and wire. The compiler neither knows what an LLM is nor
 invents a coercion.
 
-Foreign capabilities are typed values. `nefor.graph.actor` accepts a
-`Foreign<P, I, O>`, validates the parameter type, and stores its qualified
-identity in graph data. Runtime registry contracts arrive as immutable MAG
-inputs and are checked again by `nefor.graph.validate` before lowering.
+Actor-specific constructors are ordinary typed functions. They select a
+factory identity, make generic arguments explicit as type descriptors, and
+call `nefor.graph.actor` with parameters whose type their own signature owns.
+Runtime registry contracts arrive through the domain-neutral typed
+`host-input` boundary and are checked again by `nefor.graph.validate` before
+lowering.
 
 ## Runtime artifact
 
-`nefor.graph.lower` produces only the graph-modification data consumed by the
+`nefor.graph.lower` produces the raw graph-modification value consumed by the
 kernel: actors, typed routes, typed initial messages, kills, rules, and
 structural result metadata. Each authored initial message retains its
 destination descriptor as `semantic_type` even though the current factory
@@ -65,7 +67,7 @@ activation. A concrete
 `output<T>` identity actor is the unique terminal, and the structural result
 metadata selects that actor's output port.
 
-The runtime binds each qualified foreign identity to an implementation and
+The runtime binds each qualified factory identity to an implementation and
 revalidates its concrete input/output contract as exact semantic-type/runtime-
 wire pairs. Rust's `ConcreteType` relation is the single owner of semantic
 edge compatibility and product coverage; Lua validates protocol wiring and
@@ -79,7 +81,7 @@ Rule functions use a parallel, deliberately narrower path:
 ```text
 typed source value -> pure unary MAG function -> nefor.graph.Delta
   -> nefor.graph.lower-delta
-  -> Artifact("nefor.graph-delta/v1", data)
+  -> Artifact(raw value)
   -> atomic apply to the same run
 ```
 
@@ -94,13 +96,13 @@ artifact pipeline, so
 the expression itself is concise:
 
 ```lisp
-(nefor.process.exec "search" (as nefor.contracts.ProcessExecParams {:argv ["rg" "-n" "TODO" "src/"] :cwd nefor.process.cwd :timeout (nefor.contracts.no-timeout)}))
+(nefor.process.exec "search" (as nefor.process.ProcessExecParams {:argv ["rg" "-n" "TODO" "src/"] :cwd nefor.process.cwd :timeout (nefor.contracts.no-timeout)}))
 ```
 
 For a one-off pipeline, keep it inside the command node:
 
 ```lisp
-(nefor.shell.script "search" (as nefor.contracts.ShellScriptParams {:script "rg -n TODO src/ | sort" :cwd "." :timeout (nefor.contracts.no-timeout)}))
+(nefor.shell.script "search" (as nefor.shell.ShellScriptParams {:script "rg -n TODO src/ | sort" :cwd "." :timeout (nefor.contracts.no-timeout)}))
 ```
 
 Multi-node pipelines are full `.mag` programs: construct `source`, `process.exec`

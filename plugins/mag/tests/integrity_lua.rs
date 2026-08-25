@@ -49,7 +49,7 @@ fn terminal_settlement_is_first_write_wins_even_after_host_take() {
     run(r#"
         assert(kernel.begin_run({run_id="race", run_name="race", session_id="s"}).ok)
         assert(kernel.start("race", {
-          actors={{id="result", factory="nefor.factory.stub", params={greeting="first"}, routes={}}},
+          actors={{id="result", factory="nefor.factory.stub", type_arguments={}, params={greeting="first"}, routes={}}},
           messages={{to="result", content={kind="stub.In"}}}, kills={}, rules={},
           result={from={actor="result", wire="stub.Out"}}
         }).ok)
@@ -76,10 +76,10 @@ fn killed_generation_cannot_route_settle_or_trigger_rules() {
         assert(kernel.begin_run({run_id="stale", run_name="stale", session_id="s"}).ok)
         assert(kernel.start("stale", {
           actors={
-            {id="source", factory="nefor.factory.stub", params={value="first"},
+            {id="source", factory="nefor.factory.stub", type_arguments={}, params={value="first"},
              routes={["stub.Out"]={{actor="downstream", wire="stub.In"}}}},
-            {id="downstream", factory="nefor.factory.stub", params={}, routes={}},
-            {id="result", factory="nefor.factory.stub", params={}, routes={}}
+            {id="downstream", factory="nefor.factory.stub", type_arguments={}, params={}, routes={}},
+            {id="result", factory="nefor.factory.stub", type_arguments={}, params={}, routes={}}
           },
           messages={{to="source", content={kind="stub.In"}}}, kills={},
           rules={{id="watch", on={actor="source", wire="stub.Out"}, fn="noop"}},

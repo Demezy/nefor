@@ -166,13 +166,13 @@ end
 local function gate_actors()
   return {
     {
-      id = "produce", factory = "producer", params = {},
+      id = "produce", factory = "producer", type_arguments = {}, params = {},
       evidence={version=2,identity="nefor.factory.producer",arguments={},input={kind="named",name="nefor.contracts.ProviderInput",arguments={}},output={kind="named",name="nefor.contracts.TextAnswer",arguments={}}},
       input={type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"},outputs={{type={kind="named",name="nefor.contracts.TextAnswer",arguments={}},wire="generic-provider.TextAnswer"}},
       routes = { ["generic-provider.TextAnswer"] = { { actor = "approve", wire = "generic-provider.TextAnswer" } } },
     },
     {
-      id = "approve", factory = "human", params = { prompt = "Approve the draft?" },
+      id = "approve", factory = "human", type_arguments = {}, params = { prompt = "Approve the draft?" },
       evidence={version=2,identity="nefor.factory.human",arguments={},input={kind="named",name="nefor.contracts.TextAnswer",arguments={}},output={kind="union",items={{kind="named",name="nefor.contracts.Approved",arguments={}},{kind="named",name="nefor.contracts.Rejected",arguments={}}}}},
       input={type={kind="named",name="nefor.contracts.TextAnswer",arguments={}},wire="generic-provider.TextAnswer"},outputs={{type={kind="named",name="test.Approved",arguments={}},wire="human.Approved"},{type={kind="named",name="test.Rejected",arguments={}},wire="human.Rejected"}},
       routes = {
@@ -181,12 +181,16 @@ local function gate_actors()
       },
     },
     {
-      id = "rework", factory = "adapter", params = { seed = "provider-in" },
+      id = "rework", factory = "adapter",
+      type_arguments = {{kind="named",name="test.Rejected",arguments={}}},
+      params = { seed = "provider-in" },
       evidence={version=2,identity="nefor.factory.adapter",arguments={{kind="named",name="test.Rejected",arguments={}}},input={kind="named",name="test.Rejected",arguments={}},output={kind="named",name="nefor.contracts.ProviderInput",arguments={}}},
       input={type={kind="named",name="test.Rejected",arguments={}},wire="human.Rejected"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
       routes = { ["generic-provider.ProviderOut"] = { { actor = "produce", wire = "generic-provider.ProviderOut" } } },
     },
-    { id = "out", factory = "sink", params = {}, routes = {},
+    { id = "out", factory = "sink",
+      type_arguments = {{kind="named",name="test.Approved",arguments={}}},
+      params = {}, routes = {},
       evidence={version=2,identity="nefor.factory.sink",arguments={{kind="named",name="test.Approved",arguments={}}},input={kind="named",name="test.Approved",arguments={}},output={kind="primitive",name="Unit"}},
       input={type={kind="named",name="test.Approved",arguments={}},wire="human.Approved"},outputs={{type={kind="primitive",name="Unit"},wire="mag.Unit"}} },
   }
@@ -397,13 +401,16 @@ do
   local result = inv.apply({
     actors = {
       {
-        id = "entry", factory = "adapter", params = { seed = "provider-in" },
+        id = "entry", factory = "adapter",
+        type_arguments = {{kind="named",name="test.Task",arguments={}}},
+        params = { seed = "provider-in" },
         evidence={version=2,identity="nefor.factory.adapter",arguments={{kind="named",name="test.Task",arguments={}}},input={kind="named",name="test.Task",arguments={}},output={kind="named",name="nefor.contracts.ProviderInput",arguments={}}},
         input={type={kind="named",name="test.Task",arguments={}},wire="task"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
         routes = { ["generic-provider.ProviderOut"] = { { actor = "review.produce", wire = "generic-provider.ProviderOut" } } },
       },
       {
         id = "review.produce", factory = "llm",
+        type_arguments = {},
         params = { provider = "chatgpt-provider", model = "opus",
           output_type = "nefor.contracts.TextAnswer",
           error_type = "nefor.contracts.AgentError",
@@ -413,7 +420,7 @@ do
         routes = { ["nefor.agent.Result"] = { { actor = "review.approve", wire = "generic-provider.TextAnswer" } } },
       },
       {
-        id = "review.approve", factory = "human", params = { prompt = "Approve this result?" },
+        id = "review.approve", factory = "human", type_arguments = {}, params = { prompt = "Approve this result?" },
         evidence={version=2,identity="nefor.factory.human",arguments={},input={kind="named",name="nefor.contracts.TextAnswer",arguments={}},output={kind="union",items={{kind="named",name="nefor.contracts.Approved",arguments={}},{kind="named",name="nefor.contracts.Rejected",arguments={}}}}},
         input={type=named("nefor.contracts.TextAnswer"),wire="generic-provider.TextAnswer"},outputs={{type={kind="named",name="test.Approved",arguments={}},wire="human.Approved"},{type={kind="named",name="test.Rejected",arguments={}},wire="human.Rejected"}},
         routes = {
@@ -422,12 +429,16 @@ do
         },
       },
       {
-        id = "review.rework", factory = "adapter", params = { seed = "provider-in" },
+        id = "review.rework", factory = "adapter",
+        type_arguments = {{kind="named",name="test.Rejected",arguments={}}},
+        params = { seed = "provider-in" },
         evidence={version=2,identity="nefor.factory.adapter",arguments={{kind="named",name="test.Rejected",arguments={}}},input={kind="named",name="test.Rejected",arguments={}},output={kind="named",name="nefor.contracts.ProviderInput",arguments={}}},
         input={type={kind="named",name="test.Rejected",arguments={}},wire="human.Rejected"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
         routes = { ["generic-provider.ProviderOut"] = { { actor = "review.produce", wire = "generic-provider.ProviderOut" } } },
       },
-      { id = "sink", factory = "sink", params = {}, routes = {},
+      { id = "sink", factory = "sink",
+        type_arguments = {{kind="named",name="test.Approved",arguments={}}},
+        params = {}, routes = {},
         evidence={version=2,identity="nefor.factory.sink",arguments={{kind="named",name="test.Approved",arguments={}}},input={kind="named",name="test.Approved",arguments={}},output={kind="primitive",name="Unit"}},
         input={type={kind="named",name="test.Approved",arguments={}},wire="human.Approved"},outputs={{type={kind="primitive",name="Unit"},wire="mag.Unit"}} },
     },

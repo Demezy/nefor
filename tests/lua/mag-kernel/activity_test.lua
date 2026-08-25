@@ -138,8 +138,8 @@ do
 
   local res = h.obs:apply({
     actors = {
-      { id = "w", factory = "worker", params = {}, routes = { ["mag.Unit"] = { { actor = "f", wire = "mag.Unit" } } } },
-      { id = "f", factory = "follower", params = {}, routes = {} },
+      { id = "w", factory = "worker", type_arguments = {}, params = {}, routes = { ["mag.Unit"] = { { actor = "f", wire = "mag.Unit" } } } },
+      { id = "f", factory = "follower", type_arguments = {}, params = {}, routes = {} },
     },
     messages = { { to = "w", content = { kind = "seed.In" } } },
   })
@@ -198,7 +198,7 @@ do
   })
 
   h.obs:apply({
-    actors = { { id = "c", factory = "caller", params = {}, routes = {} } },
+    actors = { { id = "c", factory = "caller", type_arguments = {}, params = {}, routes = {} } },
     messages = { { to = "c", content = { kind = "seed.In" } } },
   })
 
@@ -234,7 +234,7 @@ do
   })
 
   h.obs:apply({
-    actors = { { id = "d", factory = "deferred", params = {}, routes = {} } },
+    actors = { { id = "d", factory = "deferred", type_arguments = {}, params = {}, routes = {} } },
     messages = { { to = "d", content = { kind = "seed.In" } } },
   })
   local dk = kinds_of(events_for(h, "d"))
@@ -273,8 +273,8 @@ do
   -- Routed failure: flaky.Err reaches the catcher, and flaky still idles.
   h.obs:apply({
     actors = {
-      { id = "flaky", factory = "flaky", params = {}, routes = { ["flaky.Err"] = { { actor = "catch", wire = "flaky.Err" } } } },
-      { id = "catch", factory = "catcher", params = {}, routes = {} },
+      { id = "flaky", factory = "flaky", type_arguments = {}, params = {}, routes = { ["flaky.Err"] = { { actor = "catch", wire = "flaky.Err" } } } },
+      { id = "catch", factory = "catcher", type_arguments = {}, params = {}, routes = {} },
     },
     messages = { { to = "flaky", content = { kind = "seed.In" } } },
   })
@@ -293,7 +293,7 @@ do
     },
   })
   h2.obs:apply({
-    actors = { { id = "solo", factory = "flaky", params = {}, routes = {} } },
+    actors = { { id = "solo", factory = "flaky", type_arguments = {}, params = {}, routes = {} } },
     messages = { { to = "solo", content = { kind = "seed.In" } } },
   })
   local sk = kinds_of(events_for(h2, "solo"))

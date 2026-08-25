@@ -1,25 +1,29 @@
 (require "nefor.graph")
 (require "nefor.contracts")
 
-;; Relative paths are resolved by the capability against the MAG host's
+;; Relative paths are resolved by the process actor against the MAG host's
 ;; inherited working directory. Keeping the captured base as data makes that
 ;; authority explicit in every process request.
-(def cwd ".")
+(let cwd ".")
+(let factory "nefor.factory.process-exec")
+(type ProcessExecParams {:argv (List String)
+                         :cwd String
+                         :timeout nefor.contracts.Timeout})
 
-(def exec (fn [[name String] [params nefor.contracts.ProcessExecParams]]
+(let exec (fn [[name String] [params ProcessExecParams]]
   -> (nefor.graph.Node (| Unit nefor.contracts.Text) nefor.contracts.ProcessResult)
-  (let [input (nefor.graph.port name
+  (let input (nefor.graph.port name
                 (type-tag (| Unit nefor.contracts.Text))
-                "nefor.process.Input")
-        output (nefor.graph.port name
+                "nefor.process.Input"))
+  (let output (nefor.graph.port name
                  (type-tag nefor.contracts.ProcessResult)
-                 "nefor.process.Result")]
-    (as (nefor.graph.Node (| Unit nefor.contracts.Text) nefor.contracts.ProcessResult)
+                 "nefor.process.Result"))
+  (as (nefor.graph.Node (| Unit nefor.contracts.Text) nefor.contracts.ProcessResult)
       {:id name :role "ordinary"
-       :actors [(nefor.graph.actor name nefor.factory.process-exec params
+       :actors [(nefor.graph.actor name factory [] params
                    (nefor.graph.store-port input)
                    [(nefor.graph.store-port output)])]
        :routes (as (List nefor.graph.StoredRoute) [])
        :messages []
        :input input
-       :output output}))))
+       :output output})))

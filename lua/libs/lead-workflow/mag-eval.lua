@@ -119,7 +119,7 @@ M.schema = {
     "shell backgrounding. Background only when a process intentionally needs a " ..
     "separately retained lifecycle. " ..
     "A direct command is (nefor.process.exec \"step\" " ..
-    "(as nefor.contracts.ProcessExecParams {:argv [\"rg\" \"-n\" \"TODO\" \"src/\"] " ..
+    "(as nefor.process.ProcessExecParams {:argv [\"rg\" \"-n\" \"TODO\" \"src/\"] " ..
     ":cwd nefor.process.cwd :timeout (nefor.contracts.no-timeout)})); " ..
     "compose multi-node work in a .mag graph. Commands run until process exit, " ..
     "so awaiting a persistent foreground process such as an HTTP server waits " ..
@@ -178,16 +178,17 @@ local function build_source(expr)
     '(require "nefor.graph")\n',
     '(require "nefor.process")\n',
     '(require "nefor.shell")\n',
-    '(let [start (nefor.graph.source "eval-input" (type-tag Unit) nil)\n',
-    '      operation ',
+    '(let start (nefor.graph.source "eval-input" (type-tag Unit) nil))\n',
+    '(let operation ',
   })
   local suffix = table.concat({
-    '\n      result (nefor.graph.output-for "eval-output" operation)\n',
-    '      topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph\n',
-    '                 (nefor.graph.add-edges graph ',
-    '                   [(nefor.graph.edge start operation) ',
-    '                    (nefor.graph.edge operation result)]))]\n',
-    '  (nefor.artifact.compile topology))\n',
+    ')\n',
+    '(let result (nefor.graph.output-for "eval-output" operation))\n',
+    '(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph\n',
+    '                (nefor.graph.add-edges graph ',
+    '                  [(nefor.graph.edge start operation) ',
+    '                   (nefor.graph.edge operation result)])))\n',
+    '(nefor.artifact.compile topology)\n',
   })
   return prefix .. expr .. suffix, { source = expr, start = #prefix, finish = #prefix + #expr }
 end

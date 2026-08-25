@@ -19,17 +19,17 @@ fn profiled_load_reports_phases_and_deterministic_work() {
     let root = temp_dir("profile");
     fs::write(
         root.join("library.mag"),
-        "(def copy (fn [[value Int]] -> Int value))",
+        "(let copy (fn [[value Int]] -> Int value))",
     )
     .expect("library");
     fs::write(
         root.join("main.mag"),
-        "(require \"library\")\n(artifact \"test.profile/v1\" {:value (library.copy 7)})",
+        "(require \"library\")\n(artifact {:value (library.copy 7)})",
     )
     .expect("entry");
 
     let profiler = CompileProfiler::new();
-    let program = nefor_mag::load_with_profiler(
+    nefor_mag::load_with_profiler(
         &root,
         "main.mag",
         json!({}),
@@ -37,7 +37,6 @@ fn profiled_load_reports_phases_and_deterministic_work() {
         &profiler,
     )
     .expect("profiled load");
-    nefor_mag::validate_loaded_rules_profiled(&program, &profiler).expect("rules");
     let profile = profiler.snapshot();
 
     assert_eq!(profile.counters.module_requests, 1);

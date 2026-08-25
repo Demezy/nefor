@@ -1,7 +1,92 @@
 use crate::types::MagType;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BindingId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FrameId(pub u64);
+
+#[derive(Debug, Clone)]
+pub struct CheckedExpr {
+    pub ty: MagType,
+    pub kind: CheckedExprKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum CheckedExprKind {
+    Unit,
+    Str(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Keyword(String),
+    BindingRef(BindingId),
+    Vector(Vec<CheckedExpr>),
+    Map(Vec<(String, CheckedExpr)>),
+    If {
+        condition: Box<CheckedExpr>,
+        then_branch: Box<CheckedExpr>,
+        else_branch: Box<CheckedExpr>,
+    },
+    Call {
+        callee: Box<CheckedExpr>,
+        args: Vec<CheckedExpr>,
+    },
+    Function(Arc<CheckedFn>),
+    Ascribe {
+        target: MagType,
+        value: Box<CheckedExpr>,
+    },
+    TypeTag(MagType),
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckedBlock {
+    pub frame_layout: Vec<BindingId>,
+    pub bindings: Vec<CheckedBinding>,
+    pub expressions: Vec<CheckedExpr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckedBinding {
+    pub id: BindingId,
+    pub name: String,
+    pub ty: MagType,
+    pub initializer: Arc<CheckedExpr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckedParam {
+    pub id: BindingId,
+    pub name: String,
+    pub ty: MagType,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckedFn {
+    pub name: Option<String>,
+    pub type_params: Vec<String>,
+    pub params: Vec<CheckedParam>,
+    pub result: MagType,
+    pub body: Arc<CheckedBlock>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BindingSlot {
+    Uninitialized(Arc<CheckedExpr>),
+    Initializing,
+    Ready(Value),
+}
+
+#[derive(Debug, Default)]
+pub struct ScopeFrame {
+    pub names: HashMap<String, Vec<BindingId>>,
+    pub slots: HashMap<BindingId, BindingSlot>,
+}
+
+pub type Scope = FrameId;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -56,7 +141,8 @@ pub struct FnValue {
     pub param_types: Vec<MagType>,
     pub return_type: MagType,
     pub body: Vec<Expr>,
-    pub closure: Vec<(String, Value)>,
+    pub checked: Option<Arc<CheckedFn>>,
+    pub closure: Vec<Scope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -64,30 +150,6 @@ pub struct TypeDecl {
     pub name: String,
     pub params: Vec<String>,
     pub body: MagType,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ForeignDecl {
-    pub name: String,
-    pub type_params: Vec<String>,
-    pub specialization: Vec<MagType>,
-    pub params: MagType,
-    pub input: MagType,
-    pub output: MagType,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ForeignEvidence {
-    pub identity: String,
-    pub arguments: Vec<crate::types::ConcreteType>,
-    pub input: crate::types::ConcreteType,
-    pub output: crate::types::ConcreteType,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Artifact {
-    pub format: String,
-    pub data: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -110,15 +172,13 @@ pub enum Value {
     Type(MagType),
     TypeDecl(TypeDecl),
     TypeTag(crate::types::ConcreteType),
-    Foreign(ForeignDecl),
-    ForeignEvidence(ForeignEvidence),
     TypeDescriptor(crate::types::ConcreteType),
     TypeSchema(crate::schema::TypeSchema),
     SemanticTypeId(crate::types::SemanticTypeId),
     PackedValue(Arc<Value>),
     JsonValue(serde_json::Value),
     HostInputs(serde_json::Value),
-    Artifact(Artifact),
+    Artifact(serde_json::Value),
     Typed(Arc<Value>, MagType),
 }
 
@@ -147,8 +207,6 @@ impl Value {
             Self::BuiltinFn(_) => "builtin-fn",
             Self::Type(_) | Self::TypeDecl(_) => "type",
             Self::TypeTag(_) => "type-tag",
-            Self::Foreign(_) => "foreign",
-            Self::ForeignEvidence(_) => "foreign-evidence",
             Self::TypeDescriptor(_) => "type-descriptor",
             Self::TypeSchema(_) => "type-schema",
             Self::SemanticTypeId(_) => "semantic-type-id",

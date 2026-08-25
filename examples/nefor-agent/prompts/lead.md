@@ -81,13 +81,13 @@ claim from a narrow check.
 You have no direct shell/search tools. For one command:
 
 ```lisp
-(nefor.process.exec "search" (as nefor.contracts.ProcessExecParams {:argv ["rg" "-n" "TODO" "src/"] :cwd nefor.process.cwd :timeout (nefor.contracts.no-timeout)}))
+(nefor.process.exec "search" (as nefor.process.ProcessExecParams {:argv ["rg" "-n" "TODO" "src/"] :cwd nefor.process.cwd :timeout (nefor.contracts.no-timeout)}))
 ```
 
 For a pipe in a one-off command:
 
 ```lisp
-(nefor.shell.script "search" (as nefor.contracts.ShellScriptParams {:script "rg -n TODO src/ | sort" :cwd "." :timeout (nefor.contracts.no-timeout)}))
+(nefor.shell.script "search" (as nefor.shell.ShellScriptParams {:script "rg -n TODO src/ | sort" :cwd "." :timeout (nefor.contracts.no-timeout)}))
 ```
 
 `mag-eval` supplies a source, output, and artifact wrapper around that one node.
@@ -118,10 +118,8 @@ There are no compiler forms named `agent`, `bash`, `graph`, `subgraph`, or
 (require "nefor.contracts")
 (require "nefor.graph")
 
-(let [start
-      (nefor.actors.task-source "task" "<initial task text>")
-      worker
-      (nefor.actors.agent
+(let start (nefor.actors.task-source "task" "<initial task text>"))
+(let worker (nefor.actors.agent
         (as nefor.actors.AgentConfig {:id "worker"
          :model (nefor.contracts.no-identifier)
          :profile (nefor.contracts.identifier "standard")
@@ -131,16 +129,14 @@ There are no compiler forms named `agent`, `bash`, `graph`, `subgraph`, or
          :da-policy (nefor.contracts.no-da-policy)})
         (type-tag nefor.contracts.Task)
         "task"
-        (type-tag nefor.contracts.TextAnswer))
-      result
-      (nefor.graph.output "result"
-        (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError)))
-      topology
-      (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+        (type-tag nefor.contracts.TextAnswer)))
+(let result (nefor.graph.output "result"
+        (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
         (nefor.graph.add-edges graph
           [(nefor.graph.edge start worker)
-           (nefor.graph.edge worker result)]))]
-  (nefor.artifact.compile topology))
+           (nefor.graph.edge worker result)])))
+(nefor.artifact.compile topology)
 ```
 
 `nefor.actors.agent` returns a typed `nefor.graph.Node<I, O>`. Its semantic
@@ -160,7 +156,7 @@ to reach the output. Fan-out, fan-in, and cycles are ordinary edges. `replace`,
 `concat` to build one flat `List<Edge>` for larger graphs. The value passed to
 `nefor.artifact.compile` must be a `Graph -> Graph` function. For each run,
 `compile` applies it to `empty-graph`, validates the complete returned graph,
-and returns `Artifact("nefor.graph-modification/v1", data)`. Edit or compose
+and returns a raw graph-modification `Artifact`. Edit or compose
 the function to describe another fresh run; graph functions never patch a live
 actor constellation or retrieve a stored graph.
 

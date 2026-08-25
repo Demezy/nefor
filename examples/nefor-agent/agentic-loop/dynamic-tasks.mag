@@ -9,69 +9,71 @@
 (type Summary {:content String})
 (type IndexedTask {:index Int :value Task})
 
-(def indexed-task (fn [[index Int] [task Task]] -> IndexedTask
+(let indexed-task (fn [[index Int] [task Task]] -> IndexedTask
   (as IndexedTask {:index index :value task})))
-(def worker-id (fn [[entry IndexedTask]] -> String (str "expand.worker." (get entry "index"))))
-(def collector-sender-id (fn [[entry IndexedTask]] -> String (str (worker-id entry) ".llm")))
-(def worker (fn [[entry IndexedTask]] -> (nefor.graph.Node Task (| WorkerResult nefor.contracts.AgentError))
-  (let [task (get entry "value") id (worker-id entry)
-        agent (nefor.actors.agent
+(let worker-id (fn [[entry IndexedTask]] -> String (str "expand.worker." (get entry "index"))))
+(let collector-sender-id (fn [[entry IndexedTask]] -> String (str (worker-id entry) ".llm")))
+(let worker (fn [[entry IndexedTask]] -> (nefor.graph.Node Task (| WorkerResult nefor.contracts.AgentError))
+  (let task (get entry "value"))
+  (let id (worker-id entry))
+  (let agent (nefor.actors.agent
                 (as nefor.actors.AgentConfig
                   {:id id :model (nefor.contracts.no-identifier)
                    :profile (nefor.contracts.no-identifier) :provider "mock-provider"
                    :system (str "Complete this task: " (get task "description"))
                    :tools [] :da-policy (nefor.contracts.no-da-policy)
                    :max-corrections 2})
-                (type-tag Task) "task" (type-tag WorkerResult))]
-    agent)))
+                (type-tag Task) "task" (type-tag WorkerResult)))
+  agent))
 
-(def add-worker (fn [[collector-input (nefor.graph.Port (| WorkerResult nefor.contracts.AgentError))]
+(let add-worker (fn [[collector-input (nefor.graph.Port (| WorkerResult nefor.contracts.AgentError))]
                      [change nefor.graph.Delta] [entry IndexedTask]] -> nefor.graph.Delta
-  (let [fragment (worker entry)
-        with-fragment (nefor.graph.merge-delta change (nefor.graph.node-delta fragment))
-        with-route (nefor.graph.delta-route with-fragment (get fragment "output") collector-input)]
-    (nefor.graph.delta-message-front with-route (get fragment "input") (get entry "value")))))
+  (let fragment (worker entry))
+  (let with-fragment (nefor.graph.merge-delta change (nefor.graph.node-delta fragment)))
+  (let with-route (nefor.graph.delta-route with-fragment (get fragment "output") collector-input))
+  (nefor.graph.delta-message-front with-route (get fragment "input") (get entry "value"))))
 
 
-(def planner-agent (nefor.actors.agent
+(let planner-agent (nefor.actors.agent
   (as nefor.actors.AgentConfig {:id "planner"
     :model (nefor.contracts.no-identifier)
     :profile (nefor.contracts.no-identifier) :provider "mock-provider"
     :system "Return the task plan." :tools []
     :da-policy (nefor.contracts.no-da-policy) :max-corrections 2})
   (type-tag nefor.contracts.Task) "task" (type-tag (List Task))))
-(def planner-success
+(let planner-success
   (nefor.actors.result-arm planner-agent (type-tag (List Task))))
-(def planner-error-port
+(let planner-error-port
   (nefor.actors.result-arm planner-agent
     (type-tag nefor.contracts.AgentError)))
-(def prompt (nefor.dynamic.collected-prompt "summary-input" (type-tag (| WorkerResult nefor.contracts.AgentError))))
-(def summarizer (nefor.actors.agent
+(let prompt (nefor.dynamic.collected-prompt "summary-input" (type-tag (| WorkerResult nefor.contracts.AgentError))))
+(let summarizer (nefor.actors.agent
   (as nefor.actors.AgentConfig {:id "summarizer"
     :model (nefor.contracts.no-identifier)
     :profile (nefor.contracts.no-identifier) :provider "mock-provider"
     :system "Summarize the ordered worker results." :tools []
     :da-policy (nefor.contracts.no-da-policy) :max-corrections 2})
   (type-tag nefor.contracts.ProviderInput) "generic-provider.ProviderOut" (type-tag Summary)))
-(def result (nefor.graph.output "result"
+(let result (nefor.graph.output "result"
   (type-tag (| Summary nefor.contracts.AgentError))))
-(def summary-input (get prompt "input"))
-(def expand (fn [[tasks (List Task)]] -> Artifact
+(let summary-input (get prompt "input"))
+(let expand (fn [[tasks (List Task)]] -> Artifact
   (if (= (count tasks) 0)
         (nefor.artifact.delta
           (nefor.graph.delta (as (List nefor.graph.Actor) [])
             (as (List nefor.graph.StoredRoute) []) [(nefor.dynamic.empty-to summary-input)]
             (as (List String) [])))
-        (let [indexed (indexed-map indexed-task tasks)
-              ids (map collector-sender-id indexed)
-              collector (nefor.dynamic.collector "expand.collector" ids (type-tag (| WorkerResult nefor.contracts.AgentError)))
-              base (nefor.graph.node-delta collector)
-              workers (fold (fn [[change nefor.graph.Delta] [entry IndexedTask]] -> nefor.graph.Delta
-                              (add-worker (get collector "input") change entry)) base indexed)
-              routed (nefor.graph.delta-route workers (get collector "output") summary-input)]
-          (nefor.artifact.delta routed)))))
+        ((fn [] -> Artifact
+        (let indexed (indexed-map indexed-task tasks))
+        (let ids (map collector-sender-id indexed))
+        (let collector (nefor.dynamic.collector "expand.collector" ids (type-tag (| WorkerResult nefor.contracts.AgentError))))
+        (let base (nefor.graph.node-delta collector))
+        (let workers (fold (fn [[change nefor.graph.Delta] [entry IndexedTask]] -> nefor.graph.Delta
+                              (add-worker (get collector "input") change entry)) base indexed))
+        (let routed (nefor.graph.delta-route workers (get collector "output") summary-input))
+        (nefor.artifact.delta routed))))))
 
-(def planner-error (fn [[error nefor.contracts.AgentError]] -> Artifact
+(let planner-error (fn [[error nefor.contracts.AgentError]] -> Artifact
     (nefor.artifact.delta
       (nefor.graph.delta-message (nefor.graph.delta
       (as (List nefor.graph.Actor) []) (as (List nefor.graph.StoredRoute) [])
@@ -79,7 +81,7 @@
       (get result "input")
       (as (| Summary nefor.contracts.AgentError) error)))))
 
-(def initial
+(let initial
   (nefor.graph.delta-route
     (nefor.graph.delta-route
       (nefor.graph.merge-delta (nefor.graph.node-delta planner-agent)
@@ -89,8 +91,7 @@
       (get summarizer "output") (get result "input"))
     (get prompt "output") (get summarizer "input")))
 
-(artifact "nefor.graph-modification/v1"
-  (nefor.graph.lower-resident
+(artifact (nefor.graph.lower-resident
     (nefor.graph.delta-message initial (get planner-agent "input")
       (as nefor.contracts.Task {:prompt "Plan this request"}))
     [(nefor.graph.rule "expand" planner-success "expand")

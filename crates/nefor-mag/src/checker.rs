@@ -1,8 +1,26 @@
-use crate::ast::{Expr, Value};
+use crate::ast::{
+    BindingId, CheckedBinding, CheckedBlock, CheckedExpr, CheckedExprKind, CheckedFn, CheckedParam,
+    Expr, Value,
+};
 use crate::env::Env;
 use crate::error::MagError;
 use crate::types::MagType;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
+
+type Locals = HashMap<String, Vec<MagType>>;
+
+fn add_local(locals: &mut Locals, name: impl Into<String>, ty: MagType) -> Result<(), MagError> {
+    let name = name.into();
+    let overloads = locals.entry(name.clone()).or_default();
+    if overloads.contains(&ty) {
+        return Err(MagError::Type(format!(
+            "duplicate visible overload {name}: {ty}"
+        )));
+    }
+    overloads.push(ty);
+    Ok(())
+}
 
 pub fn check_function_with_binding(
     env: &Env,
@@ -12,19 +30,58 @@ pub fn check_function_with_binding(
     result: &MagType,
     body: &[Expr],
 ) -> Result<(), MagError> {
-    let mut locals = params
-        .iter()
-        .cloned()
-        .zip(param_types.iter().cloned())
-        .collect::<HashMap<_, _>>();
+    let mut locals = Locals::new();
+    for (name, ty) in params.iter().cloned().zip(param_types.iter().cloned()) {
+        add_local(&mut locals, name, ty)?;
+    }
     if let Some(name) = binding {
-        locals.insert(
+        add_local(
+            &mut locals,
             name.to_string(),
             MagType::Function(param_types.to_vec(), Box::new(result.clone())),
-        );
+        )?;
+    }
+    for (name, ty) in params.iter().zip(param_types) {
+        if env
+            .lookup_candidates(name)
+            .iter()
+            .filter_map(value_type)
+            .any(|visible| visible == *ty)
+        {
+            return Err(MagError::Type(format!(
+                "duplicate visible overload {name}: {ty}"
+            )));
+        }
+    }
+
+    for expr in body {
+        let Some((name, initializer)) = direct_let(expr)? else {
+            continue;
+        };
+        if is_fn(initializer) {
+            let ty = infer_fn_signature(env, &locals, initializer)?;
+            add_local(&mut locals, name, ty)?;
+        }
+    }
+    for expr in body {
+        let Some((name, initializer)) = direct_let(expr)? else {
+            continue;
+        };
+        if !is_fn(initializer) {
+            let ty = infer(env, &mut locals, initializer)?;
+            add_local(&mut locals, name, ty)?;
+        }
     }
     let mut actual = MagType::Unit;
     for expr in body {
+        if direct_let(expr)?.is_some() {
+            if let Some((_, initializer)) = direct_let(expr)? {
+                if is_fn(initializer) {
+                    let _ = infer(env, &mut locals, initializer)?;
+                }
+            }
+            continue;
+        }
         actual = infer(env, &mut locals, expr).map_err(|error| match binding {
             Some(name) => MagError::Type(format!("in function {name}: {error}")),
             None => error,
@@ -36,6 +93,106 @@ pub fn check_function_with_binding(
             binding.map(|name| format!("{name} ")).unwrap_or_default()
         ))
     })
+}
+
+fn direct_let(expr: &Expr) -> Result<Option<(&str, &Expr)>, MagError> {
+    let Expr::List(items) = expr else {
+        return Ok(None);
+    };
+    if !matches!(items.first(), Some(Expr::Symbol(head)) if head == "let") {
+        return Ok(None);
+    }
+    if items.len() != 3 {
+        return Err(MagError::Type("let expects a name and value".into()));
+    }
+    let name = items[1]
+        .as_symbol()
+        .ok_or_else(|| MagError::Type("let name must be a symbol".into()))?;
+    Ok(Some((name, &items[2])))
+}
+
+fn is_fn(expr: &Expr) -> bool {
+    matches!(expr, Expr::List(items) if matches!(items.first(), Some(Expr::Symbol(head)) if head == "fn"))
+}
+
+fn function_type_params(expression: &Expr) -> Result<Vec<String>, MagError> {
+    let Expr::List(items) = expression else {
+        return Ok(vec![]);
+    };
+    let args = &items[1..];
+    let Some(Expr::Vector(parameters)) = args.first() else {
+        return Ok(vec![]);
+    };
+    if !matches!(args.get(1), Some(Expr::Vector(_))) {
+        return Ok(vec![]);
+    }
+    parameters
+        .iter()
+        .map(|parameter| {
+            parameter
+                .as_symbol()
+                .map(str::to_owned)
+                .ok_or_else(|| MagError::Type("generic binder must be a symbol".into()))
+        })
+        .collect()
+}
+
+fn infer_fn_signature(env: &Env, outer: &Locals, expression: &Expr) -> Result<MagType, MagError> {
+    let mut vars = HashSet::new();
+    for ty in outer.values().flatten() {
+        collect_vars(ty, &mut vars);
+    }
+    infer_fn_signature_scoped(env, &vars, expression)
+}
+
+fn infer_fn_signature_scoped(
+    env: &Env,
+    outer_vars: &HashSet<String>,
+    expression: &Expr,
+) -> Result<MagType, MagError> {
+    let Expr::List(items) = expression else {
+        unreachable!()
+    };
+    let args = &items[1..];
+    if args.len() < 4 {
+        return Err(MagError::Type("typed fn signature required".into()));
+    }
+    let empty = Expr::Vector(vec![]);
+    let (type_expr, param_expr, arrow, return_expr) =
+        if matches!(args.get(1), Some(Expr::Vector(_))) {
+            (&args[0], &args[1], &args[2], &args[3])
+        } else {
+            (&empty, &args[0], &args[1], &args[2])
+        };
+    if !matches!(arrow, Expr::Symbol(symbol) if symbol == "->") {
+        return Err(MagError::Type("fn signature requires ->".into()));
+    }
+    let mut vars = outer_vars.clone();
+    let Expr::Vector(type_params) = type_expr else {
+        unreachable!()
+    };
+    for parameter in type_params {
+        vars.insert(
+            parameter
+                .as_symbol()
+                .ok_or_else(|| MagError::Type("generic binder must be a symbol".into()))?
+                .to_owned(),
+        );
+    }
+    let Expr::Vector(params) = param_expr else {
+        return Err(MagError::Type("fn parameters must be a vector".into()));
+    };
+    let param_types = params
+        .iter()
+        .map(|pair| match pair {
+            Expr::Vector(values) if values.len() == 2 => {
+                crate::eval::parse_type(env, &values[1], &vars)
+            }
+            _ => Err(MagError::Type("parameter must be [name Type]".into())),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = crate::eval::parse_type(env, return_expr, &vars)?;
+    Ok(MagType::Function(param_types, Box::new(result)))
 }
 
 pub fn check_call(
@@ -62,11 +219,26 @@ pub fn check_call(
     Ok((substitute(&function.return_type, &subst), subst))
 }
 
-fn infer(
+pub fn check_resolved_call(
     env: &Env,
-    locals: &mut HashMap<String, MagType>,
-    expr: &Expr,
-) -> Result<MagType, MagError> {
+    function: &crate::ast::FnValue,
+    resolved: &MagType,
+) -> Result<(MagType, HashMap<String, MagType>), MagError> {
+    let declared = MagType::Function(
+        function.param_types.clone(),
+        Box::new(function.return_type.clone()),
+    );
+    let MagType::Function(_, result) = resolved else {
+        return Err(MagError::Type(format!(
+            "checked call target must be a function, got {resolved}"
+        )));
+    };
+    let mut substitution = HashMap::new();
+    compatible(env, resolved, &declared, &mut substitution).map_err(MagError::Type)?;
+    Ok((result.as_ref().clone(), substitution))
+}
+
+fn infer(env: &Env, locals: &mut Locals, expr: &Expr) -> Result<MagType, MagError> {
     match expr {
         Expr::Nil => Ok(MagType::Unit),
         Expr::Bool(_) => Ok(MagType::Bool),
@@ -74,11 +246,31 @@ fn infer(
         Expr::Float(_) => Ok(MagType::Float),
         Expr::Str(_) => Ok(MagType::String),
         Expr::Keyword(_) => Ok(MagType::String),
-        Expr::Symbol(name) => locals
-            .get(name)
-            .cloned()
-            .or_else(|| env.lookup(name).ok().and_then(value_type))
-            .ok_or_else(|| MagError::Unresolved(name.clone())),
+        Expr::Symbol(name) => match locals.get(name).map(Vec::as_slice) {
+            Some([ty]) => Ok(ty.clone()),
+            Some(types) => {
+                let data = types
+                    .iter()
+                    .filter(|ty| !matches!(ty, MagType::Function(_, _)))
+                    .collect::<Vec<_>>();
+                match data.as_slice() {
+                    [ty] => Ok((*ty).clone()),
+                    _ => Err(MagError::Type(format!(
+                        "ambiguous overload {name}; candidates: {}",
+                        types
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))),
+                }
+            }
+            None => env
+                .lookup(name)
+                .ok()
+                .and_then(|value| value_type(&value))
+                .ok_or_else(|| MagError::Unresolved(name.clone())),
+        },
         Expr::Vector(xs) => infer_list(env, locals, xs),
         Expr::Map(fields) => {
             let mut out = BTreeMap::new();
@@ -99,11 +291,7 @@ fn infer(
     }
 }
 
-fn infer_list(
-    env: &Env,
-    locals: &mut HashMap<String, MagType>,
-    xs: &[Expr],
-) -> Result<MagType, MagError> {
+fn infer_list(env: &Env, locals: &mut Locals, xs: &[Expr]) -> Result<MagType, MagError> {
     if xs.is_empty() {
         return Ok(MagType::EmptyList);
     }
@@ -115,11 +303,7 @@ fn infer_list(
     Ok(MagType::List(Box::new(first)))
 }
 
-fn infer_form(
-    env: &Env,
-    locals: &mut HashMap<String, MagType>,
-    items: &[Expr],
-) -> Result<MagType, MagError> {
+fn infer_form(env: &Env, locals: &mut Locals, items: &[Expr]) -> Result<MagType, MagError> {
     if items.is_empty() {
         return Ok(MagType::Unit);
     }
@@ -148,34 +332,46 @@ fn infer_form(
                 return Ok(MagType::Union(vec![left, right]));
             }
             "let" => {
-                let bindings = match items.get(1) {
-                    Some(Expr::Vector(v)) if v.len() % 2 == 0 => v,
-                    _ => return Err(MagError::Type("let bindings must be pairs".into())),
-                };
-                let mut nested = locals.clone();
-                for pair in bindings.chunks(2) {
-                    let name = pair[0]
-                        .as_symbol()
-                        .ok_or_else(|| MagError::Type("let name must be a symbol".into()))?;
-                    let ty = infer(env, &mut nested, &pair[1])?;
-                    nested.insert(name.into(), ty);
-                }
-                let mut out = MagType::Unit;
-                for body in &items[2..] {
-                    out = infer(env, &mut nested, body)?;
-                }
-                return Ok(out);
+                return Err(MagError::Type(
+                    "let is only valid directly in a source or function block".into(),
+                ));
             }
             "as" => {
                 if items.len() != 3 {
                     return Err(MagError::Type("as expects a type and value".into()));
                 }
                 let mut vars = HashSet::new();
-                for ty in locals.values() {
+                for ty in locals.values().flatten() {
                     collect_vars(ty, &mut vars);
                 }
                 let target = crate::eval::parse_type(env, &items[1], &vars)?;
-                let _source = infer(env, locals, &items[2])?;
+                let _source = match &items[2] {
+                    Expr::Symbol(name) if locals.get(name).is_some_and(|types| types.len() > 1) => {
+                        let matches = locals[name]
+                            .iter()
+                            .filter(|ty| compatible(env, ty, &target, &mut HashMap::new()).is_ok())
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        match matches.as_slice() {
+                            [ty] => ty.clone(),
+                            [] => {
+                                return Err(MagError::Type(format!(
+                                    "no overload {name} matches {target}"
+                                )))
+                            }
+                            _ => {
+                                return Err(MagError::Type(format!(
+                                    "ambiguous overload {name} for {target}"
+                                )))
+                            }
+                        }
+                    }
+                    Expr::Symbol(name) if env.lookup_candidates(name).len() > 1 => {
+                        value_type(&env.lookup_by_type(name, &target)?)
+                            .ok_or_else(|| MagError::Type(format!("{name} has no value type")))?
+                    }
+                    _ => target.clone(),
+                };
                 return Ok(target);
             }
             "type-tag" => {
@@ -183,59 +379,86 @@ fn infer_form(
                     return Err(MagError::Type("type-tag expects one type".into()));
                 }
                 let mut vars = HashSet::new();
-                for ty in locals.values() {
+                for ty in locals.values().flatten() {
                     collect_vars(ty, &mut vars);
                 }
                 return Ok(MagType::TypeTag(Box::new(crate::eval::parse_type(
                     env, &items[1], &vars,
                 )?)));
             }
-            "specialize" => {
-                if items.len() != 3 {
-                    return Err(MagError::Type(
-                        "specialize expects a foreign and type vector".into(),
-                    ));
-                }
-                let decl = match items[1].as_symbol().and_then(|name| env.lookup(name).ok()) {
-                    Some(Value::Foreign(decl)) => decl,
-                    _ => {
-                        return Err(MagError::Type(
-                            "specialize expects a Foreign declaration".into(),
-                        ))
-                    }
-                };
-                let exprs = match &items[2] {
-                    Expr::Vector(v) => v,
-                    _ => return Err(MagError::Type("specialize types must be a vector".into())),
-                };
-                if exprs.len() != decl.type_params.len() {
-                    return Err(MagError::Type(format!(
-                        "{} expects {} type arguments",
-                        decl.name,
-                        decl.type_params.len()
-                    )));
-                }
-                let mut vars = HashSet::new();
-                for ty in locals.values() {
-                    collect_vars(ty, &mut vars);
-                }
-                let args = exprs
-                    .iter()
-                    .map(|expr| crate::eval::parse_type(env, expr, &vars))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let subst = decl.type_params.iter().cloned().zip(args).collect();
-                return Ok(MagType::Foreign(
-                    Box::new(substitute(&decl.params, &subst)),
-                    Box::new(substitute(&decl.input, &subst)),
-                    Box::new(substitute(&decl.output, &subst)),
-                ));
-            }
             "fn" => return infer_fn(env, locals, items),
             _ => {}
         }
     }
     if let Some(name) = items[0].as_symbol() {
-        if let Ok(Value::BuiltinFn(_)) = env.lookup(name) {
+        let env_candidates = env.lookup_candidates(name);
+        let builtin = env_candidates
+            .iter()
+            .any(|candidate| matches!(candidate, Value::BuiltinFn(_)));
+        let mut signatures = locals
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter_map(|candidate| match candidate {
+                MagType::Function(params, result) => {
+                    let mut variables = HashSet::new();
+                    collect_vars(candidate, &mut variables);
+                    Some((variables.is_empty(), params.clone(), (**result).clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for signature in env_candidates.iter().filter_map(|candidate| {
+            let Value::Fn(function) = candidate else {
+                return None;
+            };
+            Some((
+                function.type_params.is_empty(),
+                function.param_types.clone(),
+                function.return_type.clone(),
+            ))
+        }) {
+            if !signatures.contains(&signature) {
+                signatures.push(signature);
+            }
+        }
+        if !signatures.is_empty() {
+            let argument_types = items[1..]
+                .iter()
+                .map(|argument| infer(env, locals, argument))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut matching = signatures
+                .iter()
+                .filter_map(|(concrete, params, result)| {
+                    if params.len() != argument_types.len() {
+                        return None;
+                    }
+                    let mut substitution = HashMap::new();
+                    for (actual, expected) in argument_types.iter().zip(params) {
+                        compatible(env, actual, expected, &mut substitution).ok()?;
+                    }
+                    Some((*concrete, substitute(result, &substitution)))
+                })
+                .collect::<Vec<_>>();
+            if matching.len() > 1 {
+                let concrete = matching
+                    .iter()
+                    .filter(|(concrete, _)| *concrete)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if concrete.len() == 1 {
+                    matching = concrete;
+                }
+            }
+            return match matching.as_slice() {
+                [(_, result)] => Ok(result.clone()),
+                [] if builtin => infer_builtin(env, locals, name, &items[1..]),
+                [] => Err(MagError::Type(format!("no overload {name} matches call"))),
+                _ => Err(MagError::Type(format!(
+                    "ambiguous overload {name} for call"
+                ))),
+            };
+        } else if builtin {
             return infer_builtin(env, locals, name, &items[1..]);
         }
     }
@@ -259,11 +482,7 @@ fn infer_form(
     Ok(substitute(&result, &subst))
 }
 
-fn infer_fn(
-    env: &Env,
-    outer: &HashMap<String, MagType>,
-    items: &[Expr],
-) -> Result<MagType, MagError> {
+fn infer_fn(env: &Env, outer: &Locals, items: &[Expr]) -> Result<MagType, MagError> {
     let args = &items[1..];
     if args.len() < 4 {
         return Err(MagError::Type("typed fn signature required".into()));
@@ -279,7 +498,7 @@ fn infer_fn(
         return Err(MagError::Type("fn signature requires ->".into()));
     }
     let mut vars = HashSet::new();
-    for ty in outer.values() {
+    for ty in outer.values().flatten() {
         collect_vars(ty, &mut vars);
     }
     let declared_vars = match type_expr {
@@ -298,7 +517,7 @@ fn infer_fn(
         Expr::Vector(v) => v,
         _ => return Err(MagError::Type("fn parameters must be a vector".into())),
     };
-    let mut names = vec![];
+    let mut names = Vec::<String>::new();
     let mut types = vec![];
     for pair in pairs {
         match pair {
@@ -316,10 +535,34 @@ fn infer_fn(
     let result = crate::eval::parse_type(env, return_expr, &vars)?;
     let mut locals = outer.clone();
     for (name, ty) in names.iter().cloned().zip(types.iter().cloned()) {
-        locals.insert(name, ty);
+        add_local(&mut locals, name, ty)?;
+    }
+    for expr in body {
+        let Some((name, initializer)) = direct_let(expr)? else {
+            continue;
+        };
+        if is_fn(initializer) {
+            let ty = infer_fn_signature(env, &locals, initializer)?;
+            add_local(&mut locals, name, ty)?;
+        }
+    }
+    for expr in body {
+        let Some((name, initializer)) = direct_let(expr)? else {
+            continue;
+        };
+        if !is_fn(initializer) {
+            let ty = infer(env, &mut locals, initializer)?;
+            add_local(&mut locals, name, ty)?;
+        }
     }
     let mut actual = MagType::Unit;
     for expr in body {
+        if let Some((_, initializer)) = direct_let(expr)? {
+            if is_fn(initializer) {
+                let _ = infer(env, &mut locals, initializer)?;
+            }
+            continue;
+        }
         actual = infer(env, &mut locals, expr)?;
     }
     compatible(env, &actual, &result, &mut HashMap::new()).map_err(|message| {
@@ -332,7 +575,7 @@ fn infer_fn(
 
 fn infer_builtin(
     env: &Env,
-    locals: &mut HashMap<String, MagType>,
+    locals: &mut Locals,
     name: &str,
     args: &[Expr],
 ) -> Result<MagType, MagError> {
@@ -350,6 +593,12 @@ fn infer_builtin(
         "get" => {
             exact(2)?;
             let target = infer(env, locals, &args[0])?;
+            if matches!(target, MagType::HostInputs) {
+                return Err(MagError::Type("get expects a map".into()));
+            }
+            let key_type = infer(env, locals, &args[1])?;
+            compatible(env, &key_type, &MagType::String, &mut HashMap::new())
+                .map_err(MagError::Type)?;
             let key = match &args[1] {
                 Expr::Str(s) | Expr::Keyword(s) => Some(s.as_str()),
                 _ => None,
@@ -360,6 +609,9 @@ fn infer_builtin(
         "assoc" => {
             exact(3)?;
             let target = infer(env, locals, &args[0])?;
+            let key_type = infer(env, locals, &args[1])?;
+            compatible(env, &key_type, &MagType::String, &mut HashMap::new())
+                .map_err(MagError::Type)?;
             let key = match &args[1] {
                 Expr::Str(s) | Expr::Keyword(s) => Some(s.as_str()),
                 _ => None,
@@ -395,21 +647,14 @@ fn infer_builtin(
                 .map_err(MagError::Type)?;
             Ok(MagType::Bool)
         }
-        "foreign-id" => {
-            exact(1)?;
-            match infer(env, locals, &args[0])? {
-                MagType::Foreign(_, _, _) => Ok(MagType::String),
+        "host-input" => {
+            exact(2)?;
+            let key = infer(env, locals, &args[0])?;
+            compatible(env, &key, &MagType::String, &mut HashMap::new()).map_err(MagError::Type)?;
+            match infer(env, locals, &args[1])? {
+                MagType::TypeTag(expected) => Ok(*expected),
                 actual => Err(MagError::Type(format!(
-                    "foreign-id expects Foreign, got {actual}"
-                ))),
-            }
-        }
-        "foreign-evidence" => {
-            exact(1)?;
-            match infer(env, locals, &args[0])? {
-                MagType::Foreign(_, _, _) => Ok(MagType::ForeignEvidence),
-                actual => Err(MagError::Type(format!(
-                    "foreign-evidence expects Foreign, got {actual}"
+                    "host-input expects TypeTag, got {actual}"
                 ))),
             }
         }
@@ -590,30 +835,6 @@ fn infer_builtin(
                 Box::new(MagType::TypeDescriptor),
             ))
         }
-        "foreign-contracts" => {
-            exact(0)?;
-            Ok(MagType::List(Box::new(MagType::Record(
-                [
-                    ("identity".into(), MagType::String),
-                    (
-                        "type_scheme".into(),
-                        MagType::Record(
-                            [
-                                (
-                                    "input_tags".into(),
-                                    MagType::List(Box::new(MagType::String)),
-                                ),
-                                ("outputs".into(), MagType::List(Box::new(MagType::String))),
-                            ]
-                            .into_iter()
-                            .collect(),
-                        ),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-            ))))
-        }
         "read" => {
             if !(1..=2).contains(&args.len()) {
                 return Err(MagError::Type(format!(
@@ -629,12 +850,16 @@ fn infer_builtin(
             }
             Ok(MagType::String)
         }
-        "artifact" => {
-            exact(2)?;
-            let format = infer(env, locals, &args[0])?;
-            compatible(env, &format, &MagType::String, &mut HashMap::new())
+        "read-json" => {
+            exact(1)?;
+            let path = infer(env, locals, &args[0])?;
+            compatible(env, &path, &MagType::String, &mut HashMap::new())
                 .map_err(MagError::Type)?;
-            let _ = infer(env, locals, &args[1])?;
+            Ok(MagType::JsonValue)
+        }
+        "artifact" => {
+            exact(1)?;
+            let _ = infer(env, locals, &args[0])?;
             Ok(MagType::Artifact)
         }
         "concat" => {
@@ -756,7 +981,1534 @@ fn infer_builtin(
     }
 }
 
-fn value_type(value: &Value) -> Option<MagType> {
+#[derive(Clone)]
+struct CheckedCandidate {
+    id: BindingId,
+    ty: MagType,
+    generic_binders: Vec<String>,
+    contributes_type_vars: bool,
+}
+
+type CheckedScope = HashMap<String, Vec<CheckedCandidate>>;
+const TYPE_BINDER_SCOPE_KEY: &str = "\0type-binders";
+
+pub(crate) const BUILTIN_NAMES: &[&str] = &[
+    "str",
+    "map",
+    "indexed-map",
+    "filter",
+    "flat-map",
+    "fold",
+    "concat",
+    "get",
+    "assoc",
+    "keys",
+    "count",
+    "first",
+    "canonical",
+    "sort-by",
+    "remove-at",
+    "conforms?",
+    "or",
+    "not",
+    "=",
+    "fail",
+    "type-evidence",
+    "read",
+    "read-json",
+    "require",
+    "artifact",
+    "type-schema",
+    "type-id",
+    "value-type-id",
+    "value-type-evidence",
+    "pack",
+    "packed-empty-record?",
+    "packed-record-has-only-key?",
+    "packed-record-has-only-keys?",
+    "packed-field-conforms?",
+    "descriptor-accepts?",
+    "descriptor-input-covered-by?",
+    "descriptor-input-assignments",
+    "descriptor-output-covered-by?",
+    "descriptor-table",
+    "host-input",
+];
+
+fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagType> {
+    let var = |name: &str| MagType::Var(format!("\0builtin.{name}"));
+    let function =
+        |params: Vec<MagType>, result: MagType| MagType::Function(params, Box::new(result));
+    let list = |item: MagType| MagType::List(Box::new(item));
+    let map = |key: MagType, value: MagType| MagType::Map(Box::new(key), Box::new(value));
+    let tag = |value: MagType| MagType::TypeTag(Box::new(value));
+    let descriptor = MagType::TypeDescriptor;
+    let packed = MagType::PackedValue;
+    let mut signatures = match name {
+        "str" => candidate
+            .and_then(|candidate| match candidate {
+                MagType::Function(params, _) => {
+                    Some(vec![function(params.clone(), MagType::String)])
+                }
+                _ => None,
+            })
+            .unwrap_or_default(),
+        "count" => vec![
+            function(vec![list(var("item"))], MagType::Int),
+            function(vec![MagType::String], MagType::Int),
+            function(vec![map(var("key"), var("value"))], MagType::Int),
+        ],
+        "first" => vec![function(vec![list(var("item"))], var("item"))],
+        "remove-at" => vec![function(
+            vec![list(var("item")), MagType::Int],
+            list(var("item")),
+        )],
+        "concat" => vec![
+            function(
+                vec![list(var("item")), list(var("item"))],
+                list(var("item")),
+            ),
+            function(vec![MagType::String, MagType::String], MagType::String),
+        ],
+        "not" => vec![function(vec![MagType::Bool], MagType::Bool)],
+        "=" => vec![function(vec![var("value"), var("value")], MagType::Bool)],
+        "host-input" => vec![function(
+            vec![MagType::String, tag(var("value"))],
+            var("value"),
+        )],
+        "type-evidence" => vec![function(vec![tag(var("value"))], descriptor)],
+        "type-schema" => vec![function(vec![tag(var("value"))], MagType::TypeSchema)],
+        "type-id" => vec![function(vec![descriptor], MagType::SemanticTypeId)],
+        "value-type-id" => vec![
+            function(
+                vec![var("value"), tag(var("value"))],
+                MagType::SemanticTypeId,
+            ),
+            function(
+                vec![var("value"), descriptor.clone()],
+                MagType::SemanticTypeId,
+            ),
+        ],
+        "value-type-evidence" => vec![function(
+            vec![var("value"), descriptor.clone()],
+            descriptor.clone(),
+        )],
+        "canonical" => vec![function(vec![var("value")], MagType::String)],
+        "conforms?" => vec![function(vec![var("value"), descriptor], MagType::Bool)],
+        "fail" => vec![function(vec![var("value")], MagType::Never)],
+        "pack" => vec![function(vec![var("value")], packed.clone())],
+        "packed-empty-record?" => vec![function(vec![packed.clone()], MagType::Bool)],
+        "packed-record-has-only-key?" => vec![function(
+            vec![packed.clone(), MagType::String],
+            MagType::Bool,
+        )],
+        "packed-record-has-only-keys?" => vec![function(
+            vec![packed.clone(), list(MagType::String)],
+            MagType::Bool,
+        )],
+        "packed-field-conforms?" => vec![function(
+            vec![packed, MagType::String, descriptor],
+            MagType::Bool,
+        )],
+        "descriptor-accepts?" => vec![function(
+            vec![descriptor.clone(), descriptor.clone()],
+            MagType::Bool,
+        )],
+        "descriptor-input-covered-by?" | "descriptor-output-covered-by?" => vec![function(
+            vec![descriptor.clone(), list(descriptor.clone())],
+            MagType::Bool,
+        )],
+        "descriptor-input-assignments" => vec![function(
+            vec![descriptor.clone(), list(descriptor.clone())],
+            list(MagType::Int),
+        )],
+        "descriptor-table" => vec![function(
+            vec![list(descriptor.clone())],
+            map(MagType::String, descriptor.clone()),
+        )],
+        "read" => vec![
+            function(vec![MagType::String], MagType::String),
+            function(vec![MagType::String, var("fallback")], MagType::String),
+        ],
+        "read-json" => vec![function(vec![MagType::String], MagType::JsonValue)],
+        "require" => vec![function(vec![MagType::String], MagType::Unit)],
+        "artifact" => vec![function(vec![var("value")], MagType::Artifact)],
+        "or" => vec![function(vec![var("value"), var("value")], var("value"))],
+        "keys" => vec![function(
+            vec![map(var("key"), var("value"))],
+            list(MagType::String),
+        )],
+        "get" => vec![function(
+            vec![map(var("key"), var("value")), MagType::String],
+            var("value"),
+        )],
+        "assoc" => vec![function(
+            vec![map(var("key"), var("value")), MagType::String, var("value")],
+            map(var("key"), var("value")),
+        )],
+        "map" => vec![function(
+            vec![
+                function(vec![var("item")], var("result")),
+                list(var("item")),
+            ],
+            list(var("result")),
+        )],
+        "filter" => vec![function(
+            vec![
+                function(vec![var("item")], MagType::Bool),
+                list(var("item")),
+            ],
+            list(var("item")),
+        )],
+        "flat-map" => vec![function(
+            vec![
+                function(vec![var("item")], list(var("result"))),
+                list(var("item")),
+            ],
+            list(var("result")),
+        )],
+        "sort-by" => vec![function(
+            vec![
+                function(vec![var("item")], MagType::String),
+                list(var("item")),
+            ],
+            list(var("item")),
+        )],
+        "indexed-map" => vec![function(
+            vec![
+                function(vec![MagType::Int, var("item")], var("result")),
+                list(var("item")),
+            ],
+            list(var("result")),
+        )],
+        "fold" => vec![function(
+            vec![
+                function(vec![var("state"), var("item")], var("state")),
+                var("state"),
+                list(var("item")),
+            ],
+            var("state"),
+        )],
+        _ => Vec::new(),
+    };
+    if let Some(MagType::Function(params, _)) = candidate {
+        if name == "or" && params.len() == 2 {
+            signatures.push(function(params.clone(), MagType::Union(params.clone())));
+        }
+        if let Some(MagType::Record(fields)) = params.first() {
+            match name {
+                "count" => signatures.push(function(vec![params[0].clone()], MagType::Int)),
+                "keys" => signatures.push(function(vec![params[0].clone()], list(MagType::String))),
+                "get" if params.len() == 2 && params[1] == MagType::String => {
+                    signatures.extend(
+                        fields
+                            .values()
+                            .cloned()
+                            .map(|field| function(vec![params[0].clone(), MagType::String], field)),
+                    );
+                }
+                "assoc" if params.len() == 3 && params[1] == MagType::String => {
+                    signatures.extend(fields.values().cloned().map(|field| {
+                        function(
+                            vec![params[0].clone(), MagType::String, field],
+                            params[0].clone(),
+                        )
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+    signatures
+}
+
+fn collides_with_builtin(env: &Env, name: &str, candidate: &MagType) -> bool {
+    builtin_overload_types(name, Some(candidate))
+        .iter()
+        .any(|builtin| {
+            let bindable = internal_type_variables(builtin);
+            compatible_with_bindable(env, candidate, builtin, &mut HashMap::new(), &bindable)
+                .is_ok()
+        })
+}
+
+/// Resolves a source block into typed expressions whose authored references
+/// point at stable binding identities. Evaluation never has to repeat name or
+/// overload resolution.
+pub fn compile_block(env: &Env, expressions: &[Expr]) -> Result<CheckedBlock, MagError> {
+    compile_block_in(env, &[], expressions, None)
+}
+
+fn compile_block_in(
+    env: &Env,
+    outer: &[CheckedScope],
+    expressions: &[Expr],
+    result_expected: Option<&MagType>,
+) -> Result<CheckedBlock, MagError> {
+    let mut declarations = Vec::new();
+    for expression in expressions {
+        if let Some(declaration) = direct_let(expression)? {
+            declarations.push(declaration);
+        }
+    }
+    let allocated = declarations
+        .iter()
+        .map(|(name, initializer)| (*name, *initializer, env.allocate_binding_id(name, None)))
+        .collect::<Vec<_>>();
+
+    let mut current = CheckedScope::new();
+    let scoped_type_vars = visible_type_variables(outer);
+    let mut pending = Vec::new();
+    for (name, initializer, id) in &allocated {
+        if is_fn(initializer) {
+            let ty = infer_fn_signature_scoped(env, &scoped_type_vars, initializer)?;
+            insert_checked_candidate(
+                env,
+                outer,
+                &mut current,
+                name,
+                *id,
+                ty,
+                function_type_params(initializer)?,
+                false,
+            )?;
+        } else {
+            pending.push((*name, *initializer, *id));
+        }
+    }
+
+    // Strict initializers are inferred as a dependency fixpoint. Function
+    // bodies are intentionally not visited here: their signatures provide the
+    // complete peer inventory before any body is checked.
+    while !pending.is_empty() {
+        let mut next = Vec::new();
+        let mut progressed = false;
+        for (name, initializer, id) in pending {
+            let mut types = visible_types(env, outer, &current);
+            match infer_shape(env, &mut types, &scoped_type_vars, initializer) {
+                Ok(ty) => {
+                    insert_checked_candidate(
+                        env,
+                        outer,
+                        &mut current,
+                        name,
+                        id,
+                        ty,
+                        vec![],
+                        false,
+                    )?;
+                    progressed = true;
+                }
+                Err(MagError::Unresolved(_)) => next.push((name, initializer, id)),
+                Err(error) => return Err(error),
+            }
+        }
+        if !progressed {
+            let names = next.iter().map(|(name, _, _)| *name).collect::<Vec<_>>();
+            return Err(MagError::Type(format!(
+                "cannot infer recursive strict bindings: {}",
+                names.join(", ")
+            )));
+        }
+        pending = next;
+    }
+
+    let mut scopes = outer.to_vec();
+    scopes.push(current.clone());
+    let mut bindings = Vec::with_capacity(allocated.len());
+    for (name, initializer, id) in allocated {
+        let candidate = current
+            .get(name)
+            .and_then(|candidates| candidates.iter().find(|candidate| candidate.id == id))
+            .ok_or_else(|| MagError::Unresolved(name.into()))?;
+        let checked = if is_fn(initializer) {
+            compile_function(env, &scopes, Some(name), initializer, Some(&candidate.ty))?
+        } else {
+            compile_expr(env, &scopes, initializer, Some(&candidate.ty))?
+        };
+        bindings.push(CheckedBinding {
+            id,
+            name: name.into(),
+            ty: candidate.ty.clone(),
+            initializer: Arc::new(checked),
+        });
+    }
+
+    let last_expression = expressions
+        .iter()
+        .rposition(|expression| direct_let(expression).ok().flatten().is_none());
+    let mut checked_expressions = Vec::new();
+    for (index, expression) in expressions.iter().enumerate() {
+        if direct_let(expression)?.is_none() {
+            let expected = (Some(index) == last_expression)
+                .then_some(result_expected)
+                .flatten();
+            let checked = match compile_expr(env, &scopes, expression, expected) {
+                Ok(checked) => checked,
+                Err(_) if expected.is_some() => compile_expr(env, &scopes, expression, None)?,
+                Err(error) => return Err(error),
+            };
+            checked_expressions.push(checked);
+        }
+    }
+    Ok(CheckedBlock {
+        frame_layout: bindings.iter().map(|binding| binding.id).collect(),
+        bindings,
+        expressions: checked_expressions,
+    })
+}
+
+fn insert_checked_candidate(
+    env: &Env,
+    outer: &[CheckedScope],
+    current: &mut CheckedScope,
+    name: &str,
+    id: BindingId,
+    ty: MagType,
+    generic_binders: Vec<String>,
+    contributes_type_vars: bool,
+) -> Result<(), MagError> {
+    let canonical = canonical_type(&ty);
+    if visible_candidates(env, outer, current, name)
+        .iter()
+        .any(|candidate| canonical_type(&candidate.ty) == canonical)
+        || collides_with_builtin(env, name, &ty)
+    {
+        return Err(MagError::Type(format!(
+            "duplicate visible overload {name}: {ty}"
+        )));
+    }
+    env.set_binding_type(id, ty.clone());
+    current
+        .entry(name.to_owned())
+        .or_default()
+        .push(CheckedCandidate {
+            id,
+            ty,
+            generic_binders,
+            contributes_type_vars,
+        });
+    Ok(())
+}
+
+fn env_candidates(env: &Env, name: &str) -> Vec<CheckedCandidate> {
+    env.lookup_candidate_ids(name)
+        .into_iter()
+        .filter_map(|id| {
+            env.binding_metadata(id)
+                .and_then(|metadata| metadata.ty)
+                .map(|ty| {
+                    let generic_binders = match env.ready_binding(id) {
+                        Ok(Value::Fn(function)) => function.type_params.clone(),
+                        _ => vec![],
+                    };
+                    CheckedCandidate {
+                        id,
+                        ty,
+                        generic_binders,
+                        contributes_type_vars: false,
+                    }
+                })
+        })
+        .collect()
+}
+
+fn builtin_id(env: &Env, name: &str) -> Option<BindingId> {
+    env.lookup_candidate_ids(name).into_iter().find(
+        |id| matches!(env.ready_binding(*id), Ok(Value::BuiltinFn(ref builtin)) if builtin == name),
+    )
+}
+
+fn visible_candidates(
+    env: &Env,
+    scopes: &[CheckedScope],
+    current: &CheckedScope,
+    name: &str,
+) -> Vec<CheckedCandidate> {
+    let mut candidates = scopes
+        .iter()
+        .flat_map(|scope| scope.get(name).into_iter().flatten().cloned())
+        .chain(current.get(name).into_iter().flatten().cloned())
+        .chain(env_candidates(env, name))
+        .collect::<Vec<_>>();
+    let mut seen = HashSet::new();
+    candidates.retain(|candidate| seen.insert(candidate.id));
+    candidates
+}
+
+fn all_candidates(env: &Env, scopes: &[CheckedScope], name: &str) -> Vec<CheckedCandidate> {
+    visible_candidates(env, scopes, &CheckedScope::new(), name)
+}
+
+fn visible_types(_env: &Env, scopes: &[CheckedScope], current: &CheckedScope) -> Locals {
+    let mut types = Locals::new();
+    for scope in scopes.iter().chain(std::iter::once(current)) {
+        for (name, candidates) in scope {
+            let entry = types.entry(name.clone()).or_default();
+            for candidate in candidates {
+                if !entry.contains(&candidate.ty) {
+                    entry.push(candidate.ty.clone());
+                }
+            }
+        }
+    }
+    types
+}
+
+fn infer_shape(
+    env: &Env,
+    locals: &mut Locals,
+    scoped_type_vars: &HashSet<String>,
+    expression: &Expr,
+) -> Result<MagType, MagError> {
+    match expression {
+        Expr::List(items) if matches!(items.first(), Some(Expr::Symbol(head)) if head == "fn") => {
+            infer_fn_signature_scoped(env, scoped_type_vars, expression)
+        }
+        Expr::Vector(items) => {
+            if items.is_empty() {
+                return Ok(MagType::EmptyList);
+            }
+            let first = infer_shape(env, locals, scoped_type_vars, &items[0])?;
+            for item in &items[1..] {
+                let actual = infer_shape(env, locals, scoped_type_vars, item)?;
+                compatible_static(env, &actual, &first, &mut HashMap::new())
+                    .map_err(MagError::Type)?;
+            }
+            Ok(MagType::List(Box::new(first)))
+        }
+        Expr::Map(fields) => fields
+            .iter()
+            .map(|(key, value)| {
+                let key = record_key(key)?;
+                Ok((key, infer_shape(env, locals, scoped_type_vars, value)?))
+            })
+            .collect::<Result<BTreeMap<_, _>, MagError>>()
+            .map(MagType::Record),
+        Expr::List(items) if matches!(items.first(), Some(Expr::Symbol(head)) if head == "as") => {
+            if items.len() != 3 {
+                return Err(MagError::Type("as expects a type and value".into()));
+            }
+            crate::eval::parse_type(env, &items[1], scoped_type_vars)
+        }
+        Expr::List(items) if matches!(items.first(), Some(Expr::Symbol(head)) if head == "type-tag") =>
+        {
+            if items.len() != 2 {
+                return Err(MagError::Type("type-tag expects one type".into()));
+            }
+            Ok(MagType::TypeTag(Box::new(crate::eval::parse_type(
+                env,
+                &items[1],
+                scoped_type_vars,
+            )?)))
+        }
+        Expr::List(items) if matches!(items.first(), Some(Expr::Symbol(head)) if head == "if") => {
+            if !(3..=4).contains(&items.len()) {
+                return Err(MagError::Type("if expects 2-3 arguments".into()));
+            }
+            let condition = infer_shape(env, locals, scoped_type_vars, &items[1])?;
+            compatible_static(env, &condition, &MagType::Bool, &mut HashMap::new())
+                .map_err(MagError::Type)?;
+            let left = infer_shape(env, locals, scoped_type_vars, &items[2])?;
+            let right = if items.len() == 4 {
+                infer_shape(env, locals, scoped_type_vars, &items[3])?
+            } else {
+                MagType::Unit
+            };
+            if compatible_static(env, &left, &right, &mut HashMap::new()).is_ok() {
+                Ok(right)
+            } else {
+                Ok(MagType::Union(vec![left, right]))
+            }
+        }
+        _ => infer(env, locals, expression),
+    }
+}
+
+fn compile_expr(
+    env: &Env,
+    scopes: &[CheckedScope],
+    expression: &Expr,
+    expected: Option<&MagType>,
+) -> Result<CheckedExpr, MagError> {
+    let checked = match expression {
+        Expr::Nil => checked(MagType::Unit, CheckedExprKind::Unit),
+        Expr::Bool(value) => checked(MagType::Bool, CheckedExprKind::Bool(*value)),
+        Expr::Int(value) => checked(MagType::Int, CheckedExprKind::Int(*value)),
+        Expr::Float(value) => checked(MagType::Float, CheckedExprKind::Float(*value)),
+        Expr::Str(value) => checked(MagType::String, CheckedExprKind::Str(value.clone())),
+        Expr::Keyword(value) => checked(MagType::String, CheckedExprKind::Keyword(value.clone())),
+        Expr::Symbol(name) => compile_symbol(env, scopes, name, expected)?,
+        Expr::Vector(items) => compile_vector(env, scopes, items, expected)?,
+        Expr::Map(fields) => compile_map(env, scopes, fields, expected)?,
+        Expr::List(items) => compile_form(env, scopes, items, expected)?,
+    };
+    if let Some(expected) = expected {
+        compatible_static(env, &checked.ty, expected, &mut HashMap::new())
+            .map_err(MagError::Type)?;
+    }
+    Ok(checked)
+}
+
+fn checked(ty: MagType, kind: CheckedExprKind) -> CheckedExpr {
+    CheckedExpr { ty, kind }
+}
+
+fn compile_symbol(
+    env: &Env,
+    scopes: &[CheckedScope],
+    name: &str,
+    expected: Option<&MagType>,
+) -> Result<CheckedExpr, MagError> {
+    let candidates = all_candidates(env, scopes, name);
+    let mut matches = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let (candidate_type, mut bindable) = instantiate_candidate(candidate);
+            let resolved = if let Some(expected) = expected {
+                bindable.extend(internal_type_variables(expected));
+                let mut substitution = HashMap::new();
+                if !candidate.generic_binders.is_empty() {
+                    compatible_with_bindable(
+                        env,
+                        expected,
+                        &candidate_type,
+                        &mut substitution,
+                        &bindable,
+                    )
+                    .ok()?;
+                    substitute(&candidate_type, &substitution)
+                } else {
+                    compatible_with_bindable(
+                        env,
+                        &candidate_type,
+                        expected,
+                        &mut substitution,
+                        &bindable,
+                    )
+                    .ok()?;
+                    candidate_type
+                }
+            } else {
+                candidate_type
+            };
+            Some((candidate, resolved))
+        })
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        let concrete = matches
+            .iter()
+            .filter(|(candidate, _)| candidate.generic_binders.is_empty())
+            .count();
+        if concrete == 1 {
+            matches.retain(|(candidate, _)| candidate.generic_binders.is_empty());
+        }
+    }
+    if expected.is_none() && matches.len() > 1 {
+        let data = matches
+            .iter()
+            .filter(|(_, resolved)| !matches!(resolved, MagType::Function(_, _)))
+            .cloned()
+            .collect::<Vec<_>>();
+        if data.len() == 1 {
+            matches = data;
+        }
+    }
+    match matches.as_slice() {
+        [(candidate, resolved)] => Ok(checked(
+            resolved.clone(),
+            CheckedExprKind::BindingRef(candidate.id),
+        )),
+        [] if candidates.is_empty() => Err(MagError::Unresolved(name.into())),
+        [] => Err(MagError::Type(format!(
+            "no overload {name} matches {}",
+            expected
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "context".into())
+        ))),
+        _ => Err(MagError::Type(format!(
+            "ambiguous overload {name}; candidates: {}",
+            matches
+                .iter()
+                .map(|(_, resolved)| resolved.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+fn compile_vector(
+    env: &Env,
+    scopes: &[CheckedScope],
+    items: &[Expr],
+    expected: Option<&MagType>,
+) -> Result<CheckedExpr, MagError> {
+    if let Some(MagType::Product(_)) = expected {
+        let checked_items = items
+            .iter()
+            .map(|item| compile_expr(env, scopes, item, None))
+            .collect::<Result<Vec<_>, _>>()?;
+        let actual = checked_items
+            .iter()
+            .map(|item| item.ty.clone())
+            .collect::<Vec<_>>();
+        return Ok(checked(
+            MagType::Product(actual),
+            CheckedExprKind::Vector(checked_items),
+        ));
+    }
+    let expected_item = match expected {
+        Some(MagType::List(item)) => Some(item.as_ref()),
+        _ => None,
+    };
+    let mut checked_items = Vec::with_capacity(items.len());
+    let mut item_type = expected_item.cloned();
+    for item in items {
+        let value = compile_expr(env, scopes, item, expected_item)?;
+        if let Some(ty) = expected_item {
+            compatible_static(env, &value.ty, ty, &mut HashMap::new()).map_err(MagError::Type)?;
+        } else if let Some(current) = &item_type {
+            if compatible_static(env, &value.ty, current, &mut HashMap::new()).is_err() {
+                let mut alternatives = match current {
+                    MagType::Union(alternatives) => alternatives.clone(),
+                    ty => vec![ty.clone()],
+                };
+                if !alternatives.contains(&value.ty) {
+                    alternatives.push(value.ty.clone());
+                }
+                item_type = Some(MagType::Union(alternatives));
+            }
+        } else {
+            item_type = Some(value.ty.clone());
+        }
+        checked_items.push(value);
+    }
+    let ty = item_type
+        .map(|item| MagType::List(Box::new(item)))
+        .unwrap_or(MagType::EmptyList);
+    Ok(checked(ty, CheckedExprKind::Vector(checked_items)))
+}
+
+fn record_key(expression: &Expr) -> Result<String, MagError> {
+    match expression {
+        Expr::Keyword(key) | Expr::Symbol(key) | Expr::Str(key) => Ok(key.clone()),
+        _ => Err(MagError::Type(
+            "record key must be a keyword, symbol, or string".into(),
+        )),
+    }
+}
+
+fn compile_map(
+    env: &Env,
+    scopes: &[CheckedScope],
+    fields: &[(Expr, Expr)],
+    expected: Option<&MagType>,
+) -> Result<CheckedExpr, MagError> {
+    let mut checked_fields = Vec::with_capacity(fields.len());
+    let mut field_types = BTreeMap::new();
+    for (key, value) in fields {
+        let key = record_key(key)?;
+        let expected_field = match expected {
+            Some(MagType::Record(fields)) => fields.get(&key),
+            Some(MagType::Map(_, value)) => Some(value.as_ref()),
+            _ => None,
+        };
+        let value = compile_expr(env, scopes, value, expected_field)?;
+        field_types.insert(key.clone(), value.ty.clone());
+        checked_fields.push((key, value));
+    }
+    Ok(checked(
+        MagType::Record(field_types),
+        CheckedExprKind::Map(checked_fields),
+    ))
+}
+
+fn compile_form(
+    env: &Env,
+    scopes: &[CheckedScope],
+    items: &[Expr],
+    expected: Option<&MagType>,
+) -> Result<CheckedExpr, MagError> {
+    if items.is_empty() {
+        return Ok(checked(MagType::Unit, CheckedExprKind::Unit));
+    }
+    if let Some(head) = items[0].as_symbol() {
+        match head {
+            "let" => {
+                return Err(MagError::Type(
+                    "let is only valid directly in a source or function block".into(),
+                ))
+            }
+            "if" => return compile_if(env, scopes, items, expected),
+            "as" => return compile_ascribe(env, scopes, items),
+            "type-tag" => return compile_type_tag(env, scopes, items),
+            "fn" => {
+                return compile_function(env, scopes, None, &Expr::List(items.to_vec()), expected)
+            }
+            _ => {}
+        }
+        let candidates = all_candidates(env, scopes, head);
+        let function_candidates = candidates
+            .into_iter()
+            .filter(|candidate| matches!(candidate.ty, MagType::Function(_, _)))
+            .collect::<Vec<_>>();
+        if !function_candidates.is_empty() {
+            let user_call = compile_overloaded_call(
+                env,
+                scopes,
+                head,
+                &function_candidates,
+                &items[1..],
+                expected,
+            );
+            if user_call.is_ok() || builtin_id(env, head).is_none() {
+                return user_call;
+            }
+        }
+        if let Some(id) = builtin_id(env, head) {
+            return compile_builtin_call(env, scopes, head, id, &items[1..], expected);
+        }
+    }
+    let callee = compile_expr(env, scopes, &items[0], None)?;
+    let MagType::Function(params, result) = &callee.ty else {
+        return Err(MagError::Type(format!("cannot call {}", callee.ty)));
+    };
+    if params.len() != items.len() - 1 {
+        return Err(MagError::Arity {
+            expected: params.len(),
+            got: items.len() - 1,
+        });
+    }
+    let mut substitution = HashMap::new();
+    let mut args = Vec::with_capacity(params.len());
+    for (expression, parameter) in items[1..].iter().zip(params) {
+        let parameter = substitute(parameter, &substitution);
+        let argument = compile_expr(env, scopes, expression, Some(&parameter))?;
+        compatible_static(env, &argument.ty, &parameter, &mut substitution)
+            .map_err(MagError::Type)?;
+        args.push(argument);
+    }
+    let result = substitute(&result, &substitution);
+    if let Some(expected) = expected {
+        let bindable = internal_type_variables(&callee.ty);
+        constrain_result(env, &result, expected, &mut substitution, &bindable)?;
+    }
+    let result = substitute(&result, &substitution);
+    Ok(checked(
+        result,
+        CheckedExprKind::Call {
+            callee: Box::new(callee),
+            args,
+        },
+    ))
+}
+
+fn compile_if(
+    env: &Env,
+    scopes: &[CheckedScope],
+    items: &[Expr],
+    expected: Option<&MagType>,
+) -> Result<CheckedExpr, MagError> {
+    if !(3..=4).contains(&items.len()) {
+        return Err(MagError::Type("if expects 2-3 arguments".into()));
+    }
+    let condition = compile_expr(env, scopes, &items[1], Some(&MagType::Bool))?;
+    let then_branch = compile_expr(env, scopes, &items[2], expected)?;
+    let else_branch = if items.len() == 4 {
+        compile_expr(env, scopes, &items[3], expected)?
+    } else {
+        checked(MagType::Unit, CheckedExprKind::Unit)
+    };
+    let ty =
+        if compatible_static(env, &then_branch.ty, &else_branch.ty, &mut HashMap::new()).is_ok() {
+            else_branch.ty.clone()
+        } else {
+            MagType::Union(vec![then_branch.ty.clone(), else_branch.ty.clone()])
+        };
+    Ok(checked(
+        ty,
+        CheckedExprKind::If {
+            condition: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
+        },
+    ))
+}
+
+fn compile_ascribe(
+    env: &Env,
+    scopes: &[CheckedScope],
+    items: &[Expr],
+) -> Result<CheckedExpr, MagError> {
+    if items.len() != 3 {
+        return Err(MagError::Type("as expects a type and value".into()));
+    }
+    let target = parse_checked_type(env, scopes, &items[1])?;
+    // `as` is the explicit nominal/sum refinement boundary. Structural
+    // conformance and constructor-evidence diagnostics belong to evaluation,
+    // so the checker must not reject the very conversion `as` authorizes.
+    // Expected type is used only where it selects an overload or gives a
+    // product literal its authored positional shape.
+    let source_expected = match &items[2] {
+        Expr::Symbol(name) if all_candidates(env, scopes, name).len() > 1 => Some(&target),
+        _ => None,
+    };
+    let value = match &items[2] {
+        Expr::Vector(values) if matches!(target, MagType::Product(_)) => {
+            compile_vector(env, scopes, values, Some(&target))?
+        }
+        Expr::List(values) if !matches!(values.first(), Some(Expr::Symbol(head)) if matches!(head.as_str(), "if" | "as" | "type-tag" | "fn" | "let")) => {
+            compile_form(env, scopes, values, Some(&target))?
+        }
+        source => compile_expr(env, scopes, source, source_expected)?,
+    };
+    Ok(checked(
+        target.clone(),
+        CheckedExprKind::Ascribe {
+            target,
+            value: Box::new(value),
+        },
+    ))
+}
+
+fn compile_type_tag(
+    env: &Env,
+    scopes: &[CheckedScope],
+    items: &[Expr],
+) -> Result<CheckedExpr, MagError> {
+    if items.len() != 2 {
+        return Err(MagError::Type("type-tag expects one type".into()));
+    }
+    let target = parse_checked_type(env, scopes, &items[1])?;
+    Ok(checked(
+        MagType::TypeTag(Box::new(target.clone())),
+        CheckedExprKind::TypeTag(target),
+    ))
+}
+
+fn compile_overloaded_call(
+    env: &Env,
+    scopes: &[CheckedScope],
+    name: &str,
+    candidates: &[CheckedCandidate],
+    expressions: &[Expr],
+    expected_result: Option<&MagType>,
+) -> Result<CheckedExpr, MagError> {
+    if let [candidate] = candidates {
+        let (candidate_type, bindable) = instantiate_candidate(candidate);
+        let MagType::Function(params, result) = &candidate_type else {
+            unreachable!()
+        };
+        if params.len() != expressions.len() {
+            return Err(MagError::Arity {
+                expected: params.len(),
+                got: expressions.len(),
+            });
+        }
+        let (args, mut substitution) =
+            compile_call_args(env, scopes, expressions, params, &bindable)?;
+        let output = substitute(result, &substitution);
+        if let Some(expected) = expected_result {
+            constrain_result(env, &output, expected, &mut substitution, &bindable)?;
+        }
+        let output = substitute(result, &substitution);
+        let callee_type = MagType::Function(
+            params
+                .iter()
+                .map(|parameter| substitute(parameter, &substitution))
+                .collect(),
+            Box::new(output.clone()),
+        );
+        return Ok(checked(
+            output,
+            CheckedExprKind::Call {
+                callee: Box::new(checked(
+                    callee_type,
+                    CheckedExprKind::BindingRef(candidate.id),
+                )),
+                args,
+            },
+        ));
+    }
+    let mut matches = Vec::new();
+    for candidate in candidates {
+        let (candidate_type, bindable) = instantiate_candidate(candidate);
+        let MagType::Function(params, result) = &candidate_type else {
+            continue;
+        };
+        if params.len() != expressions.len() {
+            continue;
+        }
+        if let Ok((args, mut substitution)) =
+            compile_call_args(env, scopes, expressions, params, &bindable)
+        {
+            let output = substitute(result, &substitution);
+            if let Some(expected) = expected_result {
+                if constrain_result(env, &output, expected, &mut substitution, &bindable).is_err() {
+                    continue;
+                }
+            }
+            let output = substitute(result, &substitution);
+            let callee_type = MagType::Function(
+                params
+                    .iter()
+                    .map(|parameter| substitute(parameter, &substitution))
+                    .collect(),
+                Box::new(output.clone()),
+            );
+            matches.push((candidate, args, output, callee_type));
+        }
+    }
+    if matches.len() > 1 {
+        let concrete = matches
+            .iter()
+            .filter(|(candidate, _, _, _)| candidate.generic_binders.is_empty())
+            .count();
+        if concrete == 1 {
+            matches.retain(|(candidate, _, _, _)| candidate.generic_binders.is_empty());
+        }
+    }
+    match matches.as_slice() {
+        [(candidate, args, result, callee_type)] => {
+            let callee = checked(
+                callee_type.clone(),
+                CheckedExprKind::BindingRef(candidate.id),
+            );
+            Ok(checked(
+                result.clone(),
+                CheckedExprKind::Call {
+                    callee: Box::new(callee),
+                    args: args.clone(),
+                },
+            ))
+        }
+        [] => Err(MagError::Type(format!("no overload {name} matches call"))),
+        _ => Err(MagError::Type(format!(
+            "ambiguous overload {name} for call"
+        ))),
+    }
+}
+
+fn constrain_result(
+    env: &Env,
+    output: &MagType,
+    expected: &MagType,
+    substitution: &mut HashMap<String, MagType>,
+    bindable: &HashSet<String>,
+) -> Result<(), MagError> {
+    if has_type_variables(output) {
+        compatible_with_bindable(env, expected, output, substitution, bindable)
+            .map_err(MagError::Type)
+    } else {
+        compatible_with_bindable(env, output, expected, substitution, bindable)
+            .map_err(MagError::Type)
+    }
+}
+
+fn compile_call_args(
+    env: &Env,
+    scopes: &[CheckedScope],
+    expressions: &[Expr],
+    params: &[MagType],
+    bindable: &HashSet<String>,
+) -> Result<(Vec<CheckedExpr>, HashMap<String, MagType>), MagError> {
+    let mut substitution = HashMap::new();
+    let mut args = Vec::with_capacity(params.len());
+    for (expression, parameter) in expressions.iter().zip(params) {
+        let parameter = substitute(parameter, &substitution);
+        let argument = compile_expr(env, scopes, expression, Some(&parameter))?;
+        compatible_with_bindable(env, &argument.ty, &parameter, &mut substitution, bindable)
+            .map_err(MagError::Type)?;
+        args.push(argument);
+    }
+    Ok((args, substitution))
+}
+
+fn compile_builtin_call(
+    env: &Env,
+    scopes: &[CheckedScope],
+    name: &str,
+    id: BindingId,
+    expressions: &[Expr],
+    expected: Option<&MagType>,
+) -> Result<CheckedExpr, MagError> {
+    if name == "get" {
+        if expressions.len() != 2 {
+            return Err(MagError::Arity {
+                expected: 2,
+                got: expressions.len(),
+            });
+        }
+        let target = compile_expr(env, scopes, &expressions[0], None)?;
+        if matches!(target.ty, MagType::HostInputs) {
+            return Err(MagError::Type("get expects a map".into()));
+        }
+        let key = compile_expr(env, scopes, &expressions[1], Some(&MagType::String))?;
+        let key_name = match &expressions[1] {
+            Expr::Str(key) | Expr::Keyword(key) => Some(key.as_str()),
+            _ => None,
+        };
+        let output = field_type(env, &target.ty, key_name)
+            .ok_or_else(|| MagError::Type(format!("cannot get {key_name:?} from {}", target.ty)))?;
+        return Ok(checked(
+            output.clone(),
+            CheckedExprKind::Call {
+                callee: Box::new(checked(
+                    MagType::Function(
+                        vec![target.ty.clone(), MagType::String],
+                        Box::new(output.clone()),
+                    ),
+                    CheckedExprKind::BindingRef(id),
+                )),
+                args: vec![target, key],
+            },
+        ));
+    }
+    if name == "canonical" && expressions.len() != 1 {
+        return Err(MagError::Arity {
+            expected: 1,
+            got: expressions.len(),
+        });
+    }
+    if name == "artifact" {
+        if expressions.len() != 1 {
+            return Err(MagError::Arity {
+                expected: 1,
+                got: expressions.len(),
+            });
+        }
+        let data = compile_expr(env, scopes, &expressions[0], None)?;
+        let result = MagType::Artifact;
+        return Ok(checked(
+            result.clone(),
+            CheckedExprKind::Call {
+                callee: Box::new(checked(
+                    MagType::Function(vec![data.ty.clone()], Box::new(result.clone())),
+                    CheckedExprKind::BindingRef(id),
+                )),
+                args: vec![data],
+            },
+        ));
+    }
+    if name == "str" {
+        let args = expressions
+            .iter()
+            .map(|expression| compile_expr(env, scopes, expression, None))
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = MagType::String;
+        return Ok(checked(
+            result.clone(),
+            CheckedExprKind::Call {
+                callee: Box::new(checked(
+                    MagType::Function(
+                        args.iter().map(|argument| argument.ty.clone()).collect(),
+                        Box::new(result.clone()),
+                    ),
+                    CheckedExprKind::BindingRef(id),
+                )),
+                args,
+            },
+        ));
+    }
+    if matches!(
+        name,
+        "map" | "filter" | "flat-map" | "sort-by" | "indexed-map"
+    ) {
+        return compile_collection_builtin(env, scopes, name, id, expressions, expected);
+    }
+    if name == "fold" {
+        return compile_fold_builtin(env, scopes, id, expressions);
+    }
+    let mut locals = visible_types(env, scopes, &CheckedScope::new());
+    let result = infer_builtin(env, &mut locals, name, expressions)?;
+    let args = expressions
+        .iter()
+        .map(|expression| compile_expr(env, scopes, expression, None))
+        .collect::<Result<Vec<_>, _>>()?;
+    let callee_type = MagType::Function(
+        args.iter().map(|argument| argument.ty.clone()).collect(),
+        Box::new(result.clone()),
+    );
+    Ok(checked(
+        result,
+        CheckedExprKind::Call {
+            callee: Box::new(checked(callee_type, CheckedExprKind::BindingRef(id))),
+            args,
+        },
+    ))
+}
+
+fn compile_collection_builtin(
+    env: &Env,
+    scopes: &[CheckedScope],
+    name: &str,
+    id: BindingId,
+    expressions: &[Expr],
+    expected: Option<&MagType>,
+) -> Result<CheckedExpr, MagError> {
+    if expressions.len() != 2 {
+        return Err(MagError::Arity {
+            expected: 2,
+            got: expressions.len(),
+        });
+    }
+    let collection = compile_expr(env, scopes, &expressions[1], None)?;
+    let MagType::List(item) = &collection.ty else {
+        return Err(MagError::Type(format!("{name} expects List")));
+    };
+    let callback_result = match name {
+        "filter" => MagType::Bool,
+        "sort-by" => MagType::String,
+        "map" => match expected {
+            Some(MagType::List(result)) => (**result).clone(),
+            _ => MagType::Var("\0builtin.result".into()),
+        },
+        "flat-map" => expected
+            .cloned()
+            .unwrap_or_else(|| MagType::List(Box::new(MagType::Var("\0builtin.result".into())))),
+        "indexed-map" => match expected {
+            Some(MagType::List(result)) => (**result).clone(),
+            _ => MagType::Var("\0builtin.result".into()),
+        },
+        _ => unreachable!(),
+    };
+    let callback_params = if name == "indexed-map" {
+        vec![MagType::Int, (**item).clone()]
+    } else {
+        vec![(**item).clone()]
+    };
+    let callback_expected = MagType::Function(callback_params, Box::new(callback_result));
+    let callback =
+        compile_expr(env, scopes, &expressions[0], Some(&callback_expected)).map_err(|error| {
+            match name {
+                "sort-by" => {
+                    MagError::Type(format!("sort-by callback must return String: {error}"))
+                }
+                "filter" => MagError::Type(format!("filter callback must return Bool: {error}")),
+                _ => error,
+            }
+        })?;
+    let MagType::Function(_, result) = &callback.ty else {
+        unreachable!("callback expectation guarantees a function")
+    };
+    let output = match name {
+        "filter" | "sort-by" => collection.ty.clone(),
+        "flat-map" => (**result).clone(),
+        "map" | "indexed-map" => MagType::List(result.clone()),
+        _ => unreachable!(),
+    };
+    let callee_type = MagType::Function(
+        vec![callback.ty.clone(), collection.ty.clone()],
+        Box::new(output.clone()),
+    );
+    Ok(checked(
+        output,
+        CheckedExprKind::Call {
+            callee: Box::new(checked(callee_type, CheckedExprKind::BindingRef(id))),
+            args: vec![callback, collection],
+        },
+    ))
+}
+
+fn compile_fold_builtin(
+    env: &Env,
+    scopes: &[CheckedScope],
+    id: BindingId,
+    expressions: &[Expr],
+) -> Result<CheckedExpr, MagError> {
+    if expressions.len() != 3 {
+        return Err(MagError::Arity {
+            expected: 3,
+            got: expressions.len(),
+        });
+    }
+    let init = compile_expr(env, scopes, &expressions[1], None)?;
+    let collection = compile_expr(env, scopes, &expressions[2], None)?;
+    let MagType::List(item) = &collection.ty else {
+        return Err(MagError::Type("fold expects List".into()));
+    };
+    let callback_expected = MagType::Function(
+        vec![init.ty.clone(), (**item).clone()],
+        Box::new(init.ty.clone()),
+    );
+    let callback = compile_expr(env, scopes, &expressions[0], Some(&callback_expected))?;
+    let output = init.ty.clone();
+    let callee_type = MagType::Function(
+        vec![callback.ty.clone(), init.ty.clone(), collection.ty.clone()],
+        Box::new(output.clone()),
+    );
+    Ok(checked(
+        output,
+        CheckedExprKind::Call {
+            callee: Box::new(checked(callee_type, CheckedExprKind::BindingRef(id))),
+            args: vec![callback, init, collection],
+        },
+    ))
+}
+
+#[derive(Clone)]
+struct ParsedFunction {
+    type_params: Vec<String>,
+    params: Vec<(String, MagType)>,
+    result: MagType,
+    body: Vec<Expr>,
+}
+
+fn parse_function(
+    env: &Env,
+    scopes: &[CheckedScope],
+    expression: &Expr,
+) -> Result<ParsedFunction, MagError> {
+    let Expr::List(items) = expression else {
+        return Err(MagError::Type("expected fn".into()));
+    };
+    let args = &items[1..];
+    if args.len() < 4 {
+        return Err(MagError::Type("typed fn signature required".into()));
+    }
+    let empty = Expr::Vector(Vec::new());
+    let (type_params, params, arrow, result, body) = if matches!(args.get(1), Some(Expr::Vector(_)))
+    {
+        (&args[0], &args[1], &args[2], &args[3], &args[4..])
+    } else {
+        (&empty, &args[0], &args[1], &args[2], &args[3..])
+    };
+    if !matches!(arrow, Expr::Symbol(symbol) if symbol == "->") {
+        return Err(MagError::Type("fn signature requires ->".into()));
+    }
+    let type_params = match type_params {
+        Expr::Vector(parameters) => parameters
+            .iter()
+            .map(|parameter| {
+                parameter
+                    .as_symbol()
+                    .map(str::to_owned)
+                    .ok_or_else(|| MagError::Type("generic binder must be a symbol".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => unreachable!(),
+    };
+    let mut vars = visible_type_variables(scopes);
+    vars.extend(type_params.iter().cloned());
+    let params = match params {
+        Expr::Vector(params) => params
+            .iter()
+            .map(|parameter| match parameter {
+                Expr::Vector(pair) if pair.len() == 2 => Ok((
+                    pair[0]
+                        .as_symbol()
+                        .ok_or_else(|| MagError::Type("parameter name must be a symbol".into()))?
+                        .to_owned(),
+                    crate::eval::parse_type(env, &pair[1], &vars)?,
+                )),
+                _ => Err(MagError::Type("parameter must be [name Type]".into())),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err(MagError::Type("fn parameters must be a vector".into())),
+    };
+    Ok(ParsedFunction {
+        type_params,
+        params,
+        result: crate::eval::parse_type(env, result, &vars)?,
+        body: body.to_vec(),
+    })
+}
+
+fn compile_function(
+    env: &Env,
+    scopes: &[CheckedScope],
+    name: Option<&str>,
+    expression: &Expr,
+    expected: Option<&MagType>,
+) -> Result<CheckedExpr, MagError> {
+    let function = parse_function(env, scopes, expression)?;
+    let signature = MagType::Function(
+        function.params.iter().map(|(_, ty)| ty.clone()).collect(),
+        Box::new(function.result.clone()),
+    );
+    if let Some(expected) = expected {
+        compatible_static(env, &signature, expected, &mut HashMap::new())
+            .map_err(MagError::Type)?;
+    }
+    let mut parameter_scope = CheckedScope::new();
+    if !function.type_params.is_empty() {
+        parameter_scope.insert(
+            TYPE_BINDER_SCOPE_KEY.into(),
+            vec![CheckedCandidate {
+                id: BindingId(u64::MAX),
+                ty: MagType::Product(
+                    function
+                        .type_params
+                        .iter()
+                        .cloned()
+                        .map(MagType::Var)
+                        .collect(),
+                ),
+                generic_binders: vec![],
+                contributes_type_vars: true,
+            }],
+        );
+    }
+    let mut checked_params = Vec::with_capacity(function.params.len());
+    for (parameter_name, ty) in function.params {
+        let id = env.allocate_binding_id(&parameter_name, Some(ty.clone()));
+        insert_checked_candidate(
+            env,
+            scopes,
+            &mut parameter_scope,
+            &parameter_name,
+            id,
+            ty.clone(),
+            vec![],
+            false,
+        )?;
+        checked_params.push(CheckedParam {
+            id,
+            name: parameter_name,
+            ty,
+        });
+    }
+    let mut body_scopes = scopes.to_vec();
+    body_scopes.push(parameter_scope);
+    let body = compile_block_in(env, &body_scopes, &function.body, Some(&function.result))?;
+    let actual = body
+        .expressions
+        .last()
+        .map(|expression| expression.ty.clone())
+        .unwrap_or(MagType::Unit);
+    compatible_static(env, &actual, &function.result, &mut HashMap::new()).map_err(|message| {
+        MagError::Type(format!(
+            "function {}returns {actual}, declared {}: {message}",
+            name.map(|name| format!("{name} ")).unwrap_or_default(),
+            function.result
+        ))
+    })?;
+    Ok(checked(
+        signature,
+        CheckedExprKind::Function(Arc::new(CheckedFn {
+            name: name.map(str::to_owned),
+            type_params: function.type_params,
+            params: checked_params,
+            result: function.result,
+            body: Arc::new(body),
+        })),
+    ))
+}
+
+fn parse_checked_type(
+    env: &Env,
+    scopes: &[CheckedScope],
+    expression: &Expr,
+) -> Result<MagType, MagError> {
+    crate::eval::parse_type(env, expression, &visible_type_variables(scopes))
+}
+
+fn visible_type_variables(scopes: &[CheckedScope]) -> HashSet<String> {
+    let mut variables = HashSet::new();
+    for candidate in scopes.iter().flat_map(|scope| scope.values()).flatten() {
+        if candidate.contributes_type_vars {
+            collect_vars(&candidate.ty, &mut variables);
+        }
+    }
+    variables
+}
+
+fn has_type_variables(ty: &MagType) -> bool {
+    let mut variables = HashSet::new();
+    collect_vars(ty, &mut variables);
+    !variables.is_empty()
+}
+
+fn instantiate_candidate(candidate: &CheckedCandidate) -> (MagType, HashSet<String>) {
+    let substitutions = candidate
+        .generic_binders
+        .iter()
+        .enumerate()
+        .map(|(index, binder)| {
+            (
+                binder.clone(),
+                MagType::Var(format!("\0binding{}.{index}", candidate.id.0)),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let bindable = substitutions
+        .values()
+        .filter_map(|ty| match ty {
+            MagType::Var(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    (substitute(&candidate.ty, &substitutions), bindable)
+}
+
+fn internal_type_variables(ty: &MagType) -> HashSet<String> {
+    let mut variables = HashSet::new();
+    collect_vars(ty, &mut variables);
+    variables.retain(|name| name.starts_with('\0'));
+    variables
+}
+
+fn canonical_type(ty: &MagType) -> String {
+    fn canonicalize(
+        ty: &MagType,
+        variables: &mut HashMap<String, MagType>,
+        next: &mut usize,
+    ) -> MagType {
+        match ty {
+            MagType::Var(name) => variables
+                .entry(name.clone())
+                .or_insert_with(|| {
+                    let variable = MagType::Var(format!("${next}"));
+                    *next += 1;
+                    variable
+                })
+                .clone(),
+            MagType::Named(name, args) => MagType::Named(
+                name.clone(),
+                args.iter()
+                    .map(|arg| canonicalize(arg, variables, next))
+                    .collect(),
+            ),
+            MagType::TypeTag(item) => {
+                MagType::TypeTag(Box::new(canonicalize(item, variables, next)))
+            }
+            MagType::List(item) => MagType::List(Box::new(canonicalize(item, variables, next))),
+            MagType::Map(key, value) => MagType::Map(
+                Box::new(canonicalize(key, variables, next)),
+                Box::new(canonicalize(value, variables, next)),
+            ),
+            MagType::Record(fields) => MagType::Record(
+                fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), canonicalize(ty, variables, next)))
+                    .collect(),
+            ),
+            MagType::Union(items) => MagType::Union(
+                items
+                    .iter()
+                    .map(|item| canonicalize(item, variables, next))
+                    .collect(),
+            ),
+            MagType::Product(items) => MagType::Product(
+                items
+                    .iter()
+                    .map(|item| canonicalize(item, variables, next))
+                    .collect(),
+            ),
+            MagType::Function(params, result) => MagType::Function(
+                params
+                    .iter()
+                    .map(|param| canonicalize(param, variables, next))
+                    .collect(),
+                Box::new(canonicalize(result, variables, next)),
+            ),
+            _ => ty.clone(),
+        }
+    }
+    canonicalize(ty, &mut HashMap::new(), &mut 0).to_string()
+}
+
+pub(crate) fn value_type(value: &Value) -> Option<MagType> {
     match value {
         Value::Unit => Some(MagType::Unit),
         Value::Bool(_) => Some(MagType::Bool),
@@ -782,12 +2534,6 @@ fn value_type(value: &Value) -> Option<MagType> {
         Value::Type(t) => Some(t.clone()),
         Value::TypeDecl(d) => Some(MagType::Named(d.name.clone(), vec![])),
         Value::TypeTag(ty) => Some(MagType::TypeTag(Box::new(ty.to_mag_type()))),
-        Value::Foreign(decl) => Some(MagType::Foreign(
-            Box::new(decl.params.clone()),
-            Box::new(decl.input.clone()),
-            Box::new(decl.output.clone()),
-        )),
-        Value::ForeignEvidence(_) => Some(MagType::ForeignEvidence),
         Value::TypeDescriptor(_) => Some(MagType::TypeDescriptor),
         Value::TypeSchema(_) => Some(MagType::TypeSchema),
         Value::SemanticTypeId(_) => Some(MagType::SemanticTypeId),
@@ -800,8 +2546,35 @@ fn value_type(value: &Value) -> Option<MagType> {
     }
 }
 
+pub(crate) fn canonical_value_type(value: &Value) -> Option<String> {
+    if let Value::Type(ty) = value {
+        return Some(format!("Type<{ty}>"));
+    }
+    if let Value::Fn(function) = value {
+        let substitutions = function
+            .type_params
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.clone(), MagType::Var(format!("${index}"))))
+            .collect::<HashMap<_, _>>();
+        let params = function
+            .param_types
+            .iter()
+            .map(|ty| substitute(ty, &substitutions).to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let result = substitute(&function.return_type, &substitutions);
+        return Some(format!(
+            "forall[{}].Fn({params})->{result}",
+            function.type_params.len()
+        ));
+    }
+    value_type(value).map(|ty| ty.to_string())
+}
+
 fn field_type(env: &Env, ty: &MagType, key: Option<&str>) -> Option<MagType> {
     match ty {
+        MagType::JsonValue => Some(MagType::JsonValue),
         MagType::Map(_, v) => Some((**v).clone()),
         MagType::Record(fields) => key.and_then(|k| fields.get(k).cloned()),
         MagType::Named(name, args) => env.type_decl(name).and_then(|decl| {
@@ -835,14 +2608,67 @@ fn compatible(
     expected: &MagType,
     subst: &mut HashMap<String, MagType>,
 ) -> Result<(), String> {
+    compatible_in(env, actual, expected, subst, None)
+}
+
+fn compatible_static(
+    env: &Env,
+    actual: &MagType,
+    expected: &MagType,
+    subst: &mut HashMap<String, MagType>,
+) -> Result<(), String> {
+    let mut bindable = internal_type_variables(actual);
+    bindable.extend(internal_type_variables(expected));
+    compatible_in(env, actual, expected, subst, Some(&bindable))
+}
+
+fn compatible_with_bindable(
+    env: &Env,
+    actual: &MagType,
+    expected: &MagType,
+    subst: &mut HashMap<String, MagType>,
+    bindable: &HashSet<String>,
+) -> Result<(), String> {
+    let mut active = bindable.clone();
+    active.extend(internal_type_variables(actual));
+    active.extend(internal_type_variables(expected));
+    compatible_in(env, actual, expected, subst, Some(&active))
+}
+
+fn compatible_in(
+    env: &Env,
+    actual: &MagType,
+    expected: &MagType,
+    subst: &mut HashMap<String, MagType>,
+    bindable: Option<&HashSet<String>>,
+) -> Result<(), String> {
     if let MagType::Var(name) = expected {
-        if let Some(bound) = subst.get(name) {
-            let bound = bound.clone();
-            return compatible(env, actual, &bound, subst)
-                .map_err(|_| format!("{name} was {bound}, got {actual}"));
+        if bindable.is_none_or(|bindable| bindable.contains(name)) {
+            if let Some(bound) = subst.get(name) {
+                let bound = bound.clone();
+                return compatible_in(env, actual, &bound, subst, bindable)
+                    .map_err(|_| format!("{name} was {bound}, got {actual}"));
+            }
+            subst.insert(name.clone(), actual.clone());
+            return Ok(());
         }
-        subst.insert(name.clone(), actual.clone());
-        return Ok(());
+        if actual == expected {
+            return Ok(());
+        }
+    }
+    if let MagType::Var(name) = actual {
+        if bindable.is_some_and(|bindable| bindable.contains(name)) {
+            if let Some(bound) = subst.get(name) {
+                let bound = bound.clone();
+                return compatible_in(env, &bound, expected, subst, bindable)
+                    .map_err(|_| format!("{name} was {bound}, expected {expected}"));
+            }
+            subst.insert(name.clone(), expected.clone());
+            return Ok(());
+        }
+    }
+    if matches!(expected, MagType::Var(_)) {
+        return Err(format!("expected {expected}, got {actual}"));
     }
     if actual == expected {
         return Ok(());
@@ -871,7 +2697,7 @@ fn compatible(
     }
     if let MagType::Union(variants) = actual {
         for variant in variants {
-            compatible(env, variant, expected, subst)?;
+            compatible_in(env, variant, expected, subst, bindable)?;
         }
         return Ok(());
     }
@@ -879,7 +2705,7 @@ fn compatible(
         MagType::Union(options) => {
             let mut matches = options.iter().filter_map(|option| {
                 let mut candidate = subst.clone();
-                compatible(env, actual, option, &mut candidate)
+                compatible_in(env, actual, option, &mut candidate, bindable)
                     .ok()
                     .map(|_| candidate)
             });
@@ -901,7 +2727,7 @@ fn compatible(
                 if actual_name == expected_name && actual_args.len() == expected_args.len() =>
             {
                 for (actual_arg, expected_arg) in actual_args.iter().zip(expected_args) {
-                    compatible(env, actual_arg, expected_arg, subst)?;
+                    compatible_in(env, actual_arg, expected_arg, subst, bindable)?;
                 }
                 Ok(())
             }
@@ -910,21 +2736,23 @@ fn compatible(
             )),
         },
         MagType::TypeTag(expected_type) => match actual {
-            MagType::TypeTag(actual_type) => compatible(env, actual_type, expected_type, subst),
+            MagType::TypeTag(actual_type) => {
+                compatible_in(env, actual_type, expected_type, subst, bindable)
+            }
             _ => Err(format!("expected {expected}, got {actual}")),
         },
         MagType::List(e) => match actual {
-            MagType::List(a) => compatible(env, a, e, subst),
+            MagType::List(a) => compatible_in(env, a, e, subst, bindable),
             _ => Err(format!("expected {expected}, got {actual}")),
         },
         MagType::Map(ek, ev) => match actual {
             MagType::Map(ak, av) => {
-                compatible(env, ak, ek, subst)?;
-                compatible(env, av, ev, subst)
+                compatible_in(env, ak, ek, subst, bindable)?;
+                compatible_in(env, av, ev, subst, bindable)
             }
             MagType::Record(fields) if matches!(ek.as_ref(), MagType::String) => {
                 for value in fields.values() {
-                    compatible(env, value, ev, subst)?;
+                    compatible_in(env, value, ev, subst, bindable)?;
                 }
                 Ok(())
             }
@@ -933,11 +2761,12 @@ fn compatible(
         MagType::Record(ef) => match actual {
             MagType::Record(af) if ef.len() == af.len() => {
                 for (k, e) in ef {
-                    compatible(
+                    compatible_in(
                         env,
                         af.get(k).ok_or_else(|| format!("missing field {k}"))?,
                         e,
                         subst,
+                        bindable,
                     )?;
                 }
                 Ok(())
@@ -947,17 +2776,9 @@ fn compatible(
         MagType::Function(ep, er) => match actual {
             MagType::Function(ap, ar) if ap.len() == ep.len() => {
                 for (a, e) in ap.iter().zip(ep) {
-                    compatible(env, a, e, subst)?;
+                    compatible_in(env, a, e, subst, bindable)?;
                 }
-                compatible(env, ar, er, subst)
-            }
-            _ => Err(format!("expected {expected}, got {actual}")),
-        },
-        MagType::Foreign(ep, ei, eo) => match actual {
-            MagType::Foreign(ap, ai, ao) => {
-                compatible(env, ap, ep, subst)?;
-                compatible(env, ai, ei, subst)?;
-                compatible(env, ao, eo, subst)
+                compatible_in(env, ar, er, subst, bindable)
             }
             _ => Err(format!("expected {expected}, got {actual}")),
         },
@@ -986,11 +2807,6 @@ pub(crate) fn substitute(ty: &MagType, subst: &HashMap<String, MagType>) -> MagT
         MagType::Function(p, r) => MagType::Function(
             p.iter().map(|t| substitute(t, subst)).collect(),
             Box::new(substitute(r, subst)),
-        ),
-        MagType::Foreign(p, i, o) => MagType::Foreign(
-            Box::new(substitute(p, subst)),
-            Box::new(substitute(i, subst)),
-            Box::new(substitute(o, subst)),
         ),
         _ => ty.clone(),
     }
@@ -1023,11 +2839,70 @@ fn collect_vars(ty: &MagType, out: &mut HashSet<String>) {
             }
             collect_vars(result, out);
         }
-        MagType::Foreign(params, input, output) => {
-            collect_vars(params, out);
-            collect_vars(input, out);
-            collect_vars(output, out);
-        }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod builtin_signature_tests {
+    use super::*;
+
+    #[test]
+    fn every_visible_builtin_has_collision_signatures() {
+        let env = Env::new_with_stdlib();
+        for &name in BUILTIN_NAMES {
+            let signatures = if name == "str" {
+                let representative =
+                    MagType::Function(vec![MagType::Int], Box::new(MagType::String));
+                builtin_overload_types(name, Some(&representative))
+            } else {
+                builtin_overload_types(name, None)
+            };
+            assert!(
+                !signatures.is_empty(),
+                "visible builtin {name} has no signature inventory"
+            );
+            for signature in signatures {
+                assert!(
+                    collides_with_builtin(&env, name, &signature),
+                    "visible builtin {name} does not recognize signature {signature}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn record_builtin_families_are_in_the_collision_inventory() {
+        let env = Env::new_with_stdlib();
+        let record = MagType::Record(BTreeMap::from([("value".into(), MagType::Int)]));
+        for (name, candidate) in [
+            (
+                "count",
+                MagType::Function(vec![record.clone()], Box::new(MagType::Int)),
+            ),
+            (
+                "keys",
+                MagType::Function(
+                    vec![record.clone()],
+                    Box::new(MagType::List(Box::new(MagType::String))),
+                ),
+            ),
+            (
+                "get",
+                MagType::Function(
+                    vec![record.clone(), MagType::String],
+                    Box::new(MagType::Int),
+                ),
+            ),
+            (
+                "assoc",
+                MagType::Function(
+                    vec![record.clone(), MagType::String, MagType::Int],
+                    Box::new(record.clone()),
+                ),
+            ),
+        ] {
+            assert!(collides_with_builtin(&env, name, &candidate), "{name}");
+        }
     }
 }

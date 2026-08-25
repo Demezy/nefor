@@ -41,7 +41,7 @@ pub mod kernel {
             let loaded = nefor_mag::load_with_inputs_and_module_roots(
                 &source_dir,
                 "main.mag",
-                serde_json::json!({"foreign_contracts": contracts}),
+                serde_json::json!({"factory_contracts": contracts}),
                 &[manifest.join("../../examples/nefor-agent/mag/lib")],
             )
             .expect("compile MAG test program");
@@ -58,17 +58,59 @@ pub mod kernel {
     (require "nefor.graph")
     (require "nefor.shell")
     (require "nefor.process")
-    (let [start (nefor.graph.source "start" (type-tag Unit) nil)
-          operation {expression}
-          result (nefor.graph.output-for "result" operation)]
-      (nefor.artifact.compile
+    (let start (nefor.graph.source "start" (type-tag Unit) nil))
+    (let operation {expression})
+    (let result (nefor.graph.output-for "result" operation))
+    (nefor.artifact.compile
         (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
           (nefor.graph.add-edges graph
             [(nefor.graph.edge start operation)
-             (nefor.graph.edge operation result)]))))
+             (nefor.graph.edge operation result)])))
     "#
             );
             compile_mag_source(host, name, &source)
+        }
+
+        #[test]
+        fn inline_actor_type_arguments_must_be_dense_lists() {
+            let host = shipped_host();
+            for (run_id, type_arguments) in [
+                ("missing-type-arguments", None),
+                (
+                    "keyed-type-arguments",
+                    Some(serde_json::json!({"named": {"kind":"primitive","name":"String"}})),
+                ),
+            ] {
+                assert!(host.begin_run(run_id, run_id, None).expect("begin").ok);
+                let mut actor = serde_json::json!({
+                    "id": "inline",
+                    "factory": "nefor.factory.stub",
+                    "params": {},
+                    "routes": {}
+                });
+                if let Some(type_arguments) = type_arguments {
+                    actor["type_arguments"] = type_arguments;
+                }
+                let modification = serde_json::json!({
+                    "actors": [actor],
+                    "messages": [],
+                    "kills": [],
+                    "rules": [],
+                    "result": {"from": {"actor": "inline", "wire": "stub.Out", "type": "String"}}
+                });
+                let outcome = host.start(run_id, &modification).expect("start");
+                assert!(!outcome.ok, "{run_id} unexpectedly accepted");
+                assert!(
+                    outcome
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("type_arguments must be a dense list")),
+                    "{run_id}: {:?}",
+                    outcome.error
+                );
+                host.end_run(run_id, TeardownReason::RunFailed)
+                    .expect("end invalid run");
+            }
         }
 
         #[test]
@@ -80,7 +122,7 @@ pub mod kernel {
     (require "nefor.contracts")
     (require "nefor.graph")
 
-    (def make-agent (fn [I O] [[id String] [input-type (TypeTag I)]
+    (let make-agent (fn [I O] [[id String] [input-type (TypeTag I)]
                                 [input-wire String] [output-type (TypeTag O)]]
       -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
       (nefor.actors.agent
@@ -91,26 +133,26 @@ pub mod kernel {
            :max-corrections 2})
         input-type input-wire output-type)))
 
-    (let [left-task (nefor.graph.source "left-task" (type-tag nefor.contracts.Task)
-                       (as nefor.contracts.Task {:prompt "left"}))
-          middle-task (nefor.graph.source "middle-task" (type-tag nefor.contracts.Task)
-                         (as nefor.contracts.Task {:prompt "middle"}))
-          right-task (nefor.graph.source "right-task" (type-tag nefor.contracts.Task)
-                        (as nefor.contracts.Task {:prompt "right"}))
-          left (make-agent "left" (type-tag nefor.contracts.Task) "task"
-                 (type-tag nefor.contracts.TextAnswer))
-          middle (make-agent "middle" (type-tag nefor.contracts.Task) "task"
-                   (type-tag nefor.contracts.TextAnswer))
-          right (make-agent "right" (type-tag nefor.contracts.Task) "task"
-                  (type-tag nefor.contracts.TextAnswer))
-          synthesis (make-agent "synthesis"
+    (let left-task (nefor.graph.source "left-task" (type-tag nefor.contracts.Task)
+                       (as nefor.contracts.Task {:prompt "left"})))
+    (let middle-task (nefor.graph.source "middle-task" (type-tag nefor.contracts.Task)
+                         (as nefor.contracts.Task {:prompt "middle"})))
+    (let right-task (nefor.graph.source "right-task" (type-tag nefor.contracts.Task)
+                        (as nefor.contracts.Task {:prompt "right"})))
+    (let left (make-agent "left" (type-tag nefor.contracts.Task) "task"
+                 (type-tag nefor.contracts.TextAnswer)))
+    (let middle (make-agent "middle" (type-tag nefor.contracts.Task) "task"
+                   (type-tag nefor.contracts.TextAnswer)))
+    (let right (make-agent "right" (type-tag nefor.contracts.Task) "task"
+                  (type-tag nefor.contracts.TextAnswer)))
+    (let synthesis (make-agent "synthesis"
                       (type-tag (+ (| nefor.contracts.TextAnswer nefor.contracts.AgentError)
                                    (| nefor.contracts.TextAnswer nefor.contracts.AgentError)
                                    (| nefor.contracts.TextAnswer nefor.contracts.AgentError)))
-                      "nefor.agent.Result" (type-tag nefor.contracts.TextAnswer))
-          result (nefor.graph.output "result"
-                   (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError)))
-          topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+                      "nefor.agent.Result" (type-tag nefor.contracts.TextAnswer)))
+    (let result (nefor.graph.output "result"
+                   (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+    (let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
                      (nefor.graph.add-edges graph
                        [(nefor.graph.edge left-task left)
                         (nefor.graph.edge middle-task middle)
@@ -118,8 +160,8 @@ pub mod kernel {
                         (nefor.graph.edge left synthesis)
                         (nefor.graph.edge middle synthesis)
                         (nefor.graph.edge right synthesis)
-                        (nefor.graph.edge synthesis result)]))]
-      (nefor.artifact.compile topology))
+                        (nefor.graph.edge synthesis result)])))
+    (nefor.artifact.compile topology)
     "#;
 
             let modification = compile_mag_source(&host, "shared-multi-agent", source);
@@ -138,11 +180,11 @@ pub mod kernel {
     (require "nefor.artifact")
     (require "nefor.contracts")
     (require "nefor.graph")
-    (let [start (nefor.actors.task-source "task-input" "runtime prompt")
-          result (nefor.graph.output "result" (type-tag nefor.contracts.Task))]
-      (nefor.artifact.compile
+    (let start (nefor.actors.task-source "task-input" "runtime prompt"))
+    (let result (nefor.graph.output "result" (type-tag nefor.contracts.Task)))
+    (nefor.artifact.compile
         (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-          (nefor.graph.add-edges graph [(nefor.graph.edge start result)]))))
+          (nefor.graph.add-edges graph [(nefor.graph.edge start result)])))
     "#;
             let modification = compile_mag_source(&host, "task-source-runtime", source);
             let begun = host
@@ -304,7 +346,7 @@ pub mod kernel {
             let host = shipped_host();
             let run_id = "provenance-run";
             let expression = r#"(nefor.process.exec "command"
-              (as nefor.contracts.ProcessExecParams
+              (as nefor.process.ProcessExecParams
                 {:argv ["printf" "provenance"] :cwd nefor.process.cwd
                  :timeout (nefor.contracts.no-timeout)}))"#;
             let modification = compile_mag_eval_expression(&host, run_id, expression);
@@ -340,7 +382,7 @@ pub mod kernel {
         fn process_and_script_keep_structured_results_and_explicit_timeouts() {
             let host = shipped_host();
             let expression = r#"(nefor.shell.script "script"
-              (as nefor.contracts.ShellScriptParams
+              (as nefor.shell.ShellScriptParams
                 {:script "printf output" :cwd nefor.process.cwd
                  :timeout (nefor.contracts.timeout-ms 30000)}))"#;
             let emits = start_shell_expression(&host, "shell-script", expression);
@@ -395,7 +437,7 @@ pub mod kernel {
                 ),
             ] {
                 let expression = format!(
-                    "(nefor.process.exec \"invalid\" (as nefor.contracts.ProcessExecParams {params}))"
+                    "(nefor.process.exec \"invalid\" (as nefor.process.ProcessExecParams {params}))"
                 );
                 let emits = start_shell_expression(&host, run_id, &expression);
                 assert!(emits.iter().all(|event| {
@@ -419,26 +461,22 @@ pub mod kernel {
     (require "nefor.contracts")
     (require "nefor.graph")
 
-    (foreign nefor.factory.stub
-      {:params (Map String String)
-       :input nefor.contracts.Text
-       :output nefor.contracts.Text})
-    (let [start (nefor.graph.source "start" (type-tag nefor.contracts.Text)
-                  (as nefor.contracts.Text {:content "ordinary"}))
-          input (nefor.graph.port "echo" (type-tag nefor.contracts.Text) "stub.In")
-          output (nefor.graph.port "echo" (type-tag nefor.contracts.Text) "stub.Out")
-          actor (nefor.graph.actor "echo"
-                  nefor.factory.stub (as (Map String String) {})
-                  (nefor.graph.store-port input) [(nefor.graph.store-port output)])
-          echo (nefor.graph.node "echo" "ordinary" [actor]
+    (let start (nefor.graph.source "start" (type-tag nefor.contracts.Text)
+                  (as nefor.contracts.Text {:content "ordinary"})))
+    (let input (nefor.graph.port "echo" (type-tag nefor.contracts.Text) "stub.In"))
+    (let output (nefor.graph.port "echo" (type-tag nefor.contracts.Text) "stub.Out"))
+    (let actor (nefor.graph.actor "echo"
+                  "nefor.factory.stub" [] (as (Map String String) {})
+                  (nefor.graph.store-port input) [(nefor.graph.store-port output)]))
+    (let echo (nefor.graph.node "echo" "ordinary" [actor]
                  (as (List nefor.graph.StoredRoute) [])
-                 (as (List nefor.graph.Message) []) input output)
-          result (nefor.graph.output-for "result" echo)]
-      (nefor.artifact.compile
+                 (as (List nefor.graph.Message) []) input output))
+    (let result (nefor.graph.output-for "result" echo))
+    (nefor.artifact.compile
         (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
           (nefor.graph.add-edges graph
             [(nefor.graph.edge start echo)
-             (nefor.graph.edge echo result)]))))
+             (nefor.graph.edge echo result)])))
                 "#,
             );
 
@@ -479,26 +517,22 @@ pub mod kernel {
     (require "nefor.contracts")
     (require "nefor.graph")
 
-    (foreign nefor.factory.stub
-      {:params (Map String String)
-       :input nefor.contracts.Text
-       :output nefor.contracts.Text})
-    (let [start (nefor.graph.source "start" (type-tag nefor.contracts.Text)
-                  (as nefor.contracts.Text {:content "valid"}))
-          input (nefor.graph.port "broken" (type-tag nefor.contracts.Text) "stub.In")
-          output (nefor.graph.port "broken" (type-tag nefor.contracts.Text) "stub.Out")
-          actor (nefor.graph.actor "broken" nefor.factory.stub
+    (let start (nefor.graph.source "start" (type-tag nefor.contracts.Text)
+                  (as nefor.contracts.Text {:content "valid"})))
+    (let input (nefor.graph.port "broken" (type-tag nefor.contracts.Text) "stub.In"))
+    (let output (nefor.graph.port "broken" (type-tag nefor.contracts.Text) "stub.Out"))
+    (let actor (nefor.graph.actor "broken" "nefor.factory.stub" []
                   (as (Map String String) {:value "not-a-Text-record"})
-                  (nefor.graph.store-port input) [(nefor.graph.store-port output)])
-          broken (nefor.graph.node "broken" "ordinary" [actor]
+                  (nefor.graph.store-port input) [(nefor.graph.store-port output)]))
+    (let broken (nefor.graph.node "broken" "ordinary" [actor]
                    (as (List nefor.graph.StoredRoute) [])
-                   (as (List nefor.graph.Message) []) input output)
-          result (nefor.graph.output-for "result" broken)]
-      (nefor.artifact.compile
+                   (as (List nefor.graph.Message) []) input output))
+    (let result (nefor.graph.output-for "result" broken))
+    (nefor.artifact.compile
         (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
           (nefor.graph.add-edges graph
             [(nefor.graph.edge start broken)
-             (nefor.graph.edge broken result)]))))
+             (nefor.graph.edge broken result)])))
                 "#,
             );
             let run_id = "malformed-typed-output";
@@ -532,15 +566,15 @@ pub mod kernel {
     (require "nefor.contracts")
     (require "nefor.graph")
 
-    (let [pair-type (type-tag (+ nefor.contracts.Text nefor.contracts.Text))
-          start (nefor.graph.source "start" pair-type
+    (let pair-type (type-tag (+ nefor.contracts.Text nefor.contracts.Text)))
+    (let start (nefor.graph.source "start" pair-type
                   (as (+ nefor.contracts.Text nefor.contracts.Text)
                     [(as nefor.contracts.Text {:content "left"})
-                     (as nefor.contracts.Text {:content "right"})]))
-          result (nefor.graph.output "result" pair-type)]
-      (nefor.artifact.compile
+                     (as nefor.contracts.Text {:content "right"})])))
+    (let result (nefor.graph.output "result" pair-type))
+    (nefor.artifact.compile
         (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-          (nefor.graph.add-edges graph [(nefor.graph.edge start result)]))))
+          (nefor.graph.add-edges graph [(nefor.graph.edge start result)])))
                 "#,
             );
 
@@ -577,16 +611,16 @@ pub mod kernel {
     (type Left {:content String})
     (type Right {:count Int})
 
-    (let [left (nefor.graph.source "left" (type-tag Left)
-                  (as Left {:content "first"}))
-          right (nefor.graph.source "right" (type-tag Right)
-                   (as Right {:count 2}))
-          result (nefor.graph.output "result" (type-tag (+ Left Right)))]
-      (nefor.artifact.compile
+    (let left (nefor.graph.source "left" (type-tag Left)
+                  (as Left {:content "first"})))
+    (let right (nefor.graph.source "right" (type-tag Right)
+                   (as Right {:count 2})))
+    (let result (nefor.graph.output "result" (type-tag (+ Left Right))))
+    (nefor.artifact.compile
         (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
           (nefor.graph.add-edges graph
             [(nefor.graph.edge left result)
-             (nefor.graph.edge right result)]))))
+             (nefor.graph.edge right result)])))
                 "#,
             );
             let run_id = "component-product-output";
@@ -621,33 +655,30 @@ pub mod kernel {
     (type Right {:value Int})
     (type Choice (| Left Right))
 
-    (foreign nefor.factory.stub
-      {:params (Map String String) :input Choice :output Choice})
-
-    (def branch (fn [T] [[id String] [type (TypeTag T)]] -> (nefor.graph.Node T T)
-      (let [input (nefor.graph.port id type "stub.In")
-            output (nefor.graph.port id type "stub.Out")
-            actor (nefor.graph.actor id
-                    nefor.factory.stub
+    (let branch (fn [T] [[id String] [type (TypeTag T)]] -> (nefor.graph.Node T T)
+      (let input (nefor.graph.port id type "stub.In"))
+      (let output (nefor.graph.port id type "stub.Out"))
+      (let actor (nefor.graph.actor id
+                    "nefor.factory.stub" []
                     (as (Map String String) {})
                     (nefor.graph.store-port input)
-                    [(nefor.graph.store-port output)])]
-        (nefor.graph.node id "ordinary" [actor]
+                    [(nefor.graph.store-port output)]))
+      (nefor.graph.node id "ordinary" [actor]
           (as (List nefor.graph.StoredRoute) [])
-          (as (List nefor.graph.Message) []) input output))))
+          (as (List nefor.graph.Message) []) input output)))
 
-    (let [start (nefor.graph.source "start" (type-tag Choice)
-                  (as Choice (as Left {:value "chosen"})))
-          left (branch "left" (type-tag Left))
-          right (branch "right" (type-tag Right))
-          result (nefor.graph.output "result" (type-tag Choice))]
-      (nefor.artifact.compile
+    (let start (nefor.graph.source "start" (type-tag Choice)
+                  (as Choice (as Left {:value "chosen"}))))
+    (let left (branch "left" (type-tag Left)))
+    (let right (branch "right" (type-tag Right)))
+    (let result (nefor.graph.output "result" (type-tag Choice)))
+    (nefor.artifact.compile
         (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
           (nefor.graph.add-edges graph
             [(nefor.graph.edge start left)
              (nefor.graph.edge start right)
              (nefor.graph.edge left result)
-             (nefor.graph.edge right result)]))))
+             (nefor.graph.edge right result)])))
                 "#,
             );
             let begun = host
@@ -694,7 +725,7 @@ pub mod kernel {
                 &host,
                 run_id,
                 r#"(nefor.process.exec "broken"
-                     (as nefor.contracts.ProcessExecParams
+                     (as nefor.process.ProcessExecParams
                        {:argv ["true"] :cwd nefor.process.cwd
                         :timeout (nefor.contracts.timeout-ms 0)}))"#,
             );
@@ -739,6 +770,7 @@ pub mod kernel {
                 "actors": [{
                     "id": "custom",
                     "factory": "nefor.factory.stub",
+                    "type_arguments": [],
                     "params": {"greeting": "done"},
                     "routes": {}
                 }],
@@ -784,6 +816,7 @@ pub mod kernel {
                         "actors": [{
                             "id": "tentative",
                             "factory": "nefor.factory.stub",
+                            "type_arguments": [],
                             "params": {},
                             "routes": {}
                         }],
@@ -830,8 +863,8 @@ pub mod kernel {
                 .expect("begin");
             let graph = serde_json::json!({
                 "actors": [
-                    {"id":"source", "factory":"nefor.factory.stub", "params":{}, "routes":{}},
-                    {"id":"result", "factory":"nefor.factory.stub", "params":{}, "routes":{}}
+                    {"id":"source", "factory":"nefor.factory.stub", "type_arguments":[], "params":{}, "routes":{}},
+                    {"id":"result", "factory":"nefor.factory.stub", "type_arguments":[], "params":{}, "routes":{}}
                 ],
                 "messages": [
                     {"to":"source", "content":{"kind":"stub.In"}},
@@ -993,9 +1026,9 @@ pub mod kernel {
                 .expect("begin stopped route");
             let stopped_route = serde_json::json!({
                 "actors": [
-                    {"id":"source", "factory":"nefor.factory.stub", "params":{},
+                    {"id":"source", "factory":"nefor.factory.stub", "type_arguments":[], "params":{},
                      "routes":{"stub.Out":[{"actor":"consumer","wire":"stub.Out"}]}},
-                    {"id":"consumer", "factory":"nefor.factory.stub", "params":{}, "routes":{}}
+                    {"id":"consumer", "factory":"nefor.factory.stub", "type_arguments":[], "params":{}, "routes":{}}
                 ],
                 "messages":[{"to":"source", "content":{"kind":"stub.In"}}],
                 "kills":[],
@@ -1035,17 +1068,6 @@ pub mod kernel {
 
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/runtime.rs"));
 
-impl kernel::LuaHost {
-    fn begin_run(
-        &self,
-        run_id: &str,
-        run_name: &str,
-        session_id: Option<&str>,
-    ) -> Result<kernel::BeginRunOutcome, error::MagError> {
-        self.begin_run_with_principal(run_id, run_name, session_id, None, None)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1063,17 +1085,14 @@ mod tests {
             "run_id": "unsupported-schema",
             "session_id": "session-1",
             "artifact": {
-                "format": GRAPH_MODIFICATION_FORMAT,
-                "data": {
-                    "actors": [{
-                        "id": "answer",
-                        "factory": "structured-output",
-                        "params": {
-                            "schema": {"version": 1, "root": {"kind": "json_value"}}
-                        }
-                    }],
-                    "messages": [], "kills": [], "rules": []
-                }
+                "actors": [{
+                    "id": "answer",
+                    "factory": "structured-output",
+                    "params": {
+                        "schema": {"version": 1, "root": {"kind": "json_value"}}
+                    }
+                }],
+                "messages": [], "kills": [], "rules": []
             }
         });
         let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
@@ -1118,31 +1137,31 @@ mod tests {
         fs::write(
             root.join("main.mag"),
             r#"
-    (require "nefor.actors")
-    (require "nefor.artifact")
-    (require "nefor.contracts")
-    (require "nefor.graph")
-    (let [start (nefor.actors.task-source "task" "test")
-          worker (nefor.actors.agent
-            (as nefor.actors.AgentConfig {:id "worker"
-             :model (nefor.contracts.no-identifier)
-             :profile (nefor.contracts.no-identifier)
-             :provider "mock-provider"
-             :system "Answer."
-             :tools (as (List String) [])
-             :da-policy (nefor.contracts.no-da-policy)
-             :max-corrections 0})
-            (type-tag nefor.contracts.Task) "task"
-            (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError)))
-          result (nefor.graph.output "result"
-            (type-tag (| (| nefor.contracts.TextAnswer nefor.contracts.AgentError)
-                         nefor.contracts.AgentError)))]
-      (nefor.artifact.compile
-        (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-          (nefor.graph.add-edges graph
-            [(nefor.graph.edge start worker)
-             (nefor.graph.edge worker result)]))))
-    "#,
+(require "nefor.actors")
+(require "nefor.artifact")
+(require "nefor.contracts")
+(require "nefor.graph")
+(let start (nefor.actors.task-source "task" "test"))
+(let worker (nefor.actors.agent
+        (as nefor.actors.AgentConfig {:id "worker"
+         :model (nefor.contracts.no-identifier)
+         :profile (nefor.contracts.no-identifier)
+         :provider "mock-provider"
+         :system "Answer."
+         :tools (as (List String) [])
+         :da-policy (nefor.contracts.no-da-policy)
+         :max-corrections 0})
+        (type-tag nefor.contracts.Task) "task"
+        (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+(let result (nefor.graph.output "result"
+        (type-tag (| (| nefor.contracts.TextAnswer nefor.contracts.AgentError)
+                     nefor.contracts.AgentError))))
+(nefor.artifact.compile
+    (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+      (nefor.graph.add-edges graph
+        [(nefor.graph.edge start worker)
+         (nefor.graph.edge worker result)])))
+"#,
         )
         .expect("program");
         let module_root =
@@ -1193,6 +1212,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_resident_rules_are_rejected_by_the_plugin_not_mag_core() {
+        let root = std::env::temp_dir().join(format!(
+            "mag-malformed-resident-rules-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("workspace");
+        fs::write(
+            root.join("main.mag"),
+            r#"(artifact {:actors [] :messages [] :kills [] :rules "not-a-list"})"#,
+        )
+        .expect("program");
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let host = LuaHost::load_kernel(
+            &manifest.join("lua/mag-kernel/init.lua"),
+            Some(&manifest.join("../../lua")),
+        )
+        .expect("kernel");
+        let body = serde_json::json!({
+            "id": "load-malformed-rules",
+            "source_dir": root,
+            "entry": "main.mag"
+        });
+        let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
+        let mut program = None;
+        handle_load(
+            &out_tx,
+            body.as_object().expect("load body"),
+            Some("load-malformed-rules"),
+            &mut program,
+            &host,
+        )
+        .await
+        .expect("load rejection is a protocol response");
+
+        let outgoing = out_rx.try_recv().expect("load rejection");
+        let Body::Event(body) = outgoing.body else {
+            panic!("expected event response")
+        };
+        assert_eq!(body["kind"], ERROR_KIND);
+        assert!(body["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("'rules' must be an array")));
+        assert!(program.is_none(), "invalid program is not installed");
+        assert!(host.drain_emits().expect("kernel emits").is_empty());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
     async fn valid_text_answer_agent_loads_through_existing_path() {
         let root =
             std::env::temp_dir().join(format!("mag-valid-text-agent-{}", std::process::id()));
@@ -1201,30 +1269,30 @@ mod tests {
         fs::write(
             root.join("main.mag"),
             r#"
-    (require "nefor.actors")
-    (require "nefor.artifact")
-    (require "nefor.contracts")
-    (require "nefor.graph")
-    (let [start (nefor.actors.task-source "task" "test")
-          worker (nefor.actors.agent
-            (as nefor.actors.AgentConfig {:id "worker"
-             :model (nefor.contracts.no-identifier)
-             :profile (nefor.contracts.no-identifier)
-             :provider "mock-provider"
-             :system "Answer."
-             :tools (as (List String) [])
-             :da-policy (nefor.contracts.no-da-policy)
-             :max-corrections 0})
-            (type-tag nefor.contracts.Task) "task"
-            (type-tag nefor.contracts.TextAnswer))
-          result (nefor.graph.output "result"
-            (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError)))]
-      (nefor.artifact.compile
-        (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-          (nefor.graph.add-edges graph
-            [(nefor.graph.edge start worker)
-             (nefor.graph.edge worker result)]))))
-    "#,
+(require "nefor.actors")
+(require "nefor.artifact")
+(require "nefor.contracts")
+(require "nefor.graph")
+(let start (nefor.actors.task-source "task" "test"))
+(let worker (nefor.actors.agent
+        (as nefor.actors.AgentConfig {:id "worker"
+         :model (nefor.contracts.no-identifier)
+         :profile (nefor.contracts.no-identifier)
+         :provider "mock-provider"
+         :system "Answer."
+         :tools (as (List String) [])
+         :da-policy (nefor.contracts.no-da-policy)
+         :max-corrections 0})
+        (type-tag nefor.contracts.Task) "task"
+        (type-tag nefor.contracts.TextAnswer)))
+(let result (nefor.graph.output "result"
+        (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+(nefor.artifact.compile
+    (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+      (nefor.graph.add-edges graph
+        [(nefor.graph.edge start worker)
+         (nefor.graph.edge worker result)])))
+"#,
         )
         .expect("program");
         let module_root =
@@ -1310,41 +1378,38 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("workspace");
         fs::write(
-                root.join("main.mag"),
-                r#"
-                  (type Task {:task String})
-                  (type ExpandedResult {:greeting String})
-                  (def task-name (fn [[task Task]] -> String (get task "task")))
-                  (def expand (fn [[task Task]] -> Artifact
-                    (artifact "nefor.graph-delta/v1"
-                      {:actors []
-                       :messages [{:to "middle" :content {:kind "stub.In" :task (task-name task)}}]
-                       :kills []
-                       :rules []})))
-                  (def finish (fn [[task Task]] -> Artifact
-                    (artifact "nefor.graph-delta/v1"
-                      {:actors []
-                       :messages [{:to "result" :content {:kind "stub.In" :task task}}]
-                       :kills []
-                       :rules []})))
-                  (artifact "nefor.graph-modification/v1"
-                    {:actors [
-                      {:id "source" :foreign "nefor.factory.stub"
-                       :params {:value {:task "one"}} :routes {}}
-                      {:id "middle" :foreign "nefor.factory.stub"
-                       :params {:value {:task "nested"}} :routes {}}
-                      {:id "result" :foreign "nefor.factory.stub"
-                       :params {:greeting "expanded"} :routes {}}]
-                     :messages [{:to "source" :content {:kind "stub.In"}}]
-                     :kills []
-                     :rules [{:id "expand" :on {:actor "source" :type (type-evidence (type-tag Task)) :wire "stub.Out"}
-                              :fn "expand"}
-                             {:id "finish" :on {:actor "middle" :type (type-evidence (type-tag Task)) :wire "stub.Out"}
-                              :fn "finish"}]
-                     :result {:from {:actor "result" :type (type-evidence (type-tag ExpandedResult)) :wire "stub.Out"}}})
-                "#,
-            )
-            .expect("program");
+            root.join("main.mag"),
+            r#"
+              (type Task {:task String})
+              (type ExpandedResult {:greeting String})
+              (let task-name (fn [[task Task]] -> String (get task "task")))
+              (let expand (fn [[task Task]] -> Artifact
+                (artifact {:actors []
+                   :messages [{:to "middle" :content {:kind "stub.In" :task (task-name task)}}]
+                   :kills []
+                   :rules []})))
+              (let finish (fn [[task Task]] -> Artifact
+                (artifact {:actors []
+                   :messages [{:to "result" :content {:kind "stub.In" :task task}}]
+                   :kills []
+                   :rules []})))
+              (artifact {:actors [
+                  {:id "source" :factory "nefor.factory.stub" :type_arguments []
+                   :params {:value {:task "one"}} :routes {}}
+                  {:id "middle" :factory "nefor.factory.stub" :type_arguments []
+                   :params {:value {:task "nested"}} :routes {}}
+                  {:id "result" :factory "nefor.factory.stub" :type_arguments []
+                   :params {:greeting "expanded"} :routes {}}]
+                 :messages [{:to "source" :content {:kind "stub.In"}}]
+                 :kills []
+                 :rules [{:id "expand" :on {:actor "source" :type (type-evidence (type-tag Task)) :wire "stub.Out"}
+                          :fn "expand"}
+                         {:id "finish" :on {:actor "middle" :type (type-evidence (type-tag Task)) :wire "stub.Out"}
+                          :fn "finish"}]
+                 :result {:from {:actor "result" :type (type-evidence (type-tag ExpandedResult)) :wire "stub.Out"}}})
+            "#,
+        )
+        .expect("program");
         let module_root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/nefor-agent/mag/lib");
         let program = nefor_mag::load_with_inputs_and_module_roots(
@@ -1354,9 +1419,13 @@ mod tests {
             &[root.clone(), module_root],
         )
         .expect("load program");
-        let artifact = serde_json::to_value(&program.artifact).expect("artifact json");
-        nefor_mag::validate_loaded_rules(&program).expect("rules valid");
+        let artifact = program.artifact.clone();
         let modification = artifact_modification(&artifact).expect("normalize graph");
+        let rules = resolve_resident_rules(&program, &modification).expect("rules valid");
+        let program = ResidentProgram {
+            loaded: program,
+            rules,
+        };
 
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let host = LuaHost::load_kernel(
@@ -1403,15 +1472,6 @@ mod tests {
         fn named(name: &str) -> Value {
             serde_json::json!({"kind":"named","name":name,"arguments":[]})
         }
-        fn evidence(identity: &str, input: Value, output: Value) -> Value {
-            serde_json::json!({
-                "version": 2,
-                "identity": identity,
-                "arguments": [],
-                "input": input,
-                "output": output
-            })
-        }
         fn event(request_id: &str, event: &str, fields: Value) -> Map<String, Value> {
             let mut body = fields.as_object().expect("event fields").clone();
             body.insert(
@@ -1434,11 +1494,7 @@ mod tests {
             "actors": [{
                 "id": "answer",
                 "factory": "llm",
-                "evidence": evidence(
-                    "nefor.factory.llm",
-                    provider_input.clone(),
-                    serde_json::json!({"kind":"union","items":[tool_calls.clone(),text_answer.clone()]})
-                ),
+                "type_arguments": [],
                 "input": {"wire":"generic-provider.ProviderOut","type":provider_input},
                 "outputs": [
                     {"wire":"generic-tool.ToolCalls","type":tool_calls},

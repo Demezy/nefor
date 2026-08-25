@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use nefor_mag::LoadedProgram;
+use nefor_mag::{ArtifactFunction, LoadedProgram};
 use nefor_plugin_sdk::{await_ready_ok, spawn_stdin_reader, spawn_stdout_writer, TransportError};
 use nefor_protocol::{Body, Envelope, PluginOutgoing, SystemBody};
 use serde_json::{Map, Value};
@@ -38,7 +38,23 @@ use crate::kernel::{LuaHost, RunCompletion, TeardownReason};
 struct ActiveExecute {
     /// The `mag.execute` request id to correlate the terminal reply to.
     in_reply_to: Option<String>,
-    program: Option<Arc<LoadedProgram>>,
+    program: Option<Arc<ResidentProgram>>,
+}
+
+/// Nefor-owned interpretation of a raw MAG artifact. Core MAG keeps only the
+/// loaded program and opaque function handles; this plugin owns rule IDs and
+/// the artifact fields that declare them.
+struct ResidentProgram {
+    loaded: LoadedProgram,
+    rules: HashMap<String, ArtifactFunction>,
+}
+
+impl std::ops::Deref for ResidentProgram {
+    type Target = LoadedProgram;
+
+    fn deref(&self) -> &Self::Target {
+        &self.loaded
+    }
 }
 
 /// The in-flight async runs, keyed by run_id.
@@ -46,9 +62,9 @@ type ActiveExecutes = HashMap<String, ActiveExecute>;
 
 fn run_program<'a>(
     active: &'a ActiveExecutes,
-    current: Option<&'a LoadedProgram>,
+    current: Option<&'a ResidentProgram>,
     run_id: &str,
-) -> Option<&'a LoadedProgram> {
+) -> Option<&'a ResidentProgram> {
     active
         .get(run_id)
         .and_then(|execute| execute.program.as_deref())
@@ -67,9 +83,6 @@ const PLUGIN_NAME: &str = "mag";
 
 /// Plugin version, advertised in `mag.hello`.
 const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
-const GRAPH_MODIFICATION_FORMAT: &str = "nefor.graph-modification/v1";
-const GRAPH_DELTA_FORMAT: &str = "nefor.graph-delta/v1";
-
 /// Liveness ping we answer, and the reply kind.
 const PING_KIND: &str = "mag.ping";
 const PONG_KIND: &str = "mag.pong";
@@ -279,7 +292,7 @@ async fn run_dispatch_loop(
     // The session's resident program: loaded once by `mag.load`, then the
     // source of the cached environment every `mag.eval` evaluates against and
     // the default program `mag.execute` runs.
-    let mut program: Option<Arc<LoadedProgram>> = None;
+    let mut program: Option<Arc<ResidentProgram>> = None;
     // The in-flight async runs, keyed by run_id (deferred-completion path).
     // Concurrent `mag.execute` requests each hold one entry; each settles
     // independently against its own run-scoped kernel context.
@@ -351,7 +364,7 @@ async fn flush_emits(
 
 fn drain_rule_triggers(
     host: &LuaHost,
-    program: Option<&LoadedProgram>,
+    program: Option<&ResidentProgram>,
     run_id: &str,
 ) -> Result<(), MagError> {
     while let Some(trigger) = host.take_rule_trigger(run_id)? {
@@ -362,14 +375,16 @@ fn drain_rule_triggers(
             )?;
             break;
         };
-        let result = nefor_mag::eval_fn(program, &trigger.function, trigger.value)
-            .map_err(|error| format!("rule {:?} evaluation failed: {error}", trigger.rule_id))
-            .and_then(|artifact| {
-                serde_json::to_value(artifact).map_err(|error| {
-                    format!("rule {:?} artifact serialize: {error}", trigger.rule_id)
-                })
+        let result = program
+            .rules
+            .get(&trigger.rule_id)
+            .ok_or_else(|| format!("unknown resident rule {:?}", trigger.rule_id))
+            .and_then(|function| {
+                nefor_mag::eval_artifact_fn(&program.loaded, function, trigger.value).map_err(
+                    |error| format!("rule {:?} evaluation failed: {error}", trigger.rule_id),
+                )
             })
-            .and_then(|artifact| artifact_data(&artifact, GRAPH_DELTA_FORMAT, "rule delta"))
+            .and_then(|artifact| graph_modification(&artifact, "rule delta"))
             .and_then(|delta| {
                 let outcome = host.apply(run_id, &delta).map_err(|error| {
                     format!("rule {:?} delta apply failed: {error}", trigger.rule_id)
@@ -413,7 +428,7 @@ async fn settle_run(
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
-    program: Option<&LoadedProgram>,
+    program: Option<&ResidentProgram>,
     run_id: &str,
 ) -> Result<(), MagError> {
     if !active.contains_key(run_id) {
@@ -485,7 +500,7 @@ async fn handle_event(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     source: &str,
     body: &Map<String, Value>,
-    program: &mut Option<Arc<LoadedProgram>>,
+    program: &mut Option<Arc<ResidentProgram>>,
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
@@ -595,7 +610,7 @@ async fn handle_load(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     body: &Map<String, Value>,
     in_reply_to: Option<&str>,
-    program: &mut Option<Arc<LoadedProgram>>,
+    program: &mut Option<Arc<ResidentProgram>>,
     host: &LuaHost,
 ) -> Result<(), MagError> {
     let source_dir = match body.get("source_dir").and_then(Value::as_str) {
@@ -620,7 +635,7 @@ async fn handle_load(
     let contracts = host
         .registry_contracts()
         .unwrap_or_else(|_| Value::Array(Vec::new()));
-    let inputs = serde_json::json!({ "foreign_contracts": contracts });
+    let inputs = serde_json::json!({ "factory_contracts": contracts });
     match nefor_mag::load_with_inputs_and_module_roots(
         Path::new(source_dir),
         entry,
@@ -628,22 +643,14 @@ async fn handle_load(
         &module_roots,
     ) {
         Ok(loaded) => {
-            let artifact = match serde_json::to_value(&loaded.artifact) {
-                Ok(value) => value,
-                Err(error) => {
-                    return send_event(
-                        out_tx,
-                        error_body(in_reply_to, &format!("artifact serialize: {error}")),
-                    )
-                    .await
-                }
-            };
-            if let Err(error) = nefor_mag::validate_loaded_rules(&loaded) {
-                return send_event(out_tx, mag_error_body(in_reply_to, &error)).await;
-            }
+            let artifact = loaded.artifact.clone();
             let modification = match artifact_modification(&artifact) {
                 Ok(modification) => modification,
                 Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
+            };
+            let rules = match resolve_resident_rules(&loaded, &modification) {
+                Ok(rules) => rules,
+                Err(error) => return send_event(out_tx, mag_error_body(in_reply_to, &error)).await,
             };
             if let Err(error) = preflight_provider_schemas(&modification) {
                 return send_event(out_tx, error_body(in_reply_to, &error)).await;
@@ -656,7 +663,7 @@ async fn handle_load(
                 .registry_contracts()
                 .unwrap_or_else(|_| Value::Array(Vec::new()));
             let reply = loaded_body(in_reply_to, &loaded.hash, artifact, &factories, contracts);
-            *program = Some(Arc::new(loaded));
+            *program = Some(Arc::new(ResidentProgram { loaded, rules }));
             send_event(out_tx, reply).await
         }
         Err(e) => send_event(out_tx, mag_error_body(in_reply_to, &e)).await,
@@ -748,7 +755,7 @@ async fn handle_execute(
     source: &str,
     body: &Map<String, Value>,
     in_reply_to: Option<&str>,
-    program: &Option<Arc<LoadedProgram>>,
+    program: &Option<Arc<ResidentProgram>>,
     runtime: (&LuaHost, &mut ActiveExecutes, &mut CapabilityBridge),
 ) -> Result<(), MagError> {
     let (host, active, bridge) = runtime;
@@ -758,18 +765,9 @@ async fn handle_execute(
             Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
         },
         None => match program {
-            Some(p) => match serde_json::to_value(&p.artifact) {
-                Ok(artifact) => match artifact_modification(&artifact) {
-                    Ok(m) => m,
-                    Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
-                },
-                Err(e) => {
-                    return send_event(
-                        out_tx,
-                        error_body(in_reply_to, &format!("resident artifact serialize: {e}")),
-                    )
-                    .await
-                }
+            Some(p) => match artifact_modification(&p.artifact) {
+                Ok(m) => m,
+                Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
             },
             None => {
                 return send_event(
@@ -1070,7 +1068,7 @@ async fn handle_apply(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     body: &Map<String, Value>,
     in_reply_to: Option<&str>,
-    program: Option<&LoadedProgram>,
+    program: Option<&ResidentProgram>,
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
@@ -1216,7 +1214,7 @@ async fn handle_steer_run(
 async fn handle_resume_actor(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     body: &Map<String, Value>,
-    program: Option<&LoadedProgram>,
+    program: Option<&ResidentProgram>,
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
@@ -1262,7 +1260,7 @@ async fn handle_resume_actor(
 async fn handle_interrupt_run(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     body: &Map<String, Value>,
-    program: Option<&LoadedProgram>,
+    program: Option<&ResidentProgram>,
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
@@ -1346,7 +1344,7 @@ async fn handle_tool_stream(
 async fn handle_tool_result(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     body: &Map<String, Value>,
-    program: Option<&LoadedProgram>,
+    program: Option<&ResidentProgram>,
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
@@ -1373,7 +1371,7 @@ async fn handle_tool_result(
 async fn handle_provider_reply(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     reply: bridge::ProviderReply,
-    program: Option<&LoadedProgram>,
+    program: Option<&ResidentProgram>,
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
@@ -1408,7 +1406,7 @@ async fn handle_eval(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     body: &Map<String, Value>,
     in_reply_to: Option<&str>,
-    program: &mut Option<Arc<LoadedProgram>>,
+    program: &mut Option<Arc<ResidentProgram>>,
 ) -> Result<(), MagError> {
     let name = match body.get("name").and_then(Value::as_str) {
         Some(s) => s,
@@ -1431,13 +1429,7 @@ async fn handle_eval(
     };
 
     match nefor_mag::eval_fn(loaded, name, input) {
-        Ok(artifact) => {
-            let reply = match serde_json::to_value(&artifact) {
-                Ok(value) => artifact_body(in_reply_to, value),
-                Err(e) => error_body(in_reply_to, &format!("artifact serialize: {e}")),
-            };
-            send_event(out_tx, reply).await
-        }
+        Ok(artifact) => send_event(out_tx, artifact_body(in_reply_to, artifact)).await,
         Err(e) => send_event(out_tx, error_body(in_reply_to, &e.to_string())).await,
     }
 }
@@ -1457,7 +1449,7 @@ fn hello_body(kernel: Option<&str>, factories: &[String], contracts: Value) -> M
         "factories".into(),
         Value::Array(factories.iter().cloned().map(Value::String).collect()),
     );
-    m.insert("foreign_contracts".into(), contracts);
+    m.insert("factory_contracts".into(), contracts);
     m
 }
 
@@ -1490,52 +1482,84 @@ fn loaded_body(
         "factories".into(),
         Value::Array(factories.iter().cloned().map(Value::String).collect()),
     );
-    m.insert("foreign_contracts".into(), contracts);
+    m.insert("factory_contracts".into(), contracts);
     m
 }
 
-/// Validate the generic host artifact boundary and bind qualified foreign
-/// actor identities to the kernel's existing `factory` field. The kernel sees
-/// the same graph-modification IR and therefore retains all firing, lifecycle,
-/// and defensive contract checks unchanged.
-fn artifact_data(artifact: &Value, expected_format: &str, context: &str) -> Result<Value, String> {
-    let object = artifact
+/// Interpret a raw MAG artifact as Nefor's graph-modification IR. MAG itself
+/// neither knows nor validates this application-owned schema.
+fn graph_modification(artifact: &Value, context: &str) -> Result<Value, String> {
+    let data = artifact
         .as_object()
-        .ok_or_else(|| format!("{context} artifact must be an object"))?;
-    let format = object
-        .get("format")
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("{context} artifact missing string format"))?;
-    if format != expected_format {
-        return Err(format!(
-            "{context} must use artifact format {expected_format:?}, got {format:?}"
-        ));
-    }
-    let mut data = object
-        .get("data")
-        .and_then(Value::as_object)
         .cloned()
-        .ok_or_else(|| format!("{context} artifact data must be an object"))?;
-    if let Some(actors) = data.get_mut("actors").and_then(Value::as_array_mut) {
-        for actor in actors {
-            let spec = actor
-                .as_object_mut()
-                .ok_or_else(|| "artifact actors must be objects".to_owned())?;
-            if let Some(foreign) = spec.remove("foreign") {
-                if !foreign.is_string() {
-                    return Err("artifact actor foreign identity must be a string".to_owned());
-                }
-                if spec.insert("factory".to_owned(), foreign).is_some() {
-                    return Err("artifact actor cannot declare both foreign and factory".to_owned());
-                }
-            }
-        }
-    }
+        .ok_or_else(|| format!("{context} artifact must be a graph-modification object"))?;
     Ok(Value::Object(data))
 }
 
 fn artifact_modification(artifact: &Value) -> Result<Value, String> {
-    artifact_data(artifact, GRAPH_MODIFICATION_FORMAT, "mag.execute")
+    graph_modification(artifact, "mag.execute")
+}
+
+fn resolve_resident_rules(
+    program: &LoadedProgram,
+    modification: &Value,
+) -> Result<HashMap<String, ArtifactFunction>, nefor_mag::error::MagError> {
+    let Some(raw_rules) = modification.get("rules") else {
+        return Ok(HashMap::new());
+    };
+    let rules = raw_rules.as_array().ok_or_else(|| {
+        nefor_mag::error::MagError::Type("graph modification 'rules' must be an array".into())
+    })?;
+    let mut resolved = HashMap::new();
+    for (index, raw_rule) in rules.iter().enumerate() {
+        let rule = raw_rule.as_object().ok_or_else(|| {
+            nefor_mag::error::MagError::Type(format!("rules[{index}] must be an object"))
+        })?;
+        let id = rule
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                nefor_mag::error::MagError::Type(format!(
+                    "rules[{index}] requires a non-empty string id"
+                ))
+            })?;
+        if resolved.contains_key(id) {
+            return Err(nefor_mag::error::MagError::Type(format!(
+                "duplicate resident rule id {id:?}"
+            )));
+        }
+        let function = rule
+            .get("fn")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                nefor_mag::error::MagError::Type(format!(
+                    "rule {id:?} requires a non-empty string function name"
+                ))
+            })?;
+        let on = rule.get("on").and_then(Value::as_object).ok_or_else(|| {
+            nefor_mag::error::MagError::Type(format!("rule {id:?} requires an object 'on'"))
+        })?;
+        for field in ["actor", "wire"] {
+            if !on
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+            {
+                return Err(nefor_mag::error::MagError::Type(format!(
+                    "rule {id:?} requires a non-empty string on.{field}"
+                )));
+            }
+        }
+        let input_type = on.get("type").ok_or_else(|| {
+            nefor_mag::error::MagError::Type(format!("rule {id:?} requires a source semantic type"))
+        })?;
+        let handle = nefor_mag::resolve_artifact_fn(program, function, input_type)
+            .map_err(|error| nefor_mag::error::MagError::Type(format!("rule {id:?}: {error}")))?;
+        resolved.insert(id.to_owned(), handle);
+    }
+    Ok(resolved)
 }
 
 /// Terminal run reply on success: status, the declared boundary result INLINE
@@ -1664,6 +1688,7 @@ async fn send_event(
         .map_err(|_| TransportError::WriterClosed)?;
     Ok(())
 }
+
 
 async fn send_ready(out_tx: &mpsc::Sender<PluginOutgoing>) -> Result<(), MagError> {
     out_tx

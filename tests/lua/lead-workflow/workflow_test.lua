@@ -190,38 +190,61 @@ local function with_profiles(profiles, fn)
   if not ok then error(err, 0) end
 end
 
--- Current authoring dialect: agents are the compiler's `agent` template,
--- composed with a sink via (graph … :terminal out). The lead's validators
--- never parse this source — compilation happens in the mag plugin and the
--- validators run over the modification in the mag.loaded reply — so these
--- strings only document what the lead writes to disk.
-local READ_ONLY_MAG = [[
-(type mag.Task)
-(type generic-provider.TextAnswer)
+-- Current authoring dialect. The lead's validators never parse this source —
+-- compilation happens in the mag plugin and the validators run over the
+-- modification in the mag.loaded reply — so these strings only document what
+-- the lead writes to disk.
+local READ_ONLY_MAG = [=[
+(require "nefor.actors")
+(require "nefor.artifact")
+(require "nefor.contracts")
+(require "nefor.graph")
 
-(let [worker (agent {:id "worker"
-                     :system "Answer the task."
-                     :provider "chatgpt"
-                     :profile "standard"
-                     :tools ["read_file"]}
-               : mag.Task -> generic-provider.TextAnswer)
-      out    (node "sink" {} : generic-provider.TextAnswer -> generic-provider.TextAnswer)]
-  (graph worker -> out :terminal out))
-]]
+(let start (nefor.actors.task-source "worker-task" "Answer the task."))
+(let worker (nefor.actors.agent
+  (as nefor.actors.AgentConfig {:id "worker"
+    :model (nefor.contracts.no-identifier)
+    :profile "standard"
+    :provider "chatgpt"
+    :system "Answer the task."
+    :tools ["read_file"]
+    :da-policy (nefor.contracts.no-da-policy)
+    :max-corrections 2})
+  (type-tag nefor.contracts.Task) "task"
+  (type-tag nefor.contracts.TextAnswer)))
+(let out (nefor.graph.output "worker-output"
+  (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph
+      [(nefor.graph.edge start worker) (nefor.graph.edge worker out)])))
+]=]
 
-local WRITER_MAG = [[
-(type mag.Task)
-(type generic-provider.TextAnswer)
+local WRITER_MAG = [=[
+(require "nefor.actors")
+(require "nefor.artifact")
+(require "nefor.contracts")
+(require "nefor.graph")
 
-(let [build (agent {:id "build"
-                    :system "Implement feature X."
-                    :provider "chatgpt"
-                    :profile "fast"
-                    :tools ["read_file" "write_file"]}
-              : mag.Task -> generic-provider.TextAnswer)
-      out   (node "sink" {} : generic-provider.TextAnswer -> generic-provider.TextAnswer)]
-  (graph build -> out :terminal out))
-]]
+(let start (nefor.actors.task-source "build-task" "Implement feature X."))
+(let build (nefor.actors.agent
+  (as nefor.actors.AgentConfig {:id "build"
+    :model (nefor.contracts.no-identifier)
+    :profile "fast"
+    :provider "chatgpt"
+    :system "Implement feature X."
+    :tools ["read_file" "write_file"]
+    :da-policy (nefor.contracts.no-da-policy)
+    :max-corrections 2})
+  (type-tag nefor.contracts.Task) "task"
+  (type-tag nefor.contracts.TextAnswer)))
+(let out (nefor.graph.output "build-output"
+  (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph
+      [(nefor.graph.edge start build) (nefor.graph.edge build out)])))
+]=]
 
 -- Modification shapes the mag plugin replies with on mag.loaded — the
 -- ModificationIr {actors, messages, kills, rules} the loader lowers to.
@@ -229,7 +252,7 @@ local WRITER_MAG = [[
 -- these are trimmed to the actors the validators care about.
 local KERNEL_FACTORIES = { "adapter", "llm", "run-tool", "sink", "stub", "tool-result" }
 
-local function foreign_contracts(factories)
+local function factory_contracts(factories)
   local contracts = {}
   for _, name in ipairs(factories or KERNEL_FACTORIES) do
     contracts[#contracts + 1] = { identity = "nefor.factory." .. name }
@@ -239,7 +262,7 @@ end
 
 -- Test fixtures stay compact by describing the former sink-shaped graph,
 -- then this helper expresses the same program through the current artifact
--- boundary: qualified foreign actors plus a structural result selector.
+-- boundary: qualified factory identities plus a structural result selector.
 local function artifact_from_modification(modification)
   local actors, sink_ids = {}, {}
   for _, actor in ipairs(modification.actors or {}) do
@@ -259,7 +282,8 @@ local function artifact_from_modification(modification)
       end
       actors[#actors + 1] = {
         id = actor.id,
-        foreign = "nefor.factory." .. tostring(actor.factory),
+        factory = "nefor.factory." .. tostring(actor.factory),
+        type_arguments = actor.type_arguments or {},
         params = actor.params or {},
         routes = routes,
       }
@@ -279,14 +303,11 @@ local function artifact_from_modification(modification)
     end
   end
   return {
-    format = "nefor.graph-modification/v1",
-    data = {
-      actors = actors,
-      messages = modification.messages or {},
-      kills = modification.kills or {},
-      rules = modification.rules or {},
-      result = result,
-    },
+    actors = actors,
+    messages = modification.messages or {},
+    kills = modification.kills or {},
+    rules = modification.rules or {},
+    result = result,
   }
 end
 
@@ -567,15 +588,15 @@ local function feed_loaded(modification, factories)
     in_reply_to = load.body.id,
     hash        = "sha256:test",
     factories   = factories or KERNEL_FACTORIES,
-    foreign_contracts = foreign_contracts(factories),
+    factory_contracts = factory_contracts(factories),
     artifact = artifact_from_modification(modification),
   })
   return load
 end
 
--- The composition supplies the shared base agent behind the ready MAG
--- constructor. MAG programs add a positional system overlay and send the full
--- task as a user message; they do not select models.
+-- Integration regression for the production mag.loaded boundary: the same
+-- factory-shaped reply drives registry capture, preview rendering, default
+-- overlay resolution, execute forwarding, and active-run metadata.
 do
   fresh()
   lw.configure({ agent_defaults = {
@@ -588,13 +609,20 @@ do
   _test.calls_clear()
   execute_mag("system-overlay-execute", "system-overlay.mag")
   local modification = read_only_modification()
-  modification.actors[2].foreign = "nefor.factory.structured-output"
+  modification.actors[2].factory = "structured-output"
   modification.actors[2].params.profile = nil
-  feed_loaded(modification)
+  feed_loaded(modification,
+    { "adapter", "structured-output", "run-tool", "sink", "stub", "tool-result" })
   local exec = find_call(decode_calls(), function(c)
     return c.body.kind == "mag.execute" and c.target == "mag"
   end)
   assert_true(exec ~= nil, "configured universal system permits execution")
+  assert_eq(exec.body.artifact.actors[2].factory,
+    "nefor.factory.structured-output", "execute preserves the plugin artifact factory")
+  assert_true(type(exec.body.artifact.actors[2].type_arguments) == "table",
+    "execute preserves the plugin artifact type arguments")
+  assert_true(lw._internals.state.kernel_factories["nefor.factory.structured-output"] == true,
+    "factory contracts from the plugin reply feed control-plane validation")
   local patch = exec.body.params_overlay["worker.llm"]
   assert_eq(patch.provider, "chatgpt", "ready agent receives default provider")
   assert_eq(patch.model, "general-model",
@@ -603,6 +631,13 @@ do
   assert_eq(patch.system,
     "universal composed prompt\n\n---\n\nAnswer the task.",
     "the runtime composes the shared base with the delegated position")
+  local run = lw._internals.state.active_runs[exec.body.run_id]
+  assert_eq(run.nodes["worker.llm"].reasoner, "nefor.factory.structured-output",
+    "run metadata uses the artifact factory identity")
+  local preview = require("libs.mag-workspace").preview(
+    exec.body.artifact, "sha256:test", KERNEL_FACTORIES)
+  assert_true(preview:find("worker.llm (nefor.factory.structured-output)", 1, true) ~= nil,
+    "preview renders the same artifact factory identity")
 end
 
 -- ------------------------------------------------------------------
@@ -655,7 +690,7 @@ do
   normal_load.body.module_roots[1] = "/mutated/envelope"
   _test.calls_clear()
   invoke_tool("roots-eval", "mag-eval", { intent = "Evaluate expression",
-    expr = '(nefor.shell.script "roots" (as nefor.contracts.ShellScriptParams {:script "true" :cwd "." :timeout (nefor.contracts.no-timeout)}) (type-tag Unit) "mag.Unit")',
+    expr = '(nefor.shell.script "roots" (as nefor.shell.ShellScriptParams {:script "true" :cwd "." :timeout (nefor.contracts.no-timeout)}) (type-tag Unit) "mag.Unit")',
   })
   local eval_load = latest_mag_load()
   assert_true(eval_load ~= nil, "mag-eval emits mag.load")
@@ -668,7 +703,7 @@ do
 
   fresh()
   invoke_tool("roots-eval-reset", "mag-eval", { intent = "Evaluate expression",
-    expr = '(nefor.shell.script "roots-reset" (as nefor.contracts.ShellScriptParams {:script "true" :cwd "." :timeout (nefor.contracts.no-timeout)}) (type-tag Unit) "mag.Unit")',
+    expr = '(nefor.shell.script "roots-reset" (as nefor.shell.ShellScriptParams {:script "true" :cwd "." :timeout (nefor.contracts.no-timeout)}) (type-tag Unit) "mag.Unit")',
   })
   local reset_load = latest_mag_load()
   assert_eq(#reset_load.body.module_roots, 1,
@@ -747,7 +782,7 @@ do
     in_reply_to = load.body.id,
     hash        = "sha256:read-only",
     factories   = KERNEL_FACTORIES,
-    foreign_contracts = foreign_contracts(KERNEL_FACTORIES),
+    factory_contracts = factory_contracts(KERNEL_FACTORIES),
     artifact = artifact_from_modification(read_only_modification()),
   })
   calls = decode_calls()
@@ -801,7 +836,7 @@ do
   local nodes = status.body.output.run.nodes
   assert_eq(nodes[1].id, "worker.entry", "actor ids preserved in run summaries")
   assert_eq(nodes[2].reasoner, "nefor.factory.llm",
-    "qualified foreign capability carried under the reasoner key")
+    "qualified factory identity carried under the reasoner key")
 end
 
 do
@@ -846,7 +881,7 @@ do
   local preview = reply.body.output.preview
   assert_true(type(preview) == "string", "mag compile returns a preview string")
   for _, needle in ipairs({
-    "worker.llm (nefor.factory.llm)",                      -- actor + capability
+    "worker.llm (nefor.factory.llm)",                      -- actor + factory
     "provider: \"chatgpt\"",                               -- params summary
     "Result: worker.llm (generic-provider.TextAnswer)",   -- structural result
     "-> worker.entry (task)",                              -- initial message
@@ -931,7 +966,7 @@ end
 local function start_eval_run(firing_id)
   invoke_tool(firing_id, "mag-eval", {
     intent = "Print value",
-    expr = '(nefor.process.exec "print" (as nefor.contracts.ProcessExecParams {:argv ["printf" "ok"] :cwd nefor.process.cwd :timeout (nefor.contracts.no-timeout)}))',
+    expr = '(nefor.process.exec "print" (as nefor.process.ProcessExecParams {:argv ["printf" "ok"] :cwd nefor.process.cwd :timeout (nefor.contracts.no-timeout)}))',
   })
   feed_loaded(read_only_modification())
   local exec = find_call(decode_calls(), function(c)
@@ -1138,7 +1173,7 @@ local function relayed_lead_prompt()
        and c.body.run_name == "lead"
   end)
   if exec == nil then return nil end
-  local modification = exec.body.artifact and exec.body.artifact.data
+  local modification = exec.body.artifact
   for _, actor in ipairs(modification and modification.actors or {}) do
     if actor.id == "lead.source" then return actor.params.value.prompt end
   end
@@ -1372,11 +1407,11 @@ do
        and c.body.id == "firing-kernel-badfactory"
        and type(c.body.error) == "string"
   end)
-  assert_true(err ~= nil and err.body.error:find("unknown foreign", 1, true) ~= nil,
-    "validation rejects the unknown capability with a clear error; got " .. json.encode(_test.calls()))
+  assert_true(err ~= nil and err.body.error:find("unknown factory", 1, true) ~= nil,
+    "validation rejects the unknown factory with a clear error; got " .. json.encode(_test.calls()))
   assert_true(err.body.error:find("worker.entry", 1, true) ~= nil
               and err.body.error:find("adapter", 1, true) ~= nil,
-    "rejection names the offending actor and capability")
+    "rejection names the offending actor and factory")
 end
 
 -- Structural result metadata is required even though result collection is not
@@ -1471,9 +1506,10 @@ do
   _test.calls_clear()
   execute_mag("firing-typed-profile", "typed-profile.mag")
   local m = read_only_modification()
-  m.actors[2].foreign = "nefor.factory.structured-output"
+  m.actors[2].factory = "structured-output"
   m.actors[2].params.profile = { present = true, value = "standard" }
-  feed_loaded(m)
+  feed_loaded(m,
+    { "adapter", "structured-output", "run-tool", "sink", "stub", "tool-result" })
   local exec = find_call(decode_calls(), function(c)
     return c.body.kind == "mag.execute" and c.target == "mag"
   end)
@@ -1573,18 +1609,18 @@ assert_profile_config_error({
   broken = { provider = "chatgpt", model = "", reasoning_effort = "low" },
 }, "configured profile 'broken' requires a non-empty string model")
 
--- mag.loaded snapshots qualified foreign capabilities for validation.
+-- mag.loaded snapshots qualified factory identities for validation.
 do
   fresh()
   feed("mag", {
     kind      = "mag.loaded",
-    foreign_contracts = foreign_contracts({ "sink", "llm", "stub", "run-tool" }),
+    factory_contracts = factory_contracts({ "sink", "llm", "stub", "run-tool" }),
   })
   local set = lw._internals.state.kernel_factories
   assert_true(type(set) == "table"
               and set["nefor.factory.sink"] == true
               and set["nefor.factory.llm"] == true,
-    "mag.loaded populates the foreign capability registry snapshot")
+    "mag.loaded populates the factory registry snapshot")
 end
 
 -- ------------------------------------------------------------------
@@ -2114,7 +2150,7 @@ do
     "no acknowledgment exists before compilation and validation")
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:eval", foreign_contracts = foreign_contracts(), artifact = artifact })
+    hash = "sha256:eval", factory_contracts = factory_contracts(), artifact = artifact })
   local calls = decode_calls()
   local exec = find_call(calls, function(c) return c.body.kind == "mag.execute" end)
   local ack = find_call(calls, function(c)
@@ -2174,7 +2210,7 @@ do
   load = latest_mag_load()
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:agent", foreign_contracts = foreign_contracts(), artifact = artifact })
+    hash = "sha256:agent", factory_contracts = factory_contracts(), artifact = artifact })
   calls = decode_calls()
   exec = find_call(calls, function(c) return c.body.kind == "mag.execute" end)
   ack = find_call(calls, function(c)
@@ -2234,7 +2270,7 @@ do
   load = latest_mag_load()
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:auto", foreign_contracts = foreign_contracts(), artifact = artifact })
+    hash = "sha256:auto", factory_contracts = factory_contracts(), artifact = artifact })
   exec = find_call(decode_calls(), function(c) return c.body.kind == "mag.execute" end)
   local owner_run_id = exec.body.run_id
   _test.calls_clear()
@@ -2265,7 +2301,7 @@ do
   load = latest_mag_load()
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:agent-cancel", foreign_contracts = foreign_contracts(), artifact = artifact })
+    hash = "sha256:agent-cancel", factory_contracts = factory_contracts(), artifact = artifact })
   exec = find_call(decode_calls(), function(c) return c.body.kind == "mag.execute" end)
   assert_true(exec ~= nil and lw._internals.state.active_runs[exec.body.run_id] ~= nil,
     "cancel test starts a detached eval")
@@ -2291,7 +2327,7 @@ do
     local pending_load = latest_mag_load()
     _test.calls_clear()
     feed("mag", { kind = "mag.loaded", in_reply_to = pending_load.body.id,
-      hash = "sha256:lifecycle", foreign_contracts = foreign_contracts(), artifact = artifact })
+      hash = "sha256:lifecycle", factory_contracts = factory_contracts(), artifact = artifact })
     local submitted = find_call(decode_calls(), function(c)
       return c.body.kind == "mag.execute"
     end)
@@ -2471,7 +2507,7 @@ do
   for i = 1, 2 do
     local run_id = registry:mint_run_id()
     lw._internals.register_active_run(run_id,
-      { { id = "worker-" .. i, foreign = "llm" } }, "worker-" .. i,
+      { { id = "worker-" .. i, factory = "llm" } }, "worker-" .. i,
       "dispatch-" .. i, "terminated-" .. i, sessions.current_id())
     invoke_tool("wait-terminated-" .. i, "await-run", { run_id = run_id })
     run_ids[i] = run_id
@@ -2531,7 +2567,7 @@ do
     "cancel removes pending compile correlation")
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:late", foreign_contracts = foreign_contracts(),
+    hash = "sha256:late", factory_contracts = factory_contracts(),
     artifact = artifact_from_modification(read_only_modification()) })
   assert_eq(find_call(decode_calls(), function(c) return c.body.kind == "mag.execute" end), nil,
     "late compile response cannot execute orphaned work")
@@ -2609,10 +2645,10 @@ do
     args = { intent = "Validate expression", expr = "(nefor.shell.script \"x\" \"pwd\")" } })
   load = latest_mag_load()
   local invalid = artifact_from_modification(read_only_modification())
-  invalid.data.result = nil
+  invalid.result = nil
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:invalid", foreign_contracts = foreign_contracts(), artifact = invalid })
+    hash = "sha256:invalid", factory_contracts = factory_contracts(), artifact = invalid })
   calls = decode_calls()
   err = find_call(calls, function(c)
     return c.body.kind == "tool.result" and c.body.id == "gate-validation-error"
@@ -2644,7 +2680,7 @@ do
   _test.calls_clear()
   for i = #loads, 1, -1 do
     feed("mag", { kind = "mag.loaded", in_reply_to = loads[i].body.id,
-      hash = "sha256:" .. tostring(i), foreign_contracts = foreign_contracts(),
+      hash = "sha256:" .. tostring(i), factory_contracts = factory_contracts(),
       artifact = artifact_from_modification(read_only_modification()) })
   end
   local calls = decode_calls()
@@ -2697,7 +2733,7 @@ do
 
   feed("tool-gate", { kind = "lead-workflow.tool.cancel", id = "file-pending-execute" })
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:file-late", foreign_contracts = foreign_contracts(),
+    hash = "sha256:file-late", factory_contracts = factory_contracts(),
     artifact = artifact_from_modification(read_only_modification()) })
   feed("mag", { kind = "mag.error", in_reply_to = load.body.id,
     message = "late compiler failure" })
@@ -2726,7 +2762,7 @@ do
     "session end clears all pending file loads")
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:session-late", foreign_contracts = foreign_contracts(),
+    hash = "sha256:session-late", factory_contracts = factory_contracts(),
     artifact = artifact_from_modification(read_only_modification()) })
   feed("mag", { kind = "mag.error", in_reply_to = load.body.id,
     message = "late session compiler failure" })
@@ -2750,15 +2786,15 @@ do
   local child_actor = "child.run-tool"
   local direct_id = registry:mint_run_id()
   lw._internals.register_active_run(direct_id,
-    { { id = "worker", foreign = "llm" } }, "worker", "dispatch-direct",
+    { { id = "worker", factory = "llm" } }, "worker", "dispatch-direct",
     "direct", sessions.current_id(), direct_actor)
   local sibling_id = registry:mint_run_id()
   lw._internals.register_active_run(sibling_id,
-    { { id = "sibling", foreign = "llm" } }, "sibling", "dispatch-sibling",
+    { { id = "sibling", factory = "llm" } }, "sibling", "dispatch-sibling",
     "sibling", sessions.current_id(), sibling_actor)
   local grandchild_id = registry:mint_run_id()
   lw._internals.register_active_run(grandchild_id,
-    { { id = "grandchild", foreign = "llm" } }, "grandchild", "dispatch-grandchild",
+    { { id = "grandchild", factory = "llm" } }, "grandchild", "dispatch-grandchild",
     "grandchild", sessions.current_id(), child_actor)
 
   local function metadata_for(actor, owning_run)
@@ -3042,7 +3078,7 @@ do
   }, { caller_id = "opaque-gate-inner", invocation = lead_eval })
   local eval_load = latest_mag_load()
   feed("mag", { kind = "mag.loaded", in_reply_to = eval_load.body.id,
-    hash = "sha256:provenance", foreign_contracts = foreign_contracts(),
+    hash = "sha256:provenance", factory_contracts = factory_contracts(),
     artifact = artifact_from_modification(read_only_modification()) })
   lead_ack = find_call(decode_calls(), function(c)
     return c.body.kind == "tool.result" and c.body.id == "provenance-eval-lead"
@@ -3255,9 +3291,9 @@ do
     _test.calls_clear()
   end
   local registry = lw._internals.run_registry
-  local foreign = registry:register({ run_id = registry:mint_run_id(), run_name = "foreign",
+  local other_session = registry:register({ run_id = registry:mint_run_id(), run_name = "other",
     session_id = "other-session", terminal = "worker" })
-  invoke_tool("wrong", "await-run", { run_id = foreign.run_id })
+  invoke_tool("wrong", "await-run", { run_id = other_session.run_id })
   local wrong = find_call(decode_calls(), function(c)
     return c.body.kind == "tool.result" and c.body.id == "wrong"
   end)

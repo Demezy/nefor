@@ -39,27 +39,26 @@ graph retrieval or hot graph mutation in this API.
 (require "nefor.contracts")
 (require "nefor.graph")
 
-(let [start
-      (nefor.actors.task-source "task" "Inspect the repository.")
-      worker
-      (nefor.actors.agent
-        (as nefor.actors.AgentConfig {:id "worker"
-         :model (nefor.contracts.no-identifier)
-         :profile (nefor.contracts.identifier "standard") :provider "chatgpt"
-         :system "Answer the task." :tools nefor.actors.general-tools ;; includes "mag-eval"
-         :da-policy (nefor.contracts.no-da-policy) :max-corrections 2})
-        (type-tag nefor.contracts.Task)
-        "task"
-        (type-tag nefor.contracts.TextAnswer))
-      result
-      (nefor.graph.output "result"
-        (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError)))
-      topology
-      (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-        (nefor.graph.add-edges graph
-          [(nefor.graph.edge start worker)
-           (nefor.graph.edge worker result)]))]
-  (nefor.artifact.compile topology))
+(let start (nefor.actors.task-source "task" "Inspect the repository."))
+(let worker
+  (nefor.actors.agent
+    (as nefor.actors.AgentConfig {:id "worker"
+     :model (nefor.contracts.no-identifier)
+     :profile (nefor.contracts.identifier "standard") :provider "chatgpt"
+     :system "Answer the task." :tools nefor.actors.general-tools ;; includes "mag-eval"
+     :da-policy (nefor.contracts.no-da-policy) :max-corrections 2})
+    (type-tag nefor.contracts.Task)
+    "task"
+    (type-tag nefor.contracts.TextAnswer)))
+(let result
+  (nefor.graph.output "result"
+    (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+(let topology
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph
+      [(nefor.graph.edge start worker)
+       (nefor.graph.edge worker result)])))
+(nefor.artifact.compile topology)
 ```
 
 `:tools` is the agent's capability boundary. In the example composition,
@@ -126,16 +125,16 @@ For a shell pipeline, write a graph program with source, command nodes, and
 output:
 
 ```lisp
-(let [start (nefor.graph.source "start" (type-tag Unit) nil)
-      search (nefor.process.exec "search" (as nefor.contracts.ProcessExecParams {:argv ["rg" "-n" "TODO" "src/"] :cwd nefor.process.cwd :timeout (nefor.contracts.no-timeout)}))
-      sort (nefor.shell.script "sort" (as nefor.contracts.ShellScriptParams {:script "sort" :cwd "." :timeout (nefor.contracts.no-timeout)}))
-      result (nefor.graph.output-for "result" sort)]
-  (nefor.artifact.compile
-    (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-      (nefor.graph.add-edges graph
-        [(nefor.graph.edge start search)
-         (nefor.graph.edge search sort)
-         (nefor.graph.edge sort result)]))))
+(let start (nefor.graph.source "start" (type-tag Unit) nil))
+(let search (nefor.process.exec "search" (as nefor.contracts.ProcessExecParams {:argv ["rg" "-n" "TODO" "src/"] :cwd nefor.process.cwd :timeout (nefor.contracts.no-timeout)})))
+(let sort (nefor.shell.script "sort" (as nefor.contracts.ShellScriptParams {:script "sort" :cwd "." :timeout (nefor.contracts.no-timeout)})))
+(let result (nefor.graph.output-for "result" sort))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph
+      [(nefor.graph.edge start search)
+       (nefor.graph.edge search sort)
+       (nefor.graph.edge sort result)])))
 ```
 
 Both process surfaces carry explicit parameter records. `cwd` is required;

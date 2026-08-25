@@ -82,7 +82,7 @@ end
 -- is supplied per test. Emitting mag.ready confirms readiness.
 local function spawn_actor(h, id, factory, routes, deliver_fn)
   local res = h.inv.apply({
-    actors = { { id = id, factory = factory, params = {}, routes = routes or {} } },
+    actors = { { id = id, factory = factory, type_arguments = {}, params = {}, routes = routes or {} } },
   })
   assert_true(res.ok, "spawn " .. id .. ": " .. tostring(res.error))
   local inst = { id = id, emit = h.router:emitter(id), received = {} }
@@ -229,7 +229,7 @@ do
   local order = {}
   -- Register the spec through the fold, but bind nothing: the router's
   -- construct hook (init.lua's seam) builds the instance on demand.
-  local res = h.inv.apply({ actors = { { id = "b", factory = "sink", params = {}, routes = {},
+  local res = h.inv.apply({ actors = { { id = "b", factory = "sink", type_arguments = {}, params = {}, routes = {},
     evidence={version=2,identity="nefor.factory.sink",arguments={{kind="named",name="test.Answer",arguments={}}},input={kind="named",name="test.Answer",arguments={}},output={kind="primitive",name="Unit"}},
     input={type={kind="named",name="test.Answer",arguments={}},wire="generic-provider.TextAnswer"},outputs={{type={kind="primitive",name="Unit"},wire="mag.Unit"}} } } })
   assert_true(res.ok, "spawn b: " .. tostring(res.error))
@@ -480,7 +480,7 @@ do
     drained.count = drained.count + 1
     inst.emit({ kind = "mag.complete", from = "d" })
   end
-  h.inv.apply({ actors = { { id = "d", factory = "worker", params = {}, routes = {} } } })
+  h.inv.apply({ actors = { { id = "d", factory = "worker", type_arguments = {}, params = {}, routes = {} } } })
   h.router:bind("d", inst)
   inst.emit({ kind = "mag.ready", from = "d" })
 
@@ -495,7 +495,7 @@ do
   local i2 = { id = "z", emit = h.router:emitter("z") }
   i2.deliver = function() return "ok" end
   function i2.handle_drain() flags.drained = true end
-  h.inv.apply({ actors = { { id = "z", factory = "worker", params = {}, routes = {} } } })
+  h.inv.apply({ actors = { { id = "z", factory = "worker", type_arguments = {}, params = {}, routes = {} } } })
   h.router:bind("z", i2)
   i2.emit({ kind = "mag.ready", from = "z" })
   h.inv.apply({ kills = { "z" } })
@@ -599,6 +599,7 @@ do
   local consumer_result = h.inv.apply({ actors = { {
     id = "provider-consumer",
     factory = consumer_decl.name,
+    type_arguments = {},
     params = {},
     semantic_strict = true,
     input = {
@@ -621,6 +622,7 @@ do
   local producer_result = h.inv.apply({ actors = { {
     id = "provider-producer",
     factory = producer_decl.name,
+    type_arguments = {},
     params = {},
     semantic_strict = true,
     input = { wire = "test.Start", type_id = "test.Start", type = provider_input },
@@ -718,6 +720,7 @@ do
     local sink_result = h.inv.apply({ actors = { {
       id = sink_id,
       factory = sink_decl.name,
+      type_arguments = {},
       params = {},
       semantic_strict = true,
       input = { wire = "retry.Branch", type_id = "test.Branch", type = output_type },
@@ -736,6 +739,7 @@ do
     local result = h.inv.apply({ actors = { {
       id = gate_id,
       factory = "retry-gate",
+      type_arguments = {},
       params = { max_retries = maximum },
       semantic_strict = true,
       evidence = {

@@ -12,7 +12,7 @@ This guide describes the lead-facing workflow. See [Authoring reference](languag
 
 ```lisp
 (nefor.process.exec "find-todos"
-  (as nefor.contracts.ProcessExecParams
+  (as nefor.process.ProcessExecParams
     {:argv ["rg" "-n" "TODO" "src/"]
      :cwd nefor.process.cwd
      :timeout (nefor.contracts.no-timeout)}))
@@ -59,10 +59,10 @@ The `mag` binary validates a program without starting Nefor:
 mag compile workflow.mag \
   --source-dir ./mag \
   --module-root ./mag/lib \
-  --registry ./foreign-contracts.json
+  --input factory_contracts=./factory-contracts.json
 ```
 
-`workflow.mag` is resolved beneath `--source-dir`. Repeat `--module-root` to add module search roots and `--registry` to combine Lua or JSON foreign-contract snapshots. If no module root is supplied, the source directory is used. `--profile` adds compiler phase timings and deterministic counters to the JSON success envelope.
+`workflow.mag` is resolved beneath `--source-dir`. Repeat `--module-root` to add module search roots and `--input NAME=PATH` to expose immutable JSON values through the typed host-input boundary. If no module root is supplied, the source directory is used. `--profile` adds compiler phase timings and deterministic counters to the JSON success envelope. This envelope is CLI transport metadata; its `artifact` field is the exact raw MAG artifact and the envelope does not define an artifact schema.
 
 Standalone compilation emits an artifact and content hash, but has no execute subcommand. Runtime execution belongs to Nefor's lead workflow because it needs the configured providers, tools, approval policy, session, and run control.
 

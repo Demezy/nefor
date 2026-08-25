@@ -40,13 +40,6 @@ pub fn value_to_json(env: &Env, value: &Value) -> Result<serde_json::Value, MagE
         Value::HostInputs(_) => Err(MagError::Eval(
             "compiler host inputs cannot enter an artifact".into(),
         )),
-        Value::ForeignEvidence(evidence) => Ok(serde_json::json!({
-            "version": 2,
-            "identity": evidence.identity,
-            "arguments": evidence.arguments.iter().map(concrete_type_to_json).collect::<Result<Vec<_>, _>>()?,
-            "input": concrete_type_to_json(&evidence.input)?,
-            "output": concrete_type_to_json(&evidence.output)?,
-        })),
         Value::List(v) | Value::Vector(v) | Value::Product(v) => Ok(serde_json::Value::Array(
             v.iter()
                 .map(|value| value_to_json(env, value))
@@ -57,9 +50,7 @@ pub fn value_to_json(env: &Env, value: &Value) -> Result<serde_json::Value, MagE
                 .map(|(key, value)| Ok((key.clone(), value_to_json(env, value)?)))
                 .collect::<Result<_, MagError>>()?,
         )),
-        Value::Artifact(v) => {
-            serde_json::to_value(v).map_err(|e| MagError::Eval(format!("serialize artifact: {e}")))
-        }
+        Value::Artifact(v) => Ok(v.clone()),
         Value::Typed(value, MagType::Union(_)) => {
             let (selected, payload) = selected_sum_payload(value).ok_or_else(|| {
                 MagError::Eval(
@@ -440,7 +431,23 @@ pub fn json_to_typed_value(
                 .and_then(json_number_to_i64)
                 .ok_or_else(|| MagError::Type(format!("expected {ty}")))?,
         ),
-        MagType::Unit | MagType::Bool | MagType::String => json_to_value(value),
+        MagType::Unit => {
+            if !value.is_null() {
+                return Err(MagError::Type(format!("expected {ty}")));
+            }
+            Value::Unit
+        }
+        MagType::Bool => Value::Bool(
+            value
+                .as_bool()
+                .ok_or_else(|| MagError::Type(format!("expected {ty}")))?,
+        ),
+        MagType::String => Value::Str(
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| MagError::Type(format!("expected {ty}")))?,
+        ),
         unsupported => {
             return Err(MagError::Type(format!(
                 "{unsupported} is not representable as rule input JSON"
@@ -485,6 +492,31 @@ mod tests {
             panic!("expected typed record");
         };
         assert!(matches!(fields.get("value"), Some(Value::Int(1))));
+    }
+
+    #[test]
+    fn typed_primitives_reject_wrong_json_shapes_recursively() {
+        let env = Env::new();
+        for (value, ty) in [
+            (serde_json::json!("true"), MagType::Bool),
+            (serde_json::json!(true), MagType::String),
+            (serde_json::json!({}), MagType::Unit),
+        ] {
+            assert!(json_to_typed_value(&env, &value, &ty).is_err());
+        }
+
+        let nested = MagType::List(Box::new(MagType::Record(BTreeMap::from([
+            ("enabled".into(), MagType::Bool),
+            ("label".into(), MagType::String),
+            ("marker".into(), MagType::Unit),
+        ]))));
+        for value in [
+            serde_json::json!([{"enabled":"true","label":"ok","marker":null}]),
+            serde_json::json!([{"enabled":true,"label":7,"marker":null}]),
+            serde_json::json!([{"enabled":true,"label":"ok","marker":false}]),
+        ] {
+            assert!(json_to_typed_value(&env, &value, &nested).is_err());
+        }
     }
 
     #[test]

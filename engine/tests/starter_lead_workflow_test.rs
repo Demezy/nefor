@@ -67,7 +67,7 @@ fn production_mag_eval_wrapper_compiles_direct_process_exec() {
         .eval()
         .expect("load production mag-eval wrapper");
     let expression = r#"(nefor.process.exec "step"
-      (as nefor.contracts.ProcessExecParams
+      (as nefor.process.ProcessExecParams
         {:argv ["printf" "ok"] :cwd nefor.process.cwd
          :timeout (nefor.contracts.no-timeout)}))"#;
     let (source, _): (String, Table) = build_source
@@ -75,7 +75,7 @@ fn production_mag_eval_wrapper_compiles_direct_process_exec() {
         .expect("generate production mag-eval source");
 
     let inputs = serde_json::json!({
-        "foreign_contracts": [
+        "factory_contracts": [
             {
                 "identity": "nefor.factory.process-exec",
                 "type_scheme": {
@@ -108,7 +108,10 @@ fn production_mag_eval_wrapper_compiles_direct_process_exec() {
     )
     .unwrap_or_else(|error| panic!("production mag-eval wrapper failed to compile: {error}"));
 
-    assert_eq!(artifact.format, "nefor.graph-modification/v1");
+    assert!(artifact
+        .get("actors")
+        .and_then(|value| value.as_array())
+        .is_some());
 }
 
 fn install_stub_nefor(lua: &Lua) -> mlua::Result<()> {

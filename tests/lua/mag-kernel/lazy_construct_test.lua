@@ -137,9 +137,9 @@ do
 
   local res = h.obs:apply({
     actors = {
-      { id = "u1", factory = "upstream", params = {}, routes = { ["l.Out"] = { { actor = "j", wire = "l.Out" } } } },
-      { id = "u2", factory = "upstream", params = {}, routes = { ["r.Out"] = { { actor = "j", wire = "r.Out" } } } },
-      { id = "j", factory = "joiner", params = {}, routes = {} },
+      { id = "u1", factory = "upstream", type_arguments = {}, params = {}, routes = { ["l.Out"] = { { actor = "j", wire = "l.Out" } } } },
+      { id = "u2", factory = "upstream", type_arguments = {}, params = {}, routes = { ["r.Out"] = { { actor = "j", wire = "r.Out" } } } },
+      { id = "j", factory = "joiner", type_arguments = {}, params = {}, routes = {} },
     },
   })
   assert_true(res.ok, "constellation registers: " .. tostring(res.error))
@@ -196,8 +196,8 @@ do
 
   local res = h.obs:apply({
     actors = {
-      { id = "s", factory = "solo", params = {}, routes = {} },
-      { id = "u", factory = "either", params = {}, routes = {} },
+      { id = "s", factory = "solo", type_arguments = {}, params = {}, routes = {} },
+      { id = "u", factory = "either", type_arguments = {}, params = {}, routes = {} },
     },
     messages = {
       { to = "s", content = { kind = "seed.In", n = 1 } },
@@ -252,7 +252,7 @@ do
   })
 
   -- Register without ever messaging: alive externally, no instance inside.
-  local res = h.obs:apply({ actors = { { id = "x", factory = "idle", params = {}, routes = {} } } })
+  local res = h.obs:apply({ actors = { { id = "x", factory = "idle", type_arguments = {}, params = {}, routes = {} } } })
   assert_true(res.ok, "spawn x: " .. tostring(res.error))
   assert_eq(h.inv.state_of("x"), "alive", "a registered-but-unconstructed actor counts as alive")
   assert_eq(#h.constructed, 0, "no construction without an activation")
@@ -276,7 +276,7 @@ do
   assert_eq(#h.constructed, 0, "a dead-target send does not construct")
 
   -- Respawn after kill: monotone no-op (docs/ir.md), still dead.
-  local r = h.obs:apply({ actors = { { id = "x", factory = "idle", params = {}, routes = {} } } })
+  local r = h.obs:apply({ actors = { { id = "x", factory = "idle", type_arguments = {}, params = {}, routes = {} } } })
   assert_true(r.ok, "respawn-after-kill is a no-op, not a rejection")
   assert_eq(h.inv.state_of("x"), "dead", "spawn cannot revive a dead id")
   assert_eq(#h.constructed, 0, "the no-op respawn constructs nothing")
@@ -319,9 +319,9 @@ do
 
   local res = h.obs:apply({
     actors = {
-      { id = "entry", factory = "entry", params = {}, routes = { ["hop.Ping"] = { { actor = "sink", wire = "hop.Ping" } }, ["alt.Out"] = { { actor = "exhaust", wire = "alt.Out" } } } },
-      { id = "sink", factory = "terminal", params = {}, routes = {} },
-      { id = "exhaust", factory = "summarizer", params = {}, routes = {} },
+      { id = "entry", factory = "entry", type_arguments = {}, params = {}, routes = { ["hop.Ping"] = { { actor = "sink", wire = "hop.Ping" } }, ["alt.Out"] = { { actor = "exhaust", wire = "alt.Out" } } } },
+      { id = "sink", factory = "terminal", type_arguments = {}, params = {}, routes = {} },
+      { id = "exhaust", factory = "summarizer", type_arguments = {}, params = {}, routes = {} },
     },
     messages = { { to = "entry", content = { kind = "seed.In" } } },
   })

@@ -226,29 +226,30 @@ end
 -- carries (source → entry adapter → lead llm → output; the spawner derives
 -- its source, entry, and llm seams from this, never hardcodes them).
 local function lead_artifact()
-  return { format = "nefor.graph-modification/v1", data = {
+  local task_type = {
+    kind = "named",
+    name = "nefor.contracts.Task",
+    arguments = json.decode("[]"),
+  }
+  return {
     types = {
-      task = {
-        kind = "named",
-        name = "nefor.contracts.Task",
-        arguments = json.decode("[]"),
-      },
+      task = task_type,
     },
     actors = {
       {
-        id = "lead.source", foreign = "nefor.factory.source",
+        id = "lead.source", factory = "nefor.factory.source", type_arguments = { task_type },
         params = { value = { prompt = "<initial task text>" } },
         routes = { ["nefor.graph.Value"] = {
           { actor = "lead.entry", wire = "task" },
         } },
       },
       {
-        id = "lead.entry", foreign = "nefor.factory.adapter",
+        id = "lead.entry", factory = "nefor.factory.adapter", type_arguments = { task_type },
         params = { seed = "provider-in" },
         routes = { ["generic-provider.ProviderOut"] = { { actor = "lead.llm", wire = "generic-provider.ProviderOut" } } },
       },
       {
-        id = "lead.llm", foreign = "nefor.factory.llm",
+        id = "lead.llm", factory = "nefor.factory.llm", type_arguments = {},
         params = { tools = { "read_file", "mag" } },
         routes = {
           ["generic-tool.ToolCalls"] = { { actor = "lead.run-tool", wire = "generic-tool.ToolCalls" } },
@@ -265,7 +266,7 @@ local function lead_artifact()
       type = "nefor.contracts.TextAnswer",
       wire = "generic-provider.TextAnswer",
     } },
-  } }
+  }
 end
 
 local function task_prompt(modification)
@@ -431,7 +432,7 @@ do
   local calls = decode_calls()
   local promoted = find_kind(calls, "mag.execute")
   assert(promoted ~= nil, "early lead.entry failure promotes queued input")
-  assert_eq(task_prompt(promoted.body.artifact.data), "queued after failure",
+  assert_eq(task_prompt(promoted.body.artifact), "queued after failure",
     "the promoted run carries the queued user input")
   assert_eq(agentic_loop._internals.state.current_run_id, promoted.body.run_id,
     "the promoted run becomes the active lead run")
@@ -491,7 +492,7 @@ do
   calls = decode_calls()
   local exec = find_kind(calls, "mag.execute")
   assert(exec ~= nil, "loaded program starts the queued turn")
-  assert_eq(task_prompt(exec.body.artifact.data), "cold one\ncold two",
+  assert_eq(task_prompt(exec.body.artifact), "cold one\ncold two",
     "cold submits coalesce into one model delivery")
   assert(find_kind(calls, "chat.queue.steered") ~= nil,
     "promotion reconciles the optimistic queue")
@@ -548,7 +549,7 @@ do
   })
   assert_eq(agentic_loop._internals.state.conversation_id, manager_conversation_id,
     "derived child creation cannot replace the active root")
-  local mod = exec.body.artifact and exec.body.artifact.data
+  local mod = exec.body.artifact
   assert(type(mod) == "table", "the artifact rides inline on the execute")
   assert_eq(mod.messages[1].to, "lead.source", "Unit activation targets the source actor")
   assert_eq(mod.messages[1].content.kind, "mag.Unit",
@@ -646,7 +647,7 @@ do
     "the cached program is not re-loaded per turn")
   local exec2 = find_kind(calls, "mag.execute")
   assert(exec2 ~= nil, "second turn executes")
-  assert_eq(task_prompt(exec2.body.artifact.data), "and more?")
+  assert_eq(task_prompt(exec2.body.artifact), "and more?")
   assert_eq(exec2.body.params_overlay["lead.llm"].history, nil,
     "second turn does not persist the prior transcript in MAG")
 end
@@ -1073,7 +1074,7 @@ do
     "queued promotion relies on canonical manager projection")
   local exec2 = find_kind(calls, "mag.execute")
   assert(exec2 ~= nil, "queued input promotes into a fresh turn on close")
-  assert_eq(task_prompt(exec2.body.artifact.data), "second",
+  assert_eq(task_prompt(exec2.body.artifact), "second",
     "the promoted turn carries the queued text")
   assert_eq(exec2.body.params_overlay["lead.llm"].history, nil,
     "the promoted turn reconstructs finished context outside MAG")
@@ -1211,7 +1212,7 @@ do
   local calls = decode_calls()
   local exec2 = find_kind(calls, "mag.execute")
   assert(exec2 ~= nil, "an idle lead relays the completion immediately")
-  local prompt = task_prompt(exec2.body.artifact.data)
+  local prompt = task_prompt(exec2.body.artifact)
   assert_eq(exec2.body.params_overlay["lead.llm"].input_cause,
     "internal_async_completion",
     "the relay persists its causal identity separately from user authorship")
@@ -1250,7 +1251,7 @@ do
   local calls = decode_calls()
   local exec2 = find_kind(calls, "mag.execute")
   assert(exec2 ~= nil, "an idle lead relays the interrupted failure immediately")
-  local prompt = task_prompt(exec2.body.artifact.data)
+  local prompt = task_prompt(exec2.body.artifact)
   assert(string.find(prompt, "FAILED", 1, true) ~= nil,
     "the relay turn marks the interrupted run as FAILED")
   assert(string.find(prompt, "interrupted by user", 1, true) ~= nil,
@@ -1407,7 +1408,7 @@ do
     if c.body.kind == "mag.execute" then execs[#execs + 1] = c end
   end
   assert_eq(#execs, 1, "both queued completions flush as one relay turn")
-  local prompt = task_prompt(execs[1].body.artifact.data)
+  local prompt = task_prompt(execs[1].body.artifact)
   assert(prompt:find("alpha output", 1, true) ~= nil,
     "the merged relay carries the first completion")
   assert(prompt:find("beta output", 1, true) ~= nil,

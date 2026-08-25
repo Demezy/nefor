@@ -278,12 +278,11 @@ async fn load_lead_program<R: AsyncBufReadExt + Unpin>(
 fn turn_artifact(program: &Value, user_text: &str) -> Value {
     let mut m = program.clone();
     let actors = m
-        .get_mut("data")
-        .and_then(|data| data.get_mut("actors"))
+        .get_mut("actors")
         .and_then(Value::as_array_mut)
         .expect("program has actors");
     for actor in actors {
-        if actor.get("foreign").and_then(Value::as_str) == Some("nefor.factory.source") {
+        if actor.get("factory").and_then(Value::as_str) == Some("nefor.factory.source") {
             let value = actor
                 .get_mut("params")
                 .and_then(|params| params.get_mut("value"))
@@ -372,7 +371,7 @@ async fn typed_task_contract_lowers_and_corrects_mock_provider_json() {
 
     let artifact = load_typed_task_program(&mut reader, &mut stdin).await;
     let actors = artifact
-        .pointer("/data/actors")
+        .pointer("/actors")
         .and_then(Value::as_array)
         .unwrap();
     let structured = actors
@@ -380,7 +379,7 @@ async fn typed_task_contract_lowers_and_corrects_mock_provider_json() {
         .find(|actor| actor.get("id").and_then(Value::as_str) == Some("typed-task.llm"))
         .expect("structured actor lowered");
     assert_eq!(
-        structured.get("foreign").and_then(Value::as_str),
+        structured.get("factory").and_then(Value::as_str),
         Some("nefor.factory.structured-output")
     );
     assert_eq!(
@@ -599,14 +598,12 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
     let loaded = next_event_of_kind(&mut reader, "mag.loaded").await;
     let artifact = &loaded["artifact"];
     assert_eq!(
-        artifact
-            .pointer("/data/messages/0/to")
-            .and_then(Value::as_str),
+        artifact.pointer("/messages/0/to").and_then(Value::as_str),
         Some("planner.entry")
     );
     assert_eq!(
         artifact
-            .pointer("/data/messages/0/content/kind")
+            .pointer("/messages/0/content/kind")
             .and_then(Value::as_str),
         Some("task")
     );

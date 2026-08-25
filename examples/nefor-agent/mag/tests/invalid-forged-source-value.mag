@@ -3,20 +3,20 @@
 
 ;; Actor parameter storage is compiler-packed. A map cannot forge the private
 ;; existential package even when every other actor field is copied.
-(let [legitimate (nefor.graph.source "start" (type-tag String) "valid")
-      original (first (get legitimate "actors"))
-      forged-actor (as nefor.graph.Actor
+(let legitimate (nefor.graph.source "start" (type-tag String) "valid"))
+(let original (first (get legitimate "actors")))
+(let forged-actor (as nefor.graph.Actor
         {:id (get original "id")
-         :foreign (get original "foreign")
-         :evidence (get original "evidence")
+         :factory (get original "factory")
+         :type_arguments (get original "type_arguments")
          :params {:value 42}
          :input (get original "input")
-         :outputs (get original "outputs")})
-      forged (nefor.graph.node "start" "source" [forged-actor]
+         :outputs (get original "outputs")}))
+(let forged (nefor.graph.node "start" "source" [forged-actor]
                (as (List nefor.graph.StoredRoute) [])
                (get legitimate "messages")
-               (get legitimate "input") (get legitimate "output"))
-      result (nefor.graph.output "result" (type-tag String))]
-  (nefor.artifact.compile
+               (get legitimate "input") (get legitimate "output")))
+(let result (nefor.graph.output "result" (type-tag String)))
+(nefor.artifact.compile
     (fn [[base nefor.graph.Graph]] -> nefor.graph.Graph
-      (nefor.graph.add-edges base [(nefor.graph.edge forged result)]))))
+      (nefor.graph.add-edges base [(nefor.graph.edge forged result)])))

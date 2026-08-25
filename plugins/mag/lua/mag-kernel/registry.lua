@@ -33,9 +33,22 @@ local plain_data = require("plain-data")
 local registry = {}
 registry.__index = registry
 
+local function is_dense_list(value)
+  if type(value) ~= "table" then return false end
+  local count = 0
+  for key in pairs(value) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then return false end
+    count = count + 1
+  end
+  for index = 1, count do
+    if value[index] == nil then return false end
+  end
+  return true
+end
+
 local function compatible_output_type(expected, actual)
   if type_node.equal(expected, actual) then return true end
-  -- A library boundary may give a foreign actor's nominal success output a
+  -- A library boundary may give an actor's nominal success output a
   -- more specific domain name while retaining the actor's runtime wire.
   return expected.kind == "named" and actual.kind == "named"
 end
@@ -237,7 +250,7 @@ function registry:register(entry)
     return nil, string.format("factory %q: identity must be a qualified symbol", decl.name)
   end
   if self.identities[identity] then
-    return nil, string.format("foreign identity %q already registered", identity)
+    return nil, string.format("factory identity %q already registered", identity)
   end
   decl.identity = identity
   self.factories[decl.name] = { declaration = decl, construct = entry.construct }
@@ -461,41 +474,33 @@ function registry:validate_modification(modification, resolve, existing_specs)
         "actor %q: unknown factory %q", tostring(spec.id), tostring(spec.factory)))
     else
       local variables = decl.type_variables or {}
-      local evidence = spec.evidence
-      if decl.semantic and type(evidence) ~= "table" then
+      local arguments = spec.type_arguments
+      if not is_dense_list(arguments) then
         table.insert(errors, string.format(
-          "actor %q: semantic factory requires compiler foreign evidence", tostring(spec.id)))
-      elseif type(evidence) == "table" and
-          (evidence.version ~= 2 or evidence.identity ~= decl.identity or
-           type(evidence.arguments) ~= "table" or type(evidence.input) ~= "table" or
-           type(evidence.output) ~= "table") then
-        table.insert(errors, string.format(
-          "actor %q: invalid or mismatched foreign evidence", tostring(spec.id)))
-      elseif type(evidence) == "table" and #evidence.arguments ~= #variables then
+          "actor %q: type_arguments must be a dense list", tostring(spec.id)))
+      elseif #arguments ~= #variables then
         table.insert(errors, string.format(
           "actor %q: factory %q expects %d type argument(s), got %d",
-          tostring(spec.id), spec.factory, #variables, #evidence.arguments))
-      elseif type(evidence) == "table" then
-        local arguments={}; local evidence_ok=true
-        for index, argument in ipairs(evidence.arguments) do
-          local ok,err=type_node.validate(argument); arguments[index]=argument
-          if not ok then evidence_ok=false; table.insert(errors,string.format(
-            "actor %q: foreign evidence argument %d: %s",tostring(spec.id),index,err)) end
+          tostring(spec.id), spec.factory, #variables, #arguments))
+      else
+        local arguments_ok=true
+        for index, argument in ipairs(arguments) do
+          local ok,err=type_node.validate(argument)
+          if not ok then arguments_ok=false; table.insert(errors,string.format(
+            "actor %q: type argument %d: %s",tostring(spec.id),index,err)) end
         end
-        local input_ok,input_err=type_node.validate(evidence.input)
-        local output_ok,output_err=type_node.validate(evidence.output)
-        if not input_ok then evidence_ok=false; table.insert(errors,string.format("actor %q: evidence input: %s",tostring(spec.id),input_err)) end
-        if not output_ok then evidence_ok=false; table.insert(errors,string.format("actor %q: evidence output: %s",tostring(spec.id),output_err)) end
         local input = spec.input
         local input_type=type(input)=="table" and input.type or nil
-        local spec_input_ok=type_node.validate(input_type)
-        if not spec_input_ok then
-          table.insert(errors, string.format("actor %q: semantic input is not a valid structural type", tostring(spec.id)))
+        local spec_input_ok=true
+        if decl.semantic then
+          spec_input_ok=type_node.validate(input_type)
+          if not spec_input_ok then
+            table.insert(errors, string.format("actor %q: semantic input is not a valid structural type", tostring(spec.id)))
+          end
         end
-        if decl.semantic and evidence_ok then
+        if decl.semantic and arguments_ok and spec_input_ok then
           local bindings={}; for index,variable in ipairs(variables) do bindings[variable]=arguments[index] end
-          local evidence_input=type_node.substitute(decl.semantic.input,bindings)
-          local evidence_output=type_node.substitute(decl.semantic.output,bindings)
+          local semantic_output=type_node.substitute(decl.semantic.output,bindings)
           local expected_input=nil
           for _,endpoint in ipairs(decl.semantic.inputs) do
             if endpoint.wire==input.wire then expected_input=type_node.substitute(endpoint.type,bindings) end
@@ -503,10 +508,6 @@ function registry:validate_modification(modification, resolve, existing_specs)
           local expected_outputs={}
           for _,endpoint in ipairs(decl.semantic.outputs) do
             expected_outputs[endpoint.wire]=type_node.substitute(endpoint.type,bindings)
-          end
-          if not type_node.equal(evidence.input,evidence_input) or
-              not type_node.equal(evidence.output,evidence_output) then
-            table.insert(errors, string.format("actor %q: foreign evidence does not instantiate the registry scheme", tostring(spec.id)))
           end
           if not expected_input or not type_node.equal(input.type,expected_input) then
             table.insert(errors,string.format("actor %q: semantic input wire has the wrong type",tostring(spec.id)))
@@ -519,9 +520,9 @@ function registry:validate_modification(modification, resolve, existing_specs)
             else actual[output.wire]=output.type end
           end
           for wire,expected in pairs(expected_outputs) do
-            local required=type_node.equal(expected,evidence_output)
-            if evidence_output.kind=="union" then
-              for _,arm in ipairs(evidence_output.items) do if type_node.equal(expected,arm) then required=true end end
+            local required=type_node.equal(expected,semantic_output)
+            if semantic_output.kind=="union" then
+              for _,arm in ipairs(semantic_output.items) do if type_node.equal(expected,arm) then required=true end end
             end
             if (required and not actual[wire]) or (actual[wire] and not compatible_output_type(expected,actual[wire])) then
               table.insert(errors,string.format("actor %q: semantic output for wire %q is missing or has the wrong type",tostring(spec.id),wire))
@@ -570,7 +571,7 @@ function registry:validate_modification(modification, resolve, existing_specs)
                   table.insert(errors, string.format(
                     "wiring %q -%s-> %q/%s: no input of factory %q accepts the destination wire",
                     tostring(spec.id), tag, tostring(dest_id), tostring(dest_wire), dest_factory))
-                elseif dest_spec and (spec.evidence or dest_spec.evidence) then
+                elseif dest_spec and decl.semantic and dest_decl.semantic then
                   local source_semantic=nil
                   for _,output in ipairs(spec.outputs or {}) do
                     if output.wire==tag then

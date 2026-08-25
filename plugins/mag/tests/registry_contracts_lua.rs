@@ -166,8 +166,7 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
         params={}, inputs={input="In"}, outputs={"Out"}
       }, construct=function() return {} end }))
       local function valid(argument,input,output)
-        return reg:validate_modification({actors={{id="a",factory="generic",evidence={
-          version=2,identity="nefor.factory.generic",arguments={argument},input=input,output=output},
+        return reg:validate_modification({actors={{id="a",factory="generic",type_arguments={argument},
           input={type=input,wire="In"},outputs={{type=output,wire="Out"}},routes={}}}})
       end
       local task=n("main.Task")
@@ -186,7 +185,12 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
       assert(reg:register({ declaration = {
         name="plain", params={}, inputs={input="In"}, outputs={"Out"}
       }, construct=function() return {} end }))
-      assert(reg:validate_modification({actors={{id="p",factory="plain",routes={}}}}).ok)
+      local plain=reg:validate_modification({actors={{id="p",factory="plain",type_arguments={},routes={}}}})
+      assert(plain.ok,table.concat(plain.errors or {},"; "))
+      assert(not reg:validate_modification({actors={{id="keyed",factory="plain",
+        type_arguments={named=p("String")},routes={}}}}).ok)
+      assert(not reg:validate_modification({actors={{id="sparse",factory="plain",
+        type_arguments={[2]=p("String")},routes={}}}}).ok)
 
       assert(reg:register({declaration={name="fixed",semantic={
         input=p("String"),output=p("Int"),
@@ -194,16 +198,14 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
         params={},inputs={value="FixedIn"},outputs={"FixedOut"}},construct=function() return {} end}))
       assert(not reg:validate_modification({actors={{id="fixed",factory="fixed",
         input={wire="FixedIn",type=p("String")},outputs={{wire="FixedOut",type=p("Int")}},routes={}}}}).ok)
-      local fixed_good=reg:validate_modification({actors={{id="fixed",factory="fixed",evidence={
-        version=2,identity="nefor.factory.fixed",arguments={},input=p("String"),output=p("Int")},
+      local fixed_good=reg:validate_modification({actors={{id="fixed",factory="fixed",type_arguments={},
         input={wire="FixedIn",type=p("String")},outputs={{wire="FixedOut",type=p("Int")}},routes={}}}})
       assert(fixed_good.ok,table.concat(fixed_good.errors or {},"; "))
       local string_id=nefor.semantic_type.id(p("String"))
       local int_id=nefor.semantic_type.id(p("Int"))
       local typed_fixed=reg:validate_modification({
         types={[string_id]=p("String"),[int_id]=p("Int")},
-        actors={{id="fixed",factory="fixed",evidence={
-          version=2,identity="nefor.factory.fixed",arguments={},input=p("String"),output=p("Int")},
+        actors={{id="fixed",factory="fixed",type_arguments={},
           input={wire="FixedIn",type=p("String"),type_id=string_id},
           outputs={{wire="FixedOut",type=p("Int"),type_id=int_id}},routes={}}}})
       assert(typed_fixed.ok,table.concat(typed_fixed.errors or {},"; "))
@@ -214,14 +216,12 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
       assert(table.concat(forged_key.errors,"; "):find("declarations are invalid"))
       local mismatched_ref=reg:validate_modification({
         types={[string_id]=p("String"),[int_id]=p("Int")},
-        actors={{id="fixed",factory="fixed",evidence={
-          version=2,identity="nefor.factory.fixed",arguments={},input=p("String"),output=p("Int")},
+        actors={{id="fixed",factory="fixed",type_arguments={},
           input={wire="FixedIn",type=p("String"),type_id=int_id},
           outputs={{wire="FixedOut",type=p("Int"),type_id=int_id}},routes={}}}})
       assert(not mismatched_ref.ok)
       assert(table.concat(mismatched_ref.errors,"; "):find("absent or mismatched"))
-      local fixed_tamper=reg:validate_modification({actors={{id="fixed",factory="fixed",evidence={
-        version=2,identity="nefor.factory.fixed",arguments={},input=p("String"),output=p("Int")},
+      local fixed_tamper=reg:validate_modification({actors={{id="fixed",factory="fixed",type_arguments={},
         input={wire="FixedIn",type=p("Int")},outputs={{wire="FixedOut",type=p("String")}},routes={}}}})
       assert(not fixed_tamper.ok)
 
@@ -244,11 +244,9 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
         semantic={input=v("T"),output=p("Unit"),inputs={{wire="Same",type=v("T")}},outputs={{wire="Done",type=p("Unit")}}},params={},inputs={value="Same"},outputs={"Done"}},
         construct=function() return {} end}))
       local mismatched=reg:validate_modification({actors={
-        {id="source",factory="producer",evidence={version=2,identity="nefor.factory.producer",
-          arguments={p("String")},input=p("Unit"),output=p("String")},input={type=p("Unit"),wire="Start"},
+        {id="source",factory="producer",type_arguments={p("String")},input={type=p("Unit"),wire="Start"},
           outputs={{type=p("String"),wire="Same"}},routes={["Same"]={{actor="dest",wire="Same"}}}},
-        {id="dest",factory="consumer",evidence={version=2,identity="nefor.factory.consumer",
-          arguments={p("Int")},input=p("Int"),output=p("Unit")},input={type=p("Int"),wire="Same"},
+        {id="dest",factory="consumer",type_arguments={p("Int")},input={type=p("Int"),wire="Same"},
           outputs={{type=p("Unit"),wire="Done"}},routes={}}
       }})
       assert(not mismatched.ok)
@@ -260,14 +258,11 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
           outputs={{wire="Done",type=p("Unit")}}},params={},inputs={value={"Pair","Pair"}},outputs={"Done"}},
         construct=function() return {} end}))
       local repeated_product_actors={
-        {id="left",factory="producer",evidence={version=2,identity="nefor.factory.producer",
-          arguments={p("String")},input=p("Unit"),output=p("String")},input={type=p("Unit"),wire="Start"},
+        {id="left",factory="producer",type_arguments={p("String")},input={type=p("Unit"),wire="Start"},
           outputs={{type=p("String"),wire="Same"}},routes={Same={{actor="pair",wire="Pair"}}}},
-        {id="right",factory="producer",evidence={version=2,identity="nefor.factory.producer",
-          arguments={p("String")},input=p("Unit"),output=p("String")},input={type=p("Unit"),wire="Start"},
+        {id="right",factory="producer",type_arguments={p("String")},input={type=p("Unit"),wire="Start"},
           outputs={{type=p("String"),wire="Same"}},routes={Same={{actor="pair",wire="Pair"}}}},
-        {id="pair",factory="product-consumer",evidence={version=2,identity="nefor.factory.product-consumer",
-          arguments={p("String")},input={kind="product",items={p("String"),p("String")}},output=p("Unit")},
+        {id="pair",factory="product-consumer",type_arguments={p("String")},
           input={type={kind="product",items={p("String"),p("String")}},wire="Pair"},
           outputs={{type=p("Unit"),wire="Done"}},routes={}}
       }
@@ -294,8 +289,7 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
         repeated_product_actors[1],repeated_product_actors[3]}})
       assert(not underfilled.ok)
       assert(table.concat(underfilled.errors,"; "):find("component multiset"))
-      local third={id="third",factory="producer",evidence={version=2,identity="nefor.factory.producer",
-        arguments={p("String")},input=p("Unit"),output=p("String")},input={type=p("Unit"),wire="Start"},
+      local third={id="third",factory="producer",type_arguments={p("String")},input={type=p("Unit"),wire="Start"},
         outputs={{type=p("String"),wire="Same"}},routes={Same={{actor="pair",wire="Pair"}}}}
       local overfilled=reg:validate_modification({actors={
         repeated_product_actors[1],repeated_product_actors[2],third,repeated_product_actors[3]}})
@@ -306,14 +300,12 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
         semantic={input=p("Unit"),output={kind="union",items={v("A"),v("B")}},inputs={{wire="Start",type=p("Unit")}},outputs={{wire="Left",type=v("A")},{wire="Right",type=v("B")}}},params={},inputs={start="Start"},outputs={"Left","Right"}},
         construct=function() return {} end}))
       local missing_arm=reg:validate_modification({actors={{id="choice",factory="choice",
-        evidence={version=2,identity="nefor.factory.choice",arguments={p("String"),p("Int")},
-          input=p("Unit"),output={kind="union",items={p("String"),p("Int")}}},input={type=p("Unit"),wire="Start"},
+        type_arguments={p("String"),p("Int")},input={type=p("Unit"),wire="Start"},
         outputs={{type=p("String"),wire="Left"}},routes={}}}})
       assert(not missing_arm.ok)
       assert(table.concat(missing_arm.errors,"; "):find("semantic output for wire"))
       local swapped=reg:validate_modification({actors={{id="choice",factory="choice",
-        evidence={version=2,identity="nefor.factory.choice",arguments={p("String"),p("Int")},
-          input=p("Unit"),output={kind="union",items={p("String"),p("Int")}}},input={type=p("Unit"),wire="Start"},
+        type_arguments={p("String"),p("Int")},input={type=p("Unit"),wire="Start"},
         outputs={{type=p("Int"),wire="Left"},{type=p("String"),wire="Right"}},routes={}}}})
       assert(not swapped.ok)
 
@@ -322,14 +314,10 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
         inputs={{wire="In",type=p("String")}},
         outputs={{wire="Final",type=n("nefor.contracts.TextAnswer")}}},
         params={},inputs={value="In"},outputs={"Final"}},construct=function() return {} end}))
-      local refined=reg:validate_modification({actors={{id="answer",factory="answer",evidence={
-        version=2,identity="nefor.factory.answer",arguments={},input=p("String"),
-        output=n("nefor.contracts.TextAnswer")},input={wire="In",type=p("String")},
+      local refined=reg:validate_modification({actors={{id="answer",factory="answer",type_arguments={},input={wire="In",type=p("String")},
         outputs={{wire="Final",type=n("main.CodeAudit")}},routes={}}}})
       assert(refined.ok,table.concat(refined.errors or {},"; "))
-      local structural_refinement=reg:validate_modification({actors={{id="answer",factory="answer",evidence={
-        version=2,identity="nefor.factory.answer",arguments={},input=p("String"),
-        output=n("nefor.contracts.TextAnswer")},input={wire="In",type=p("String")},
+      local structural_refinement=reg:validate_modification({actors={{id="answer",factory="answer",type_arguments={},input={wire="In",type=p("String")},
         outputs={{wire="Final",type=p("String")}},routes={}}}})
       assert(not structural_refinement.ok)
       assert(not valid(p("String"),p("String"),{kind="list"}).ok)

@@ -293,9 +293,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     let synthetic = libraries
         .iter()
         .map(|path| format!("(require \"{}\")", module_name(&lib_root, path)))
-        .chain(std::iter::once(
-            "(artifact \"nefor.graph-modification/v1\" {})".to_owned(),
-        ))
+        .chain(std::iter::once("(artifact {})".to_owned()))
         .collect::<Vec<_>>()
         .join("\n");
     fs::write(temp_root.join("all-libraries.mag"), synthetic)
@@ -379,11 +377,11 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
-(let [start (nefor.actors.task-source "task-input" "preserve this prompt")
-      result (nefor.graph.output "result" (type-tag nefor.contracts.Task))]
-  (nefor.artifact.compile
+(let start (nefor.actors.task-source "task-input" "preserve this prompt"))
+(let result (nefor.graph.output "result" (type-tag nefor.contracts.Task)))
+(nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-      (nefor.graph.add-edges graph [(nefor.graph.edge start result)]))))"#,
+      (nefor.graph.add-edges graph [(nefor.graph.edge start result)])))"#,
     )
     .expect("write task source regression");
     let task_source = load(
@@ -402,7 +400,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
     let task_artifact = task_source.get("artifact").expect("task source artifact");
     let task_actor = task_artifact
-        .pointer("/data/actors")
+        .pointer("/actors")
         .and_then(Value::as_array)
         .and_then(|actors| {
             actors
@@ -411,7 +409,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         })
         .expect("task source actor");
     assert_eq!(
-        task_actor.get("foreign").and_then(Value::as_str),
+        task_actor.get("factory").and_then(Value::as_str),
         Some("nefor.factory.source")
     );
     assert_eq!(
@@ -438,26 +436,26 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
 (require "nefor.actors")
 (require "nefor.contracts")
 (require "nefor.graph")
-(def ignore-exhausted (fn [[value (nefor.contracts.Exhausted nefor.contracts.Task)]] -> Artifact
-  (artifact "nefor.graph-delta/v1" {})))
-(let [start (nefor.graph.source "start" (type-tag nefor.contracts.Task)
-              (as nefor.contracts.Task {:prompt "retry"}))
-      gate (nefor.actors.retry-gate
+(let ignore-exhausted (fn [[value (nefor.contracts.Exhausted nefor.contracts.Task)]] -> Artifact
+  (artifact {})))
+(let start (nefor.graph.source "start" (type-tag nefor.contracts.Task)
+              (as nefor.contracts.Task {:prompt "retry"})))
+(let gate (nefor.actors.retry-gate
              (as nefor.actors.RetryGateConfig {:id "retry" :max-retries 3})
-             (type-tag nefor.contracts.Task))
-      gate-node (as (nefor.graph.Node nefor.contracts.Task
+             (type-tag nefor.contracts.Task)))
+(let gate-node (as (nefor.graph.Node nefor.contracts.Task
                       (nefor.contracts.Continue nefor.contracts.Task))
                   {:id (get gate "id") :role "ordinary"
                    :actors (get gate "actors") :routes (get gate "routes")
                    :messages (get gate "messages") :input (get gate "input")
-                   :output (get gate "first")})
-      result (nefor.graph.output-for "result" gate-node)]
-  (nefor.artifact.compile-program
+                   :output (get gate "first")}))
+(let result (nefor.graph.output-for "result" gate-node))
+(nefor.artifact.compile-program
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
         [(nefor.graph.edge start gate-node)
          (nefor.graph.edge gate-node result)]))
-    [(nefor.graph.rule "exhausted-observer" (get gate "second") "ignore-exhausted")]))"#,
+    [(nefor.graph.rule "exhausted-observer" (get gate "second") "ignore-exhausted")])"#,
     )
     .expect("write retry gate graph regression");
     let retry_gate = load(
@@ -475,7 +473,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "the typed RetryGate graph must compile against runtime contracts: {retry_gate:#?}"
     );
 
-    // A library fragment may expose a useful subset of a foreign actor's
+    // A library fragment may expose a useful subset of an actor's
     // runtime outputs. Shell script advertises a structured result plus typed capability failure; the
     // ordinary wrapper deliberately exposes only the structured result. Unknown
     // authored wires remain invalid — the runtime inventory is authoritative.
@@ -485,17 +483,17 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
 (require "nefor.graph")
 (require "nefor.shell")
 (require "nefor.process")
-(let [start (nefor.graph.source "start" (type-tag Unit) nil)
-      operation (nefor.shell.script "x"
-        (as nefor.contracts.ShellScriptParams
+(let start (nefor.graph.source "start" (type-tag Unit) nil))
+(let operation (nefor.shell.script "x"
+        (as nefor.shell.ShellScriptParams
           {:script "true" :cwd nefor.process.cwd
-           :timeout (nefor.contracts.no-timeout)}))
-      result (nefor.graph.output-for "result" operation)]
-  (nefor.artifact.compile
+           :timeout (nefor.contracts.no-timeout)})))
+(let result (nefor.graph.output-for "result" operation))
+(nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
         [(nefor.graph.edge start operation)
-         (nefor.graph.edge operation result)]))))"#,
+         (nefor.graph.edge operation result)])))"#,
     )
     .expect("write shell subset regression");
     let subset = load(
@@ -519,17 +517,17 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
 (require "nefor.graph")
 (require "nefor.path")
 (require "nefor.process")
-(let [start (nefor.graph.source "start" (type-tag Unit) nil)
-      operation (nefor.process.exec "pwd"
-        (as nefor.contracts.ProcessExecParams
+(let start (nefor.graph.source "start" (type-tag Unit) nil))
+(let operation (nefor.process.exec "pwd"
+        (as nefor.process.ProcessExecParams
           {:argv ["pwd"] :cwd (nefor.path.join nefor.process.cwd "../outside")
-           :timeout (nefor.contracts.no-timeout)}))
-      result (nefor.graph.output-for "result" operation)]
-  (nefor.artifact.compile
+           :timeout (nefor.contracts.no-timeout)})))
+(let result (nefor.graph.output-for "result" operation))
+(nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
         [(nefor.graph.edge start operation)
-         (nefor.graph.edge operation result)]))))"#,
+         (nefor.graph.edge operation result)])))"#,
     )
     .expect("write process path regression");
     let process_path = load(
@@ -548,7 +546,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     assert_eq!(
         process_path
             .get("artifact")
-            .and_then(|value| value.pointer("/data/actors/0/params/cwd")),
+            .and_then(|value| value.pointer("/actors/0/params/cwd")),
         Some(&json!("./../outside")),
         "path.join remains lexical and nonconfining"
     );
@@ -587,33 +585,33 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
 (require "nefor.graph")
 (require "nefor.shell")
 (require "nefor.process")
-(let [start (nefor.graph.source "start" (type-tag Unit) nil)
-      operation (nefor.shell.script "operation"
-        (as nefor.contracts.ShellScriptParams
+(let start (nefor.graph.source "start" (type-tag Unit) nil))
+(let operation (nefor.shell.script "operation"
+        (as nefor.shell.ShellScriptParams
           {{:script "true" :cwd nefor.process.cwd
-           :timeout (nefor.contracts.no-timeout)}}))
-      unused (nefor.shell.script "unused"
-        (as nefor.contracts.ShellScriptParams
+           :timeout (nefor.contracts.no-timeout)}})))
+(let unused (nefor.shell.script "unused"
+        (as nefor.shell.ShellScriptParams
           {{:script "false" :cwd nefor.process.cwd
-           :timeout (nefor.contracts.no-timeout)}}))
-      result (nefor.graph.output-for "result" operation)
-      first (nefor.graph.edge start operation)
-      second (nefor.graph.edge operation result)
-      absent (nefor.graph.edge start unused)
-      expected (nefor.graph.graph [first second])
-      laws [(= expected (nefor.graph.graph [second first]))
+           :timeout (nefor.contracts.no-timeout)}})))
+(let result (nefor.graph.output-for "result" operation))
+(let first (nefor.graph.edge start operation))
+(let second (nefor.graph.edge operation result))
+(let absent (nefor.graph.edge start unused))
+(let expected (nefor.graph.graph [first second]))
+(let laws [(= expected (nefor.graph.graph [second first]))
             (= expected (nefor.graph.add-edges
                           (nefor.graph.add-edges nefor.graph.empty-graph [first])
                           [second]))
             (= expected (nefor.graph.add-edges expected [first second first]))
-            (= expected (nefor.graph.remove-edges expected [absent absent]))]
-      laws-hold (= (count (filter (fn [[holds Bool]] -> Bool holds) laws))
-                   (count laws))]
-  (if laws-hold
+            (= expected (nefor.graph.remove-edges expected [absent absent]))])
+(let laws-hold (= (count (filter (fn [[holds Bool]] -> Bool holds) laws))
+                   (count laws)))
+(if laws-hold
     (nefor.artifact.compile
       (fn [[base nefor.graph.Graph]] -> nefor.graph.Graph
         {expression}))
-    (fail {{:kind "GraphSetLawFailure"}})))"#
+    (fail {{:kind "GraphSetLawFailure"}}))"#
         );
         fs::write(temp_root.join(&file_name), source).expect("write graph edge algebra regression");
         let result = load(
@@ -649,7 +647,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     }
     let algebra_actors = algebra
         .get("artifact")
-        .and_then(|artifact| artifact.pointer("/data/actors"))
+        .and_then(|artifact| artifact.pointer("/actors"))
         .and_then(Value::as_array)
         .expect("graph algebra artifact actors");
     assert_eq!(
@@ -677,18 +675,18 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         r#"(require "nefor.artifact")
 (require "nefor.graph")
 (require "nefor.worktree")
-(let [start (nefor.graph.source "start" (type-tag Unit) nil)
-      operation (nefor.worktree.create
+(let start (nefor.graph.source "start" (type-tag Unit) nil))
+(let operation (nefor.worktree.create
                  "workspace"
                  (as nefor.worktree.CreateSpec
                    {:repository "/repo" :path "/worktrees/topic"
-                    :branch "topic" :base "main"}))
-      result (nefor.graph.output-for "result" operation)]
-  (nefor.artifact.compile
+                    :branch "topic" :base "main"})))
+(let result (nefor.graph.output-for "result" operation))
+(nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
         [(nefor.graph.edge start operation)
-         (nefor.graph.edge operation result)]))))"#,
+         (nefor.graph.edge operation result)])))"#,
     )
     .expect("write worktree create regression");
     let worktree = load(
@@ -707,7 +705,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
     let create_actor = worktree
         .get("artifact")
-        .and_then(|artifact| artifact.pointer("/data/actors"))
+        .and_then(|artifact| artifact.pointer("/actors"))
         .and_then(Value::as_array)
         .and_then(|actors| {
             actors
@@ -716,7 +714,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         })
         .expect("worktree create actor is visible in the compiled preview");
     assert_eq!(
-        create_actor.get("foreign").and_then(Value::as_str),
+        create_actor.get("factory").and_then(Value::as_str),
         Some("nefor.factory.worktree-create")
     );
     assert_eq!(
@@ -742,18 +740,18 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         r#"(require "nefor.artifact")
 (require "nefor.graph")
 (require "nefor.worktree")
-(let [start (nefor.graph.source "start" (type-tag Unit) nil)
-      operation (nefor.worktree.open
+(let start (nefor.graph.source "start" (type-tag Unit) nil))
+(let operation (nefor.worktree.open
                  "workspace"
                  (as nefor.worktree.OpenSpec
                    {:repository "/repo" :path "/worktrees/topic"
-                    :branch "topic"}))
-      result (nefor.graph.output-for "result" operation)]
-  (nefor.artifact.compile
+                    :branch "topic"})))
+(let result (nefor.graph.output-for "result" operation))
+(nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
         [(nefor.graph.edge start operation)
-         (nefor.graph.edge operation result)]))))"#,
+         (nefor.graph.edge operation result)])))"#,
     )
     .expect("write worktree open regression");
     let open_worktree = load(
@@ -772,7 +770,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
     let open_actor = open_worktree
         .get("artifact")
-        .and_then(|artifact| artifact.pointer("/data/actors"))
+        .and_then(|artifact| artifact.pointer("/actors"))
         .and_then(Value::as_array)
         .and_then(|actors| {
             actors
@@ -781,7 +779,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         })
         .expect("worktree open actor");
     assert_eq!(
-        open_actor.get("foreign").and_then(Value::as_str),
+        open_actor.get("factory").and_then(Value::as_str),
         Some("nefor.factory.worktree-open")
     );
     assert!(open_actor.pointer("/params/base").is_none());
@@ -791,29 +789,30 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         r#"(require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
-(let [input (nefor.graph.port "x" (type-tag Unit) "nefor.process.Input")
-      output (nefor.graph.port "x" (type-tag nefor.contracts.ProcessResult) "mag.Unknown")
-      actor (nefor.graph.actor
+(require "nefor.shell")
+(let input (nefor.graph.port "x" (type-tag Unit) "nefor.process.Input"))
+(let output (nefor.graph.port "x" (type-tag nefor.contracts.ProcessResult) "mag.Unknown"))
+(let actor (nefor.graph.actor
               "x"
-              nefor.factory.shell-script
-              (as nefor.contracts.ShellScriptParams
+              "nefor.factory.shell-script" []
+              (as nefor.shell.ShellScriptParams
                 {:script "true" :cwd "." :timeout (nefor.contracts.no-timeout)})
               (nefor.graph.store-port input)
-              (as (List nefor.graph.StoredPort) [(nefor.graph.store-port output)]))
-      operation (as (nefor.graph.Node Unit nefor.contracts.ProcessResult)
+              (as (List nefor.graph.StoredPort) [(nefor.graph.store-port output)])))
+(let operation (as (nefor.graph.Node Unit nefor.contracts.ProcessResult)
                  {:id "x" :role "ordinary"
                   :actors (as (List nefor.graph.Actor) [actor])
                   :routes (as (List nefor.graph.StoredRoute) [])
                   :messages (as (List nefor.graph.Message) [])
                   :input input
-                  :output output})
-      start (nefor.graph.source "start" (type-tag Unit) nil)
-      result (nefor.graph.output-for "result" operation)]
-  (nefor.artifact.compile
+                  :output output}))
+(let start (nefor.graph.source "start" (type-tag Unit) nil))
+(let result (nefor.graph.output-for "result" operation))
+(nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
         [(nefor.graph.edge start operation)
-         (nefor.graph.edge operation result)]))))"#,
+         (nefor.graph.edge operation result)])))"#,
     )
     .expect("write unknown shell output regression");
     let unknown = load(
@@ -836,7 +835,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
             .and_then(Value::as_str)
             .is_some_and(|message| {
                 message.contains("actor \\\"x\\\"")
-                    && message.contains("foreign \\\"nefor.factory.shell-script\\\"")
+                    && message.contains("factory \\\"nefor.factory.shell-script\\\"")
                     && message.contains("exposes output wires [\\\"mag.Unknown\\\"]")
                     && message.contains("accepted output wires:")
             }),
@@ -848,29 +847,30 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         r#"(require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
-(let [input (nefor.graph.port "x" (type-tag Unit) "mag.Unknown")
-      output (nefor.graph.port "x" (type-tag nefor.contracts.ProcessResult) "nefor.process.Result")
-      actor (nefor.graph.actor
+(require "nefor.shell")
+(let input (nefor.graph.port "x" (type-tag Unit) "mag.Unknown"))
+(let output (nefor.graph.port "x" (type-tag nefor.contracts.ProcessResult) "nefor.process.Result"))
+(let actor (nefor.graph.actor
               "x"
-              nefor.factory.shell-script
-              (as nefor.contracts.ShellScriptParams
+              "nefor.factory.shell-script" []
+              (as nefor.shell.ShellScriptParams
                 {:script "true" :cwd "." :timeout (nefor.contracts.no-timeout)})
               (nefor.graph.store-port input)
-              (as (List nefor.graph.StoredPort) [(nefor.graph.store-port output)]))
-      operation (as (nefor.graph.Node Unit nefor.contracts.ProcessResult)
+              (as (List nefor.graph.StoredPort) [(nefor.graph.store-port output)])))
+(let operation (as (nefor.graph.Node Unit nefor.contracts.ProcessResult)
                  {:id "x" :role "ordinary"
                   :actors (as (List nefor.graph.Actor) [actor])
                   :routes (as (List nefor.graph.StoredRoute) [])
                   :messages (as (List nefor.graph.Message) [])
                   :input input
-                  :output output})
-      start (nefor.graph.source "start" (type-tag Unit) nil)
-      result (nefor.graph.output-for "result" operation)]
-  (nefor.artifact.compile
+                  :output output}))
+(let start (nefor.graph.source "start" (type-tag Unit) nil))
+(let result (nefor.graph.output-for "result" operation))
+(nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
         [(nefor.graph.edge start operation)
-         (nefor.graph.edge operation result)]))))"#,
+         (nefor.graph.edge operation result)])))"#,
     )
     .expect("write unknown shell input regression");
     let unknown_input = load(
@@ -893,7 +893,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
             .and_then(Value::as_str)
             .is_some_and(|message| {
                 message.contains("actor \\\"x\\\"")
-                    && message.contains("foreign \\\"nefor.factory.shell-script\\\"")
+                    && message.contains("factory \\\"nefor.factory.shell-script\\\"")
                     && message.contains("rejects input wire \\\"mag.Unknown\\\"")
                     && message.contains("accepted input wires:")
             }),
@@ -901,52 +901,49 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
 
     fs::write(
-        temp_root.join("foreign-identity-unknown.mag"),
+        temp_root.join("factory-identity-unknown.mag"),
         r#"(require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
-(foreign missing.factory
-  {:params nefor.contracts.ShellScriptParams
-   :input Unit
-   :output nefor.contracts.ProcessResult})
-(let [input (nefor.graph.port "x" (type-tag Unit) "nefor.process.Input")
-      output (nefor.graph.port "x" (type-tag nefor.contracts.ProcessResult) "nefor.process.Result")
-      actor (nefor.graph.actor
+(require "nefor.shell")
+(let input (nefor.graph.port "x" (type-tag Unit) "nefor.process.Input"))
+(let output (nefor.graph.port "x" (type-tag nefor.contracts.ProcessResult) "nefor.process.Result"))
+(let actor (nefor.graph.actor
               "x"
-              missing.factory
-              (as nefor.contracts.ShellScriptParams
+              "missing.factory" []
+              (as nefor.shell.ShellScriptParams
                 {:script "true" :cwd "." :timeout (nefor.contracts.no-timeout)})
               (nefor.graph.store-port input)
-              (as (List nefor.graph.StoredPort) [(nefor.graph.store-port output)]))
-      operation (as (nefor.graph.Node Unit nefor.contracts.ProcessResult)
+              (as (List nefor.graph.StoredPort) [(nefor.graph.store-port output)])))
+(let operation (as (nefor.graph.Node Unit nefor.contracts.ProcessResult)
                  {:id "x" :role "ordinary"
                   :actors (as (List nefor.graph.Actor) [actor])
                   :routes (as (List nefor.graph.StoredRoute) [])
                   :messages (as (List nefor.graph.Message) [])
                   :input input
-                  :output output})
-      start (nefor.graph.source "start" (type-tag Unit) nil)
-      result (nefor.graph.output-for "result" operation)]
-  (nefor.artifact.compile
+                  :output output}))
+(let start (nefor.graph.source "start" (type-tag Unit) nil))
+(let result (nefor.graph.output-for "result" operation))
+(nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
         [(nefor.graph.edge start operation)
-         (nefor.graph.edge operation result)]))))"#,
+         (nefor.graph.edge operation result)])))"#,
     )
-    .expect("write unknown foreign identity regression");
+    .expect("write unknown factory identity regression");
     let unknown_identity = load(
         &mut reader,
         &mut stdin,
-        "foreign-identity-unknown",
+        "factory-identity-unknown",
         &temp_root,
-        Path::new("foreign-identity-unknown.mag"),
+        Path::new("factory-identity-unknown.mag"),
         std::slice::from_ref(&lib_root),
     )
     .await;
     assert_eq!(
         unknown_identity.get("kind").and_then(Value::as_str),
         Some("mag.error"),
-        "an authored foreign absent from the runtime inventory must fail: {unknown_identity:#?}"
+        "an authored factory absent from the runtime inventory must fail: {unknown_identity:#?}"
     );
     assert!(
         unknown_identity
@@ -954,7 +951,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
             .and_then(Value::as_str)
             .is_some_and(|message| {
                 message.contains("actor \\\"x\\\"")
-                    && message.contains("foreign identity \\\"missing.factory\\\"")
+                    && message.contains("factory identity \\\"missing.factory\\\"")
                     && message.contains("is not present in the runtime inventory")
             }),
         "unknown identity failure should distinguish missing inventory entries: {unknown_identity:#?}"

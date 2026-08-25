@@ -393,7 +393,7 @@ mod tests {
             .and_then(Value::as_array)
             .expect("hello advertises factories");
         assert!(factories.iter().any(|f| f.as_str() == Some("sink")));
-        assert_eq!(b["foreign_contracts"][0]["identity"], "nefor.factory.llm");
+        assert_eq!(b["factory_contracts"][0]["identity"], "nefor.factory.llm");
     }
 
     #[test]
@@ -426,7 +426,7 @@ mod tests {
         let b = loaded_body(
             Some("load-1"),
             "sha256:abc",
-            serde_json::json!({"format": GRAPH_MODIFICATION_FORMAT, "data": {"actors": []}}),
+            serde_json::json!({"actors": []}),
             &["stub".to_owned(), "sink".to_owned()],
             serde_json::json!([{"identity": "nefor.factory.stub"}]),
         );
@@ -439,7 +439,7 @@ mod tests {
             .and_then(Value::as_array)
             .expect("factories");
         assert!(factories.iter().any(|f| f.as_str() == Some("sink")));
-        assert_eq!(b["foreign_contracts"][0]["identity"], "nefor.factory.stub");
+        assert_eq!(b["factory_contracts"][0]["identity"], "nefor.factory.stub");
     }
 
     #[test]
@@ -492,32 +492,29 @@ mod tests {
     }
 
     #[test]
-    fn artifact_boundary_normalizes_qualified_foreign_identity() {
+    fn artifact_boundary_preserves_factory_identity() {
         let artifact = serde_json::json!({
-            "format": GRAPH_MODIFICATION_FORMAT,
-            "data": {
-                "actors": [{"id": "answer", "foreign": "nefor.factory.llm"}],
-                "messages": [], "kills": [], "rules": []
-            }
+            "actors": [{"id": "answer", "factory": "nefor.factory.llm", "type_arguments": []}],
+            "messages": [], "kills": [], "rules": []
         });
         let modification = artifact_modification(&artifact).expect("valid artifact");
         assert_eq!(modification["actors"][0]["factory"], "nefor.factory.llm");
-        assert!(modification["actors"][0].get("foreign").is_none());
+        assert_eq!(
+            modification["actors"][0]["type_arguments"],
+            serde_json::json!([])
+        );
     }
 
     #[test]
     fn artifact_boundary_preserves_structural_result_metadata() {
         let artifact = serde_json::json!({
-            "format": GRAPH_MODIFICATION_FORMAT,
-            "data": {
-                "actors": [{"id": "answer", "foreign": "nefor.factory.llm", "routes": {}}],
-                "messages": [], "kills": [], "rules": [],
-                "result": {"from": {
-                    "actor": "answer",
-                    "type": "audit.CodeAudit",
-                    "wire": "generic-provider.TextAnswer"
-                }}
-            }
+            "actors": [{"id": "answer", "factory": "nefor.factory.llm", "type_arguments": [], "routes": {}}],
+            "messages": [], "kills": [], "rules": [],
+            "result": {"from": {
+                "actor": "answer",
+                "type": "audit.CodeAudit",
+                "wire": "generic-provider.TextAnswer"
+            }}
         });
         let modification = artifact_modification(&artifact).expect("valid artifact");
         assert_eq!(modification["result"]["from"]["actor"], "answer");
@@ -529,11 +526,11 @@ mod tests {
     }
 
     #[test]
-    fn artifact_boundary_rejects_unknown_format() {
-        let artifact = serde_json::json!({"format": "other/v1", "data": {}});
+    fn artifact_boundary_rejects_non_object() {
+        let artifact = serde_json::json!([]);
         assert!(artifact_modification(&artifact)
-            .expect_err("format must be rejected")
-            .contains("must use artifact format"));
+            .expect_err("non-object must be rejected")
+            .contains("graph-modification object"));
     }
 
     #[test]

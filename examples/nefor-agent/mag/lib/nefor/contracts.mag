@@ -1,6 +1,5 @@
-;; Runtime-facing data and capability contracts. Foreign identities are
-;; qualified independently of this module so the same names bind in artifacts
-;; and the runtime registry.
+;; Shared runtime-facing domain values used across actor families. Factory
+;; identities and actor parameter records live with their constructors.
 
 (require "core.types")
 
@@ -35,124 +34,18 @@
 (type ProcessResult {:stdout String :stderr String :termination TerminationStatus})
 (type ProcessFailure {:operation String :error String})
 
-(def no-identifier (fn [] -> OptionalIdentifier
+(let no-identifier (fn [] -> OptionalIdentifier
   (as OptionalIdentifier {:present false :value ""})))
-(def identifier (fn [[value String]] -> OptionalIdentifier
+(let identifier (fn [[value String]] -> OptionalIdentifier
   (as OptionalIdentifier {:present true :value value})))
-(def no-da-policy (fn [] -> DaPolicy
+(let no-da-policy (fn [] -> DaPolicy
   (as DaPolicy {:rules (as (Map String String) {})})))
-(def da-policy (fn [[rules (Map String String)]] -> DaPolicy
+(let da-policy (fn [[rules (Map String String)]] -> DaPolicy
   (as DaPolicy {:rules rules})))
-(def no-timeout (fn [] -> Timeout
+(let no-timeout (fn [] -> Timeout
   (as Timeout {:present false :milliseconds 0})))
-(def timeout-ms (fn [[milliseconds Int]] -> Timeout
+(let timeout-ms (fn [[milliseconds Int]] -> Timeout
   (as Timeout {:present true :milliseconds milliseconds})))
 
-(type AdapterParams {:seed String :schema TypeSchema})
-(type LlmParams {:model OptionalIdentifier
-                 :profile OptionalIdentifier
-                 :provider String
-                 :system String
-                 :tools (List String)
-                 :output_type SemanticTypeId
-                 :error_type SemanticTypeId
-                 :provider_error_type SemanticTypeId})
-(type RunToolParams {:tools (List String)
-                     :da-policy DaPolicy})
-(type ToolResultParams {})
-(type ProcessExecParams {:argv (List String)
-                         :cwd String
-                         :timeout Timeout})
-(type ShellScriptParams {:script String
-                         :cwd String
-                         :timeout Timeout})
-(type HumanParams {:prompt String})
-(type SinkParams {})
-(type SourceParams [T] {:value T :value_type SemanticTypeId})
-(type OutputParams {})
-(type StructuredOutputParams {:model OptionalIdentifier
-                              :profile OptionalIdentifier
-                              :provider String
-                              :system String
-                              :tools (List String)
-                              :schema TypeSchema
-                              :output_type SemanticTypeId
-                              :error_type SemanticTypeId
-                              :provider_error_type SemanticTypeId
-                              :validation_error_type SemanticTypeId
-                              :max_corrections Int})
-(type CollectorParams {:expected_senders (List String)})
-(type DynamicParams {})
 (type Continue [T] {:value T})
 (type Exhausted [T] {:value T})
-(type RetryGateParams {:max_retries Int})
-
-(foreign nefor.factory.adapter [T]
-  {:params AdapterParams
-   :input T
-   :output ProviderInput})
-
-(foreign nefor.factory.llm
-  {:params LlmParams
-   :input ProviderInput
-   :output (| ToolCalls TextAnswer)})
-
-(foreign nefor.factory.structured-output [T]
-  {:params StructuredOutputParams
-   :input ProviderInput
-   :output (| ToolCalls (| T AgentError))})
-
-(foreign nefor.factory.run-tool
-  {:params RunToolParams
-   :input ToolCalls
-   :output ToolHandle})
-
-(foreign nefor.factory.tool-result
-  {:params ToolResultParams
-   :input ToolHandle
-   :output ProviderInput})
-
-(foreign nefor.factory.process-exec
-  {:params ProcessExecParams
-   :input (| Unit Text)
-   :output ProcessResult})
-
-(foreign nefor.factory.shell-script
-  {:params ShellScriptParams
-   :input (| Unit Text)
-   :output ProcessResult})
-
-(foreign nefor.factory.human
-  {:params HumanParams
-   :input TextAnswer
-   :output (| Approved Rejected)})
-
-(foreign nefor.factory.sink [T]
-  {:params SinkParams
-   :input T
-   :output Unit})
-
-(foreign nefor.factory.source [T]
-  {:params (SourceParams T)
-   :input Unit
-   :output T})
-
-(foreign nefor.factory.output [T]
-  {:params OutputParams
-   :input T
-   :output T})
-
-(foreign nefor.factory.collector [T]
-  {:params CollectorParams
-   :input T
-   :output (List T)})
-
-(foreign nefor.factory.retry-gate [T]
-  {:params RetryGateParams
-   :input T
-   :output (| (Continue T) (Exhausted T))})
-
-(foreign nefor.factory.collect-item [T]
-  {:params DynamicParams :input T :output T})
-(foreign nefor.factory.collected-prompt [T]
-  {:params DynamicParams :input (List T) :output ProviderInput})

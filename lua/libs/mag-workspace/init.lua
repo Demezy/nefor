@@ -118,7 +118,7 @@ local function format_routes(routes)
 end
 
 -- Format a graph modification (`mag.loaded` reply shape) into a
--- human-readable preview: actors with foreign capability + params summary, their
+-- human-readable preview: actors with factory identity + params summary, their
 -- typed routes, the initial messages, the hash, and the kernel
 -- registry's factory names.
 function M.preview(modification, hash, factories)
@@ -135,7 +135,7 @@ function M.preview(modification, hash, factories)
   lines[#lines + 1] = "Actors:"
   for _, actor in ipairs(actors) do
     lines[#lines + 1] = string.format("  %s (%s)%s",
-      tostring(actor.id), tostring(actor.foreign), format_params(actor.params))
+      tostring(actor.id), tostring(actor.factory), format_params(actor.params))
     local routes = format_routes(actor.routes)
     if routes then
       lines[#lines + 1] = "    routes: " .. routes

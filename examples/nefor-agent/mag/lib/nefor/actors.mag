@@ -1,6 +1,40 @@
 (require "nefor.graph")
 (require "nefor.contracts")
 
+(let adapter-factory "nefor.factory.adapter")
+(let llm-factory "nefor.factory.llm")
+(let structured-output-factory "nefor.factory.structured-output")
+(let run-tool-factory "nefor.factory.run-tool")
+(let tool-result-factory "nefor.factory.tool-result")
+(let retry-gate-factory "nefor.factory.retry-gate")
+(let human-factory "nefor.factory.human")
+
+(type AdapterParams {:seed String :schema TypeSchema})
+(type LlmParams {:model nefor.contracts.OptionalIdentifier
+                 :profile nefor.contracts.OptionalIdentifier
+                 :provider String
+                 :system String
+                 :tools (List String)
+                 :output_type SemanticTypeId
+                 :error_type SemanticTypeId
+                 :provider_error_type SemanticTypeId})
+(type StructuredOutputParams {:model nefor.contracts.OptionalIdentifier
+                              :profile nefor.contracts.OptionalIdentifier
+                              :provider String
+                              :system String
+                              :tools (List String)
+                              :schema TypeSchema
+                              :output_type SemanticTypeId
+                              :error_type SemanticTypeId
+                              :provider_error_type SemanticTypeId
+                              :validation_error_type SemanticTypeId
+                              :max_corrections Int})
+(type RunToolParams {:tools (List String)
+                     :da-policy nefor.contracts.DaPolicy})
+(type ToolResultParams {})
+(type RetryGateParams {:max_retries Int})
+(type HumanParams {:prompt String})
+
 (type AgentConfig {:id String
                    :model nefor.contracts.OptionalIdentifier
                    :profile nefor.contracts.OptionalIdentifier
@@ -20,7 +54,7 @@
    :first (nefor.graph.Port A)
    :second (nefor.graph.Port B)})
 
-(def branch-node-delta (fn [I A B]
+(let branch-node-delta (fn [I A B]
   [[fragment (BranchNode I A B)]] -> nefor.graph.Delta
   (as nefor.graph.Delta
     {:actors (get fragment "actors")
@@ -28,7 +62,7 @@
      :messages (get fragment "messages")
      :kills []})))
 
-(def task-source (fn [[id String] [prompt String]]
+(let task-source (fn [[id String] [prompt String]]
   -> (nefor.graph.Node Unit nefor.contracts.Task)
   (nefor.graph.source id
     (type-tag nefor.contracts.Task)
@@ -38,51 +72,49 @@
 ;; The stable result wire carries the selected constructor identity. Ordinary
 ;; edges route compatible arms directly; `result-arm` creates a typed resident
 ;; subscription on that same actor/wire without inserting a selector actor.
-(def agent (fn [I O] [[config AgentConfig] [input-type (TypeTag I)]
+(let agent (fn [I O] [[config AgentConfig] [input-type (TypeTag I)]
                 [input-wire String] [output-type (TypeTag O)]]
   -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
-  (let [id (get config "id")
-        entry-id (str id ".entry")
-        llm-id (str id ".llm")
-        run-tool-id (str id ".run-tool")
-        tool-result-id (str id ".tool-result")
-
-        entry-in (nefor.graph.port entry-id input-type input-wire)
-        entry-out (nefor.graph.port entry-id
+  (let id (get config "id"))
+  (let entry-id (str id ".entry"))
+  (let llm-id (str id ".llm"))
+  (let run-tool-id (str id ".run-tool"))
+  (let tool-result-id (str id ".tool-result"))
+  (let entry-in (nefor.graph.port entry-id input-type input-wire))
+  (let entry-out (nefor.graph.port entry-id
                     (type-tag nefor.contracts.ProviderInput)
-                    "generic-provider.ProviderOut")
-        llm-in (nefor.graph.port llm-id
+                    "generic-provider.ProviderOut"))
+  (let llm-in (nefor.graph.port llm-id
                   (type-tag nefor.contracts.ProviderInput)
-                  "generic-provider.ProviderOut")
-        tool-calls (nefor.graph.port llm-id
+                  "generic-provider.ProviderOut"))
+  (let tool-calls (nefor.graph.port llm-id
                      (type-tag nefor.contracts.ToolCalls)
-                     "generic-tool.ToolCalls")
-        result (nefor.graph.port llm-id
+                     "generic-tool.ToolCalls"))
+  (let result (nefor.graph.port llm-id
                  (type-tag (| O nefor.contracts.AgentError))
-                 "nefor.agent.Result")
-        run-in (nefor.graph.port run-tool-id
+                 "nefor.agent.Result"))
+  (let run-in (nefor.graph.port run-tool-id
                  (type-tag nefor.contracts.ToolCalls)
-                 "generic-tool.ToolCalls")
-        run-out (nefor.graph.port run-tool-id
+                 "generic-tool.ToolCalls"))
+  (let run-out (nefor.graph.port run-tool-id
                   (type-tag nefor.contracts.ToolHandle)
-                  "generic-tool.ToolHandle")
-        result-in (nefor.graph.port tool-result-id
+                  "generic-tool.ToolHandle"))
+  (let result-in (nefor.graph.port tool-result-id
                     (type-tag nefor.contracts.ToolHandle)
-                    "generic-tool.ToolHandle")
-        result-out (nefor.graph.port tool-result-id
+                    "generic-tool.ToolHandle"))
+  (let result-out (nefor.graph.port tool-result-id
                      (type-tag nefor.contracts.ProviderInput)
-                     "generic-provider.ProviderOut")]
-
-    (as (nefor.graph.Node I (| O nefor.contracts.AgentError)) {:id id :role "ordinary" :actors
-       [(nefor.graph.actor entry-id (specialize nefor.factory.adapter [I])
-         (as nefor.contracts.AdapterParams
+                     "generic-provider.ProviderOut"))
+  (as (nefor.graph.Node I (| O nefor.contracts.AgentError)) {:id id :role "ordinary" :actors
+       [(nefor.graph.actor entry-id adapter-factory [(type-evidence input-type)]
+         (as AdapterParams
            {:seed "provider-in" :schema (type-schema input-type)})
          (nefor.graph.store-port entry-in)
          [(nefor.graph.store-port entry-out)])
        (if (= (type-id (type-evidence output-type))
               (type-id (type-evidence (type-tag nefor.contracts.TextAnswer))))
-         (nefor.graph.actor llm-id nefor.factory.llm
-           (as nefor.contracts.LlmParams {:model (get config "model")
+         (nefor.graph.actor llm-id llm-factory []
+           (as LlmParams {:model (get config "model")
             :profile (get config "profile")
             :provider (get config "provider")
             :system (get config "system")
@@ -95,8 +127,9 @@
            (nefor.graph.store-port llm-in)
            [(nefor.graph.store-port tool-calls)
             (nefor.graph.store-port result)])
-         (nefor.graph.actor llm-id (specialize nefor.factory.structured-output [O])
-           (as nefor.contracts.StructuredOutputParams {:model (get config "model")
+         (nefor.graph.actor llm-id structured-output-factory
+           [(type-evidence output-type)]
+           (as StructuredOutputParams {:model (get config "model")
             :profile (get config "profile")
             :provider (get config "provider")
             :system (get config "system")
@@ -114,13 +147,13 @@
            (nefor.graph.store-port llm-in)
            [(nefor.graph.store-port tool-calls)
             (nefor.graph.store-port result)]))
-       (nefor.graph.actor run-tool-id nefor.factory.run-tool
-         (as nefor.contracts.RunToolParams
+       (nefor.graph.actor run-tool-id run-tool-factory []
+         (as RunToolParams
            {:tools (or (get config "tools") (as (List String) []))
             :da-policy (get config "da-policy")})
          (nefor.graph.store-port run-in) [(nefor.graph.store-port run-out)])
-       (nefor.graph.actor tool-result-id nefor.factory.tool-result
-         (as nefor.contracts.ToolResultParams {})
+       (nefor.graph.actor tool-result-id tool-result-factory []
+         (as ToolResultParams {})
          (nefor.graph.store-port result-in)
          [(nefor.graph.store-port result-out)])]
      :routes [(nefor.graph.stored-route entry-out llm-in)
@@ -129,37 +162,37 @@
               (nefor.graph.stored-route result-out llm-in)]
      :messages []
      :input entry-in
-     :output result}))))
+     :output result})))
 
 ;; Base toolset shorthands for common delegated-agent capability profiles.
 ;; Explicit custom :tools lists remain the right shape for narrower
 ;; roles or config-specific tools.
 (require "nefor.toolsets")
-(def read-only-tools nefor.toolsets.read-only)
-(def general-tools nefor.toolsets.general)
+(let read-only-tools nefor.toolsets.read-only)
+(let general-tools nefor.toolsets.general)
 
-(def result-arm (fn [I O T]
+(let result-arm (fn [I O T]
   [[fragment (nefor.graph.Node I (| O nefor.contracts.AgentError))]
    [type (TypeTag T)]] -> (nefor.graph.Port T)
-  (let [result (get fragment "output")]
-    (nefor.graph.port (get result "actor") type (get result "wire")))))
+  (let result (get fragment "output"))
+  (nefor.graph.port (get result "actor") type (get result "wire"))))
 
-(def retry-gate (fn [T] [[config RetryGateConfig] [type (TypeTag T)]]
+(let retry-gate (fn [T] [[config RetryGateConfig] [type (TypeTag T)]]
   -> (BranchNode T (nefor.contracts.Continue T) (nefor.contracts.Exhausted T))
-  (let [id (get config "id")
-        actor-id (str id ".retry-gate")
-        input (nefor.graph.port actor-id type "nefor.retry.Input")
-        continued (nefor.graph.port actor-id
+  (let id (get config "id"))
+  (let actor-id (str id ".retry-gate"))
+  (let input (nefor.graph.port actor-id type "nefor.retry.Input"))
+  (let continued (nefor.graph.port actor-id
                     (type-tag (nefor.contracts.Continue T))
-                    "nefor.retry.Continue")
-        exhausted (nefor.graph.port actor-id
+                    "nefor.retry.Continue"))
+  (let exhausted (nefor.graph.port actor-id
                     (type-tag (nefor.contracts.Exhausted T))
-                    "nefor.retry.Exhausted")]
-    (as (BranchNode T (nefor.contracts.Continue T) (nefor.contracts.Exhausted T))
+                    "nefor.retry.Exhausted"))
+  (as (BranchNode T (nefor.contracts.Continue T) (nefor.contracts.Exhausted T))
       {:id id
-       :actors [(nefor.graph.actor actor-id
-                  (specialize nefor.factory.retry-gate [T])
-                  (as nefor.contracts.RetryGateParams
+       :actors [(nefor.graph.actor actor-id retry-gate-factory
+                  [(type-evidence type)]
+                  (as RetryGateParams
                     {:max_retries (get config "max-retries")})
                   (nefor.graph.store-port input)
                   [(nefor.graph.store-port continued)
@@ -168,24 +201,24 @@
        :messages (as (List nefor.graph.Message) [])
        :input input
        :first continued
-       :second exhausted}))))
+       :second exhausted})))
 
-(def approval-gate (fn [[config ApprovalConfig]]
+(let approval-gate (fn [[config ApprovalConfig]]
   -> (BranchNode nefor.contracts.TextAnswer nefor.contracts.Approved nefor.contracts.Rejected)
-  (let [id (get config "id")
-        actor-id (str id ".human")
-        input (nefor.graph.port actor-id
+  (let id (get config "id"))
+  (let actor-id (str id ".human"))
+  (let input (nefor.graph.port actor-id
                 (type-tag nefor.contracts.TextAnswer)
-                "generic-provider.TextAnswer")
-        approved (nefor.graph.port actor-id
+                "generic-provider.TextAnswer"))
+  (let approved (nefor.graph.port actor-id
                    (type-tag nefor.contracts.Approved)
-                   "human.Approved")
-        rejected (nefor.graph.port actor-id
+                   "human.Approved"))
+  (let rejected (nefor.graph.port actor-id
                    (type-tag nefor.contracts.Rejected)
-                   "human.Rejected")]
-    (as (BranchNode nefor.contracts.TextAnswer nefor.contracts.Approved nefor.contracts.Rejected)
-     {:id id :actors [(nefor.graph.actor actor-id nefor.factory.human
-                (as nefor.contracts.HumanParams {:prompt (get config "prompt")})
+                   "human.Rejected"))
+  (as (BranchNode nefor.contracts.TextAnswer nefor.contracts.Approved nefor.contracts.Rejected)
+     {:id id :actors [(nefor.graph.actor actor-id human-factory []
+                (as HumanParams {:prompt (get config "prompt")})
                 (nefor.graph.store-port input)
                 [(nefor.graph.store-port approved)
                  (nefor.graph.store-port rejected)])]
@@ -193,4 +226,4 @@
      :messages []
      :input input
      :first approved
-     :second rejected}))))
+     :second rejected})))

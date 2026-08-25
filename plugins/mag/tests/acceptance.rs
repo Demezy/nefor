@@ -137,9 +137,6 @@ fn two_agent_modification() -> Value {
     fn named(name: &str) -> Value {
         json!({"kind":"named","name":name,"arguments":[]})
     }
-    fn evidence(identity: &str, input: Value, output: Value) -> Value {
-        json!({"version":2,"identity":identity,"arguments":[],"input":input,"output":output})
-    }
     fn agent(prefix: &str) -> Vec<Value> {
         let provider_input = named("nefor.contracts.ProviderInput");
         let tool_calls = named("nefor.contracts.ToolCalls");
@@ -151,7 +148,7 @@ fn two_agent_modification() -> Value {
             json!({
                 "id": format!("{prefix}.llm"),
                 "factory": "llm",
-                "evidence": evidence("nefor.factory.llm",provider_input.clone(),json!({"kind":"union","items":[tool_calls.clone(),text_answer.clone()]})),
+                "type_arguments": [],
                 "input":{"wire":"generic-provider.ProviderOut","type":provider_input.clone()},
                 "outputs":[{"wire":"generic-tool.ToolCalls","type":tool_calls.clone()},{"wire":"nefor.agent.Result","type":result}],
                 "params": {
@@ -170,7 +167,7 @@ fn two_agent_modification() -> Value {
             json!({
                 "id": format!("{prefix}.run-tool"),
                 "factory": "run-tool",
-                "evidence": evidence("nefor.factory.run-tool",tool_calls.clone(),tool_handle.clone()),
+                "type_arguments": [],
                 "input":{"wire":"generic-tool.ToolCalls","type":tool_calls},
                 "outputs":[{"wire":"generic-tool.ToolHandle","type":tool_handle.clone()}],
                 "params": {},
@@ -182,7 +179,7 @@ fn two_agent_modification() -> Value {
             json!({
                 "id": format!("{prefix}.tool-result"),
                 "factory": "tool-result",
-                "evidence": evidence("nefor.factory.tool-result",tool_handle.clone(),provider_input.clone()),
+                "type_arguments": [],
                 "input":{"wire":"generic-tool.ToolHandle","type":tool_handle},
                 "outputs":[{"wire":"generic-provider.ProviderOut","type":provider_input}],
                 "params": {},
@@ -309,13 +306,7 @@ async fn two_agents_one_killed_mid_flight_the_other_completes() {
     execute.insert("principal".into(), Value::String("lead".into()));
     execute.insert("run_id".into(), Value::String(RUN_NAME.into()));
     execute.insert("run_name".into(), Value::String(RUN_NAME.into()));
-    execute.insert(
-        "artifact".into(),
-        json!({
-            "format": "nefor.graph-modification/v1",
-            "data": two_agent_modification()
-        }),
-    );
+    execute.insert("artifact".into(), two_agent_modification());
     send_event(&mut stdin, execute).await;
 
     // Deterministic event loop. Every action is a reply to an observed event;
@@ -686,14 +677,14 @@ fn worktree_program(operation: &str, repository: &str, path: &str, branch: &str)
         r#"(require "nefor.artifact")
 (require "nefor.graph")
 (require "nefor.worktree")
-(let [start (nefor.graph.source "start" (type-tag Unit) nil)
-      workspace {constructor}
-      result (nefor.graph.output-for "result" workspace)]
-  (nefor.artifact.compile
+(let start (nefor.graph.source "start" (type-tag Unit) nil))
+(let workspace {constructor})
+(let result (nefor.graph.output-for "result" workspace))
+(nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
         [(nefor.graph.edge start workspace)
-         (nefor.graph.edge workspace result)]))))"#
+         (nefor.graph.edge workspace result)])))"#
     )
 }
 

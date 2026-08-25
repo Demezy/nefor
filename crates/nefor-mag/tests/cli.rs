@@ -55,41 +55,37 @@ fn compile_args<'a>(root: &'a Path, extra: &'a [&'a str]) -> Vec<&'a str> {
 }
 
 #[test]
-fn compiles_with_caller_supplied_module_root_and_registry() {
+fn compiles_with_caller_supplied_module_root_and_host_input() {
     let fixture = Fixture::new("success");
     let modules = fixture.root.join("modules");
     fs::create_dir_all(&modules).expect("modules");
     fixture.write(
         "modules/contracts.mag",
-        "(def contracts (foreign-contracts))",
+        "(type Scheme {:input_tags (List String) :outputs (List String)})\n(type Contract {:identity String :type_scheme Scheme})\n(let contracts (host-input \"factory_contracts\" (type-tag (List Contract))))",
     );
     fixture.write(
         "main.mag",
         r#"(require "contracts")
-(artifact "test/v1" {:contracts contracts.contracts})"#,
+(artifact {:contracts contracts.contracts})"#,
     );
-    let registry = fixture.write(
-        "registry.lua",
-        r#"return {
-  registry_contracts = function(array_mt)
-    local empty = function() return setmetatable({}, array_mt) end
-    return setmetatable({{
-      identity = "example.factory.echo",
-      implementation = "echo",
-      params = {},
-      type_scheme = { variables = empty(), inputs = {}, input_tags = empty(), outputs = empty() },
-      signals = empty(),
-    }}, array_mt)
-  end,
-}"#,
+    let contracts = fixture.write(
+        "contracts.json",
+        r#"[{
+  "identity": "example.factory.echo",
+  "implementation": "echo",
+  "params": {},
+  "type_scheme": {"variables": [], "inputs": {}, "input_tags": [], "outputs": []},
+  "signals": []
+}]"#,
     );
+    let input = format!("factory_contracts={}", contracts.display());
     let output = run(&compile_args(
         &fixture.root,
         &[
             "--module-root",
             modules.to_str().expect("modules path"),
-            "--registry",
-            registry.to_str().expect("registry path"),
+            "--input",
+            &input,
         ],
     ));
     assert!(
@@ -100,11 +96,8 @@ fn compiles_with_caller_supplied_module_root_and_registry() {
     let body = json_stdout(&output);
     assert_eq!(body["version"], 1);
     assert_eq!(body["ok"], true);
-    assert_eq!(body["artifact"]["format"], "test/v1");
     assert_eq!(
-        body["artifact"]["data"]["contracts"]
-            .as_array()
-            .map(Vec::len),
+        body["artifact"]["contracts"].as_array().map(Vec::len),
         Some(1)
     );
     assert_eq!(body["hash"].as_str().map(str::len), Some(64));
@@ -113,7 +106,7 @@ fn compiles_with_caller_supplied_module_root_and_registry() {
 #[test]
 fn profile_is_opt_in_and_machine_readable() {
     let fixture = Fixture::new("profile");
-    fixture.write("main.mag", "(artifact \"test.profile/v1\" {})");
+    fixture.write("main.mag", "(artifact {})");
 
     let ordinary = json_stdout(&run(&compile_args(&fixture.root, &[])));
     assert!(ordinary.get("profile").is_none());
@@ -121,22 +114,22 @@ fn profile_is_opt_in_and_machine_readable() {
     let profiled = json_stdout(&run(&compile_args(&fixture.root, &["--profile"])));
     assert_eq!(profiled["ok"], true);
     assert!(profiled["profile"]["phases"]["entry_evaluate_ns"].is_u64());
-    assert_eq!(profiled["profile"]["counters"]["evaluator_steps"], 4);
+    assert_eq!(profiled["profile"]["counters"]["evaluator_steps"], 3);
 }
 
 #[test]
-fn syntax_type_and_graph_failures_are_structured() {
+fn syntax_type_and_evaluation_failures_are_structured() {
     for (name, source, code, stage) in [
         ("syntax", "(artifact", "syntax_parse", "parse"),
         (
             "type",
-            "(artifact \"test/v1\" {:bad (+ 1 \"x\")})",
+            "(artifact {:bad (+ 1 \"x\")})",
             "type_error",
             "typecheck",
         ),
         (
-            "graph",
-            "(fail {:kind \"graph\" :message \"unknown factory\"})",
+            "evaluation",
+            "(fail {:kind \"application\" :message \"requested failure\"})",
             "evaluation_error",
             "evaluate",
         ),
@@ -169,7 +162,7 @@ fn syntax_type_and_graph_failures_are_structured() {
 fn required_module_syntax_diagnostic_owns_its_snapshot() {
     let fixture = Fixture::new("module-diagnostic");
     let module = fixture.write("bad.mag", "[λ]");
-    fixture.write("main.mag", "(require \"bad\")\n(artifact \"test/v1\" {})");
+    fixture.write("main.mag", "(require \"bad\")\n(artifact {})");
     let output = run(&compile_args(&fixture.root, &[]));
     assert!(!output.status.success());
     let body = json_stdout(&output);
@@ -188,17 +181,15 @@ fn required_module_syntax_diagnostic_owns_its_snapshot() {
 }
 
 #[test]
-fn path_and_registry_failures_are_structured() {
+fn path_and_host_input_failures_are_structured() {
     let fixture = Fixture::new("paths");
-    fixture.write("main.mag", "(artifact \"test/v1\" {})");
+    fixture.write("main.mag", "(artifact {})");
     let missing = fixture.root.join("missing.json");
-    let output = run(&compile_args(
-        &fixture.root,
-        &["--registry", missing.to_str().expect("missing path")],
-    ));
+    let input = format!("data={}", missing.display());
+    let output = run(&compile_args(&fixture.root, &["--input", &input]));
     assert!(!output.status.success());
     let body = json_stdout(&output);
-    assert_eq!(body["error"]["code"], "registry_read");
+    assert_eq!(body["error"]["code"], "input_read");
     assert_eq!(
         body["error"]["path"],
         missing.to_str().expect("missing path")
@@ -225,4 +216,10 @@ fn command_surface_has_no_execute_or_run_operation() {
     assert!(!stdout
         .lines()
         .any(|line| line.trim_start().starts_with("run")));
+
+    let compile_help = run(&["compile", "--help"]);
+    assert!(compile_help.status.success());
+    let stdout = String::from_utf8_lossy(&compile_help.stdout);
+    assert!(stdout.contains("artifact"), "{stdout}");
+    assert!(!stdout.contains("resulting graph"), "{stdout}");
 }

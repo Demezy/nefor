@@ -22,7 +22,6 @@ pub struct PhaseDurations {
     pub checking_ns: u64,
     pub artifact_conversion_ns: u64,
     pub artifact_serialize_hash_ns: u64,
-    pub resident_rule_validation_ns: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -41,7 +40,6 @@ pub struct OperationCounters {
     pub memoized_call_hits: u64,
     pub memoized_call_misses: u64,
     pub memoized_call_stores: u64,
-    pub resident_rules_validated: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -63,7 +61,6 @@ pub(crate) enum Phase {
     Checking,
     ArtifactConversion,
     ArtifactSerializeHash,
-    ResidentRuleValidation,
 }
 
 impl CompileProfiler {
@@ -98,7 +95,6 @@ impl CompileProfiler {
             Phase::Checking => &mut profile.phases.checking_ns,
             Phase::ArtifactConversion => &mut profile.phases.artifact_conversion_ns,
             Phase::ArtifactSerializeHash => &mut profile.phases.artifact_serialize_hash_ns,
-            Phase::ResidentRuleValidation => &mut profile.phases.resident_rule_validation_ns,
         };
         *target = target.saturating_add(ns);
     }

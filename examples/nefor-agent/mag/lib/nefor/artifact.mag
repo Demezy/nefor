@@ -1,46 +1,43 @@
 (require "core.validated")
 (require "nefor.graph")
 
-(def format "nefor.graph-modification/v1")
-(def delta-format "nefor.graph-delta/v1")
-
 ;; Authored programs are pure Graph -> Graph transformations. Compilation
-;; applies one to empty-graph; the host recognizes only the final Artifact
-;; wrapper and executes it as a fresh run.
-(def compile (fn [[transform (Fn nefor.graph.Graph nefor.graph.Graph)]]
+;; applies one to empty-graph; the Nefor host interprets the raw artifact as a
+;; graph modification and executes it as a fresh run.
+(let compile (fn [[transform (Fn nefor.graph.Graph nefor.graph.Graph)]]
                  -> Artifact
-  (let [graph (transform nefor.graph.empty-graph)
-        checked (nefor.graph.validate
+  (let graph (transform nefor.graph.empty-graph))
+  (let checked (nefor.graph.validate
                   graph
-                  (map nefor.graph.foreign-contract (foreign-contracts)))
-        checked-tag (get checked "tag")]
-    (if (= checked-tag "core.validated.Valid")
-      (artifact format
+                  (host-input "factory_contracts"
+                    (type-tag (List nefor.graph.FactoryContract)))))
+  (let checked-tag (get checked "tag"))
+  (if (= checked-tag "core.validated.Valid")
+      (artifact
         (nefor.graph.lower
           (get (as (core.validated.Valid nefor.graph.Graph) checked)
                "value")))
-      (let [ignored (fail checked)]
-        (artifact format {}))))))
+      (fail checked))))
 
-(def compile-program (fn [[transform (Fn nefor.graph.Graph nefor.graph.Graph)]
+(let compile-program (fn [[transform (Fn nefor.graph.Graph nefor.graph.Graph)]
                           [rules (List nefor.graph.Rule)]]
                          -> Artifact
-  (let [graph (transform nefor.graph.empty-graph)
-        checked (nefor.graph.validate-with-rules
+  (let graph (transform nefor.graph.empty-graph))
+  (let checked (nefor.graph.validate-with-rules
                   graph
                   rules
-                  (map nefor.graph.foreign-contract (foreign-contracts)))
-        checked-tag (get checked "tag")]
-    (if (= checked-tag "core.validated.Valid")
-      (artifact format
+                  (host-input "factory_contracts"
+                    (type-tag (List nefor.graph.FactoryContract)))))
+  (let checked-tag (get checked "tag"))
+  (if (= checked-tag "core.validated.Valid")
+      (artifact
         (nefor.graph.lower-program
           (as nefor.graph.Program
             {:graph (get (as (core.validated.Valid nefor.graph.Graph) checked) "value")
              :rules rules})))
-      (let [ignored (fail checked)]
-        (artifact format {}))))))
+      (fail checked))))
 
-;; A rule result is deliberately a different host format. It has no result
-;; boundary and cannot replace the run's immutable rule subscriptions.
-(def delta (fn [[change nefor.graph.Delta]] -> Artifact
-  (artifact delta-format (nefor.graph.lower-delta change))))
+;; A rule result has no result boundary and cannot replace the run's immutable
+;; rule subscriptions.
+(let delta (fn [[change nefor.graph.Delta]] -> Artifact
+  (artifact (nefor.graph.lower-delta change))))

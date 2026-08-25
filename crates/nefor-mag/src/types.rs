@@ -23,7 +23,6 @@ pub enum MagType {
     Var(String),
     Named(String, Vec<MagType>),
     TypeTag(Box<MagType>),
-    ForeignEvidence,
     List(Box<MagType>),
     EmptyList,
     Map(Box<MagType>, Box<MagType>),
@@ -31,7 +30,6 @@ pub enum MagType {
     Union(Vec<MagType>),
     Product(Vec<MagType>),
     Function(Vec<MagType>, Box<MagType>),
-    Foreign(Box<MagType>, Box<MagType>, Box<MagType>),
 }
 
 /// The single runtime-safe semantic type representation. Unlike `MagType`,
@@ -507,9 +505,7 @@ fn resolve(
         MagType::HostInputs => return unsupported("HostInputs"),
         MagType::Never => return unsupported("Never"),
         MagType::TypeTag(_) => return unsupported("TypeTag"),
-        MagType::ForeignEvidence => return unsupported("ForeignEvidence"),
         MagType::Function(_, _) => return unsupported("Fn"),
-        MagType::Foreign(_, _, _) => return unsupported("Foreign"),
     })
 }
 
@@ -539,7 +535,6 @@ impl fmt::Display for MagType {
             Self::Named(name, args) if args.is_empty() => write!(f, "{name}"),
             Self::Named(name, args) => write!(f, "({name} {})", join(args)),
             Self::TypeTag(ty) => write!(f, "(TypeTag {ty})"),
-            Self::ForeignEvidence => write!(f, "ForeignEvidence"),
             Self::List(item) => write!(f, "(List {item})"),
             Self::EmptyList => write!(f, "(List _)"),
             Self::Map(key, value) => write!(f, "(Map {key} {value})"),
@@ -572,9 +567,6 @@ impl fmt::Display for MagType {
                 let mut parts = params.iter().map(ToString::to_string).collect::<Vec<_>>();
                 parts.push(result.to_string());
                 write!(f, "(Fn {})", parts.join(" "))
-            }
-            Self::Foreign(params, input, output) => {
-                write!(f, "(Foreign {params} {input} {output})")
             }
         }
     }
@@ -809,11 +801,6 @@ mod tests {
             MagType::EmptyList,
             MagType::Artifact,
             MagType::Function(vec![MagType::Int], Box::new(MagType::Int)),
-            MagType::Foreign(
-                Box::new(MagType::Unit),
-                Box::new(MagType::Unit),
-                Box::new(MagType::Unit),
-            ),
         ] {
             assert!(ConcreteType::resolve(&env, &ty).is_err(), "{ty}");
         }

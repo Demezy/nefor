@@ -520,7 +520,7 @@ local function handle_lead_program_loaded(body)
   if body.in_reply_to ~= p.load_id then return end
   p.load_id = nil
   local artifact = body.artifact
-  local modification = type(artifact) == "table" and artifact.data or nil
+  local modification = type(artifact) == "table" and artifact or nil
   if type(modification) ~= "table" then
     emit("nefor-tui", {
       kind = "chat.error.append",
@@ -588,7 +588,7 @@ local function submit_orchestrator_run(user_text, submission_ids, input_cause)
   end
 
   local artifact = deep_clone(p.artifact)
-  local mod = artifact.data
+  local mod = artifact
   for _, actor in ipairs(mod.actors or {}) do
     if actor.id == p.source_actor then
       actor.params.value.prompt = user_text

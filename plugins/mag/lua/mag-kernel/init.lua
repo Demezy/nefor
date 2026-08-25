@@ -783,7 +783,7 @@ return {
     return registry:names()
   end,
 
-  -- Plain-data foreign contracts supplied to MAG compilation as immutable
+  -- Plain-data factory contracts supplied to MAG compilation as immutable
   -- input. Qualified identity is the authored/lowered name; implementation is
   -- retained only so the runtime can bind it to the resident constructor.
   registry_contracts = function(array_mt)
