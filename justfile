@@ -28,11 +28,10 @@ check-test-lanes:
 test-test-lanes-checker:
     tools/test-test-lanes-checker.sh
 
-# Every default deterministic target. This is the lane bare Cargo also exposes.
+# Build once and execute every default deterministic target from prepared artifacts; bare Cargo exposes the same lane.
 test-default timeout="7200": check-test-lanes test-test-lanes-checker test-docs test-session-inspector
     @echo "=== TEST LANE: default deterministic ==="
     cargo run --quiet -p nefor-cargo-test-harness -- --lane default "{{timeout}}"
-    tools/run-separate-tests.sh default
 
 # Validate local Markdown links and anchors without network access.
 test-docs:
@@ -88,9 +87,12 @@ test-tui:
     cargo test -p nefor-tui --lib
 
 # Drive the real agent example through the environment-managed tui-driver.
-test-tui-scenarios:
+test-tui-scenarios prepared="false":
     #!/usr/bin/env bash
     set -euo pipefail
+    repo="{{ justfile_directory() }}"
+    target="${CARGO_TARGET_DIR:-$repo/target}"
+    if [[ "$target" != /* ]]; then target="$repo/$target"; fi
     if ! command -v tui-driver >/dev/null 2>&1; then
       echo "tui-driver is not installed; use this environment's managed installation" >&2
       exit 127
@@ -99,7 +101,7 @@ test-tui-scenarios:
     suite_dir="$(mktemp -d "{{ justfile_directory() }}/tmp/tui-driver-suite.XXXXXX")"
     trap 'rm -rf "$suite_dir"' EXIT
     rm -rf "{{ justfile_directory() }}/tmp/tui-driver-artifacts"
-    cargo build --workspace --locked
+    if [ "{{prepared}}" != "true" ]; then cargo build --workspace --locked; fi
     scenarios=(
       tests/tui/starter-initial-prompt.json
       tests/tui/starter-mock-smoke.json
@@ -120,6 +122,8 @@ test-tui-scenarios:
         --env "NEFOR_DEV_DIR={{ justfile_directory() }}" \
         --env "NEFOR_CONFIG_DIR={{ justfile_directory() }}/examples/nefor-agent" \
         --env "NEFOR_DATA_DIR=$data_dir" \
+        --env "CARGO_TARGET_DIR=$target" \
+        --env "NEFOR_PREPARED_TESTS={{prepared}}" \
         --env NEFOR_DEFAULT_PROVIDER=mock-plugin \
         --env NEFOR_DEFAULT_MODEL=mock-model \
         --env NEFOR_ENABLE_CHATGPT=0 \
@@ -139,14 +143,21 @@ test-tui-all: test-tui test-tui-scenarios
 test-tui-chat:
     cargo test -p nefor-tui --features full-tests --test chat_test -- --test-threads=1
 
-# Every deterministic target, including operational and non-Cargo checks.
+# Build once, execute every deterministic target from prepared artifacts, then reuse the binaries for operational checks.
 test-full timeout="7200": check-test-lanes test-test-lanes-checker
-    @echo "=== TEST LANE: full deterministic ==="
-    cargo run --quiet -p nefor-cargo-test-harness -- --lane full "{{timeout}}"
-    tools/run-separate-tests.sh full
-    just test-release-bundle
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo="{{ justfile_directory() }}"
+    mkdir -p "$repo/tmp"
+    metadata="$(mktemp "$repo/tmp/prepared-test-metadata.XXXXXX")"
+    trap 'rm -f "$metadata"' EXIT
+    cargo metadata --no-deps --format-version 1 > "$metadata"
     just test-build-version
-    just test-tui-scenarios
+    echo "=== TEST LANE: full deterministic ==="
+    cargo run --quiet -p nefor-cargo-test-harness -- --lane full "{{timeout}}"
+    export NEFOR_CARGO_METADATA_FILE="$metadata"
+    just test-release-bundle true
+    just test-tui-scenarios true
     just test-docs
     just test-session-inspector
 
@@ -155,9 +166,14 @@ test-all timeout="7200":
     just test-full "{{timeout}}"
 
 # Validate that a built workspace becomes a complete installable distribution.
-test-release-bundle:
-    cargo build --workspace --locked
-    tools/test-release-bundle.sh "{{ justfile_directory() }}/target/debug"
+test-release-bundle prepared="false":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo="{{ justfile_directory() }}"
+    target="${CARGO_TARGET_DIR:-$repo/target}"
+    if [[ "$target" != /* ]]; then target="$repo/$target"; fi
+    if [ "{{prepared}}" != "true" ]; then cargo build --workspace --locked; fi
+    tools/test-release-bundle.sh "$target/debug"
 
 # Deterministic process-level checks kept separate from the fast default suite.
 test-integration: test-release-bundle test-tui-scenarios

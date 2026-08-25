@@ -26,6 +26,7 @@ struct Config {
     phase: String,
     timeout: Duration,
     artifact_root: PathBuf,
+    working_directory: PathBuf,
     command: Vec<OsString>,
 }
 
@@ -65,6 +66,7 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> io::Result<Config> {
         .transpose()?
         .unwrap_or(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS));
     let mut artifact_root = repository_root()?.join("tmp/test-watchdog");
+    let mut working_directory = repository_root()?;
 
     loop {
         let Some(arg) = args.next() else {
@@ -80,6 +82,9 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> io::Result<Config> {
             }
             Some("--artifact-root") => {
                 artifact_root = PathBuf::from(required_os(&mut args, "--artifact-root")?);
+            }
+            Some("--working-directory") => {
+                working_directory = PathBuf::from(required_os(&mut args, "--working-directory")?);
             }
             Some("--help" | "-h") => {
                 println!("{}", usage());
@@ -106,12 +111,13 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> io::Result<Config> {
         phase: phase.unwrap_or_else(|| "command".to_owned()),
         timeout,
         artifact_root,
+        working_directory,
         command,
     })
 }
 
 fn usage() -> &'static str {
-    "usage: nefor-test-watchdog [--phase NAME] [--timeout-seconds N] [--artifact-root PATH] -- COMMAND [ARG ...]"
+    "usage: nefor-test-watchdog [--phase NAME] [--timeout-seconds N] [--artifact-root PATH] [--working-directory PATH] -- COMMAND [ARG ...]"
 }
 
 fn required_os(args: &mut impl Iterator<Item = OsString>, option: &str) -> io::Result<OsString> {
@@ -175,7 +181,7 @@ fn run(config: &Config) -> io::Result<RunResult> {
     let mut command = Command::new(&config.command[0]);
     command
         .args(&config.command[1..])
-        .current_dir(repository_root()?)
+        .current_dir(&config.working_directory)
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -506,6 +512,7 @@ mod tests {
             phase: phase.to_owned(),
             timeout: Duration::from_secs_f64(timeout),
             artifact_root: root.to_path_buf(),
+            working_directory: repository_root().unwrap(),
             command: vec!["sh".into(), "-c".into(), script.into()],
         }
     }
@@ -578,6 +585,7 @@ mod tests {
             phase: "descendants".to_owned(),
             timeout: Duration::from_millis(200),
             artifact_root: root.clone(),
+            working_directory: repository_root().unwrap(),
             command: vec![fixture.into_os_string()],
         })
         .unwrap();

@@ -1,131 +1,167 @@
+use nefor_cargo_test_harness::{
+    build_prepared_manifest, execute_prepared_manifest, load_full_execution_plan,
+    prepare_manifest_for_platform, read_manifest, run_cargo_and_prepare, run_cargo_metadata,
+    run_cargo_producer, run_doctests, write_immutable_manifest, TestLane,
+};
 use std::env;
-use std::ffi::OsString;
-use std::fs;
-use std::io;
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, File};
+use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{exit, ExitCode};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 struct Invocation {
-    lane: OsString,
-    timeout: OsString,
-    full: bool,
+    lane: TestLane,
+    timeout: Duration,
     prepare_only: bool,
     prepare_mag_e2e: bool,
+    test_args: Vec<OsString>,
 }
 
 fn main() -> ExitCode {
     match run() {
-        Ok(code) => ExitCode::from(code),
+        Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(error) => {
-            eprintln!("macOS test harness error: {error}");
+            eprintln!("prepared test harness error: {error}");
             ExitCode::from(125)
         }
     }
 }
 
-fn run() -> io::Result<u8> {
+fn run() -> io::Result<i32> {
     let invocation = parse_invocation()?;
-    let Invocation {
-        lane,
-        timeout,
-        full,
-        prepare_only,
-        prepare_mag_e2e,
-    } = invocation;
     let root = repository_root()?;
-    let execution_plan = nefor_cargo_test_harness::load_full_execution_plan(&root)?;
-    let artifact_dir = unique_artifact_dir(&root.join("tmp/macos-test-signing"))?;
-    if prepare_mag_e2e {
+    let artifact_dir = unique_artifact_dir(&root.join("tmp/prepared-tests"))?;
+    if invocation.prepare_mag_e2e {
         return prepare_mag_e2e_helpers(&root, &artifact_dir);
     }
-    let cargo_args = execution_plan.workspace_cargo_args("test", full, &[]);
 
-    let watchdog = cargo_target_dir(&root).join("debug/nefor-test-watchdog");
-    build_watchdog(&root)?;
+    let plan = load_full_execution_plan(&root)?;
+    let inventory = run_cargo_metadata(&root, &artifact_dir)?;
+    let producer_json =
+        run_cargo_producer(&root, &plan.producer_args(invocation.lane), &artifact_dir)?;
+    let manifest = build_prepared_manifest(
+        &root,
+        &inventory,
+        &plan,
+        invocation.lane,
+        BufReader::new(File::open(producer_json)?),
+    )?;
+    let manifest_path = artifact_dir.join("prepared-test-manifest.json");
+    write_immutable_manifest(&manifest, &manifest_path)?;
+    eprintln!(
+        "prepared manifest: {} (tests={} helpers={} doctest_targets={})",
+        manifest_path.display(),
+        manifest.tests().count(),
+        manifest.artifacts.len() - manifest.tests().count(),
+        manifest.doctest_targets.len()
+    );
 
-    #[cfg(target_os = "macos")]
-    let prepared = prepare_test_artifacts(&root, &artifact_dir, &execution_plan, full)?;
-    #[cfg(not(target_os = "macos"))]
-    let prepared = nefor_cargo_test_harness::PreparedArtifacts { paths: Vec::new() };
+    let doctest_status = run_doctests(
+        &root,
+        &plan.doctest_args(invocation.lane, &invocation.test_args),
+        &artifact_dir,
+    )?;
+    if !doctest_status.success() {
+        return Ok(101);
+    }
 
-    if prepare_only {
+    let manifest = read_manifest(&manifest_path)?;
+    prepare_manifest_for_platform(&manifest, &artifact_dir)?;
+    if invocation.prepare_only {
         eprintln!(
-            "=== TEST PREPARE ONLY COMPLETE: {} executables ===",
-            prepared.paths.len()
+            "=== PREPARED TEST PREPARE ONLY COMPLETE: tests={} signed_artifacts={} ===",
+            manifest.tests().count(),
+            manifest.signed_paths().len()
         );
         return Ok(0);
     }
 
-    let status = Command::new(watchdog)
-        .current_dir(&root)
-        .arg("--phase")
-        .arg(format!("cargo-{lane}", lane = lane.to_string_lossy()))
-        .arg("--timeout-seconds")
-        .arg(timeout)
-        .arg("--")
-        .arg(env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")))
-        .args(&cargo_args)
-        .status()?;
-    nefor_cargo_test_harness::verify_paths(&prepared.paths).map_err(|error| {
-        io::Error::other(format!(
-            "a Cargo test artifact was replaced or lost its signature after prebuild: {error}"
-        ))
-    })?;
-    status
-        .code()
-        .map_or(Ok(1), |code| Ok(u8::try_from(code).unwrap_or(1)))
+    let summary = execute_prepared_manifest(
+        &manifest,
+        invocation.timeout,
+        &invocation.test_args,
+        &artifact_dir,
+    )?;
+    Ok(summary.exit_code())
 }
 
 fn parse_invocation() -> io::Result<Invocation> {
-    let mut args = env::args_os().skip(1);
-    let first = args.next();
-    let prepare_only = first.as_deref() == Some(std::ffi::OsStr::new("--prepare-only"));
-    let prepare_mag_e2e = first.as_deref() == Some(std::ffi::OsStr::new("--prepare-mag-e2e"));
-    let (lane, timeout) = if first.as_deref() == Some(std::ffi::OsStr::new("--lane")) {
-        let lane = args.next().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "--lane requires default or full",
-            )
-        })?;
-        let timeout = args.next().unwrap_or_else(|| OsString::from("7200"));
-        (lane, timeout)
-    } else if prepare_only || prepare_mag_e2e {
-        (OsString::from("full"), OsString::from("7200"))
-    } else {
-        (
-            OsString::from("full"),
-            first.unwrap_or_else(|| OsString::from("7200")),
-        )
-    };
-    if args.next().is_some() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "usage: nefor-cargo-test-harness [--lane default|full [TIMEOUT_SECONDS] | TIMEOUT_SECONDS | --prepare-only | --prepare-mag-e2e]",
+    let mut args = env::args_os().skip(1).peekable();
+    let mut lane = TestLane::Full;
+    let mut timeout = Duration::from_hours(2);
+    let mut prepare_only = false;
+    let mut prepare_mag_e2e = false;
+    let mut test_args = Vec::new();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            test_args.extend(args);
+            break;
+        }
+        match arg.to_str() {
+            Some("--lane") => {
+                lane = match required_os(&mut args, "--lane")?.to_str() {
+                    Some("default") => TestLane::Default,
+                    Some("full") => TestLane::Full,
+                    _ => return Err(invalid_input("--lane requires default or full")),
+                };
+            }
+            Some("--timeout-seconds") => {
+                timeout = parse_timeout(&required_os(&mut args, "--timeout-seconds")?)?;
+            }
+            Some("--prepare-only") => prepare_only = true,
+            Some("--prepare-mag-e2e") => prepare_mag_e2e = true,
+            Some("--help" | "-h") => {
+                println!("{}", usage());
+                exit(0);
+            }
+            Some(value) if !value.starts_with('-') => timeout = parse_timeout(&arg)?,
+            _ => return Err(invalid_input(usage())),
+        }
+    }
+    if prepare_mag_e2e && (prepare_only || !test_args.is_empty()) {
+        return Err(invalid_input(
+            "--prepare-mag-e2e cannot be combined with lane execution options",
         ));
     }
-    let full = match lane.to_str() {
-        Some("default") => false,
-        Some("full") => true,
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "lane must be default or full",
-            ));
-        }
-    };
     Ok(Invocation {
         lane,
         timeout,
-        full,
         prepare_only,
         prepare_mag_e2e,
+        test_args,
     })
 }
 
-fn prepare_mag_e2e_helpers(root: &Path, artifact_dir: &Path) -> io::Result<u8> {
-    let prepared = nefor_cargo_test_harness::run_cargo_and_prepare(
+fn required_os(args: &mut impl Iterator<Item = OsString>, option: &str) -> io::Result<OsString> {
+    args.next()
+        .ok_or_else(|| invalid_input(format!("{option} requires a value")))
+}
+
+fn parse_timeout(raw: &OsStr) -> io::Result<Duration> {
+    let raw = raw
+        .to_str()
+        .ok_or_else(|| invalid_input("timeout requires UTF-8"))?;
+    let seconds: f64 = raw
+        .parse()
+        .map_err(|_| invalid_input(format!("invalid timeout seconds: {raw}")))?;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return Err(invalid_input("timeout must be a positive finite number"));
+    }
+    Ok(Duration::from_secs_f64(seconds))
+}
+
+fn invalid_input(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}
+
+fn usage() -> &'static str {
+    "usage: nefor-cargo-test-harness [--lane default|full] [--timeout-seconds N | N] [--prepare-only] [-- TEST_ARG ...]\n       nefor-cargo-test-harness --prepare-mag-e2e"
+}
+
+fn prepare_mag_e2e_helpers(root: &Path, artifact_dir: &Path) -> io::Result<i32> {
+    let prepared = run_cargo_and_prepare(
         root,
         &[
             "build",
@@ -161,49 +197,6 @@ fn prepare_mag_e2e_helpers(root: &Path, artifact_dir: &Path) -> io::Result<u8> {
     Ok(0)
 }
 
-fn build_watchdog(root: &Path) -> io::Result<()> {
-    let status = Command::new(env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")))
-        .current_dir(root)
-        .args(["build", "--quiet", "-p", "nefor-test-watchdog"])
-        .status()?;
-    if !status.success() {
-        return Err(io::Error::other(format!(
-            "could not build test watchdog: {status}"
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn prepare_test_artifacts(
-    root: &Path,
-    artifact_dir: &Path,
-    execution_plan: &nefor_cargo_test_harness::FullExecutionPlan,
-    full: bool,
-) -> io::Result<nefor_cargo_test_harness::PreparedArtifacts> {
-    let helper_args = execution_plan.workspace_cargo_args("build", false, &["--bins"]);
-    let helper_arg_refs = helper_args.iter().map(String::as_str).collect::<Vec<_>>();
-    let helpers = nefor_cargo_test_harness::run_cargo_and_prepare(
-        root,
-        &helper_arg_refs,
-        None,
-        &artifact_dir.join("runtime-helpers"),
-    )?;
-    let test_args = execution_plan.workspace_cargo_args("test", full, &["--no-run"]);
-    let test_arg_refs = test_args.iter().map(String::as_str).collect::<Vec<_>>();
-    let tests = nefor_cargo_test_harness::run_cargo_and_prepare(
-        root,
-        &test_arg_refs,
-        None,
-        &artifact_dir.join("test-executables"),
-    )?;
-    let mut paths = helpers.paths;
-    paths.extend(tests.paths);
-    paths.sort();
-    paths.dedup();
-    Ok(nefor_cargo_test_harness::PreparedArtifacts { paths })
-}
-
 fn repository_root() -> io::Result<PathBuf> {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -227,10 +220,6 @@ fn unique_artifact_dir(root: &Path) -> io::Result<PathBuf> {
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
-        "could not allocate signing artifact directory",
+        "could not allocate prepared-test artifact directory",
     ))
-}
-
-fn cargo_target_dir(root: &Path) -> PathBuf {
-    env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from)
 }

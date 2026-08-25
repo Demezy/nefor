@@ -76,7 +76,7 @@ If no `init.lua` is found, the engine prints a friendly error pointing at the RE
 - `just run` — launch engine with `./examples/nefor-agent` config (debug build). Sets `NEFOR_DEV_DIR` so Lua files load from the repo, not the installed copy.
 - `just check` — formatting, documentation, the focused fast confidence set, and verification-lane completeness; the ordinary scoped pre-commit check.
 - `just test` / `just test-default` — every bounded default deterministic target, including the registered non-Cargo default checks. Bare workspace Cargo exposes the same Rust target membership.
-- `just test-full` / `just test-all` — every deterministic default and full target plus the registered non-Cargo full checks. Full Cargo targets require their package's `full-tests` feature and remain absent from bare Cargo.
+- `just test-full` / `just test-all` — every deterministic default and full target plus the registered non-Cargo full checks. Full Cargo targets require their package's `full-tests` feature and remain absent from bare Cargo. Rust targets and runtime helpers are produced once, captured in an immutable manifest, signed on macOS, and executed directly through the watchdog; stable doctests are the explicit conventional Cargo/rustdoc exception before signing. See `docs/testing.md`.
 - `just lint` — workspace-wide Clippy with `-D warnings`; use targeted package Clippy for scoped Rust changes.
 - `just fmt` — rustfmt.
 - `just build` — release build into `target/release/`.

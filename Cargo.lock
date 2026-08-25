@@ -1668,6 +1668,7 @@ dependencies = [
 name = "nefor-cargo-test-harness"
 version = "0.5.0"
 dependencies = [
+ "serde",
  "serde_json",
 ]
 

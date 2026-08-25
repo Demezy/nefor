@@ -95,12 +95,12 @@ if [ "$fixture_mode" -eq 0 ]; then
   full_definition="$(cd "$repo" && just --show "$full_recipe")"
   [[ "$default_definition" == *'cargo run --quiet -p nefor-cargo-test-harness -- --lane default'* ]] || fail "$default_recipe does not reach the metadata-driven default harness"
   [[ "$full_definition" == *'cargo run --quiet -p nefor-cargo-test-harness -- --lane full'* ]] || fail "$full_recipe does not reach the metadata-driven full harness"
-  [[ "$default_definition" == *'tools/run-separate-tests.sh default'* ]] || fail "$default_recipe omits separately owned default Cargo packages"
-  [[ "$full_definition" == *'tools/run-separate-tests.sh full'* ]] || fail "$full_recipe omits separately serialized full Cargo packages"
   harness_source="$repo/tools/cargo-test-harness/src/main.rs"
   rg -q 'load_full_execution_plan' "$harness_source" || fail "Cargo harness does not consume the authoritative full execution plan"
   if rg -q 'FULL_FEATURES' "$harness_source"; then fail "Cargo harness duplicates full feature membership outside the registry"; fi
-  rg -q '\.cargo_full\.separate' "$repo/tools/run-separate-tests.sh" || fail "separate Cargo runner does not consume the authoritative plan"
+  harness_library="$repo/tools/cargo-test-harness/src/lib.rs"
+  rg -q 'package_test_args' "$harness_library" || fail "prepared runner does not consume serialized-package policy from the authoritative plan"
+  rg -q 'build_prepared_manifest' "$harness_source" || fail "Cargo harness does not execute a metadata-proven prepared manifest"
   while IFS=$'\t' read -r recipe lane; do
     if [ "$lane" = "default" ]; then
       [[ " $default_definition " == *" $recipe"* ]] || fail "$recipe is not reachable from $default_recipe"

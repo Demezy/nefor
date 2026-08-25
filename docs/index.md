@@ -18,6 +18,11 @@ interfaces, providers, and tools are composition or plugin concerns.
   wrappers.
 - [Glossary](glossary.md) — project terminology.
 
+## Development
+
+- [Verification lanes and prepared execution](testing.md) — deterministic lane
+  ownership, the single producer/signing boundary, and preserved run evidence.
+
 ## Explore and compose
 
 - [Nefor agent example](../examples/nefor-agent/README.md) — an explorable,

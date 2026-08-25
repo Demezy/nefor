@@ -42,9 +42,4 @@ expect_failure missing-tui-execution "$scratch/root.json" "$scratch/missing-tui-
 jq '.non_cargo |= map(select(.recipe != "test-test-lanes-checker"))' "$repo/tools/test-lanes.json" >"$scratch/unregistered-verification.json"
 expect_failure unregistered-verification "$scratch/root.json" "$scratch/unregistered-verification.json" "non-Cargo verification entrypoints are not registered exactly"
 
-NEFOR_TEST_PLAN_DRY_RUN=1 "$repo/tools/run-separate-tests.sh" default >"$scratch/separate-default.out"
-NEFOR_TEST_PLAN_DRY_RUN=1 "$repo/tools/run-separate-tests.sh" full >"$scratch/separate-full.out"
-rg -q '^separate-test lane=default package=nefor-tui feature=none args=none$' "$scratch/separate-default.out"
-rg -q '^separate-test lane=full package=nefor-tui feature=nefor-tui/full-tests args=--test-threads=1$' "$scratch/separate-full.out"
-
 echo "test-lane checker rejected all negative fixtures"
