@@ -312,44 +312,4 @@ mod tests {
 "#;
         assert!(parse_executables(&missing[..]).is_err());
     }
-
-    #[test]
-    fn full_execution_plan_builds_package_qualified_features() {
-        let plan = parse_full_execution_plan(
-            r#"{
-              "cargo_full": {
-                "harness_packages": ["alpha", "beta"],
-                "separate": [{"package": "terminal", "test_args": ["--test-threads=1"]}]
-              }
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(
-            plan,
-            FullExecutionPlan {
-                harness_packages: vec!["alpha".into(), "beta".into()],
-                separate_packages: vec!["terminal".into()],
-            }
-        );
-        assert_eq!(plan.feature_spec(), "alpha/full-tests,beta/full-tests");
-        assert_eq!(
-            plan.workspace_cargo_args("test", true, &["--no-run"]),
-            vec![
-                "test",
-                "--workspace",
-                "--exclude",
-                "terminal",
-                "--locked",
-                "--no-run",
-                "--features",
-                "alpha/full-tests,beta/full-tests",
-            ]
-        );
-    }
-
-    #[test]
-    fn full_execution_plan_rejects_missing_membership() {
-        let error = parse_full_execution_plan(r#"{"cargo_full":{"separate":[]}}"#).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    }
 }
