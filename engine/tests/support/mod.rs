@@ -1,5 +1,9 @@
+#![allow(dead_code)]
+
 use std::ffi::{OsStr, OsString};
 use std::sync::{Mutex, MutexGuard};
+
+pub(crate) mod agentic_cli;
 
 pub(crate) struct ScopedEnvVar {
     key: &'static str,

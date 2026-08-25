@@ -1,4 +1,4 @@
-//! Canonical child-process execution for the structured and shell capabilities.
+// Canonical child-process execution for the structured and shell capabilities.
 
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;

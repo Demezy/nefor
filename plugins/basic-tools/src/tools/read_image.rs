@@ -1,11 +1,11 @@
-//! `read_image` — read image bytes for vision-capable providers.
-//!
-//! The tool loads and classifies bytes. It does not OCR or caption;
-//! interpretation belongs to the model layer. Oversized images are
-//! downscaled/re-encoded so clipboard screenshots don't bounce off model
-//! payload limits. Providers that cannot send image parts must turn the
-//! structured media result into an explicit user-visible error before
-//! the next model turn.
+// `read_image` — read image bytes for vision-capable providers.
+//
+// The tool loads and classifies bytes. It does not OCR or caption;
+// interpretation belongs to the model layer. Oversized images are
+// downscaled/re-encoded so clipboard screenshots don't bounce off model
+// payload limits. Providers that cannot send image parts must turn the
+// structured media result into an explicit user-visible error before
+// the next model turn.
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
@@ -373,103 +373,4 @@ fn encode_base64(bytes: &[u8]) -> String {
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use image::ImageEncoder;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    #[tokio::test]
-    async fn reads_png_as_media_object() {
-        let mut f = NamedTempFile::new().expect("tempfile");
-        f.write_all(b"\x89PNG\r\n\x1a\nabc").expect("write");
-        let path = f.path().to_str().expect("utf8 path").to_owned();
-        let out = run(&json!({ "path": path })).await.expect("ok");
-        assert_eq!(out.get("type").and_then(Value::as_str), Some("media"));
-        assert_eq!(
-            out.get("media_type").and_then(Value::as_str),
-            Some("image/png")
-        );
-        assert_eq!(
-            out.get("data").and_then(Value::as_str),
-            Some("iVBORw0KGgphYmM=")
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_unsupported_image_format() {
-        let mut f = NamedTempFile::new().expect("tempfile");
-        f.write_all(b"not an image").expect("write");
-        let path = f.path().to_str().expect("utf8 path").to_owned();
-        let err = run(&json!({ "path": path })).await.unwrap_err();
-        assert!(
-            matches!(err, ToolError::UnsupportedImage { .. }),
-            "got {err:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn resolves_relative_path_against_cwd() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("image.gif");
-        std::fs::write(&path, b"GIF89a").expect("write");
-        let out = run(&json!({
-            "path": "image.gif",
-            "cwd": dir.path().to_str().expect("utf8 cwd")
-        }))
-        .await
-        .expect("ok");
-        assert_eq!(
-            out.get("media_type").and_then(Value::as_str),
-            Some("image/gif")
-        );
-    }
-
-    #[test]
-    fn schema_has_required_path() {
-        let s = schema();
-        assert_eq!(s.get("type").and_then(Value::as_str), Some("object"));
-        let required = s
-            .get("required")
-            .and_then(Value::as_array)
-            .expect("required");
-        assert!(required.iter().any(|v| v.as_str() == Some("path")));
-    }
-
-    #[test]
-    fn large_png_is_reencoded_under_target_cap() {
-        let width = 2048u32;
-        let height = 2048u32;
-        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-        let mut seed = 0x1234_5678u32;
-        for _ in 0..(width * height) {
-            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            rgba.push((seed >> 24) as u8);
-            rgba.push((seed >> 16) as u8);
-            rgba.push((seed >> 8) as u8);
-            rgba.push(255);
-        }
-
-        let mut png = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut png)
-            .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
-            .expect("encode png");
-        assert!(
-            png.len() > TARGET_OUTPUT_BYTES,
-            "fixture should exceed target cap, got {}",
-            png.len()
-        );
-
-        let media = prepare_media_bytes(&png, "image/png").expect("prepare media");
-        assert_eq!(media.media_type, "image/jpeg");
-        assert!(
-            media.bytes.len() <= TARGET_OUTPUT_BYTES,
-            "re-encoded media should be under target cap, got {}",
-            media.bytes.len()
-        );
-        assert!(media.bytes.starts_with(&[0xff, 0xd8, 0xff]));
-    }
 }

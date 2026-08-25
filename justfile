@@ -14,11 +14,25 @@ run:
 setup:
     cargo fetch
 
-# Default fast validation for small, localized changes.
-test: test-fast
+# Complete bounded default lane for ordinary local verification.
+test: test-default
 
 # Formatting plus fast tests; use before committing ordinary scoped changes.
-check: fmt-check test-docs test-fast
+check: fmt-check test-docs test-fast check-test-lanes
+
+# Prove that every Cargo and non-Cargo verification target has one lane.
+check-test-lanes:
+    tools/check-test-lanes.sh
+
+# Exercise the fail-closed checker against repository-owned negative fixtures.
+test-test-lanes-checker:
+    tools/test-test-lanes-checker.sh
+
+# Every default deterministic target. This is the lane bare Cargo also exposes.
+test-default timeout="7200": check-test-lanes test-docs test-session-inspector
+    @echo "=== TEST LANE: default deterministic ==="
+    cargo run --quiet -p nefor-cargo-test-harness -- --lane default "{{timeout}}"
+    cargo test -p nefor-tui --locked
 
 # Validate local Markdown links and anchors without network access.
 test-docs:
@@ -35,21 +49,21 @@ test-fast:
     cargo test -p nefor --test starter_tool_gate_test
     cargo test -p nefor --test read_only_tools_test
     cargo test -p tool-gate-plugin
-    cargo test -p nefor-tui --test chat_test starter_tool_catalog_replay_freshness_and_atomic_replacement -- --exact --test-threads=1
+    cargo test -p nefor-tui --test chat_smoke_test chat_lua_loads_and_renders_initial_frame -- --exact
 
 # Nefor package-manager checkout, locking, local-source, and build behavior.
 test-pm:
-    cargo test -p nefor --test nefor_pm_test
+    cargo test -p nefor --features full-tests --test nefor_pm_test
 
 # Starter Lua, session, workflow, role, and bundled tool integration tests.
 test-example:
     cargo test -p nefor --test starter_tool_gate_test
-    cargo test -p nefor --test starter_sessions_test
+    cargo test -p nefor --features full-tests --test starter_sessions_test
     cargo test -p nefor --test starter_startup_test
     cargo test -p nefor --test starter_openai_provider_test
     cargo test -p nefor --test starter_agentic_workflow_test
     cargo test -p nefor --test starter_agentic_cli_test
-    cargo test -p nefor --test starter_lead_workflow_test
+    cargo test -p nefor --features full-tests --test starter_lead_workflow_test
     cargo test -p nefor --test starter_lead_role_test
     cargo test -p nefor --test starter_mag_kernel_test
     cargo test -p nefor --test starter_ncp_test
@@ -59,8 +73,8 @@ test-example:
 # Provider/API translation tests; may need local socket binding permissions.
 test-provider:
     cargo test -p openai-provider --lib
-    cargo test -p openai-provider --test stream_integration
-    cargo test -p chatgpt-provider
+    cargo test -p openai-provider --features full-tests --test stream_integration
+    cargo test -p chatgpt-provider --features full-tests
     cargo test -p generic-provider
     cargo test -p nefor --test openai_provider_lib_test
     cargo test -p nefor --test starter_openai_provider_test
@@ -69,28 +83,43 @@ test-provider:
 prepare-mag-e2e:
     cargo run --quiet -p nefor-cargo-test-harness -- --prepare-mag-e2e
 
-# Explicit live check of the OpenAI-compatible HTTP/SSE client using repository-root .env inputs.
-test-provider-live:
+# Explicit live checks from the Cargo graph excluded from the root workspace.
+test-live target:
     #!/usr/bin/env bash
     set -euo pipefail
     repo="{{justfile_directory()}}"
-    env_file="$repo/.env"
-    if [ ! -f "$env_file" ]; then
-      echo "live provider test requires $env_file; copy .env.example and fill every value" >&2
-      exit 2
-    fi
-    set -a
-    source "$env_file"
-    set +a
-    required=(NEFOR_LIVE_OPENAI_BASE_URL NEFOR_LIVE_OPENAI_API_KEY NEFOR_LIVE_OPENAI_MODEL)
-    for name in "${required[@]}"; do
-      if [ -z "${!name:-}" ]; then
-        echo "live provider test requires non-empty $name in $env_file" >&2
+    manifest="$repo/tests/live/Cargo.toml"
+    case "{{target}}" in
+      provider)
+        env_file="$repo/.env"
+        if [ ! -f "$env_file" ]; then
+          echo "live provider test requires $env_file; copy .env.example and fill every value" >&2
+          exit 2
+        fi
+        set -a
+        source "$env_file"
+        set +a
+        required=(NEFOR_LIVE_OPENAI_BASE_URL NEFOR_LIVE_OPENAI_API_KEY NEFOR_LIVE_OPENAI_MODEL)
+        for name in "${required[@]}"; do
+          if [ -z "${!name:-}" ]; then
+            echo "live provider test requires non-empty $name in $env_file" >&2
+            exit 2
+          fi
+        done
+        echo "=== TEST LANE: live provider (explicit capability) ==="
+        NEFOR_LIVE_TEST_CAPABILITY=explicit CARGO_TARGET_DIR="$repo/target" \
+          cargo test --manifest-path "$manifest" --locked --test openai_compatible
+        ;;
+      clipboard)
+        echo "=== TEST LANE: live GUI clipboard (explicit capability) ==="
+        NEFOR_LIVE_TEST_CAPABILITY=explicit CARGO_TARGET_DIR="$repo/target" \
+          cargo test --manifest-path "$manifest" --locked --test tui_clipboard -- --test-threads=1
+        ;;
+      *)
+        echo "usage: just test-live provider|clipboard" >&2
         exit 2
-      fi
-    done
-    cd "$repo"
-    cargo test -p openai-provider --features live-openai-test --test live_openai_compatible -- --exact live_openai_compatible_client_streams_to_a_terminal_outcome
+        ;;
+    esac
 
 # TUI rendering, layout, input, scrolling, and widget unit tests.
 test-tui:
@@ -146,21 +175,22 @@ test-tui-all: test-tui test-tui-scenarios
 
 # TUI chat workflow, replay, autocomplete, and input integration tests.
 test-tui-chat:
-    cargo test -p nefor-tui --test chat_test -- --test-threads=1
+    cargo test -p nefor-tui --features full-tests --test chat_test -- --test-threads=1
 
-# Full local suite for cross-cutting or release-level validation. The first Cargo phase is watchdog-protected; override its 2h deadline with the timeout argument.
+# Every deterministic target, including operational and non-Cargo checks.
+test-full timeout="7200": check-test-lanes
+    @echo "=== TEST LANE: full deterministic ==="
+    cargo run --quiet -p nefor-cargo-test-harness -- --lane full "{{timeout}}"
+    cargo test -p nefor-tui --locked --features nefor-tui/full-tests -- --test-threads=1
+    just test-release-bundle
+    just test-build-version
+    just test-tui-scenarios
+    just test-docs
+    just test-session-inspector
+
+# Backwards-compatible name for the complete deterministic lane.
 test-all timeout="7200":
-    cargo run --quiet -p nefor-cargo-test-harness -- "{{timeout}}"
-    cargo test -p nefor-tui --lib
-    cargo test -p nefor-tui --bin nefor-tui
-    cargo test -p nefor-tui --test animation_test
-    cargo test -p nefor-tui --test engine_test
-    cargo test -p nefor-tui --test layout_test
-    cargo test -p nefor-tui --test scrollable_test
-    cargo test -p nefor-tui --test snapshot_test
-    cargo test -p nefor-tui --test text_input_test
-    cargo test -p nefor-tui --test chat_test -- --test-threads=1
-    cargo test -p nefor-tui --doc
+    just test-full "{{timeout}}"
 
 # Validate that a built workspace becomes a complete installable distribution.
 test-release-bundle:

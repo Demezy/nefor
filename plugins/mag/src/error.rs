@@ -1,8 +1,8 @@
-//! Domain errors for the mag plugin.
-//!
-//! Transport failures fold in from the shared plugin SDK; Lua and kernel
-//! loading failures are mag-specific. `anyhow` is not used — the binary
-//! surfaces `MagError` directly at the `main.rs` boundary.
+// Domain errors for the mag plugin.
+//
+// Transport failures fold in from the shared plugin SDK; Lua and kernel
+// loading failures are mag-specific. `anyhow` is not used — the binary
+// surfaces `MagError` directly at the `main.rs` boundary.
 
 /// Errors the mag plugin can fail with.
 #[derive(Debug, thiserror::Error)]

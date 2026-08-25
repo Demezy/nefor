@@ -1,0 +1,25 @@
+[package]
+name = "nefor-live-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+autotests = false
+
+[workspace]
+
+[[test]]
+name = "openai_compatible"
+path = "tests/openai_compatible.rs"
+
+[[test]]
+name = "tui_clipboard"
+path = "tests/tui_clipboard.rs"
+
+[dependencies]
+nefor-tui = { path = "../../plugins/nefor-tui" }
+openai-provider = { path = "../../plugins/openai-provider" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"

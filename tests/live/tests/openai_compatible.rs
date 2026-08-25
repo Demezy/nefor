@@ -1,3 +1,5 @@
+mod support;
+
 use openai_provider::openai::Message;
 use openai_provider::stream::run_chat_stream;
 use std::env;
@@ -16,6 +18,7 @@ fn required_env(name: &str) -> String {
 
 #[tokio::test]
 async fn live_openai_compatible_client_streams_to_a_terminal_outcome() {
+    support::require_explicit_capability();
     let base_url = required_env(BASE_URL_ENV);
     let api_key = required_env(API_KEY_ENV);
     let model = required_env(MODEL_ENV);

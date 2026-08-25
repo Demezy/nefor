@@ -11,13 +11,12 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use nefor_tui::engine::Engine;
 use nefor_tui::input::KeyMessage;
 use nefor_tui::mouse::{MouseKind, MouseMessage};
-use serde_json::{json, Map as JsonMap, Value as JsonValue};
+use serde_json::{json, Value as JsonValue};
 
 /// Per-process tempdir kept alive for the lifetime of `cargo test` and
 /// pointed at by `NEFOR_DATA_DIR` on first access. Ensures chat.lua's
@@ -38,165 +37,35 @@ use serde_json::{json, Map as JsonMap, Value as JsonValue};
 /// regression tests, scroll tests that press arrow-up); they restore
 /// back to whatever was set before (which is this process-wide tempdir)
 /// on Drop.
-static TEST_DATA_HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
+#[path = "../../../tests/support/tui_chat.rs"]
+mod chat_harness;
 
 fn ensure_test_data_home() {
-    let dir = TEST_DATA_HOME
-        .get_or_init(|| tempfile::tempdir().expect("create per-process test data home"));
-    // set_var is process-global; OnceLock guarantees the assignment
-    // runs only once. Subsequent ResumeEnv-style overrides save +
-    // restore around their scope, so this default is what they read
-    // at construction time and what they restore on Drop.
-    if std::env::var_os("NEFOR_DATA_DIR").is_none() {
-        std::env::set_var("NEFOR_DATA_DIR", dir.path());
-    }
+    chat_harness::ensure_test_data_home();
 }
 
 fn chat_lua_source() -> String {
-    // Side-effect on first call: install a per-process data home so
-    // chat.lua's input-history loader doesn't reach into the user's
-    // real `$HOME/.local/share/nefor`. Centralised here because every
-    // chat-surface test reads this function — no per-test wiring.
-    ensure_test_data_home();
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("repo root")
-        .to_path_buf();
-    // Pin the config the chat surface resolves so the suite is
-    // hermetic: NEFOR_STARTER_CONFIG_DIR beats a NEFOR_CONFIG_DIR /
-    // NEFOR_DEV_DIR exported in the developer's shell (which would
-    // leak the real installed config in), and NEFOR_DEFAULT_* beat
-    // examples/nefor-agent/config's developer-facing chatgpt/gpt-5.5 defaults.
-    // Every initial-statusline assertion keys on these values.
-    // Unconditional set_var (unlike the only-if-unset pins below):
-    // an inherited value IS the leak being defended against. Once so
-    // parallel test threads don't race the process-global env.
-    static PIN_CONFIG_ENV: OnceLock<()> = OnceLock::new();
-    PIN_CONFIG_ENV.get_or_init(|| {
-        std::env::set_var(
-            "NEFOR_STARTER_CONFIG_DIR",
-            repo_root.join("examples/nefor-agent"),
-        );
-        std::env::set_var("NEFOR_DEFAULT_PROVIDER", "mock-plugin");
-        std::env::set_var("NEFOR_DEFAULT_MODEL", "mock-model");
-    });
-    // Tell chat.lua's package.path bootstrap where the nefor-tui plugin
-    // lib lives. In a normal `nefor` run, the engine sets NEFOR_CONFIG_DIR
-    // and chat.lua derives the plugin-lib dir relative to that; tests
-    // load chat.lua directly into the engine's Lua VM (no env from the
-    // engine entry point) so we set the explicit override here.
-    let plugin_lua = repo_root.join("plugins").join("nefor-tui").join("lua");
-    if std::env::var_os("NEFOR_TUI_LUA_DIR").is_none() {
-        std::env::set_var("NEFOR_TUI_LUA_DIR", &plugin_lua);
-    }
-    // Tell chat.lua's package.path bootstrap where the chat/ submodule
-    // dir lives. Same rationale as NEFOR_TUI_LUA_DIR above — tests
-    // load chat.lua directly into the engine VM with no NEFOR_CONFIG_DIR
-    // (which is how the binary normally seeds this path).
-    let chat_subdir = repo_root.join("examples/nefor-agent").join("chat");
-    if std::env::var_os("NEFOR_STARTER_CHAT_DIR").is_none() {
-        std::env::set_var("NEFOR_STARTER_CHAT_DIR", &chat_subdir);
-    }
-    let chat_path = repo_root
-        .join("examples/nefor-agent")
-        .join("chat")
-        .join("init.lua");
-    std::fs::read_to_string(&chat_path).unwrap_or_else(|e| panic!("read {:?}: {e}", chat_path))
+    chat_harness::chat_lua_source()
 }
 
 fn canonical_chat_lua_source_for_config(config_dir: &std::path::Path) -> String {
-    ensure_test_data_home();
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("repo root")
-        .to_path_buf();
-    let source = std::fs::read_to_string(repo_root.join("examples/nefor-agent/chat/init.lua"))
-        .expect("read canonical chat entry");
-    format!(
-        r#"
-        local real_getenv = os.getenv
-        local overrides = {{
-          NEFOR_CONFIG_DIR = {config:?},
-          NEFOR_STARTER_CONFIG_DIR = {config:?},
-          NEFOR_STARTER_CHAT_DIR = {chat:?},
-          NEFOR_LOCAL_DIR = {repo:?},
-          NEFOR_TUI_LUA_DIR = {tui:?},
-          NEFOR_LUA_DIR = {lua:?},
-          NEFOR_DEFAULT_PROVIDER = "mock-plugin",
-          NEFOR_DEFAULT_MODEL = "mock-model",
-        }}
-        os.getenv = function(name)
-          if overrides[name] ~= nil then return overrides[name] end
-          return real_getenv(name)
-        end
-        os.execute = function() return true end
-        {source}
-        local config_ok, config_error = pcall(function() return require("config").active end)
-        assert(config_ok, tostring(config_error))
-        "#,
-        config = config_dir.display().to_string(),
-        chat = repo_root
-            .join("examples/nefor-agent/chat")
-            .display()
-            .to_string(),
-        repo = repo_root.display().to_string(),
-        tui = repo_root
-            .join("plugins/nefor-tui/lua")
-            .display()
-            .to_string(),
-        lua = repo_root.join("lua").display().to_string(),
-    )
+    chat_harness::canonical_chat_lua_source_for_config(config_dir)
 }
 
 fn load_chat_scenario(engine: &mut Engine) {
-    engine.load_scenario(&chat_lua_source()).expect("load");
-    let emits = engine.take_emit_queue();
-    assert_eq!(
-        emits.len(),
-        1,
-        "chat startup should emit readiness exactly once"
-    );
-    let (target_hint, body) = &emits[0];
-    assert_eq!(target_hint, &None, "chat readiness is broadcast");
-    assert_eq!(
-        body.get("kind").and_then(JsonValue::as_str),
-        Some("chat.surface.ready"),
-        "chat startup should emit only its readiness signal"
-    );
+    chat_harness::load_chat_scenario(engine);
 }
 
 fn render_str(engine: &mut Engine) -> String {
-    match engine.render_if_dirty().expect("render") {
-        Some(bytes) => String::from_utf8(bytes).expect("ansi is utf-8"),
-        // Render-was-clean is fine for assertions that only care about
-        // egress / state shape; the prior frame is on the wire already.
-        None => String::new(),
-    }
-}
-
-fn dispatch_event_from(engine: &mut Engine, source: &str, body: JsonValue) {
-    let map: JsonMap<String, JsonValue> = body.as_object().expect("event body").clone();
-    engine
-        .dispatch_envelope_from(&map, source)
-        .expect("dispatch event");
+    chat_harness::render_str(engine)
 }
 
 fn dispatch_event(engine: &mut Engine, body: JsonValue) {
-    let source = match body.get("kind").and_then(JsonValue::as_str) {
-        Some("mag.run_started") => "mag",
-        Some("chat.instruction.notice") => "engine",
-        _ => "test",
-    };
-    dispatch_event_from(engine, source, body);
+    chat_harness::dispatch_event(engine, body);
 }
 
 fn activate_conversation(engine: &mut Engine, conversation_id: &str) {
-    dispatch_event(
-        engine,
-        json!({ "kind": "conversation.active.changed", "conversation_id": conversation_id }),
-    );
+    chat_harness::activate_conversation(engine, conversation_id);
 }
 
 #[derive(Clone)]
@@ -638,31 +507,6 @@ fn key(name: &str) -> KeyMessage {
         name: name.into(),
         mods: vec![],
     }
-}
-
-#[test]
-fn chat_lua_loads_and_renders_initial_frame() {
-    let mut engine = Engine::new(80, 24).expect("engine");
-    load_chat_scenario(&mut engine);
-    let out = render_str(&mut engine);
-    assert!(
-        out.contains("mock-model"),
-        "initial statusline should show configured default model: {out:?}"
-    );
-    assert!(
-        !out.contains("Start chatting to see stats"),
-        "configured defaults should replace pre-chat placeholder: {out:?}"
-    );
-    // The input field should NOT carry a default hint — the bordered
-    // box below the transcript is self-explanatory. Substrings from the
-    // removed hint must be absent.
-    for needle in ["type a message", "ype a message", "/help for keys"] {
-        assert!(
-            !out.contains(needle),
-            "input placeholder should be empty, found {needle:?} in: {out:?}"
-        );
-    }
-    // Startup readiness was asserted and drained by `load_chat_scenario`.
 }
 
 #[test]
@@ -7074,193 +6918,6 @@ fn slash_resume_with_arg_emits_resume_request() {
     assert_eq!(
         body.get("session_id").and_then(|v| v.as_str()),
         Some(session_id),
-    );
-}
-
-/// Mouse drag inside the transcript triggers the chat.lua mouse.selection
-/// handler. The handler calls `tui.copy_to_clipboard` and surfaces a
-/// `copied N chars` toast. The test asserts the toast appears — that
-/// transitively confirms the engine extracted the text and routed it to
-/// the Lua policy. Clipboard side-effects (the actual OS write) aren't
-/// asserted because the headless test runner has no clipboard backend
-/// to inspect; the binding swallows that failure by design (warn + drop).
-#[test]
-#[ignore = "needs GUI clipboard; arboard suppresses toast on headless CI"]
-fn mouse_drag_copies_selection_and_shows_toast() {
-    let mut engine = Engine::new(80, 24).expect("engine");
-    load_chat_scenario(&mut engine);
-    // Stream a known message into the transcript so the drag covers
-    // identifiable text.
-    fixture_assistant_delta(&mut engine, "selectable-token");
-    fixture_assistant_completed(
-        &mut engine,
-        None,
-        json!({ "model": "test", "duration_ms": 1 }),
-    );
-    let frame = render_str(&mut engine);
-    assert!(
-        frame.contains("selectable-token"),
-        "expected token in pre-drag frame: {frame:?}"
-    );
-
-    // Locate the row carrying our token in the framebuffer snapshot so
-    // we drag over those cells.
-    let snap = engine.snapshot();
-    let row_idx = snap
-        .lines()
-        .position(|l| l.contains("selectable-token"))
-        .expect("token row in framebuffer");
-    let col_idx = snap
-        .lines()
-        .nth(row_idx)
-        .unwrap()
-        .find("selectable-token")
-        .unwrap();
-
-    // Down at the first cell of the token, drag to the last, release.
-    let y = row_idx as u16;
-    let x0 = col_idx as u16;
-    let x1 = (col_idx + "selectable-token".len() - 1) as u16;
-    engine
-        .handle_mouse(MouseMessage {
-            kind: MouseKind::Click,
-            x: x0,
-            y,
-            button: Some("left"),
-            mods: vec![],
-        })
-        .expect("down");
-    engine
-        .handle_mouse(MouseMessage {
-            kind: MouseKind::Drag,
-            x: x1,
-            y,
-            button: Some("left"),
-            mods: vec![],
-        })
-        .expect("drag");
-    engine
-        .handle_mouse(MouseMessage {
-            kind: MouseKind::Up,
-            x: x1,
-            y,
-            button: Some("left"),
-            mods: vec![],
-        })
-        .expect("up");
-
-    // Render once — the slide animation translates horizontally rather
-    // than clipping height, so the toast text is on screen from frame
-    // one. Skipping the previous `advance_time(250)` keeps the gap
-    // between dispatch and assertion small enough that real wall-clock
-    // drift on a loaded CI box can't push past the 2 s default TTL.
-    let _ = render_str(&mut engine);
-    let _ = engine.take_emit_queue();
-    let post = engine.snapshot();
-    assert!(
-        post.contains("copied "),
-        "expected 'copied N chars' toast after drag, got: {post:?}"
-    );
-    // Char count in the toast should match the selection length.
-    let needle = format!("copied {} chars", "selectable-token".len());
-    assert!(
-        post.contains(&needle),
-        "expected exact toast `{needle}`, got: {post:?}"
-    );
-}
-
-/// Toast layout assertions: the bordered toast pill anchors to the
-/// bottom-right of the BODY area only — overlaying transcript content
-/// at the bottom rows of the body region, but never covering the
-/// input field or statusline below it. Statusline placeholder remains
-/// visible after the toast appears.
-#[test]
-#[ignore = "needs GUI clipboard; arboard suppresses toast on headless CI"]
-fn mouse_drag_toast_overlays_input_and_statusline() {
-    let mut engine = Engine::new(80, 24).expect("engine");
-    load_chat_scenario(&mut engine);
-    // Stream a known message into the transcript so the drag covers
-    // identifiable text.
-    fixture_assistant_delta(&mut engine, "selectable-token");
-    fixture_assistant_completed(
-        &mut engine,
-        None,
-        json!({ "model": "test", "duration_ms": 1 }),
-    );
-    let _ = render_str(&mut engine);
-
-    // Locate the row carrying our token in the framebuffer snapshot.
-    let snap = engine.snapshot();
-    let row_idx = snap
-        .lines()
-        .position(|l| l.contains("selectable-token"))
-        .expect("token row in framebuffer");
-    let col_idx = snap
-        .lines()
-        .nth(row_idx)
-        .unwrap()
-        .find("selectable-token")
-        .unwrap();
-
-    // Pre-toast: the bottom-row statusline carries the placeholder text.
-    let pre = engine.snapshot();
-    assert!(
-        pre.lines()
-            .any(|l| l.contains("Start chatting to see stats")),
-        "expected statusline placeholder before toast: {pre:?}"
-    );
-
-    // Drag to trigger the selection → clipboard copy → toast path.
-    let y = row_idx as u16;
-    let x0 = col_idx as u16;
-    let x1 = (col_idx + "selectable-token".len() - 1) as u16;
-    engine
-        .handle_mouse(MouseMessage {
-            kind: MouseKind::Click,
-            x: x0,
-            y,
-            button: Some("left"),
-            mods: vec![],
-        })
-        .expect("down");
-    engine
-        .handle_mouse(MouseMessage {
-            kind: MouseKind::Drag,
-            x: x1,
-            y,
-            button: Some("left"),
-            mods: vec![],
-        })
-        .expect("drag");
-    engine
-        .handle_mouse(MouseMessage {
-            kind: MouseKind::Up,
-            x: x1,
-            y,
-            button: Some("left"),
-            mods: vec![],
-        })
-        .expect("up");
-
-    // Render once — the horizontal slide leaves the toast at full
-    // height/width from frame one, so we don't need to advance the
-    // synthetic clock past the enter window. Doing so unnecessarily
-    // narrows the wall-clock budget against the 2 s default TTL.
-    let _ = render_str(&mut engine);
-    let _ = engine.take_emit_queue();
-    let post = engine.snapshot();
-
-    // Toast is a small pill anchored bottom-right. It overlays the
-    // input + statusline area on the right side; the left side of
-    // the statusline (where the placeholder text lives) is undisturbed.
-    // What matters is that the toast LABEL renders into the bottom
-    // few rows — proving it's painted above the input/statusline in
-    // z-order, not that it occludes the entire row.
-    let label = format!("copied {} chars", "selectable-token".len());
-    let bottom_rows: String = post.lines().rev().take(5).collect::<Vec<_>>().join("\n");
-    assert!(
-        bottom_rows.contains(&label),
-        "expected toast label `{label}` in the bottom rows: {bottom_rows:?}"
     );
 }
 

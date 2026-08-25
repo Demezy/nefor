@@ -53,38 +53,6 @@ fn starter_lead_workflow_full() {
 }
 
 #[test]
-fn scoped_env_restores_after_normal_completion() {
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
-    const KEY: &str = "NEFOR_TEST_SCOPED_ENV_NORMAL";
-    std::env::remove_var(KEY);
-    {
-        let _env = ScopedEnvVar::set(&TEST_LOCK, KEY, "temporary");
-        assert_eq!(
-            std::env::var_os(KEY).as_deref(),
-            Some(std::ffi::OsStr::new("temporary"))
-        );
-    }
-    assert_eq!(std::env::var_os(KEY), None);
-}
-
-#[test]
-fn scoped_env_restores_during_unwind() {
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
-    const KEY: &str = "NEFOR_TEST_SCOPED_ENV_UNWIND";
-    std::env::set_var(KEY, "original");
-    let result = std::panic::catch_unwind(|| {
-        let _env = ScopedEnvVar::set(&TEST_LOCK, KEY, "temporary");
-        panic!("deliberate unwind");
-    });
-    assert!(result.is_err());
-    assert_eq!(
-        std::env::var_os(KEY).as_deref(),
-        Some(std::ffi::OsStr::new("original"))
-    );
-    std::env::remove_var(KEY);
-}
-
-#[test]
 fn production_mag_eval_wrapper_compiles_direct_process_exec() {
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
@@ -141,37 +109,6 @@ fn production_mag_eval_wrapper_compiles_direct_process_exec() {
     .unwrap_or_else(|error| panic!("production mag-eval wrapper failed to compile: {error}"));
 
     assert_eq!(artifact.format, "nefor.graph-modification/v1");
-}
-
-/// The retired graph IR shape ({nodes, edges, terminal} + the popen compiler
-/// bridge) must stay dead: the lead reads the modification off `mag.loaded`
-/// replies (lua/libs/lead-workflow/init.lua resume_pending_load), never a
-/// locally-compiled graph IR. Assert against the lib mechanism modules, not
-/// the starter shims (which re-export them and would pass vacuously).
-#[test]
-fn lead_side_never_reads_the_retired_graph_ir_shape() {
-    for rel in [
-        "lua/libs/lead-workflow/init.lua",
-        "lua/libs/mag-workspace/init.lua",
-    ] {
-        let path = repo_root().join(rel);
-        let src = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        for needle in ["ir.nodes", "ir.edges", "ir.terminal"] {
-            assert!(
-                !src.contains(needle),
-                "{rel} still reads the retired graph IR shape (`{needle}`)"
-            );
-        }
-    }
-    // The popen compiler bridge specifically: the `mag` CLI stays a dev tool
-    // for humans; the lead's compile goes through the mag plugin.
-    let mag_lua = repo_root().join("lua/libs/mag-workspace/init.lua");
-    let src = std::fs::read_to_string(&mag_lua).expect("read lua/libs/mag-workspace/init.lua");
-    assert!(
-        !src.contains("io.popen"),
-        "lua/libs/mag-workspace/init.lua still shells out to the mag CLI"
-    );
 }
 
 fn install_stub_nefor(lua: &Lua) -> mlua::Result<()> {

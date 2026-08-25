@@ -23,6 +23,14 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+[features]
+full-tests = []
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+required-features = ["full-tests"]
+
 [dev-dependencies]
 nefor-protocol = { path = "../../crates/nefor-protocol" }
 tokio = { workspace = true }

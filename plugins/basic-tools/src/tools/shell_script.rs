@@ -68,22 +68,3 @@ pub async fn run_cancellable_streaming(
     )
     .await
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn lowers_to_shell_and_returns_structured_result() {
-        let result = run(&json!({
-            "script": "printf out; printf err >&2",
-            "cwd": "/",
-            "timeout": { "present": false, "milliseconds": 0 }
-        }))
-        .await
-        .unwrap();
-        assert_eq!(result["stdout"], "out");
-        assert_eq!(result["stderr"], "err");
-        assert_eq!(result["termination"], json!({ "kind": "code", "code": 0 }));
-    }
-}

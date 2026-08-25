@@ -13,5 +13,13 @@ test = false
 [dependencies]
 serde_json.workspace = true
 
+[features]
+full-tests = []
+
+[[test]]
+name = "platform_preparation"
+path = "tests/platform_preparation.rs"
+required-features = ["full-tests"]
+
 [lints.clippy]
 pedantic = "warn"

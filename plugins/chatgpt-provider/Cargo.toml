@@ -54,3 +54,16 @@ nefor-mag = { path = "../../crates/nefor-mag" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 tempfile = "3"
+
+[features]
+full-tests = []
+
+[[test]]
+name = "auth_state_test"
+path = "tests/auth_state_test.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "cancel_integration"
+path = "tests/cancel_integration.rs"
+required-features = ["full-tests"]

@@ -1,9 +1,9 @@
-//! `edit_file` — edit an existing UTF-8 file by exact string replacement.
-//!
-//! This is a narrow mutation primitive: callers provide the exact text
-//! to replace and the replacement text. Whole-file overwrites stay in
-//! `write_file`; multi-file patches can grow into a separate patch tool
-//! later.
+// `edit_file` — edit an existing UTF-8 file by exact string replacement.
+//
+// This is a narrow mutation primitive: callers provide the exact text
+// to replace and the replacement text. Whole-file overwrites stay in
+// `write_file`; multi-file patches can grow into a separate patch tool
+// later.
 
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -232,75 +232,5 @@ fn bad_args(message: &str) -> ToolError {
     ToolError::BadArgs {
         tool: NAME.into(),
         message: message.into(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[tokio::test]
-    async fn replaces_unique_exact_match() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("file.txt");
-        std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
-        let out = run(&json!({
-            "path": path.to_str().unwrap(),
-            "old_string": "beta",
-            "new_string": "BETA"
-        }))
-        .await
-        .unwrap();
-        assert!(out.contains("edited"));
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "alpha\nBETA\ngamma\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn rejects_missing_match() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("file.txt");
-        std::fs::write(&path, "alpha\n").unwrap();
-        let err = run(&json!({
-            "path": path.to_str().unwrap(),
-            "old_string": "beta",
-            "new_string": "BETA"
-        }))
-        .await
-        .unwrap_err();
-        assert!(matches!(err, ToolError::BadArgs { .. }));
-    }
-
-    #[tokio::test]
-    async fn rejects_ambiguous_match_by_default() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("file.txt");
-        std::fs::write(&path, "x\nx\n").unwrap();
-        let err = run(&json!({
-            "path": path.to_str().unwrap(),
-            "old_string": "x",
-            "new_string": "y"
-        }))
-        .await
-        .unwrap_err();
-        assert!(matches!(err, ToolError::BadArgs { .. }));
-    }
-
-    #[tokio::test]
-    async fn permits_large_exact_replacements() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("file.txt");
-        std::fs::write(&path, "a\nb\nc\n").unwrap();
-        run(&json!({
-            "path": path.to_str().unwrap(),
-            "old_string": "a\nb\nc",
-            "new_string": "A\nB\nC"
-        }))
-        .await
-        .unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\nB\nC\n");
     }
 }

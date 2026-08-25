@@ -18,3 +18,11 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = "0.26"
 rcgen = "0.13"
+
+[features]
+full-tests = []
+
+[[test]]
+name = "native_trust"
+path = "tests/native_trust.rs"
+required-features = ["full-tests"]

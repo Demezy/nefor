@@ -72,9 +72,10 @@ If no `init.lua` is found, the engine prints a friendly error pointing at the RE
 - For an ordinary scoped code commit, run the relevant targeted tests and then `just check` once. This is the repository-defined completion lane; do not add broader suites merely because the work is being committed. Documentation-only changes need only their relevant documentation checks.
 - Run subsystem recipes such as `just test-example`, `just test-tui-chat`, or targeted package Clippy only when the affected behavior requires them. Run `just test-integration` only for changes crossing the process-level integration boundaries it covers. Reserve `just test-all` and workspace-wide `just lint` for changes with an actual cross-workspace blast radius, release validation, or an explicit assignment naming that breadth. Reaching the end of a work unit, verification phase, or commit is not itself a trigger for any broader check. Do not run multiple broad recipes as cumulative reassurance.
 - `just run` — launch engine with `./examples/nefor-agent` config (debug build). Sets `NEFOR_DEV_DIR` so Lua files load from the repo, not the installed copy.
-- `just check` — formatting, documentation, and the fast default confidence set; the ordinary scoped pre-commit check.
-- `just test` — fast default confidence set, not the full workspace suite.
-- `just test-all` — full local suite for cross-cutting or release-level validation.
+- `just check` — formatting, documentation, the focused fast confidence set, and verification-lane completeness; the ordinary scoped pre-commit check.
+- `just test` / `just test-default` — every bounded default deterministic target, including the registered non-Cargo default checks. Bare workspace Cargo exposes the same Rust target membership.
+- `just test-full` / `just test-all` — every deterministic default and full target plus the registered non-Cargo full checks. Full Cargo targets require their package's `full-tests` feature and remain absent from bare Cargo.
+- `just test-live provider|clipboard` — the only repository-owned entry points into the separately guarded live-test Cargo graph. Root `--workspace --all-features` cannot reach it.
 - `just lint` — workspace-wide Clippy with `-D warnings`; use targeted package Clippy for scoped Rust changes.
 - `just fmt` — rustfmt.
 - `just build` — release build into `target/release/`.

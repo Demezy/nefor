@@ -500,15 +500,16 @@ mod tests {
     #[test]
     fn cwd_guard_restores_during_unwind() {
         let tmp = tempfile::tempdir().unwrap();
-        let original = std::env::current_dir().unwrap();
-        let result = std::panic::catch_unwind(|| {
-            let _cwd = CwdGuard::capture();
+        let mut original = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let cwd = CwdGuard::capture();
+            original = Some(cwd.original.clone());
             std::env::set_current_dir(tmp.path()).unwrap();
             panic!("deliberate unwind");
-        });
+        }));
         assert!(result.is_err());
         let _lock = CWD_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        assert_eq!(std::env::current_dir().unwrap(), original);
+        assert_eq!(std::env::current_dir().unwrap(), original.unwrap());
     }
 
     #[test]

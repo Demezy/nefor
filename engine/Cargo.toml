@@ -24,6 +24,29 @@ serde_json = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 
+[features]
+full-tests = []
+
+[[test]]
+name = "agentic_cli_mock_e2e"
+path = "tests/agentic_cli_mock_e2e.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "nefor_pm_test"
+path = "tests/nefor_pm_test.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "starter_lead_workflow_test"
+path = "tests/starter_lead_workflow_test.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "starter_sessions_test"
+path = "tests/starter_sessions_test.rs"
+required-features = ["full-tests"]
+
 [dev-dependencies]
 nefor-mag = { path = "../crates/nefor-mag" }
 nefor-tui = { path = "../plugins/nefor-tui" }

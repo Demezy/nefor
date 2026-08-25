@@ -1,0 +1,15 @@
+{
+  "live_manifest": "tests/live/Cargo.toml",
+  "aggregates": {
+    "default": "test-default",
+    "full": "test-full",
+    "live": "test-live"
+  },
+  "non_cargo": [
+    { "recipe": "test-docs", "lane": "default" },
+    { "recipe": "test-session-inspector", "lane": "default" },
+    { "recipe": "test-release-bundle", "lane": "full" },
+    { "recipe": "test-build-version", "lane": "full" },
+    { "recipe": "test-tui-scenarios", "lane": "full" }
+  ]
+}

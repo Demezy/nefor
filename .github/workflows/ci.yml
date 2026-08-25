@@ -22,52 +22,27 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo build
-        run: cargo build --workspace --locked
-
-      - name: release bundle completeness
-        run: tools/test-release-bundle.sh "$PWD/target/debug"
-
-      - name: cargo test
-        run: |
-          cargo test --workspace --exclude nefor-tui --locked
-          cargo test -p nefor-tui --lib --locked
-          cargo test -p nefor-tui --bin nefor-tui --locked
-          cargo test -p nefor-tui --test animation_test --locked
-          cargo test -p nefor-tui --test engine_test --locked
-          cargo test -p nefor-tui --test layout_test --locked
-          cargo test -p nefor-tui --test scrollable_test --locked
-          cargo test -p nefor-tui --test snapshot_test --locked
-          cargo test -p nefor-tui --test text_input_test --locked
-          cargo test -p nefor-tui --test chat_test --locked -- --test-threads=1
-          cargo test -p nefor-tui --doc --locked
-
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  tui-smoke:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: tui-smoke
-
       - uses: taiki-e/install-action@just
 
       - name: Install managed tui-driver
         run: cargo install --git https://github.com/amenocturne/tui-driver.git --rev 0919a8efb130f5e5784dab227a84550284e08ad4 --locked tui-driver
 
-      - name: Run TUI daily-path scenarios
-        run: just test-tui-scenarios
+      - name: Check verification-lane completeness
+        run: just check-test-lanes
 
-      - name: Upload TUI smoke artifacts
+      - name: Run default deterministic lane
+        run: just test-default
+
+      - name: Run full deterministic lane
+        run: just test-full
+
+      - name: Upload TUI scenario artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: tui-scenario-artifacts
           path: tmp/tui-driver-artifacts/
           if-no-files-found: ignore
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings

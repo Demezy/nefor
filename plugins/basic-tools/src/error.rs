@@ -1,9 +1,9 @@
-//! Domain errors for the basic-tools plugin.
-//!
-//! Plugin-level transport errors come from [`nefor_plugin_sdk::TransportError`].
-//! [`ToolError`] covers tool-call failures surfaced on the wire as
-//! `tool.result { error }`. These are *not* fatal — they're a tool's
-//! normal error channel and the plugin keeps serving the bus.
+// Domain errors for the basic-tools plugin.
+//
+// Plugin-level transport errors come from [`nefor_plugin_sdk::TransportError`].
+// [`ToolError`] covers tool-call failures surfaced on the wire as
+// `tool.result { error }`. These are *not* fatal — they're a tool's
+// normal error channel and the plugin keeps serving the bus.
 
 /// Tool-call failure modes. These surface on the wire as
 /// `tool.result { id, error: "<message>" }`. The variant carries enough

@@ -14,6 +14,7 @@ description = "NCP v0.1 plugin: MAG actor-kernel runtime. Hosts a Lua VM that lo
 [[bin]]
 name = "mag-plugin"
 path = "src/main.rs"
+test = false
 
 [dependencies]
 nefor-protocol = { path = "../../crates/nefor-protocol" }
@@ -35,3 +36,40 @@ serde_json = { workspace = true }
 git-worktree-plugin = { path = "../git-worktree" }
 tempfile = "3"
 nefor-cargo-test-harness = { path = "../../tools/cargo-test-harness" }
+
+[features]
+full-tests = []
+
+[[test]]
+name = "mag_plugin_default"
+path = "tests/mag_plugin_default.rs"
+
+[[test]]
+name = "mag_plugin_full"
+path = "tests/mag_plugin_full.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "acceptance"
+path = "tests/acceptance.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "chatgpt_tools_e2e"
+path = "tests/chatgpt_tools_e2e.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "lead_turn"
+path = "tests/lead_turn.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "mag_corpus"
+path = "tests/mag_corpus.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "structured_provider_e2e"
+path = "tests/structured_provider_e2e.rs"
+required-features = ["full-tests"]

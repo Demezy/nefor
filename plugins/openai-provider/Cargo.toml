@@ -14,14 +14,34 @@ path = "src/lib.rs"
 [[bin]]
 name = "openai-provider"
 path = "src/main.rs"
-
-[[test]]
-name = "live_openai_compatible"
-path = "tests/live_openai_compatible.rs"
-required-features = ["live-openai-test"]
+test = false
 
 [features]
-live-openai-test = []
+full-tests = []
+
+[[test]]
+name = "openai_provider_default"
+path = "tests/openai_provider_default.rs"
+
+[[test]]
+name = "openai_provider_full"
+path = "tests/openai_provider_full.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "completion_dispatch"
+path = "tests/completion_dispatch.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "stream_integration"
+path = "tests/stream_integration.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "wire_logging"
+path = "tests/wire_logging.rs"
+required-features = ["full-tests"]
 
 [dependencies]
 nefor-protocol = { path = "../../crates/nefor-protocol" }

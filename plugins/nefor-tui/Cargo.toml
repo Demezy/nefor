@@ -18,6 +18,14 @@ path = "src/main.rs"
 [dev-dependencies]
 tempfile = "3"
 
+[features]
+full-tests = []
+
+[[test]]
+name = "chat_test"
+path = "tests/chat_test.rs"
+required-features = ["full-tests"]
+
 [dependencies]
 nefor-protocol = { path = "../../crates/nefor-protocol" }
 nefor-plugin-sdk = { path = "../../crates/nefor-plugin-sdk" }

@@ -1,5 +1,6 @@
 [workspace]
 members = ["engine", "crates/*", "plugins/basic-tools", "plugins/chatgpt-provider", "plugins/generic-provider", "plugins/generic-tool", "plugins/git-worktree", "plugins/openai-provider", "plugins/mock-plugin", "plugins/nefor-tui", "plugins/tool-gate", "plugins/mag", "tools/fake-engine", "tools/test-watchdog", "tools/cargo-test-harness"]
+exclude = ["tests/live"]
 resolver = "2"
 
 [workspace.package]

@@ -5,6 +5,18 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[[bin]]
+name = "nefor-test-watchdog"
+path = "src/main.rs"
+test = false
+
+[features]
+full-tests = []
+
+[[test]]
+name = "watchdog_full"
+path = "tests/watchdog_full.rs"
+required-features = ["full-tests"]
+
 [lints.clippy]
 pedantic = "warn"
-

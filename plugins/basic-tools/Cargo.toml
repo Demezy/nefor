@@ -10,6 +10,7 @@ description = "NCP v0.1 plugin: file/process/etc. tool primitives. v1 ships read
 [[bin]]
 name = "basic-tools"
 path = "src/main.rs"
+test = false
 
 [dependencies]
 nefor-protocol = { path = "../../crates/nefor-protocol" }
@@ -32,3 +33,15 @@ libc = "0.2"
 tokio = { workspace = true }
 serde_json = { workspace = true }
 tempfile = "3"
+
+[features]
+full-tests = []
+
+[[test]]
+name = "basic_tools_default"
+path = "tests/basic_tools_default.rs"
+
+[[test]]
+name = "basic_tools_full"
+path = "tests/basic_tools_full.rs"
+required-features = ["full-tests"]
