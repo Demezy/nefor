@@ -28,7 +28,9 @@ jobs:
         run: cargo install --git https://github.com/amenocturne/tui-driver.git --rev 0919a8efb130f5e5784dab227a84550284e08ad4 --locked tui-driver
 
       - name: Check verification-lane completeness
-        run: just check-test-lanes
+        run: |
+          just check-test-lanes
+          just test-test-lanes-checker
 
       - name: Run default deterministic lane
         run: just test-default

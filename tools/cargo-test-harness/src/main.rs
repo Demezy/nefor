@@ -6,8 +6,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const FULL_FEATURES: &str = "nefor/full-tests,basic-tools-plugin/full-tests,chatgpt-provider/full-tests,mag-plugin/full-tests,mock-plugin/full-tests,nefor-provider-http/full-tests,openai-provider/full-tests,nefor-cargo-test-harness/full-tests,nefor-test-watchdog/full-tests";
-
 struct Invocation {
     lane: OsString,
     timeout: OsString,
@@ -36,20 +34,18 @@ fn run() -> io::Result<u8> {
         prepare_mag_e2e,
     } = invocation;
     let root = repository_root()?;
+    let execution_plan = nefor_cargo_test_harness::load_full_execution_plan(&root)?;
     let artifact_dir = unique_artifact_dir(&root.join("tmp/macos-test-signing"))?;
     if prepare_mag_e2e {
         return prepare_mag_e2e_helpers(&root, &artifact_dir);
     }
-    let mut cargo_args = vec!["test", "--workspace", "--exclude", "nefor-tui", "--locked"];
-    if full {
-        cargo_args.extend(["--features", FULL_FEATURES]);
-    }
+    let cargo_args = execution_plan.workspace_cargo_args("test", full, &[]);
 
     let watchdog = cargo_target_dir(&root).join("debug/nefor-test-watchdog");
     build_watchdog(&root)?;
 
     #[cfg(target_os = "macos")]
-    let prepared = prepare_test_artifacts(&root, &artifact_dir, full)?;
+    let prepared = prepare_test_artifacts(&root, &artifact_dir, &execution_plan, full)?;
     #[cfg(not(target_os = "macos"))]
     let prepared = nefor_cargo_test_harness::PreparedArtifacts { paths: Vec::new() };
 
@@ -182,35 +178,22 @@ fn build_watchdog(root: &Path) -> io::Result<()> {
 fn prepare_test_artifacts(
     root: &Path,
     artifact_dir: &Path,
+    execution_plan: &nefor_cargo_test_harness::FullExecutionPlan,
     full: bool,
 ) -> io::Result<nefor_cargo_test_harness::PreparedArtifacts> {
+    let helper_args = execution_plan.workspace_cargo_args("build", false, &["--bins"]);
+    let helper_arg_refs = helper_args.iter().map(String::as_str).collect::<Vec<_>>();
     let helpers = nefor_cargo_test_harness::run_cargo_and_prepare(
         root,
-        &[
-            "build",
-            "--workspace",
-            "--exclude",
-            "nefor-tui",
-            "--locked",
-            "--bins",
-        ],
+        &helper_arg_refs,
         None,
         &artifact_dir.join("runtime-helpers"),
     )?;
-    let mut test_args = vec![
-        "test",
-        "--workspace",
-        "--exclude",
-        "nefor-tui",
-        "--locked",
-        "--no-run",
-    ];
-    if full {
-        test_args.extend(["--features", FULL_FEATURES]);
-    }
+    let test_args = execution_plan.workspace_cargo_args("test", full, &["--no-run"]);
+    let test_arg_refs = test_args.iter().map(String::as_str).collect::<Vec<_>>();
     let tests = nefor_cargo_test_harness::run_cargo_and_prepare(
         root,
-        &test_args,
+        &test_arg_refs,
         None,
         &artifact_dir.join("test-executables"),
     )?;

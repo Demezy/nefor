@@ -14,6 +14,103 @@ pub struct PreparedArtifacts {
     pub paths: Vec<PathBuf>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct FullExecutionPlan {
+    pub harness_packages: Vec<String>,
+    pub separate_packages: Vec<String>,
+}
+
+impl FullExecutionPlan {
+    #[must_use]
+    pub fn feature_spec(&self) -> String {
+        self.harness_packages
+            .iter()
+            .map(|package| format!("{package}/full-tests"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    #[must_use]
+    pub fn workspace_cargo_args(&self, command: &str, full: bool, suffix: &[&str]) -> Vec<String> {
+        let mut args = vec![command.to_owned(), "--workspace".to_owned()];
+        for package in &self.separate_packages {
+            args.extend(["--exclude".to_owned(), package.clone()]);
+        }
+        args.push("--locked".to_owned());
+        args.extend(suffix.iter().map(|arg| (*arg).to_owned()));
+        if full {
+            args.extend(["--features".to_owned(), self.feature_spec()]);
+        }
+        args
+    }
+}
+
+pub fn load_full_execution_plan(repository_root: &Path) -> io::Result<FullExecutionPlan> {
+    let source = fs::read_to_string(repository_root.join("tools/test-lanes.json"))?;
+    parse_full_execution_plan(&source)
+}
+
+fn parse_full_execution_plan(source: &str) -> io::Result<FullExecutionPlan> {
+    let value: serde_json::Value = serde_json::from_str(source).map_err(io::Error::other)?;
+    let cargo_full = value.get("cargo_full").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "test-lanes.json lacks cargo_full",
+        )
+    })?;
+    let harness_packages = string_array(cargo_full, "harness_packages")?;
+    let separate = cargo_full
+        .get("separate")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "cargo_full.separate must be an array",
+            )
+        })?;
+    let separate_packages = separate
+        .iter()
+        .map(|entry| {
+            entry
+                .get("package")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "every cargo_full.separate entry needs a package",
+                    )
+                })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(FullExecutionPlan {
+        harness_packages,
+        separate_packages,
+    })
+}
+
+fn string_array(value: &serde_json::Value, key: &str) -> io::Result<Vec<String>> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{key} must be an array"),
+            )
+        })?
+        .iter()
+        .map(|entry| {
+            entry.as_str().map(str::to_owned).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("every {key} entry must be a string"),
+                )
+            })
+        })
+        .collect()
+}
+
 pub fn parse_executables(input: impl BufRead) -> io::Result<Vec<PathBuf>> {
     let mut paths = BTreeSet::new();
     for (index, line) in input.lines().enumerate() {
@@ -214,5 +311,45 @@ mod tests {
         let missing = br#"{"reason":"compiler-artifact","target":{}}
 "#;
         assert!(parse_executables(&missing[..]).is_err());
+    }
+
+    #[test]
+    fn full_execution_plan_builds_package_qualified_features() {
+        let plan = parse_full_execution_plan(
+            r#"{
+              "cargo_full": {
+                "harness_packages": ["alpha", "beta"],
+                "separate": [{"package": "terminal", "test_args": ["--test-threads=1"]}]
+              }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            plan,
+            FullExecutionPlan {
+                harness_packages: vec!["alpha".into(), "beta".into()],
+                separate_packages: vec!["terminal".into()],
+            }
+        );
+        assert_eq!(plan.feature_spec(), "alpha/full-tests,beta/full-tests");
+        assert_eq!(
+            plan.workspace_cargo_args("test", true, &["--no-run"]),
+            vec![
+                "test",
+                "--workspace",
+                "--exclude",
+                "terminal",
+                "--locked",
+                "--no-run",
+                "--features",
+                "alpha/full-tests,beta/full-tests",
+            ]
+        );
+    }
+
+    #[test]
+    fn full_execution_plan_rejects_missing_membership() {
+        let error = parse_full_execution_plan(r#"{"cargo_full":{"separate":[]}}"#).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }

@@ -29,10 +29,10 @@ test-test-lanes-checker:
     tools/test-test-lanes-checker.sh
 
 # Every default deterministic target. This is the lane bare Cargo also exposes.
-test-default timeout="7200": check-test-lanes test-docs test-session-inspector
+test-default timeout="7200": check-test-lanes test-test-lanes-checker test-docs test-session-inspector
     @echo "=== TEST LANE: default deterministic ==="
     cargo run --quiet -p nefor-cargo-test-harness -- --lane default "{{timeout}}"
-    cargo test -p nefor-tui --locked
+    tools/run-separate-tests.sh default
 
 # Validate local Markdown links and anchors without network access.
 test-docs:
@@ -178,10 +178,10 @@ test-tui-chat:
     cargo test -p nefor-tui --features full-tests --test chat_test -- --test-threads=1
 
 # Every deterministic target, including operational and non-Cargo checks.
-test-full timeout="7200": check-test-lanes
+test-full timeout="7200": check-test-lanes test-test-lanes-checker
     @echo "=== TEST LANE: full deterministic ==="
     cargo run --quiet -p nefor-cargo-test-harness -- --lane full "{{timeout}}"
-    cargo test -p nefor-tui --locked --features nefor-tui/full-tests -- --test-threads=1
+    tools/run-separate-tests.sh full
     just test-release-bundle
     just test-build-version
     just test-tui-scenarios

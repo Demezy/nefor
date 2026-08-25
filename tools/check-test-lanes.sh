@@ -13,12 +13,13 @@ if [ "$#" -eq 0 ]; then
   live_metadata="$scratch/live.json"
   cargo metadata --no-deps --format-version 1 --manifest-path "$repo/Cargo.toml" >"$root_metadata"
   cargo metadata --no-deps --format-version 1 --manifest-path "$repo/$(jq -r .live_manifest "$registry")" >"$live_metadata"
-elif [ "$#" -eq 3 ] && [ "$1" = "--metadata" ]; then
+elif { [ "$#" -eq 3 ] || [ "$#" -eq 4 ]; } && [ "$1" = "--metadata" ]; then
   fixture_mode=1
   root_metadata="$2"
   live_metadata="$3"
+  if [ "$#" -eq 4 ]; then registry="$4"; fi
 else
-  echo "usage: tools/check-test-lanes.sh [--metadata ROOT_JSON LIVE_JSON]" >&2
+  echo "usage: tools/check-test-lanes.sh [--metadata ROOT_JSON LIVE_JSON [REGISTRY_JSON]]" >&2
   exit 2
 fi
 
@@ -46,6 +47,29 @@ unknown_root="$(jq -r '
 [ -z "$unknown_root" ] || fail "unknown or compound lane requirement: $unknown_root"
 
 jq -e '
+  (.cargo_full.harness_packages | type == "array" and all(type == "string"))
+  and ((.cargo_full.harness_packages | length) == (.cargo_full.harness_packages | unique | length))
+  and (.cargo_full.separate | type == "array")
+  and (.cargo_full.separate | all(
+    (.package | type == "string")
+    and (.test_args == ["--test-threads=1"])
+  ))
+  and ((.cargo_full.separate | map(.package) | length) == (.cargo_full.separate | map(.package) | unique | length))
+  and (([.cargo_full.harness_packages[], .cargo_full.separate[].package] | length)
+    == ([.cargo_full.harness_packages[], .cargo_full.separate[].package] | unique | length))
+' "$registry" >/dev/null || fail "invalid, duplicate, or non-serial Cargo full execution membership"
+
+metadata_full_packages="$(jq -c '
+  [.packages[]
+   | select(any(.targets[]; (.test or .doctest) and ((.["required-features"] // []) == ["full-tests"])))
+   | .name] | unique | sort
+' "$root_metadata")"
+planned_full_packages="$(jq -c '
+  [.cargo_full.harness_packages[], .cargo_full.separate[].package] | unique | sort
+' "$registry")"
+[ "$planned_full_packages" = "$metadata_full_packages" ] || fail "Cargo full execution packages do not exactly match metadata: planned=$planned_full_packages metadata=$metadata_full_packages"
+
+jq -e '
   ([.packages[].id] | sort) == (.workspace_members | sort)
   and ((.workspace_default_members | sort) == (.workspace_members | sort))
   and (.workspace_members | length == 1)
@@ -66,6 +90,12 @@ jq -e '
   and ((.non_cargo | map(.recipe) | length) == (.non_cargo | map(.recipe) | unique | length))
 ' "$registry" >/dev/null || fail "invalid checked command registry"
 
+discovered_entrypoints="$(cd "$repo" && rg --files tools \
+  | rg '^tools/(check-[^/]+\.(sh|ts)|test-[^/]+\.sh|.+\.test\.ts)$' \
+  | sort)"
+registered_entrypoints="$(jq -r '.non_cargo[].entrypoint // empty' "$registry" | sort)"
+[ "$registered_entrypoints" = "$discovered_entrypoints" ] || fail "non-Cargo verification entrypoints are not registered exactly: registered=[$registered_entrypoints] discovered=[$discovered_entrypoints]"
+
 if [ "$fixture_mode" -eq 0 ]; then
   summary="$(cd "$repo" && just --summary)"
   while IFS= read -r recipe; do
@@ -79,6 +109,14 @@ if [ "$fixture_mode" -eq 0 ]; then
   full_recipe="$(jq -r .aggregates.full "$registry")"
   default_definition="$(cd "$repo" && just --show "$default_recipe")"
   full_definition="$(cd "$repo" && just --show "$full_recipe")"
+  [[ "$default_definition" == *'cargo run --quiet -p nefor-cargo-test-harness -- --lane default'* ]] || fail "$default_recipe does not reach the metadata-driven default harness"
+  [[ "$full_definition" == *'cargo run --quiet -p nefor-cargo-test-harness -- --lane full'* ]] || fail "$full_recipe does not reach the metadata-driven full harness"
+  [[ "$default_definition" == *'tools/run-separate-tests.sh default'* ]] || fail "$default_recipe omits separately owned default Cargo packages"
+  [[ "$full_definition" == *'tools/run-separate-tests.sh full'* ]] || fail "$full_recipe omits separately serialized full Cargo packages"
+  harness_source="$repo/tools/cargo-test-harness/src/main.rs"
+  rg -q 'load_full_execution_plan' "$harness_source" || fail "Cargo harness does not consume the authoritative full execution plan"
+  if rg -q 'FULL_FEATURES' "$harness_source"; then fail "Cargo harness duplicates full feature membership outside the registry"; fi
+  rg -q '\.cargo_full\.separate' "$repo/tools/run-separate-tests.sh" || fail "separate Cargo runner does not consume the authoritative plan"
   while IFS=$'\t' read -r recipe lane; do
     if [ "$lane" = "default" ]; then
       [[ " $default_definition " == *" $recipe"* ]] || fail "$recipe is not reachable from $default_recipe"
