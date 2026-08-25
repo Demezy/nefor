@@ -15,7 +15,9 @@ while IFS= read -r package; do
   test_args=()
   if [ "$lane" = "full" ]; then
     cargo_args+=(--features "$package/full-tests")
-    mapfile -t test_args < <(jq -r --arg package "$package" \
+    while IFS= read -r test_arg; do
+      test_args+=("$test_arg")
+    done < <(jq -r --arg package "$package" \
       '.cargo_full.separate[] | select(.package == $package) | .test_args[]' "$registry")
   fi
   if [ "${NEFOR_TEST_PLAN_DRY_RUN:-0}" = "1" ]; then
