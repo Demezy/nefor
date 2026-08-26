@@ -40,12 +40,12 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The turn spawner appends a `## MAG workspace` block to the system
 /// overlay (examples/nefor-agent/agentic-loop): the session workspace dir plus the
-/// inlined canonical patterns document. Here we build a representative overlay the
+/// inlined canonical Nefor MAG guide. Here we build a representative overlay the
 /// same way and assert it is recorded once as canonical conversation facts.
 const LEAD_SYSTEM: &str = "you are the lead\n\n\
 ## MAG workspace\n\n\
 workspace dir: /tmp/nefor/sessions/lead-turn-session/mag\n\n\
-### lib/patterns.md\n# MAG patterns — the shapes to reach for\n";
+### lib/nefor-mag-in-five-minutes.md\n# Nefor MAG in Five Minutes\n";
 
 fn binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_mag-plugin"))
@@ -952,8 +952,8 @@ async fn lead_turn_runs_through_gate_and_second_turn_replays_seeded_history() {
         "the canonical block carries the session workspace dir: {initial_facts:?}"
     );
     assert!(
-        canonical_initial.contains("MAG patterns"),
-        "the canonical block inlines the patterns doc: {initial_facts:?}"
+        canonical_initial.contains("Nefor MAG in Five Minutes"),
+        "the canonical block inlines the Nefor MAG guide: {initial_facts:?}"
     );
     assert_eq!(
         create.get("model").and_then(Value::as_str),

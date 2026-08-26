@@ -1,0 +1,4 @@
+(let title "Modules are immutable namespaces")
+
+(let number-label (fn [[value Int]] -> String
+  (str "number-" value)))

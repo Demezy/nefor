@@ -1756,7 +1756,7 @@ local function lead_workflow_tool_schemas()
         "an output such as (type-tag nefor.contracts.TextAnswer). Exactly one " ..
         "concrete output<T> identity node marks the result boundary. Graph " ..
         "operations are pure, retrieve no stored graph, and never mutate a live run. Agent loops are unbounded; " ..
-        "stop early via interrupt/kill. The injected lib/patterns.md is the " ..
+        "stop early via interrupt/kill. The injected lib/nefor-mag-in-five-minutes.md is the " ..
         "canonical complete example: use literal (require \"...\") forms and " ..
         "never copy historical session files or use removed import/bare-helper syntax. " ..
         "For a one-off shell expression whose result you just need back, " ..

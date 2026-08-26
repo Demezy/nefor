@@ -225,11 +225,11 @@ end
 
 -- ── ambient MAG context ───────────────────────────────────────────────
 --
--- The lead used to pay a `mag-env` round-trip (plus reading patterns.md)
+-- The lead used to pay a `mag-env` round-trip (plus reading the Nefor MAG guide)
 -- before writing any MAG. That context is now ambient: appended to the
 -- conversation's canonical system message. Contents: the session workspace
 -- dir, the seeded
--- lib/ inventory, patterns.md inlined (the canonical authoring contract),
+-- lib/ inventory, the canonical Nefor MAG guide inlined,
 -- and the prompt roster.
 --
 -- Seam: the MAG workspace is lead-workflow's domain, but its path
@@ -288,22 +288,22 @@ local function prompt_names(lib_dir)
 end
 
 -- Build the static (config-derived) section. Returns (text, complete) where
--- `complete` is true when patterns.md was readable — an incomplete build is
+-- `complete` is true when the guide was readable — an incomplete build is
 -- not cached, so a later turn (once NEFOR_CONFIG_DIR resolves) rebuilds it.
 local function build_mag_static_section(config_dir)
-  local lib_dir  = config_dir .. "/mag/lib"
-  local patterns = read_config_file(lib_dir .. "/patterns.md")
+  local lib_dir = config_dir .. "/mag/lib"
+  local guide = read_config_file(lib_dir .. "/nefor-mag-in-five-minutes.md")
 
   local parts = {}
   parts[#parts + 1] = "The session MAG workspace is seeded and ready. Paths you pass to " ..
-    "`mag` are relative to it. The current canonical authoring contract from " ..
-    "patterns.md is inlined below; the composition provides ready agent primitives."
+    "`mag` are relative to it. The canonical Nefor MAG guide is inlined below; " ..
+    "the composition provides ready agent primitives."
   parts[#parts + 1] = ""
   parts[#parts + 1] = "lib/ inventory:"
   for _, rel in ipairs(lib_inventory(lib_dir)) do parts[#parts + 1] = "  " .. rel end
   parts[#parts + 1] = ""
-  parts[#parts + 1] = "### lib/patterns.md"
-  parts[#parts + 1] = patterns or "(unavailable)"
+  parts[#parts + 1] = "### lib/nefor-mag-in-five-minutes.md"
+  parts[#parts + 1] = guide or "(unavailable)"
   local names = prompt_names(lib_dir)
   if #names > 0 then
     parts[#parts + 1] = ""
@@ -311,7 +311,7 @@ local function build_mag_static_section(config_dir)
     parts[#parts + 1] = "  " .. table.concat(names, ", ")
   end
 
-  return table.concat(parts, "\n"), (patterns ~= nil)
+  return table.concat(parts, "\n"), (guide ~= nil)
 end
 
 -- Cached static section. Read once; cache only a complete build.

@@ -180,7 +180,7 @@ fn active_starter_prompts_and_mock_do_not_use_removed_mag_teaching_forms() {
         &root.join("examples/nefor-agent/mag/lib/prompts"),
         "md",
     ));
-    paths.push(root.join("examples/nefor-agent/mag/lib/patterns.md"));
+    paths.push(root.join("examples/nefor-agent/mag/lib/nefor-mag-in-five-minutes.md"));
     let guidance_paths = paths.clone();
     paths.push(root.join("examples/nefor-agent/mock-provider/init.lua"));
     let removed = [
@@ -240,9 +240,11 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     let starter = root.join("examples/nefor-agent");
     let lib_root = starter.join("mag/lib");
     let fixture_root = starter.join("mag/tests");
+    let book_root = root.join("crates/nefor-mag/examples/book");
     let all_mag = mag_files(&root);
     let libraries = mag_files(&lib_root);
     let fixtures = mag_files(&fixture_root);
+    let book_examples = mag_files(&book_root);
     let entrypoints = all_mag
         .iter()
         .filter(|path| {
@@ -256,7 +258,10 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     let unclassified = all_mag
         .iter()
         .filter(|path| {
-            !libraries.contains(path) && !fixtures.contains(path) && !entrypoints.contains(path)
+            !libraries.contains(path)
+                && !fixtures.contains(path)
+                && !book_examples.contains(path)
+                && !entrypoints.contains(path)
         })
         .collect::<Vec<_>>();
     assert!(
@@ -269,6 +274,10 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "no shipped MAG library modules found"
     );
     assert!(!entrypoints.is_empty(), "no shipped MAG entrypoints found");
+    assert!(
+        !book_examples.is_empty(),
+        "no standalone MAG Book examples found"
+    );
 
     let missing_expectations = fixtures
         .iter()
@@ -327,17 +336,17 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "shipped MAG libraries failed to compile: {library_result:#?}"
     );
 
-    // The first Lisp fence in patterns.md is the canonical minimal agent
+    // The first Lisp fence in the Nefor MAG guide is the canonical minimal agent
     // program injected into every lead turn. Compile that exact text rather
     // than maintaining a test-side approximation that can drift from the
     // documentation agents actually see.
-    let patterns_path = lib_root.join("patterns.md");
-    let patterns = fs::read_to_string(&patterns_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", patterns_path.display()));
-    let canonical = patterns
+    let guide_path = lib_root.join("nefor-mag-in-five-minutes.md");
+    let guide = fs::read_to_string(&guide_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", guide_path.display()));
+    let canonical = guide
         .split_once("```lisp\n")
         .and_then(|(_, rest)| rest.split_once("\n```").map(|(source, _)| source))
-        .expect("patterns.md contains a complete canonical Lisp fence");
+        .expect("the Nefor MAG guide contains a complete canonical Lisp fence");
     assert!(
         canonical.contains("(nefor.actors.task-source \"task\" \"Inspect the repository.\")"),
         "the canonical example must use the public Task source helper"
@@ -368,7 +377,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     assert_eq!(
         canonical_result.get("kind").and_then(Value::as_str),
         Some("mag.loaded"),
-        "the exact canonical patterns.md agent must compile against runtime contracts: {canonical_result:#?}"
+        "the exact canonical guide agent must compile against runtime contracts: {canonical_result:#?}"
     );
 
     fs::write(

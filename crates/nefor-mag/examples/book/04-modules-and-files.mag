@@ -1,0 +1,7 @@
+(require "modules.labels")
+
+(let title modules.labels.title)
+(let source (read "data/note.md"))
+(artifact {:title title
+     :source source
+     :label (modules.labels.number-label 4)})

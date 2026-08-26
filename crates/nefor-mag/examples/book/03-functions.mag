@@ -1,0 +1,20 @@
+(type Box [T] {:value T})
+(type Entry [K V] {:key K :value V})
+
+(let box (fn [T] [[value T]] -> (Box T)
+  (as (Box T) {:value value})))
+
+(let entry (fn [K V] [[key K] [value V]] -> (Entry K V)
+  (as (Entry K V) {:key key :value value})))
+
+(let label (fn [[name String] [value Int]] -> {:name String :value Int}
+  {:name name :value value}))
+
+(let names ["one" "two" "three"])
+(let entries (indexed-map
+                (fn [[index Int] [name String]] -> {:name String :value Int}
+                  (label name index))
+                names))
+(artifact {:boxed (box "typed")
+           :entry (entry "answer" 42)
+           :entries entries})

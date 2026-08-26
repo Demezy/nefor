@@ -1,0 +1,14 @@
+(type Score {:name String :accepted Bool})
+(type Accepted {:score Score})
+(type Rejected {:score Score :reason String})
+(type Decision (| Accepted Rejected))
+(type Entry [K V] {:key K :value V})
+
+(let decide (fn [[score Score]] -> Decision
+  (if (get score "accepted")
+    (as Decision (as Accepted {:score score}))
+    (as Decision
+      (as Rejected {:score score :reason "score was not accepted"})))))
+
+(artifact {:decision (decide (as Score {:name "example" :accepted true}))
+           :entry (as (Entry String Int) {:key "answer" :value 42})})

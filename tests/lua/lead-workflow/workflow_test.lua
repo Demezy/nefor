@@ -166,8 +166,8 @@ do
     "shared mag-eval schema preserves worker dependency waiting without assuming a surface")
   assert_true(await_schema.description:find("waits indefinitely", 1, true) ~= nil,
     "await-run canonically warns about persistent foreground processes")
-  assert_true(string.find(mag_schema.description, "lib/patterns.md", 1, true) ~= nil,
-    "the MAG schema points to the injected canonical patterns")
+  assert_true(string.find(mag_schema.description, "lib/nefor-mag-in-five-minutes.md", 1, true) ~= nil,
+    "the MAG schema points to the injected canonical guide")
   assert_true(string.find(mag_schema.description, "lib/nefor/*.mag", 1, true) == nil,
     "the MAG schema does not point at unreadable library implementation files")
   assert_true(string.find(mag_schema.description, "(require \"...\")", 1, true) ~= nil,

@@ -166,7 +166,8 @@ profiles. `provider` is required. Read-only investigators normally receive
 `["read_file" "mag-eval"]`; add `edit_file`/`write_file` only for builders.
 
 The session workspace includes `lib/core/*.mag`, `lib/nefor/*.mag`, role prompts,
-and `lib/patterns.md`. Paths passed to `mag` are relative to that workspace.
+and `lib/nefor-mag-in-five-minutes.md`. Paths passed to `mag` are relative to
+that workspace.
 
 ## Approval and boundaries
 

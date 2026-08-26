@@ -1,0 +1,11 @@
+(let record {:unit nil
+              :bool true
+              :int 3
+              :float 3.5
+              :string "MAG"
+              :list [1 2 3]
+              :map (as (Map String Int) {:one 1 :two 2})})
+(let numbers [1 2 3])
+(let copied (map (fn [[value Int]] -> Int value) numbers))
+(artifact {:record record
+     :copied copied})
