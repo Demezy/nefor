@@ -129,13 +129,13 @@ fn run_case(case: &Case, samples: usize) -> CaseReport {
         wall_ns.push(nanos(started.elapsed()));
         if let Some(program) = assert_outcome(case, result) {
             check_artifact(case, &mut expected_hash, &program);
-            black_box(program.artifact);
+            black_box(program.result.artifact);
 
             let (profiled, profile) = compile_profiled(case)
                 .unwrap_or_else(|error| panic!("{} profiled compile failed: {error}", case.name));
             check_artifact(case, &mut expected_hash, &profiled);
             profiles.push(profile);
-            black_box(profiled.artifact);
+            black_box(profiled.result.artifact);
         }
     }
     let counters = profiles.first().map(|profile| profile.counters.clone());
@@ -186,9 +186,13 @@ fn check_artifact(
     program: &nefor_mag::LoadedProgram,
 ) {
     if let Some(expected) = expected_hash {
-        assert_eq!(expected, &program.hash, "{} artifact changed", case.name);
+        assert_eq!(
+            expected, &program.metadata.hash,
+            "{} artifact changed",
+            case.name
+        );
     } else {
-        *expected_hash = Some(program.hash.clone());
+        *expected_hash = Some(program.metadata.hash.clone());
     }
 }
 

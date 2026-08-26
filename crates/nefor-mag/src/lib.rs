@@ -15,18 +15,81 @@ use ast::Value;
 use env::Env;
 use error::MagError;
 use profile::{CompileProfile, CompileProfiler, Phase};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-pub(crate) const EVALUATION_STEP_LIMIT: u64 = 1_000_000;
+pub const COMPILATION_RESULT_VERSION: u8 = 1;
 
-pub fn compile(source: &str, source_dir: &Path) -> Result<serde_json::Value, MagError> {
-    compile_with_inputs(
+/// Resource bounds applied to initial compilation and resident function calls.
+/// These limits bound cost and failure; they do not alter successful values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompilerLimits {
+    pub evaluation_steps: u64,
+    pub call_depth: u16,
+    pub expression_depth: u16,
+    pub memoized_calls: usize,
+}
+
+impl Default for CompilerLimits {
+    fn default() -> Self {
+        Self {
+            evaluation_steps: 1_000_000,
+            call_depth: 64,
+            expression_depth: 128,
+            memoized_calls: 16_384,
+        }
+    }
+}
+
+impl From<u64> for CompilerLimits {
+    fn from(evaluation_steps: u64) -> Self {
+        Self {
+            evaluation_steps,
+            ..Self::default()
+        }
+    }
+}
+
+/// Options shared by in-memory and file-backed compilation entry points.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompilerOptions {
+    pub limits: CompilerLimits,
+}
+
+/// Compiler-owned metadata around an application-owned artifact.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompilationMetadata {
+    pub version: u8,
+    pub hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<CompileProfile>,
+}
+
+/// The common successful value returned by Rust compilation APIs and the CLI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompilationResult {
+    pub metadata: CompilationMetadata,
+    pub artifact: serde_json::Value,
+}
+
+pub fn compile(source: &str, source_dir: &Path) -> Result<CompilationResult, MagError> {
+    compile_with_options(source, source_dir, CompilerOptions::default())
+}
+
+pub fn compile_with_options(
+    source: &str,
+    source_dir: &Path,
+    options: CompilerOptions,
+) -> Result<CompilationResult, MagError> {
+    compile_with_inputs_and_options(
         source,
         source_dir,
         serde_json::Value::Object(Default::default()),
+        options,
     )
 }
 
@@ -34,8 +97,23 @@ pub fn compile_with_inputs(
     source: &str,
     source_dir: &Path,
     inputs: serde_json::Value,
-) -> Result<serde_json::Value, MagError> {
-    compile_with_inputs_and_module_roots(source, source_dir, inputs, &[source_dir.to_path_buf()])
+) -> Result<CompilationResult, MagError> {
+    compile_with_inputs_and_options(source, source_dir, inputs, CompilerOptions::default())
+}
+
+pub fn compile_with_inputs_and_options(
+    source: &str,
+    source_dir: &Path,
+    inputs: serde_json::Value,
+    options: CompilerOptions,
+) -> Result<CompilationResult, MagError> {
+    compile_with_inputs_and_module_roots_and_options(
+        source,
+        source_dir,
+        inputs,
+        &[source_dir.to_path_buf()],
+        options,
+    )
 }
 
 pub fn compile_with_inputs_and_module_roots(
@@ -43,8 +121,24 @@ pub fn compile_with_inputs_and_module_roots(
     source_dir: &Path,
     inputs: serde_json::Value,
     module_roots: &[std::path::PathBuf],
-) -> Result<serde_json::Value, MagError> {
-    compile_impl(source, source_dir, inputs, module_roots, None)
+) -> Result<CompilationResult, MagError> {
+    compile_with_inputs_and_module_roots_and_options(
+        source,
+        source_dir,
+        inputs,
+        module_roots,
+        CompilerOptions::default(),
+    )
+}
+
+pub fn compile_with_inputs_and_module_roots_and_options(
+    source: &str,
+    source_dir: &Path,
+    inputs: serde_json::Value,
+    module_roots: &[std::path::PathBuf],
+    options: CompilerOptions,
+) -> Result<CompilationResult, MagError> {
+    compile_impl(source, source_dir, inputs, module_roots, options, None)
 }
 
 pub fn compile_profiled(
@@ -52,10 +146,35 @@ pub fn compile_profiled(
     source_dir: &Path,
     inputs: serde_json::Value,
     module_roots: &[std::path::PathBuf],
-) -> Result<(serde_json::Value, CompileProfile), MagError> {
+) -> Result<(CompilationResult, CompileProfile), MagError> {
+    compile_profiled_with_options(
+        source,
+        source_dir,
+        inputs,
+        module_roots,
+        CompilerOptions::default(),
+    )
+}
+
+pub fn compile_profiled_with_options(
+    source: &str,
+    source_dir: &Path,
+    inputs: serde_json::Value,
+    module_roots: &[std::path::PathBuf],
+    options: CompilerOptions,
+) -> Result<(CompilationResult, CompileProfile), MagError> {
     let profiler = CompileProfiler::new();
-    let artifact = compile_impl(source, source_dir, inputs, module_roots, Some(&profiler))?;
-    Ok((artifact, profiler.snapshot()))
+    let mut result = compile_impl(
+        source,
+        source_dir,
+        inputs,
+        module_roots,
+        options,
+        Some(&profiler),
+    )?;
+    let profile = profiler.snapshot();
+    result.metadata.profile = Some(profile.clone());
+    Ok((result, profile))
 }
 
 fn compile_impl(
@@ -63,13 +182,15 @@ fn compile_impl(
     source_dir: &Path,
     inputs: serde_json::Value,
     module_roots: &[std::path::PathBuf],
+    options: CompilerOptions,
     profiler: Option<&CompileProfiler>,
-) -> Result<serde_json::Value, MagError> {
-    let _fuel = eval::fuel::install(EVALUATION_STEP_LIMIT);
-    let mut env = Env::new_with_stdlib_source_dir_module_roots_and_profiler(
+) -> Result<CompilationResult, MagError> {
+    let _fuel = eval::fuel::install(options.limits);
+    let mut env = Env::new_with_stdlib_source_dir_module_roots_profiler_and_limits(
         source_dir,
         module_roots.to_vec(),
         profiler.cloned(),
+        options.limits,
     );
     env.define("inputs", Value::HostInputs(inputs));
     let started = phase_started(profiler);
@@ -85,14 +206,21 @@ fn compile_impl(
     let started = phase_started(profiler);
     let artifact = extract_artifact(value, "top-level program")?;
     record_phase(profiler, Phase::ArtifactConversion, started);
-    Ok(artifact)
+    compilation_result(artifact)
 }
 
 #[derive(Debug, Clone)]
 pub struct LoadedProgram {
     pub env: Env,
-    pub artifact: serde_json::Value,
-    pub hash: String,
+    pub result: CompilationResult,
+}
+
+impl Deref for LoadedProgram {
+    type Target = CompilationResult;
+
+    fn deref(&self) -> &Self::Target {
+        &self.result
+    }
 }
 
 /// Opaque reference to a resolved unary MAG function returning `Artifact`.
@@ -105,10 +233,19 @@ pub struct ArtifactFunction {
 }
 
 pub fn load(source_dir: &Path, entry: &str) -> Result<LoadedProgram, MagError> {
-    load_with_inputs(
+    load_with_options(source_dir, entry, CompilerOptions::default())
+}
+
+pub fn load_with_options(
+    source_dir: &Path,
+    entry: &str,
+    options: CompilerOptions,
+) -> Result<LoadedProgram, MagError> {
+    load_with_inputs_and_options(
         source_dir,
         entry,
         serde_json::Value::Object(Default::default()),
+        options,
     )
 }
 
@@ -117,7 +254,22 @@ pub fn load_with_inputs(
     entry: &str,
     inputs: serde_json::Value,
 ) -> Result<LoadedProgram, MagError> {
-    load_with_inputs_and_module_roots(source_dir, entry, inputs, &[source_dir.to_path_buf()])
+    load_with_inputs_and_options(source_dir, entry, inputs, CompilerOptions::default())
+}
+
+pub fn load_with_inputs_and_options(
+    source_dir: &Path,
+    entry: &str,
+    inputs: serde_json::Value,
+    options: CompilerOptions,
+) -> Result<LoadedProgram, MagError> {
+    load_with_inputs_and_module_roots_and_options(
+        source_dir,
+        entry,
+        inputs,
+        &[source_dir.to_path_buf()],
+        options,
+    )
 }
 
 pub fn load_with_inputs_and_module_roots(
@@ -126,7 +278,23 @@ pub fn load_with_inputs_and_module_roots(
     inputs: serde_json::Value,
     module_roots: &[std::path::PathBuf],
 ) -> Result<LoadedProgram, MagError> {
-    load_impl(source_dir, entry, inputs, module_roots, None)
+    load_with_inputs_and_module_roots_and_options(
+        source_dir,
+        entry,
+        inputs,
+        module_roots,
+        CompilerOptions::default(),
+    )
+}
+
+pub fn load_with_inputs_and_module_roots_and_options(
+    source_dir: &Path,
+    entry: &str,
+    inputs: serde_json::Value,
+    module_roots: &[std::path::PathBuf],
+    options: CompilerOptions,
+) -> Result<LoadedProgram, MagError> {
+    load_impl(source_dir, entry, inputs, module_roots, options, None)
 }
 
 pub fn load_profiled(
@@ -135,9 +303,34 @@ pub fn load_profiled(
     inputs: serde_json::Value,
     module_roots: &[std::path::PathBuf],
 ) -> Result<(LoadedProgram, CompileProfile), MagError> {
+    load_profiled_with_options(
+        source_dir,
+        entry,
+        inputs,
+        module_roots,
+        CompilerOptions::default(),
+    )
+}
+
+pub fn load_profiled_with_options(
+    source_dir: &Path,
+    entry: &str,
+    inputs: serde_json::Value,
+    module_roots: &[std::path::PathBuf],
+    options: CompilerOptions,
+) -> Result<(LoadedProgram, CompileProfile), MagError> {
     let profiler = CompileProfiler::new();
-    let program = load_with_profiler(source_dir, entry, inputs, module_roots, &profiler)?;
-    Ok((program, profiler.snapshot()))
+    let mut program = load_with_profiler_and_options(
+        source_dir,
+        entry,
+        inputs,
+        module_roots,
+        &profiler,
+        options,
+    )?;
+    let profile = profiler.snapshot();
+    program.result.metadata.profile = Some(profile.clone());
+    Ok((program, profile))
 }
 
 pub fn load_with_profiler(
@@ -147,7 +340,32 @@ pub fn load_with_profiler(
     module_roots: &[std::path::PathBuf],
     profiler: &CompileProfiler,
 ) -> Result<LoadedProgram, MagError> {
-    load_impl(source_dir, entry, inputs, module_roots, Some(profiler))
+    load_with_profiler_and_options(
+        source_dir,
+        entry,
+        inputs,
+        module_roots,
+        profiler,
+        CompilerOptions::default(),
+    )
+}
+
+pub fn load_with_profiler_and_options(
+    source_dir: &Path,
+    entry: &str,
+    inputs: serde_json::Value,
+    module_roots: &[std::path::PathBuf],
+    profiler: &CompileProfiler,
+    options: CompilerOptions,
+) -> Result<LoadedProgram, MagError> {
+    load_impl(
+        source_dir,
+        entry,
+        inputs,
+        module_roots,
+        options,
+        Some(profiler),
+    )
 }
 
 fn load_impl(
@@ -155,18 +373,20 @@ fn load_impl(
     entry: &str,
     inputs: serde_json::Value,
     module_roots: &[std::path::PathBuf],
+    options: CompilerOptions,
     profiler: Option<&CompileProfiler>,
 ) -> Result<LoadedProgram, MagError> {
-    let _fuel = eval::fuel::install(EVALUATION_STEP_LIMIT);
+    let _fuel = eval::fuel::install(options.limits);
     let path = eval::resolve_workspace_path(source_dir, entry)?;
     let started = phase_started(profiler);
     let source = std::fs::read_to_string(&path)
         .map_err(|e| MagError::Eval(format!("cannot read program {}: {e}", path.display())))?;
     record_phase(profiler, Phase::EntryRead, started);
-    let mut env = Env::new_with_stdlib_source_dir_module_roots_and_profiler(
+    let mut env = Env::new_with_stdlib_source_dir_module_roots_profiler_and_limits(
         source_dir,
         module_roots.to_vec(),
         profiler.cloned(),
+        options.limits,
     );
     env.define("inputs", Value::HostInputs(inputs));
     let started = phase_started(profiler);
@@ -183,14 +403,21 @@ fn load_impl(
     let artifact = extract_artifact(value, "top-level program")?;
     record_phase(profiler, Phase::ArtifactConversion, started);
     let started = phase_started(profiler);
+    let result = compilation_result(artifact)?;
+    record_phase(profiler, Phase::ArtifactSerializeHash, started);
+    Ok(LoadedProgram { env, result })
+}
+
+fn compilation_result(artifact: serde_json::Value) -> Result<CompilationResult, MagError> {
     let encoded = serde_json::to_vec(&artifact)
         .map_err(|e| MagError::Eval(format!("serialize artifact: {e}")))?;
-    let hash = format!("{:x}", Sha256::digest(encoded));
-    record_phase(profiler, Phase::ArtifactSerializeHash, started);
-    Ok(LoadedProgram {
-        env,
+    Ok(CompilationResult {
+        metadata: CompilationMetadata {
+            version: COMPILATION_RESULT_VERSION,
+            hash: format!("{:x}", Sha256::digest(encoded)),
+            profile: None,
+        },
         artifact,
-        hash,
     })
 }
 
@@ -209,7 +436,7 @@ pub fn eval_fn(
     name: &str,
     input: serde_json::Value,
 ) -> Result<serde_json::Value, MagError> {
-    let _fuel = eval::fuel::install(EVALUATION_STEP_LIMIT);
+    let _fuel = eval::fuel::install(program.env.compiler_limits());
     let mut matching = vec![];
     let candidates = artifact_function_candidates(program, name)?;
     if candidates.len() == 1 {
@@ -283,7 +510,7 @@ pub fn eval_artifact_fn(
     function: &ArtifactFunction,
     input: serde_json::Value,
 ) -> Result<serde_json::Value, MagError> {
-    let _fuel = eval::fuel::install(EVALUATION_STEP_LIMIT);
+    let _fuel = eval::fuel::install(program.env.compiler_limits());
     if !program.env.owns_binding_handle(&function.binding) {
         return Err(MagError::Eval(format!(
             "function '{}' belongs to a different loaded program",

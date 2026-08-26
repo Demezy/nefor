@@ -1,9 +1,17 @@
 use nefor_mag::{
-    compile, eval_fn, load_with_inputs, load_with_inputs_and_module_roots, validate_fn,
-    validate_fn_input,
+    compile as compile_result, compile_with_options, eval_fn, load_with_inputs,
+    load_with_inputs_and_module_roots, load_with_options, validate_fn, validate_fn_input,
+    CompilerLimits, CompilerOptions,
 };
 use serde_json::json;
 use std::fs;
+
+fn compile(
+    source: &str,
+    source_dir: &std::path::Path,
+) -> Result<serde_json::Value, nefor_mag::error::MagError> {
+    compile_result(source, source_dir).map(|result| result.artifact)
+}
 
 fn workspace(name: &str) -> std::path::PathBuf {
     let path =
@@ -22,6 +30,67 @@ fn artifact_is_the_only_top_level_output() {
         .unwrap_err()
         .to_string()
         .contains("must return Artifact"));
+}
+
+#[test]
+fn rust_compilation_result_matches_the_serialized_transport_shape() {
+    let root = workspace("compilation-result");
+    assert_eq!(
+        CompilerLimits::default(),
+        CompilerLimits {
+            evaluation_steps: 1_000_000,
+            call_depth: 64,
+            expression_depth: 128,
+            memoized_calls: 16_384,
+        }
+    );
+    let result = compile_result("(artifact {:answer 42})", &root).unwrap();
+    let json = serde_json::to_value(&result).unwrap();
+
+    assert_eq!(json["metadata"]["version"], 1);
+    assert_eq!(json["metadata"]["hash"].as_str().map(str::len), Some(64));
+    assert!(json["metadata"].get("profile").is_none());
+    assert_eq!(json["artifact"], json!({"answer": 42}));
+
+    let constrained = compile_with_options(
+        "(artifact {:answer 42})",
+        &root,
+        CompilerOptions {
+            limits: CompilerLimits {
+                evaluation_steps: 0,
+                ..CompilerLimits::default()
+            },
+        },
+    );
+    assert!(constrained.is_err());
+}
+
+#[test]
+fn loaded_program_limits_apply_to_resident_function_evaluation() {
+    let root = workspace("resident-limits");
+    fs::write(
+        root.join("main.mag"),
+        r#"(let recurse (fn [[value Int]] -> Artifact
+  (recurse value)))
+(artifact {})"#,
+    )
+    .unwrap();
+    let program = load_with_options(
+        &root,
+        "main.mag",
+        CompilerOptions {
+            limits: CompilerLimits {
+                call_depth: 1,
+                ..CompilerLimits::default()
+            },
+        },
+    )
+    .unwrap();
+
+    assert!(eval_fn(&program, "recurse", json!(1))
+        .unwrap_err()
+        .to_string()
+        .contains("function call depth limit reached"));
 }
 
 #[test]
@@ -1481,6 +1550,7 @@ fn graph_product_input_accepts_repeated_typed_fan_in() {
     let artifact =
         load_with_inputs_and_module_roots(&root, "main.mag", inputs, &[root.clone(), mag_lib])
             .unwrap()
+            .result
             .artifact;
     assert_eq!(artifact["tag"], "core.validated.Valid", "{:?}", artifact);
     assert_eq!(artifact["output-tag"], "core.validated.Valid");
@@ -1668,6 +1738,7 @@ fn type_schema_preserves_qualified_nominals_and_substitutes_generics() {
     .unwrap();
     let artifact = load_with_inputs(&root, "main.mag", json!({}))
         .unwrap()
+        .result
         .artifact;
     assert_eq!(artifact["version"], 1);
     assert_eq!(artifact["root"]["kind"], "named");

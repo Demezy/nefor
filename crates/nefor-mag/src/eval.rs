@@ -74,30 +74,47 @@ pub mod fuel {
         static REMAINING: Cell<Option<u64>> = const { Cell::new(None) };
         static CALL_DEPTH: Cell<u16> = const { Cell::new(0) };
         static EXPR_DEPTH: Cell<u16> = const { Cell::new(0) };
+        static CALL_LIMIT: Cell<u16> = const { Cell::new(64) };
+        static EXPR_LIMIT: Cell<u16> = const { Cell::new(128) };
     }
 
     pub struct Guard {
         previous: Option<u64>,
+        previous_call_limit: u16,
+        previous_expr_limit: u16,
         active: bool,
     }
-    pub fn install(limit: u64) -> Guard {
-        let previous = REMAINING.with(|remaining| remaining.replace(Some(limit)));
+    pub fn install(limits: impl Into<crate::CompilerLimits>) -> Guard {
+        let limits = limits.into();
+        let previous = REMAINING.with(|remaining| remaining.replace(Some(limits.evaluation_steps)));
+        let previous_call_limit = CALL_LIMIT.with(|limit| limit.replace(limits.call_depth));
+        let previous_expr_limit = EXPR_LIMIT.with(|limit| limit.replace(limits.expression_depth));
         Guard {
             previous,
+            previous_call_limit,
+            previous_expr_limit,
             active: true,
         }
     }
-    pub fn ensure(limit: u64) -> Guard {
+    pub fn ensure(limits: impl Into<crate::CompilerLimits>) -> Guard {
+        let limits = limits.into();
         REMAINING.with(|remaining| {
             if remaining.get().is_some() {
                 Guard {
                     previous: None,
+                    previous_call_limit: CALL_LIMIT.with(Cell::get),
+                    previous_expr_limit: EXPR_LIMIT.with(Cell::get),
                     active: false,
                 }
             } else {
-                remaining.set(Some(limit));
+                remaining.set(Some(limits.evaluation_steps));
+                let previous_call_limit = CALL_LIMIT.with(|limit| limit.replace(limits.call_depth));
+                let previous_expr_limit =
+                    EXPR_LIMIT.with(|limit| limit.replace(limits.expression_depth));
                 Guard {
                     previous: None,
+                    previous_call_limit,
+                    previous_expr_limit,
                     active: true,
                 }
             }
@@ -125,6 +142,8 @@ pub mod fuel {
         fn drop(&mut self) {
             if self.active {
                 REMAINING.with(|remaining| remaining.set(self.previous));
+                CALL_LIMIT.with(|limit| limit.set(self.previous_call_limit));
+                EXPR_LIMIT.with(|limit| limit.set(self.previous_expr_limit));
             }
         }
     }
@@ -133,7 +152,7 @@ pub mod fuel {
     pub fn enter_call() -> Result<CallGuard, MagError> {
         CALL_DEPTH.with(|depth| {
             let current = depth.get();
-            if current >= 64 {
+            if current >= CALL_LIMIT.with(Cell::get) {
                 Err(MagError::Budget("function call depth limit reached".into()))
             } else {
                 depth.set(current + 1);
@@ -151,7 +170,7 @@ pub mod fuel {
     pub fn enter_expr() -> Result<ExprGuard, MagError> {
         EXPR_DEPTH.with(|depth| {
             let current = depth.get();
-            if current >= 128 {
+            if current >= EXPR_LIMIT.with(Cell::get) {
                 Err(MagError::Budget("expression nesting limit reached".into()))
             } else {
                 depth.set(current + 1);
@@ -167,7 +186,7 @@ pub mod fuel {
 }
 
 pub fn eval_program(env: &mut Env, exprs: &[Expr]) -> Result<Value, MagError> {
-    let _fuel = fuel::ensure(crate::EVALUATION_STEP_LIMIT);
+    let _fuel = fuel::ensure(env.compiler_limits());
     let mut declarations = vec![false; exprs.len()];
     for (index, expr) in exprs.iter().enumerate() {
         let Expr::List(items) = expr else { continue };
@@ -1903,10 +1922,11 @@ mod tests {
 
     #[test]
     fn default_evaluation_budget_allows_exactly_1_000_000_steps() {
-        assert_eq!(crate::EVALUATION_STEP_LIMIT, 1_000_000);
-        let _fuel = fuel::install(crate::EVALUATION_STEP_LIMIT);
+        let limit = crate::CompilerLimits::default().evaluation_steps;
+        assert_eq!(limit, 1_000_000);
+        let _fuel = fuel::install(limit);
 
-        for _ in 0..crate::EVALUATION_STEP_LIMIT {
+        for _ in 0..limit {
             fuel::step().unwrap();
         }
 

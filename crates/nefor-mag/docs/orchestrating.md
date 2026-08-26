@@ -62,7 +62,7 @@ mag compile workflow.mag \
   --input factory_contracts=./factory-contracts.json
 ```
 
-`workflow.mag` is resolved beneath `--source-dir`. Repeat `--module-root` to add module search roots and `--input NAME=PATH` to expose immutable JSON values through the typed host-input boundary. If no module root is supplied, the source directory is used. `--profile` adds compiler phase timings and deterministic counters to the JSON success envelope. This envelope is CLI transport metadata; its `artifact` field is the exact raw MAG artifact and the envelope does not define an artifact schema.
+`workflow.mag` is resolved beneath `--source-dir`. Repeat `--module-root` to add module search roots and `--input NAME=PATH` to expose immutable JSON values through the typed host-input boundary. If no module root is supplied, the source directory is used. The CLI prints the same `{metadata, artifact}` `CompilationResult` returned by Rust compiler APIs. `--profile` adds compiler phase timings and deterministic counters under `metadata.profile`. Compilation failures write a structured diagnostic to stderr, exit nonzero, and produce no stdout result. The `artifact` field is the exact raw MAG artifact; compilation metadata does not define an artifact schema.
 
 Standalone compilation emits an artifact and content hash, but has no execute subcommand. Runtime execution belongs to Nefor's lead workflow because it needs the configured providers, tools, approval policy, session, and run control.
 

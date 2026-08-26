@@ -47,6 +47,10 @@ fn json_stdout(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("stdout is one JSON document")
 }
 
+fn json_stderr(output: &Output) -> Value {
+    serde_json::from_slice(&output.stderr).expect("stderr is one JSON diagnostic")
+}
+
 fn compile_args<'a>(root: &'a Path, extra: &'a [&'a str]) -> Vec<&'a str> {
     let mut args = vec!["compile", "main.mag", "--source-dir"];
     args.push(root.to_str().expect("utf8 fixture path"));
@@ -94,13 +98,12 @@ fn compiles_with_caller_supplied_module_root_and_host_input() {
         String::from_utf8_lossy(&output.stderr)
     );
     let body = json_stdout(&output);
-    assert_eq!(body["version"], 1);
-    assert_eq!(body["ok"], true);
+    assert_eq!(body["metadata"]["version"], 1);
     assert_eq!(
         body["artifact"]["contracts"].as_array().map(Vec::len),
         Some(1)
     );
-    assert_eq!(body["hash"].as_str().map(str::len), Some(64));
+    assert_eq!(body["metadata"]["hash"].as_str().map(str::len), Some(64));
 }
 
 #[test]
@@ -109,12 +112,14 @@ fn profile_is_opt_in_and_machine_readable() {
     fixture.write("main.mag", "(artifact {})");
 
     let ordinary = json_stdout(&run(&compile_args(&fixture.root, &[])));
-    assert!(ordinary.get("profile").is_none());
+    assert!(ordinary["metadata"].get("profile").is_none());
 
     let profiled = json_stdout(&run(&compile_args(&fixture.root, &["--profile"])));
-    assert_eq!(profiled["ok"], true);
-    assert!(profiled["profile"]["phases"]["entry_evaluate_ns"].is_u64());
-    assert_eq!(profiled["profile"]["counters"]["evaluator_steps"], 3);
+    assert!(profiled["metadata"]["profile"]["phases"]["entry_evaluate_ns"].is_u64());
+    assert_eq!(
+        profiled["metadata"]["profile"]["counters"]["evaluator_steps"],
+        3
+    );
 }
 
 #[test]
@@ -138,22 +143,21 @@ fn syntax_type_and_evaluation_failures_are_structured() {
         fixture.write("main.mag", source);
         let output = run(&compile_args(&fixture.root, &[]));
         assert!(!output.status.success(), "{name} unexpectedly succeeded");
+        assert!(output.stdout.is_empty(), "{name} produced a result value");
         assert!(!output.stderr.is_empty(), "{name} needs human stderr");
-        let body = json_stdout(&output);
-        assert_eq!(body["version"], 1);
-        assert_eq!(body["ok"], false);
-        assert_eq!(body["error"]["code"], code);
-        assert_eq!(body["error"]["stage"], stage);
-        assert!(body["error"]["message"].is_string());
+        let body = json_stderr(&output);
+        assert_eq!(body["code"], code);
+        assert_eq!(body["stage"], stage);
+        assert!(body["message"].is_string());
         if name == "syntax" {
             assert_eq!(
-                body["error"]["diagnostic"]["path"],
+                body["diagnostic"]["path"],
                 fixture.root.join("main.mag").display().to_string()
             );
-            assert_eq!(body["error"]["diagnostic"]["source"], source);
-            assert_eq!(body["error"]["diagnostic"]["span"]["start"], source.len());
-            assert_eq!(body["error"]["diagnostic"]["span"]["end"], source.len());
-            assert_eq!(body["error"]["diagnostic"]["related"]["span"]["start"], 0);
+            assert_eq!(body["diagnostic"]["source"], source);
+            assert_eq!(body["diagnostic"]["span"]["start"], source.len());
+            assert_eq!(body["diagnostic"]["span"]["end"], source.len());
+            assert_eq!(body["diagnostic"]["related"]["span"]["start"], 0);
         }
     }
 }
@@ -165,19 +169,20 @@ fn required_module_syntax_diagnostic_owns_its_snapshot() {
     fixture.write("main.mag", "(require \"bad\")\n(artifact {})");
     let output = run(&compile_args(&fixture.root, &[]));
     assert!(!output.status.success());
-    let body = json_stdout(&output);
-    assert_eq!(body["error"]["code"], "syntax_lex");
+    assert!(output.stdout.is_empty());
+    let body = json_stderr(&output);
+    assert_eq!(body["code"], "syntax_lex");
     assert_eq!(
-        body["error"]["diagnostic"]["path"],
+        body["diagnostic"]["path"],
         module
             .canonicalize()
             .expect("canonical module")
             .display()
             .to_string()
     );
-    assert_eq!(body["error"]["diagnostic"]["source"], "[λ]");
-    assert_eq!(body["error"]["diagnostic"]["span"]["start"], 1);
-    assert_eq!(body["error"]["diagnostic"]["span"]["end"], 3);
+    assert_eq!(body["diagnostic"]["source"], "[λ]");
+    assert_eq!(body["diagnostic"]["span"]["start"], 1);
+    assert_eq!(body["diagnostic"]["span"]["end"], 3);
 }
 
 #[test]
@@ -188,12 +193,46 @@ fn path_and_host_input_failures_are_structured() {
     let input = format!("data={}", missing.display());
     let output = run(&compile_args(&fixture.root, &["--input", &input]));
     assert!(!output.status.success());
-    let body = json_stdout(&output);
-    assert_eq!(body["error"]["code"], "input_read");
-    assert_eq!(
-        body["error"]["path"],
-        missing.to_str().expect("missing path")
+    assert!(output.stdout.is_empty());
+    let body = json_stderr(&output);
+    assert_eq!(body["code"], "input_read");
+    assert_eq!(body["path"], missing.to_str().expect("missing path"));
+}
+
+#[test]
+fn compiler_limits_are_overridable_from_the_cli() {
+    let fixture = Fixture::new("limits");
+    fixture.write(
+        "main.mag",
+        r#"(let identity (fn [[value Int]] -> Int value))
+(let first-value (identity 1))
+(let second-value (identity 1))
+(artifact [first-value second-value])"#,
     );
+
+    for (flag, value) in [
+        ("--evaluation-step-limit", "1"),
+        ("--call-depth-limit", "0"),
+        ("--expression-depth-limit", "1"),
+    ] {
+        let output = run(&compile_args(&fixture.root, &[flag, value]));
+        assert!(
+            !output.status.success(),
+            "{flag} did not constrain evaluation"
+        );
+        assert!(output.stdout.is_empty());
+        assert_eq!(json_stderr(&output)["code"], "evaluation_budget");
+    }
+
+    let output = run(&compile_args(
+        &fixture.root,
+        &["--memoized-call-limit", "0", "--profile"],
+    ));
+    assert!(output.status.success());
+    let body = json_stdout(&output);
+    let counters = &body["metadata"]["profile"]["counters"];
+    assert_eq!(counters["memoized_call_hits"], 0);
+    assert_eq!(counters["memoized_call_stores"], 0);
 }
 
 #[test]

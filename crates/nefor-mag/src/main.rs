@@ -5,8 +5,6 @@ use nefor_mag::error::MagError;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-const ENVELOPE_VERSION: u8 = 1;
-
 #[derive(Parser)]
 #[command(
     name = "mag",
@@ -41,30 +39,25 @@ struct CompileArgs {
     #[arg(long = "input", value_name = "NAME=PATH")]
     inputs: Vec<String>,
 
-    /// Include phase timings and deterministic operation counters in the success envelope
+    /// Include phase timings and deterministic operation counters in metadata
     #[arg(long)]
     profile: bool,
-}
 
-#[derive(Serialize)]
-struct CliEnvelope<T> {
-    version: u8,
-    ok: bool,
-    #[serde(flatten)]
-    payload: T,
-}
+    /// Maximum evaluator steps per compilation or resident function call
+    #[arg(long)]
+    evaluation_step_limit: Option<u64>,
 
-#[derive(Serialize)]
-struct Success {
-    artifact: Value,
-    hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    profile: Option<nefor_mag::profile::CompileProfile>,
-}
+    /// Maximum nested function calls
+    #[arg(long)]
+    call_depth_limit: Option<u16>,
 
-#[derive(Serialize)]
-struct Failure {
-    error: Diagnostic,
+    /// Maximum nested expressions
+    #[arg(long)]
+    expression_depth_limit: Option<u16>,
+
+    /// Maximum memoized function calls; zero disables memoization
+    #[arg(long)]
+    memoized_call_limit: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -82,25 +75,16 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         Command::Compile(args) => match compile(args) {
-            Ok(success) => print_json(&CliEnvelope {
-                version: ENVELOPE_VERSION,
-                ok: true,
-                payload: success,
-            }),
+            Ok(result) => print_json_stdout(&result),
             Err(error) => {
-                eprintln!("mag: {}", error.message);
-                print_json(&CliEnvelope {
-                    version: ENVELOPE_VERSION,
-                    ok: false,
-                    payload: Failure { error },
-                });
+                print_json_stderr(&error);
                 std::process::exit(1);
             }
         },
     }
 }
 
-fn compile(args: CompileArgs) -> Result<Success, Diagnostic> {
+fn compile(args: CompileArgs) -> Result<nefor_mag::CompilationResult, Diagnostic> {
     require_directory(&args.source_dir, "source_dir")?;
     let module_roots = if args.module_roots.is_empty() {
         vec![args.source_dir.clone()]
@@ -111,29 +95,43 @@ fn compile(args: CompileArgs) -> Result<Success, Diagnostic> {
         require_directory(root, "module_root")?;
     }
     let inputs = load_inputs(&args.inputs)?;
+    let defaults = nefor_mag::CompilerLimits::default();
+    let options = nefor_mag::CompilerOptions {
+        limits: nefor_mag::CompilerLimits {
+            evaluation_steps: args
+                .evaluation_step_limit
+                .unwrap_or(defaults.evaluation_steps),
+            call_depth: args.call_depth_limit.unwrap_or(defaults.call_depth),
+            expression_depth: args
+                .expression_depth_limit
+                .unwrap_or(defaults.expression_depth),
+            memoized_calls: args.memoized_call_limit.unwrap_or(defaults.memoized_calls),
+        },
+    };
     let profiler = args.profile.then(nefor_mag::profile::CompileProfiler::new);
-    let loaded = if let Some(profiler) = &profiler {
-        nefor_mag::load_with_profiler(
+    let mut loaded = if let Some(profiler) = &profiler {
+        nefor_mag::load_with_profiler_and_options(
             &args.source_dir,
             &args.entry,
             inputs,
             &module_roots,
             profiler,
+            options,
         )
     } else {
-        nefor_mag::load_with_inputs_and_module_roots(
+        nefor_mag::load_with_inputs_and_module_roots_and_options(
             &args.source_dir,
             &args.entry,
             inputs,
             &module_roots,
+            options,
         )
     }
     .map_err(mag_diagnostic)?;
-    Ok(Success {
-        artifact: loaded.artifact,
-        hash: loaded.hash,
-        profile: profiler.map(|profiler| profiler.snapshot()),
-    })
+    if let Some(profiler) = profiler {
+        loaded.result.metadata.profile = Some(profiler.snapshot());
+    }
+    Ok(loaded.result)
 }
 
 fn require_directory(path: &Path, kind: &'static str) -> Result<(), Diagnostic> {
@@ -239,11 +237,21 @@ fn path_diagnostic(code: &'static str, path: &Path, message: String) -> Diagnost
     }
 }
 
-fn print_json<T: Serialize>(value: &T) {
+fn print_json_stdout<T: Serialize>(value: &T) {
     match serde_json::to_string(value) {
         Ok(json) => println!("{json}"),
         Err(error) => {
             eprintln!("mag: cannot serialize JSON response: {error}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn print_json_stderr<T: Serialize>(value: &T) {
+    match serde_json::to_string(value) {
+        Ok(json) => eprintln!("{json}"),
+        Err(error) => {
+            eprintln!("mag: cannot serialize JSON diagnostic: {error}");
             std::process::exit(2);
         }
     }

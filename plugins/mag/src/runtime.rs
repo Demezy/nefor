@@ -643,7 +643,7 @@ async fn handle_load(
         &module_roots,
     ) {
         Ok(loaded) => {
-            let artifact = loaded.artifact.clone();
+            let artifact = loaded.result.artifact.clone();
             let modification = match artifact_modification(&artifact) {
                 Ok(modification) => modification,
                 Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
@@ -662,7 +662,13 @@ async fn handle_load(
             let contracts = host
                 .registry_contracts()
                 .unwrap_or_else(|_| Value::Array(Vec::new()));
-            let reply = loaded_body(in_reply_to, &loaded.hash, artifact, &factories, contracts);
+            let reply = loaded_body(
+                in_reply_to,
+                &loaded.result.metadata.hash,
+                artifact,
+                &factories,
+                contracts,
+            );
             *program = Some(Arc::new(ResidentProgram { loaded, rules }));
             send_event(out_tx, reply).await
         }

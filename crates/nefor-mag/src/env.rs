@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
-const MEMOIZED_CALL_LIMIT: usize = 16_384;
 const FRAME_COLLECTION_THRESHOLD: usize = 1_024;
 
 // Compound MAG values are immutable shared allocations. Holding the Value in
@@ -129,6 +128,7 @@ impl Hash for MemoCall {
 
 #[derive(Debug, Default)]
 struct CompilationState {
+    limits: crate::CompilerLimits,
     next_binding_id: u64,
     next_frame_id: u64,
     bindings: HashMap<BindingId, BindingMetadata>,
@@ -292,13 +292,35 @@ impl Env {
         module_roots: Vec<PathBuf>,
         profiler: Option<CompileProfiler>,
     ) -> Self {
+        Self::new_with_stdlib_source_dir_module_roots_profiler_and_limits(
+            path,
+            module_roots,
+            profiler,
+            crate::CompilerLimits::default(),
+        )
+    }
+    pub(crate) fn new_with_stdlib_source_dir_module_roots_profiler_and_limits(
+        path: &Path,
+        module_roots: Vec<PathBuf>,
+        profiler: Option<CompileProfiler>,
+        limits: crate::CompilerLimits,
+    ) -> Self {
         Self::new_in(
             path,
             module_roots,
             "main",
-            Arc::new(Mutex::new(CompilationState::default())),
+            Arc::new(Mutex::new(CompilationState {
+                limits,
+                ..CompilationState::default()
+            })),
             profiler,
         )
+    }
+    pub(crate) fn compiler_limits(&self) -> crate::CompilerLimits {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .limits
     }
     pub fn source_dir(&self) -> &Path {
         &self.source_dir
@@ -1070,9 +1092,13 @@ impl Env {
             return;
         };
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let limit = state.limits.memoized_calls;
+        if limit == 0 {
+            return;
+        }
         // Keep resident programs bounded even when rule functions see a long
         // stream of distinct inputs. Clearing only forfeits prior work.
-        if state.memoized_calls.len() >= MEMOIZED_CALL_LIMIT {
+        if state.memoized_calls.len() >= limit {
             state.memoized_calls.clear();
         }
         state.memoized_calls.insert(
