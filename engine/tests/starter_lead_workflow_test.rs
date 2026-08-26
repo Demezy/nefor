@@ -99,12 +99,13 @@ fn production_mag_eval_wrapper_compiles_direct_process_exec() {
             }
         ]
     });
-    let module_root = starter_dir().join("mag/lib");
+    let source_root = starter_dir().join("mag/lib");
+    let canonical_root = repo_root().join("mag/lib");
     let artifact = nefor_mag::compile_with_inputs_and_module_roots(
         &source,
-        &module_root,
+        &source_root,
         inputs,
-        std::slice::from_ref(&module_root),
+        &[canonical_root, source_root.clone()],
     )
     .unwrap_or_else(|error| panic!("production mag-eval wrapper failed to compile: {error}"));
 
@@ -254,5 +255,7 @@ fn set_package_path(lua: &Lua) -> mlua::Result<()> {
         starter = starter_str,
         lua_root = lua_root_str,
     );
-    lua.load(&script).exec()
+    lua.load(&script).exec()?;
+    lua.globals()
+        .set("_repo_root", repo_root().display().to_string())
 }

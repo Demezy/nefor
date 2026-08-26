@@ -23,7 +23,7 @@ fi
 plugin_dir="$dist_dir/share/nefor/plugins"
 manifest="$dist_dir/share/nefor/plugins.manifest"
 runtime_root="$dist_dir/share/nefor/runtime"
-mkdir -p "$dist_dir/bin" "$plugin_dir" "$dist_dir/share/nefor/examples/nefor-agent" "$runtime_root/lua" "$runtime_root/plugins"
+mkdir -p "$dist_dir/bin" "$plugin_dir" "$dist_dir/share/nefor/examples/nefor-agent" "$runtime_root/lua" "$runtime_root/plugins" "$runtime_root/mag"
 cp "$target_bin/nefor" "$dist_dir/bin/nefor"
 if [ ! -x "$target_bin/mag" ]; then
   echo "missing compiler binary: $target_bin/mag" >&2
@@ -48,6 +48,7 @@ fi
 
 
 cp -R "$repo_root/lua/." "$runtime_root/lua/"
+cp -R "$repo_root/mag/." "$runtime_root/mag/"
 for plugin_lua in "$repo_root"/plugins/*/lua; do
   [ -d "$plugin_lua" ] || continue
   plugin_name=$(basename "$(dirname "$plugin_lua")")

@@ -244,7 +244,10 @@ async fn chatgpt_projects_stale_allowlist_and_returns_tool_result_through_gate()
         "engine",
         object(json!({
             "kind": "mag.load", "id": "load", "source_dir": temp.path(),
-            "module_roots": [repo_root().join("examples/nefor-agent/mag/lib")], "entry": "tool.mag"
+            "module_roots": [
+                repo_root().join("mag/lib"),
+                repo_root().join("examples/nefor-agent/mag/lib")
+            ], "entry": "tool.mag"
         })),
     )
     .await;

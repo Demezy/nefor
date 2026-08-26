@@ -10,6 +10,7 @@
 --                            without writing links, locks, or checkout state.
 --   pm.load(name)            plain `require(name)`. Resolution is Lua's job —
 --                            install/register has already added a search path.
+--   pm.root(name)            resolve any registered or managed package root.
 --   pm.bin(name[, binname])  resolve <plugin_dir>/bin/<binname> (default: name).
 --   pm.require(name)         alias of pm.load — never triggers install.
 --   pm.sync_checkout(opts)   ensure a managed git checkout is present at a ref;
@@ -39,8 +40,8 @@
 
 local M = {}
 
--- Resolver registry. Populated by parse_spec (dir override) and install_spec
--- (clone path). Lookups for pm.load / pm.bin go through here.
+-- Materialized package registry. Populated by register and install_spec;
+-- pm.root/pm.bin resolve through it while pm.load delegates to Lua.
 --   name → { dir = "/abs/path", source = "dir" | "data" }
 local plugins = {}
 local registered_searcher_installed = false
@@ -761,23 +762,37 @@ function M.register(specs)
   end
 end
 
--- pm.bin still uses the registry to find a plugin's dir (the binary's
+-- pm.root and pm.bin use the registry to find a package's dir (the binary's
 -- location is a pm concern, not Lua's). pm.load delegates to require —
 -- after pm.install has put the right parent dirs on package.path, Lua's
 -- own resolution handles dotted names, init.lua entrypoints, and the
 -- module → file mapping uniformly.
-local function plugin_dir(name)
+local function package_dir(name)
   local entry = plugins[name]
   if entry then return entry.dir end
-  -- Fall back to the on-disk default location. Lets pm.bin work after a
-  -- prior pm.install in another process, without re-registering everything.
+  -- The plugins directory is nefor-pm's materialization root even when the
+  -- package is consumed as MAG data rather than Lua or an executable. A prior
+  -- install in another process therefore remains resolvable without replaying
+  -- the original spec.
   local fallback = pjoin(plugins_root(), name)
   local fs = require_fs()
-  if is_cloned(fallback) or fs.exists(pjoin(fallback, "init.lua")) then
+  if fs.exists(fallback) then
     plugins[name] = { dir = fallback, source = "data" }
     return fallback
   end
   return nil
+end
+
+function M.root(name)
+  if not is_string(name) then
+    error("nefor-pm.root: name must be a non-empty string", 0)
+  end
+  local dir = package_dir(name)
+  if not dir then
+    error(string.format(
+      "nefor-pm.root: package %q is not registered or installed", name), 0)
+  end
+  return dir
 end
 
 function M.load(name)
@@ -806,7 +821,7 @@ function M.bin(name, binary_name)
     error("nefor-pm.bin: name must be a non-empty string", 0)
   end
   binary_name = binary_name or name
-  local dir = plugin_dir(name)
+  local dir = package_dir(name)
   if not dir then
     error(string.format(
       "nefor-pm.bin: plugin %q not installed (run pm.install first)", name), 0)

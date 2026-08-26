@@ -19,4 +19,4 @@ Read the chapters in order:
 6. [Lowering and Execution](<06. Lowering and Execution.md>)
 
 For the complete Nefor library model compressed into commented MAG source, read
-[`nefor-mag-in-five-minutes.md`](../../../../../examples/nefor-agent/mag/lib/nefor-mag-in-five-minutes.md).
+[Nefor MAG in Five Minutes](<00. Nefor MAG in Five Minutes.md>).

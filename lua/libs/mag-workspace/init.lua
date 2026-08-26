@@ -1,8 +1,8 @@
 -- lua/libs/mag-workspace/init.lua — MAG workspace management and preview formatting.
 --
 -- Provides two things:
---   1. Workspace lifecycle: init a per-session MAG workspace seeded
---      from the config library (mag/lib/).
+--   1. Workspace lifecycle: init an empty per-session MAG source directory
+--      with an optional writable lib/ for session-local modules.
 --   2. Preview formatting: render a graph modification (the shape the
 --      mag plugin replies with on `mag.loaded`) into a human-readable
 --      string the lead can inspect before executing.
@@ -13,12 +13,10 @@
 -- tool for humans; nothing here shells out to it.
 
 local M = {}
-local configured_library_dir = nil
 local configured_sessions_root = nil
 
 function M.configure(options)
   options = options or {}
-  configured_library_dir = options.library_dir
   configured_sessions_root = options.sessions_root or configured_sessions_root
 end
 
@@ -46,19 +44,17 @@ function M.workspace_dir(session_id)
   return root .. "/" .. session_id .. "/mag"
 end
 
--- Initialize workspace: create dir, seed from config library.
+-- Initialize an empty writable workspace. Canonical and config-owned module
+-- roots stay where the package/config materialized them and are supplied to
+-- the compiler explicitly; copying them here would create stale session state.
 -- Returns the workspace path on success, nil + error on failure.
-function M.init_workspace(session_id, config_dir)
+function M.init_workspace(session_id, _config_dir)
   local ws = M.workspace_dir(session_id)
   if not ws then return nil, "no data root available" end
 
-  if not mkdir_p(ws .. "/lib/prompts") then
+  if not mkdir_p(ws .. "/lib") then
     return nil, "failed to create workspace: " .. ws
   end
-
-  -- Seed from config mag/lib/ contents. -n = no-clobber.
-  local config_mag = configured_library_dir or (config_dir .. "/mag/lib")
-  os.execute("cp -Rn " .. sh_quote(config_mag) .. "/. " .. sh_quote(ws) .. "/lib/ 2>/dev/null")
 
   return ws, nil
 end

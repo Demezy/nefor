@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use nefor_mag::load_with_inputs;
 
 fn book_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/book")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/examples")
 }
 
 #[test]
@@ -25,7 +25,7 @@ fn mag_book_examples_compile() {
 #[test]
 fn mag_in_five_minutes_program_compiles() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let path = crate_root.join("docs/book/01. core/00. MAG in Five Minutes.md");
+    let path = crate_root.join("../../mag/book/01. core/00. MAG in Five Minutes.md");
     let markdown = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     let source = markdown

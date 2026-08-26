@@ -38,14 +38,14 @@ const SESSION_ID: &str = "lead-turn-session";
 const CONVERSATION_ID: &str = "lead-conversation";
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The turn spawner appends a `## MAG workspace` block to the system
-/// overlay (examples/nefor-agent/agentic-loop): the session workspace dir plus the
-/// inlined canonical Nefor MAG guide. Here we build a representative overlay the
+/// The turn spawner composes the MAG guides and references after the authored
+/// system prompt, followed by the writable workspace. Here we build a representative overlay the
 /// same way and assert it is recorded once as canonical conversation facts.
 const LEAD_SYSTEM: &str = "you are the lead\n\n\
-## MAG workspace\n\n\
-workspace dir: /tmp/nefor/sessions/lead-turn-session/mag\n\n\
-### lib/nefor-mag-in-five-minutes.md\n# Nefor MAG in Five Minutes\n";
+# MAG in Five Minutes\n\ncore guide\n\n---\n\n\
+# Nefor MAG in Five Minutes\n\nnefor guide\n\n---\n\n\
+# MAG references\n\nFull MAG Book: `/runtime/mag/book/README.md`\n\n---\n\n\
+# MAG workspace\n\nWritable source directory: `/tmp/nefor/sessions/lead-turn-session/mag`\n";
 
 fn binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_mag-plugin"))

@@ -28,7 +28,7 @@ interfaces, providers, and tools are composition or plugin concerns.
   reusable composition mechanisms.
 - [nefor-pm](../lua/nefor-pm/README.md) — package, checkout, lock, and runtime
   generation reference.
-- [The MAG Book](../crates/nefor-mag/docs/book/README.md) — core MAG and its
+- [The MAG Book](../mag/book/README.md) — core MAG and its
   current application inside Nefor.
 - [MAG compiler](../crates/nefor-mag/README.md) — compiler entry point and
   reference links.

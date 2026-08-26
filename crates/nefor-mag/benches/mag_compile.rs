@@ -237,7 +237,10 @@ fn cases(root: &Path, scratch: &Path) -> Vec<Case> {
         name: "shipped-lead-turn".into(),
         source_dir: root.join("examples/nefor-agent"),
         entry: "agentic-loop/lead-turn.mag".into(),
-        module_roots: vec![root.join("examples/nefor-agent/mag/lib")],
+        module_roots: vec![
+            root.join("mag/lib"),
+            root.join("examples/nefor-agent/mag/lib"),
+        ],
         inputs: json!({"factory_contracts": contracts.clone()}),
         input_bytes: fs::metadata(lead).map(|m| m.len() as usize).unwrap_or(0),
         expected_error: None,
@@ -249,7 +252,11 @@ fn cases(root: &Path, scratch: &Path) -> Vec<Case> {
             scratch,
             &format!("linear-{size}"),
             &source,
-            vec![scratch.into(), root.join("examples/nefor-agent/mag/lib")],
+            vec![
+                scratch.into(),
+                root.join("mag/lib"),
+                root.join("examples/nefor-agent/mag/lib"),
+            ],
             json!({"factory_contracts": contracts.clone()}),
             None,
         ));
@@ -260,7 +267,11 @@ fn cases(root: &Path, scratch: &Path) -> Vec<Case> {
             scratch,
             &format!("product-fan-in-{size}"),
             &source,
-            vec![scratch.into(), root.join("examples/nefor-agent/mag/lib")],
+            vec![
+                scratch.into(),
+                root.join("mag/lib"),
+                root.join("examples/nefor-agent/mag/lib"),
+            ],
             json!({"factory_contracts": contracts.clone()}),
             None,
         ));

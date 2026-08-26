@@ -1,6 +1,6 @@
 # `nefor-pm` reference
 
-`nefor-pm` is the synchronous Lua package/source manager used during configuration bootstrap. It manages Lua module roots and source checkouts; it is not an engine subcommand.
+`nefor-pm` is the synchronous Lua package/source manager used during configuration bootstrap. It manages materialized package roots and source checkouts; Lua, MAG, and executable consumers explicitly select what they use. It is not an engine subcommand.
 
 ## API
 
@@ -8,6 +8,7 @@
 pm.install(specs)
 pm.update(specs)
 pm.register(specs)
+pm.root(name)
 pm.load(name)
 pm.require(name)                 -- alias of load
 pm.bin(name [, binary_name])
@@ -53,6 +54,10 @@ The plugin lock lives at `<data-root>/plugins/nefor-pm.lock.json`. `install` rep
 Use `register` for packaged immutable generations, managed install/update for package-manager state, and `dir` only for deliberate development overrides.
 
 `pm.load`/`pm.require` call Lua `require`; they never install. `pm.bin` fails if the expected executable is absent.
+`pm.root` returns the materialized directory for any registered or managed
+package, including packages containing MAG modules or documentation instead of
+Lua. An existing managed package remains resolvable in a later process without
+replaying its install spec.
 
 ## Version-derived refs
 

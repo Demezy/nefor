@@ -180,7 +180,8 @@ fn active_starter_prompts_and_mock_do_not_use_removed_mag_teaching_forms() {
         &root.join("examples/nefor-agent/mag/lib/prompts"),
         "md",
     ));
-    paths.push(root.join("examples/nefor-agent/mag/lib/nefor-mag-in-five-minutes.md"));
+    paths.push(root.join("mag/book/01. core/00. MAG in Five Minutes.md"));
+    paths.push(root.join("mag/book/02. nefor/00. Nefor MAG in Five Minutes.md"));
     let guidance_paths = paths.clone();
     paths.push(root.join("examples/nefor-agent/mock-provider/init.lua"));
     let removed = [
@@ -238,9 +239,11 @@ fn active_starter_prompts_and_mock_do_not_use_removed_mag_teaching_forms() {
 async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     let root = repo_root();
     let starter = root.join("examples/nefor-agent");
-    let lib_root = starter.join("mag/lib");
+    let lib_root = root.join("mag/lib");
+    let config_lib_root = starter.join("mag/lib");
+    let module_roots = vec![lib_root.clone(), config_lib_root.clone()];
     let fixture_root = starter.join("mag/tests");
-    let book_root = root.join("crates/nefor-mag/examples/book");
+    let book_root = root.join("mag/examples");
     let all_mag = mag_files(&root);
     let libraries = mag_files(&lib_root);
     let fixtures = mag_files(&fixture_root);
@@ -327,7 +330,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "corpus-libraries",
         &temp_root,
         Path::new("all-libraries.mag"),
-        std::slice::from_ref(&lib_root),
+        &module_roots,
     )
     .await;
     assert_eq!(
@@ -340,7 +343,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     // program injected into every lead turn. Compile that exact text rather
     // than maintaining a test-side approximation that can drift from the
     // documentation agents actually see.
-    let guide_path = lib_root.join("nefor-mag-in-five-minutes.md");
+    let guide_path = root.join("mag/book/02. nefor/00. Nefor MAG in Five Minutes.md");
     let guide = fs::read_to_string(&guide_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", guide_path.display()));
     let canonical = guide
@@ -371,7 +374,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "canonical-agent",
         &temp_root,
         Path::new("canonical-agent.mag"),
-        std::slice::from_ref(&lib_root),
+        &module_roots,
     )
     .await;
     assert_eq!(
@@ -399,7 +402,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "task-source",
         &temp_root,
         Path::new("task-source.mag"),
-        std::slice::from_ref(&lib_root),
+        &module_roots,
     )
     .await;
     assert_eq!(
@@ -473,7 +476,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "retry-gate-graph",
         &temp_root,
         Path::new("retry-gate-graph.mag"),
-        std::slice::from_ref(&lib_root),
+        &module_roots,
     )
     .await;
     assert_eq!(
@@ -511,7 +514,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "shell-output-subset",
         &temp_root,
         Path::new("shell-output-subset.mag"),
-        std::slice::from_ref(&lib_root),
+        &module_roots,
     )
     .await;
     assert_eq!(
@@ -545,7 +548,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "process-path",
         &temp_root,
         Path::new("process-path.mag"),
-        std::slice::from_ref(&lib_root),
+        &module_roots,
     )
     .await;
     assert_eq!(
@@ -629,7 +632,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
             &format!("graph-edge-algebra-{name}"),
             &temp_root,
             Path::new(&file_name),
-            std::slice::from_ref(&lib_root),
+            &module_roots,
         )
         .await;
         assert_eq!(
@@ -704,7 +707,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "worktree-create",
         &temp_root,
         Path::new("worktree-create.mag"),
-        std::slice::from_ref(&lib_root),
+        &module_roots,
     )
     .await;
     assert_eq!(
@@ -769,7 +772,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "worktree-open",
         &temp_root,
         Path::new("worktree-open.mag"),
-        std::slice::from_ref(&lib_root),
+        &module_roots,
     )
     .await;
     assert_eq!(
@@ -830,7 +833,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "shell-output-unknown",
         &temp_root,
         Path::new("shell-output-unknown.mag"),
-        std::slice::from_ref(&lib_root),
+        &module_roots,
     )
     .await;
     assert_eq!(
@@ -888,7 +891,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "shell-input-unknown",
         &temp_root,
         Path::new("shell-input-unknown.mag"),
-        std::slice::from_ref(&lib_root),
+        &module_roots,
     )
     .await;
     assert_eq!(
@@ -946,7 +949,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "factory-identity-unknown",
         &temp_root,
         Path::new("factory-identity-unknown.mag"),
-        std::slice::from_ref(&lib_root),
+        &module_roots,
     )
     .await;
     assert_eq!(
@@ -976,7 +979,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
             &format!("corpus-entry-{index}"),
             &starter,
             entry,
-            std::slice::from_ref(&lib_root),
+            &module_roots,
         )
         .await;
         assert_eq!(
@@ -1004,7 +1007,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
             &format!("corpus-failure-{index}"),
             &fixture_root,
             entry,
-            std::slice::from_ref(&lib_root),
+            &module_roots,
         )
         .await;
         assert_eq!(

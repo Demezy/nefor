@@ -695,7 +695,8 @@ async fn load_worktree_program<R: AsyncBufReadExt + Unpin>(
     source_dir: &std::path::Path,
     entry: &str,
 ) -> Value {
-    let lib_root =
+    let lib_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
+    let config_lib_root =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/nefor-agent/mag/lib");
     send_event(
         stdin,
@@ -704,7 +705,7 @@ async fn load_worktree_program<R: AsyncBufReadExt + Unpin>(
             "id": id,
             "source_dir": source_dir,
             "entry": entry,
-            "module_roots": [lib_root],
+            "module_roots": [lib_root, config_lib_root],
         })
         .as_object()
         .expect("load body")

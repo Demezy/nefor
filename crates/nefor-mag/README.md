@@ -11,7 +11,7 @@ mag compile main.mag --source-dir .
 
 ## Documentation
 
-- [The MAG Book](docs/book/README.md)
+- [The MAG Book](../../mag/book/README.md)
 - [Language and authoring reference](docs/language.md)
 - [Compiler errors and recovery](docs/errors.md)
 - [Compilation and orchestration](docs/orchestrating.md)

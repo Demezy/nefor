@@ -1414,8 +1414,7 @@ fn canonical_and_sort_by_are_typed_deterministic_builtins() {
 #[test]
 fn graph_product_input_accepts_repeated_typed_fan_in() {
     let root = workspace("product-fan-in");
-    let mag_lib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/nefor-agent/mag/lib");
+    let mag_lib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
     fs::write(
         root.join("main.mag"),
         r#"

@@ -165,9 +165,9 @@ Use only supported agent config fields: `id`, `model`, `profile`, `provider`,
 profiles. `provider` is required. Read-only investigators normally receive
 `["read_file" "mag-eval"]`; add `edit_file`/`write_file` only for builders.
 
-The session workspace includes `lib/core/*.mag`, `lib/nefor/*.mag`, role prompts,
-and `lib/nefor-mag-in-five-minutes.md`. Paths passed to `mag` are relative to
-that workspace.
+Paths passed to `mag` are relative to the writable session workspace. Canonical
+and configuration-owned modules stay in the package roots listed in the ambient
+MAG context; `lib/` is available only for optional session-local modules.
 
 ## Approval and boundaries
 

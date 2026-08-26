@@ -37,9 +37,16 @@ Editing a graph function describes a different future run. It does not retrieve 
 
 ## Workspace lifecycle
 
-Each session gets a writable MAG workspace under its session data. On initialization Nefor copies the configured `mag/lib/` tree into `lib/` **without overwriting existing files**. This gives programs stable, session-local contracts, libraries, prompt fragments, and the canonical `lib/nefor-mag-in-five-minutes.md` guide.
+Each session gets a writable MAG workspace under its session data, including an
+empty `lib/` for optional session-local modules. Canonical and configuration-owned
+libraries remain in their materialized package roots; the composition supplies
+those roots explicitly to every compilation. Nothing is copied into the session.
 
-Paths passed to the lead `mag` tool are relative to that workspace. Literal module imports such as `(require "nefor.graph")` resolve through its seeded `lib/`. Files loaded with `(read ...)` are snapshotted on first access by a loaded program; recompile or reload after changing them. Do not copy MAG files out of old session directories as templates: use the current seeded libraries and cookbook.
+Paths passed to the lead `mag` tool are relative to that workspace. Literal
+module imports such as `(require "nefor.graph")` resolve through the configured
+module roots. Files loaded with `(read ...)` are snapshotted on first access by
+a loaded program; recompile or reload after changing them. The ambient context
+names the canonical MAG Book and available module inventory.
 
 ## Run lifecycle and control
 

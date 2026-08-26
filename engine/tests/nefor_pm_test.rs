@@ -436,6 +436,60 @@ fn immutable_registration_loads_without_mutating_data_root() {
 }
 
 #[test]
+fn root_resolves_registered_consumer_neutral_package() {
+    let source = tempfile::tempdir().expect("source");
+    let data = tempfile::tempdir().expect("data");
+    let _g = DataDirGuard::new(data.path());
+    std::fs::create_dir_all(source.path().join("lib")).expect("package lib");
+
+    let lua = lua_with_pm();
+    let root: String = lua
+        .load(format!(
+            r#"
+            local pm = require("nefor-pm")
+            pm.register({{ {{ name = "nefor-mag", dir = "{}" }} }})
+            return pm.root("nefor-mag")
+            "#,
+            source.path().display()
+        ))
+        .eval()
+        .expect("registered package root");
+    assert_eq!(root, source.path().display().to_string());
+    assert!(!data.path().join("plugins").exists());
+}
+
+#[test]
+fn root_resolves_dir_override_and_existing_managed_package() {
+    let data = tempfile::tempdir().expect("data");
+    let source = tempfile::tempdir().expect("source");
+    let _g = DataDirGuard::new(data.path());
+    std::fs::create_dir_all(source.path().join("book")).expect("source package");
+
+    let lua = lua_with_pm();
+    let override_root: String = lua
+        .load(format!(
+            r#"
+            local pm = require("nefor-pm")
+            pm.install({{ {{ name = "custom-mag", dir = "{}" }} }})
+            return pm.root("custom-mag")
+            "#,
+            source.path().display()
+        ))
+        .eval()
+        .expect("dir override root");
+    assert_eq!(override_root, source.path().display().to_string());
+
+    let materialized = data.path().join("plugins").join("existing-data");
+    std::fs::create_dir_all(materialized.join("lib")).expect("managed data package");
+    let later_process = lua_with_pm();
+    let existing_root: String = later_process
+        .load(r#"return require("nefor-pm").root("existing-data")"#)
+        .eval()
+        .expect("existing managed root");
+    assert_eq!(existing_root, materialized.display().to_string());
+}
+
+#[test]
 fn immutable_registration_accepts_namespace_without_root_module() {
     let source = tempfile::tempdir().expect("source");
     let data = tempfile::tempdir().expect("data");

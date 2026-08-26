@@ -39,6 +39,12 @@ test -f "$dist_dir/share/nefor/runtime/lua/libs/agentic-loop/init.lua"
 test -f "$dist_dir/share/nefor/runtime/plugins/nefor-tui/lua/init.lua"
 test -f "$dist_dir/share/nefor/runtime/plugins/mag/lua/mag-kernel/init.lua"
 test -f "$dist_dir/share/nefor/runtime/examples/nefor-agent/agentic-loop/lead-turn.mag"
+test -f "$dist_dir/share/nefor/runtime/mag/lib/nefor/actors.mag"
+test -f "$dist_dir/share/nefor/runtime/mag/book/README.md"
+test -f "$dist_dir/share/nefor/runtime/mag/book/01. core/00. MAG in Five Minutes.md"
+test -f "$dist_dir/share/nefor/runtime/mag/book/02. nefor/00. Nefor MAG in Five Minutes.md"
+test ! -e "$dist_dir/share/nefor/runtime/examples/nefor-agent/mag/lib/nefor/actors.mag"
+diff -qr "$repo_root/mag" "$dist_dir/share/nefor/runtime/mag"
 if rg -n 'plugins\.manifest|resolve_plugin_root|PluginRoot|NEFOR_PLUGIN_DIR' "$repo_root/engine/src"; then
   echo "engine must not consume distribution inventory or discover plugin roots" >&2
   exit 1

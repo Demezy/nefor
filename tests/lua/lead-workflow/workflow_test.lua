@@ -10,7 +10,6 @@ local sessions = require("libs.sessions")
 local sessions_root = nefor.fs.data_root() .. "/sessions"
 sessions.configure { root = sessions_root }
 require("libs.mag-workspace").configure {
-  library_dir = "examples/nefor-agent/mag/lib",
   sessions_root = sessions_root,
 }
 
@@ -166,8 +165,8 @@ do
     "shared mag-eval schema preserves worker dependency waiting without assuming a surface")
   assert_true(await_schema.description:find("waits indefinitely", 1, true) ~= nil,
     "await-run canonically warns about persistent foreground processes")
-  assert_true(string.find(mag_schema.description, "lib/nefor-mag-in-five-minutes.md", 1, true) ~= nil,
-    "the MAG schema points to the injected canonical guide")
+  assert_true(string.find(mag_schema.description, "ambient core and Nefor five-minute guides", 1, true) ~= nil,
+    "the MAG schema points to the ambient canonical guides")
   assert_true(string.find(mag_schema.description, "lib/nefor/*.mag", 1, true) == nil,
     "the MAG schema does not point at unreadable library implementation files")
   assert_true(string.find(mag_schema.description, "(require \"...\")", 1, true) ~= nil,
@@ -599,12 +598,28 @@ end
 -- overlay resolution, execute forwarding, and active-run metadata.
 do
   fresh()
-  lw.configure({ agent_defaults = {
-    provider = "chatgpt",
-    model = "general-model",
-    reasoning_effort = "medium",
-    system = "universal composed prompt",
-  } })
+  local mag_root = _repo_root .. "/mag"
+  local context = require("libs.mag-context").new {
+    guides = {
+      { title = "MAG in Five Minutes", path = mag_root .. "/book/01. core/00. MAG in Five Minutes.md" },
+      { title = "Nefor MAG in Five Minutes", path = mag_root .. "/book/02. nefor/00. Nefor MAG in Five Minutes.md" },
+    },
+    book_path = mag_root .. "/book/README.md",
+    module_roots = {
+      { name = "nefor-mag", path = mag_root .. "/lib" },
+      { name = "config", path = _repo_root .. "/examples/nefor-agent/mag/lib" },
+    },
+    trailing_sections = { "NESTED TRAILING CONTEXT" },
+  }
+  lw.configure({
+    ambient_context = context,
+    agent_defaults = {
+      provider = "chatgpt",
+      model = "general-model",
+      reasoning_effort = "medium",
+      system = "universal composed prompt",
+    },
+  })
   write_mag_file("system-overlay-write", "system-overlay.mag", READ_ONLY_MAG)
   _test.calls_clear()
   execute_mag("system-overlay-execute", "system-overlay.mag")
@@ -628,9 +643,21 @@ do
   assert_eq(patch.model, "general-model",
     "structured-output ready agent receives default model")
   assert_eq(patch.reasoning_effort, "medium", "ready agent receives default effort")
-  assert_eq(patch.system,
-    "universal composed prompt\n\n---\n\nAnswer the task.",
-    "the runtime composes the shared base with the delegated position")
+  local system = patch.system
+  local base_at = assert(system:find("universal composed prompt", 1, true))
+  local position_at = assert(system:find("Answer the task.", 1, true))
+  local core_at = assert(system:find("# MAG in Five Minutes", 1, true))
+  local nefor_at = assert(system:find("# Nefor MAG in Five Minutes", 1, true))
+  local book_at = assert(system:find("Full MAG Book:", 1, true))
+  local inventory_at = assert(system:find("Available MAG modules:", 1, true))
+  local trailing_at = assert(system:find("NESTED TRAILING CONTEXT", 1, true))
+  assert_true(base_at < position_at and position_at < core_at and core_at < nefor_at
+      and nefor_at < book_at and book_at < inventory_at and inventory_at < trailing_at,
+    "nested agents receive authored system first, then both guides, references, inventory, and trailing context")
+  assert_true(system:find(mag_root .. "/book/README.md", 1, true) ~= nil,
+    "nested agents receive the resolved full-book path")
+  assert_true(system:find("nefor.graph", 1, true) ~= nil,
+    "nested agents receive the canonical module inventory")
   local run = lw._internals.state.active_runs[exec.body.run_id]
   assert_eq(run.nodes["worker.llm"].reasoner, "nefor.factory.structured-output",
     "run metadata uses the artifact factory identity")
@@ -661,6 +688,13 @@ end
 do
   fresh()
   write_mag_file("roots-default-write", "roots-default.mag", READ_ONLY_MAG)
+  local workspace = require("libs.mag-workspace").workspace_dir(sessions.current_id())
+  assert_true(nefor.fs.exists(workspace .. "/lib"),
+    "session workspace keeps a writable local module directory")
+  assert_true(not nefor.fs.exists(workspace .. "/lib/nefor/actors.mag"),
+    "canonical MAG libraries are not copied into the session")
+  assert_true(not nefor.fs.exists(workspace .. "/book/README.md"),
+    "the MAG Book is not copied into the session")
   _test.calls_clear()
   execute_mag("roots-default-execute", "roots-default.mag")
   local default_load = latest_mag_load()

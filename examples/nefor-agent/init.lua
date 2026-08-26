@@ -36,7 +36,14 @@ pm.register({
   { name = "chatgpt-provider", dir = NEFOR_ROOT .. "/plugins/chatgpt-provider/lua/chatgpt-provider" },
   { name = "tool-gate", dir = NEFOR_ROOT .. "/plugins/tool-gate/lua/tool-gate" },
   { name = "nefor-tui", dir = NEFOR_ROOT .. "/plugins/nefor-tui/lua" },
+  { name = "nefor-mag", dir = NEFOR_ROOT .. "/mag" },
 })
+
+local MAG_PACKAGE_ROOT = pm.root("nefor-mag")
+local MAG_MODULE_ROOTS = {
+  MAG_PACKAGE_ROOT .. "/lib",
+  STARTER_ROOT .. "/mag/lib",
+}
 
 local ncp            = require("core.ncp")
 local actor          = require("core.actor")
@@ -78,7 +85,6 @@ end
 
 actor.install()
 require("libs.mag-workspace").configure {
-  library_dir = STARTER_ROOT .. "/mag/lib",
   sessions_root = sessions_root,
 }
 -- Defense-in-depth fallback for the synchronous `replay_window.set`
@@ -130,12 +136,32 @@ local function build_runtime_context()
   return "\n\n---\n\n# Runtime Context\n\n" .. table.concat(parts, "\n\n")
 end
 
+local mag_context = require("libs.mag-context").new {
+  guides = {
+    {
+      title = "MAG in Five Minutes",
+      path = MAG_PACKAGE_ROOT .. "/book/01. core/00. MAG in Five Minutes.md",
+    },
+    {
+      title = "Nefor MAG in Five Minutes",
+      path = MAG_PACKAGE_ROOT .. "/book/02. nefor/00. Nefor MAG in Five Minutes.md",
+    },
+  },
+  book_path = MAG_PACKAGE_ROOT .. "/book/README.md",
+  module_roots = {
+    { name = "nefor-mag", path = MAG_PACKAGE_ROOT .. "/lib" },
+    { name = "config", path = STARTER_ROOT .. "/mag/lib" },
+  },
+  trailing_sections = { build_runtime_context() },
+}
+
 local agentic_loop = require("libs.agentic-loop")
 agentic_loop.configure {
   provider         = cfg.default_provider,
   model            = cfg.default_model,
   reasoning_effort = cfg.lead_reasoning_effort,
-  system           = lead_role.LEAD_SYSTEM_PROMPT .. build_runtime_context(),
+  system           = lead_role.LEAD_SYSTEM_PROMPT,
+  ambient_context  = mag_context,
   -- The lead's turn-program (config-as-program): each user message spawns
   -- this constellation on the mag kernel. The lead's tool surface is
   -- authored INSIDE the program (:tools on the agent config); the system
@@ -143,6 +169,7 @@ agentic_loop.configure {
   lead_program = {
     source_dir = STARTER_ROOT,
     entry      = "agentic-loop/lead-turn.mag",
+    module_roots = MAG_MODULE_ROOTS,
   },
 }
 actor.spawn(agentic_loop)
@@ -256,7 +283,18 @@ tool_gate_argv[#tool_gate_argv + 1] = cfg.tool_gate.default_action
 -- its bus subscription is live when tool-gate.hello arrives —
 -- otherwise the advertise is missed and the lead model gets "no such
 -- tool" at runtime.
-actor.spawn(require("libs.lead-workflow"))
+local lead_workflow = require("libs.lead-workflow")
+lead_workflow.configure {
+  dependency_module_roots = MAG_MODULE_ROOTS,
+  ambient_context = mag_context,
+  agent_defaults = {
+    provider = cfg.default_provider,
+    model = cfg.default_model,
+    reasoning_effort = cfg.default_reasoning_effort,
+    system = lead_role.WORKER_SYSTEM_PROMPT,
+  },
+}
+actor.spawn(lead_workflow)
 
 -- read-only-tools advertises the composition-selected Lua read tools.
 -- basic-tools is the canonical shipped search_text owner. Same ordering

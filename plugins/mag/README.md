@@ -41,7 +41,7 @@ carry a kernel copy. Resolution order, highest precedence first:
 
 ## Docs
 
-- [MAG inside Nefor](<../../crates/nefor-mag/docs/book/02. nefor/README.md>) — MAG as applied inside Nefor
+- [MAG inside Nefor](<../../mag/book/02. nefor/README.md>) — MAG as applied inside Nefor
 - [../../docs/architecture.md](../../docs/architecture.md) — the four execution layers and what lives where
 - [docs/actor-model.md](docs/actor-model.md) — actors, factories, lifecycle, contracts, signals
 - [docs/ir.md](docs/ir.md) — graph modifications, the fold, firing, rules, application semantics

@@ -69,7 +69,17 @@ pm.install({
     path = "plugins/tool-gate/lua/tool-gate/",
     dir  = PROJECT_ROOT .. "/plugins/tool-gate/lua/tool-gate",
   },
+
 })
+pm.register({
+  { name = "nefor-mag", dir = PROJECT_ROOT .. "/mag" },
+})
+
+local MAG_PACKAGE_ROOT = pm.root("nefor-mag")
+local MAG_MODULE_ROOTS = {
+  MAG_PACKAGE_ROOT .. "/lib",
+  STARTER_ROOT .. "/mag/lib",
+}
 
 local ncp      = require("core.ncp")
 local actor    = require("core.actor")
@@ -94,7 +104,6 @@ actor.install()
 -- The CLI config lives beside starter rather than containing its own MAG
 -- library tree. Seed session workspaces from the shared starter library.
 require("libs.mag-workspace").configure {
-  library_dir = STARTER_ROOT .. "/mag/lib",
   sessions_root = sessions_root,
 }
 
@@ -130,17 +139,31 @@ require("libs.generic-provider").declare()
 require("libs.generic-tool").declare()
 
 local agentic_loop = require("libs.agentic-loop")
+local cli_system = [[
+You are a helpful assistant. For decomposition tasks (multiple independent sub-questions whose answers roll up into one), use the `mag` tool: write a MAG program to the workspace with action='write', then run it with action='execute'. The run's result arrives automatically as a follow-up turn — after executing, stop and wait for it. For simple chat turns, just answer directly.
+]]
+local mag_context = require("libs.mag-context").new {
+  guides = {
+    { title = "MAG in Five Minutes", path = MAG_PACKAGE_ROOT .. "/book/01. core/00. MAG in Five Minutes.md" },
+    { title = "Nefor MAG in Five Minutes", path = MAG_PACKAGE_ROOT .. "/book/02. nefor/00. Nefor MAG in Five Minutes.md" },
+  },
+  book_path = MAG_PACKAGE_ROOT .. "/book/README.md",
+  module_roots = {
+    { name = "nefor-mag", path = MAG_PACKAGE_ROOT .. "/lib" },
+    { name = "config", path = STARTER_ROOT .. "/mag/lib" },
+  },
+}
 agentic_loop.configure {
   provider = cfg.provider.name,
   model    = cfg.provider.model,
-  system   = [[
-You are a helpful assistant. For decomposition tasks (multiple independent sub-questions whose answers roll up into one), use the `mag` tool: write a MAG program to the workspace with action='write', then run it with action='execute'. The run's result arrives automatically as a follow-up turn — after executing, stop and wait for it. For simple chat turns, just answer directly.
-]],
+  system   = cli_system,
+  ambient_context = mag_context,
   -- The lead's turn-program ships in examples/nefor-agent/ (the CLI config reuses the
   -- starter modules; the program lives beside them).
   lead_program = {
     source_dir = STARTER_ROOT,
     entry      = "agentic-loop/lead-turn.mag",
+    module_roots = MAG_MODULE_ROOTS,
   },
 }
 actor.spawn(agentic_loop)
@@ -210,7 +233,18 @@ tool_gate_argv[#tool_gate_argv + 1] = cfg.tool_gate.default_action
 -- Mirrors examples/nefor-agent/init.lua: registered BEFORE tool-gate's spawn so its
 -- bus subscription is live when tool-gate.hello arrives — otherwise
 -- the advertise is missed and the lead gets "no such tool" at runtime.
-actor.spawn(require("libs.lead-workflow"))
+local lead_workflow = require("libs.lead-workflow")
+lead_workflow.configure {
+  dependency_module_roots = MAG_MODULE_ROOTS,
+  ambient_context = mag_context,
+  agent_defaults = {
+    provider = cfg.provider.name,
+    model = cfg.provider.model,
+    reasoning_effort = "medium",
+    system = cli_system,
+  },
+}
+actor.spawn(lead_workflow)
 
 actor.spawn(tools.gate_spec("tool-gate", tool_gate_argv))
 

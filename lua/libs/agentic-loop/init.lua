@@ -63,6 +63,7 @@ local state = {
     model            = nil,
     reasoning_effort = nil,
     system           = nil,
+    ambient_context  = nil,
   },
 
   -- The shipped turn-program. `source_dir`/`entry` are composition-owned
@@ -104,15 +105,9 @@ local state = {
   tool_end_observers     = {},  ---@type table
   complete_observers     = {},  ---@type table
 
-  -- Ambient MAG context recorded once in the conversation's system message so the
-  -- lead can start writing MAG without a discovery round-trip. `static`
-  -- (inventory + patterns + types + template signatures + prompt roster)
-  -- is read once from the config lib dir and cached process-wide; the
-  -- `workspace` dir is per-session. `static_builds` counts real (re)reads
-  -- so a test can prove the cache holds across turns.
+  -- The context description is composition-owned and immutable; only the
+  -- writable workspace path is session-specific.
   mag_context = {
-    static            = nil,  ---@type string|nil
-    static_builds     = 0,    ---@type number
     workspace         = nil,  ---@type string|nil
     workspace_session = nil,  ---@type string|nil
   },
@@ -224,104 +219,11 @@ local function fire_observers(list, ...)
 end
 
 -- ── ambient MAG context ───────────────────────────────────────────────
---
--- The lead used to pay a `mag-env` round-trip (plus reading the Nefor MAG guide)
--- before writing any MAG. That context is now ambient: appended to the
--- conversation's canonical system message. Contents: the session workspace
--- dir, the seeded
--- lib/ inventory, the canonical Nefor MAG guide inlined,
--- and the prompt roster.
---
--- Seam: the MAG workspace is lead-workflow's domain, but its path
--- resolution and seeding live in the shared `libs.mag-workspace` module
--- (libs.mag-workspace) — required here as a composition-layer helper, not a reach
--- into lead-workflow's internals.
 
--- The config dir that holds the turn-program and the mag/lib library. Same
--- resolution as lead_program_source_dir (defined below for the load path);
--- inlined here to stay independent of definition order.
 local function mag_config_dir()
   local sd = state.lead_program.source_dir
   if type(sd) == "string" and #sd > 0 then return sd end
   return rawget(_G, "NEFOR_CONFIG_DIR") or os.getenv("NEFOR_CONFIG_DIR") or "."
-end
-
-local function read_config_file(path)
-  if not (nefor.fs and type(nefor.fs.read_file) == "function") then return nil end
-  local ok, res = pcall(nefor.fs.read_file, path)
-  if ok and type(res) == "table" and res.ok and type(res.content) == "string" then
-    return res.content
-  end
-  return nil
-end
-
--- Sorted relative inventory of the config lib dir (top-level files plus one
--- level of subdirectories, e.g. prompts/*).
-local function lib_inventory(lib_dir)
-  if not (nefor.fs and type(nefor.fs.list_dir) == "function") then return {} end
-  local rels = {}
-  local top = nefor.fs.list_dir(lib_dir)
-  for _, e in ipairs(top or {}) do
-    if e.is_dir then
-      local sub = nefor.fs.list_dir(lib_dir .. "/" .. e.name)
-      for _, s in ipairs(sub or {}) do
-        if not s.is_dir then rels[#rels + 1] = e.name .. "/" .. s.name end
-      end
-    else
-      rels[#rels + 1] = e.name
-    end
-  end
-  table.sort(rels)
-  return rels
-end
-
--- Names (no extension) of the prompt roster under lib/prompts/.
-local function prompt_names(lib_dir)
-  if not (nefor.fs and type(nefor.fs.list_dir) == "function") then return {} end
-  local names = {}
-  local entries = nefor.fs.list_dir(lib_dir .. "/prompts")
-  for _, e in ipairs(entries or {}) do
-    if not e.is_dir then names[#names + 1] = (e.name:gsub("%.md$", "")) end
-  end
-  table.sort(names)
-  return names
-end
-
--- Build the static (config-derived) section. Returns (text, complete) where
--- `complete` is true when the guide was readable — an incomplete build is
--- not cached, so a later turn (once NEFOR_CONFIG_DIR resolves) rebuilds it.
-local function build_mag_static_section(config_dir)
-  local lib_dir = config_dir .. "/mag/lib"
-  local guide = read_config_file(lib_dir .. "/nefor-mag-in-five-minutes.md")
-
-  local parts = {}
-  parts[#parts + 1] = "The session MAG workspace is seeded and ready. Paths you pass to " ..
-    "`mag` are relative to it. The canonical Nefor MAG guide is inlined below; " ..
-    "the composition provides ready agent primitives."
-  parts[#parts + 1] = ""
-  parts[#parts + 1] = "lib/ inventory:"
-  for _, rel in ipairs(lib_inventory(lib_dir)) do parts[#parts + 1] = "  " .. rel end
-  parts[#parts + 1] = ""
-  parts[#parts + 1] = "### lib/nefor-mag-in-five-minutes.md"
-  parts[#parts + 1] = guide or "(unavailable)"
-  local names = prompt_names(lib_dir)
-  if #names > 0 then
-    parts[#parts + 1] = ""
-    parts[#parts + 1] = "### lib/prompts/ (reusable task steering fragments)"
-    parts[#parts + 1] = "  " .. table.concat(names, ", ")
-  end
-
-  return table.concat(parts, "\n"), (guide ~= nil)
-end
-
--- Cached static section. Read once; cache only a complete build.
-local function mag_static_section(config_dir)
-  local mc = state.mag_context
-  if type(mc.static) == "string" then return mc.static end
-  local text, complete = build_mag_static_section(config_dir)
-  mc.static_builds = mc.static_builds + 1
-  if complete then mc.static = text end
-  return text
 end
 
 -- The session workspace dir, resolved the way the mag tool does (seed +
@@ -347,31 +249,15 @@ end
 
 -- The full `## MAG workspace` block, or nil when there is no active session
 -- to anchor the workspace dir.
-local function mag_workspace_block()
+local function system_with_mag_context(base)
+  local context = state.config.ambient_context
+  if type(context) ~= "table" or type(context.compose) ~= "function" then return base end
   local sessions = require("libs.sessions")
   local session_id = sessions.current_id()
-  if type(session_id) ~= "string" or session_id == "" then return nil end
+  if type(session_id) ~= "string" or session_id == "" then return base end
   local config_dir = mag_config_dir()
   local ws = mag_workspace_dir(session_id, config_dir)
-  local lines = {
-    "## MAG workspace",
-    "",
-    "workspace dir: " .. tostring(ws),
-    "",
-    mag_static_section(config_dir),
-  }
-  return table.concat(lines, "\n")
-end
-
--- Append the ambient MAG context to the conversation's system prompt. The
--- block is additive: an empty base system prompt still carries the context.
-local function system_with_mag_context(base)
-  local block = mag_workspace_block()
-  if type(block) ~= "string" then return base end
-  if type(base) == "string" and #base > 0 then
-    return base .. "\n\n" .. block
-  end
-  return block
+  return context:compose(base, { workspace = ws })
 end
 
 -- Seed system content once into the append-only conversation. Provider actors
@@ -1501,6 +1387,13 @@ function M.configure(opts)
   if type(opts.system) == "string" and #opts.system > 0 then
     state.config.system = opts.system
   end
+  if opts.ambient_context ~= nil then
+    if type(opts.ambient_context) ~= "table"
+        or type(opts.ambient_context.compose) ~= "function" then
+      error("configure: ambient_context must provide compose(base, opts)")
+    end
+    state.config.ambient_context = opts.ambient_context
+  end
   -- lead_program: where the shipped turn-program lives. `source_dir`
   -- defaults to the config dir (NEFOR_CONFIG_DIR); compositions whose
   -- config dir is not the starter (cli-config) pass it explicitly.
@@ -1712,6 +1605,7 @@ M._internals  = {
       model = nil,
       reasoning_effort = nil,
       system = nil,
+      ambient_context = nil,
     }
     state.lead_program = {
       source_dir = nil,
@@ -1741,8 +1635,6 @@ M._internals  = {
     state.tool_end_observers = {}
     state.complete_observers = {}
     state.mag_context = {
-      static = nil,
-      static_builds = 0,
       workspace = nil,
       workspace_session = nil,
     }

@@ -21,6 +21,9 @@ local json = nefor.json
 -- workspace dir (mirrors a booted session in the live runtime). Set once —
 -- the sessions module is separate state the loop's reset() doesn't touch.
 require("libs.sessions")._internals.state.current_session_id = "wf-mag-session"
+require("libs.mag-workspace").configure {
+  sessions_root = nefor.fs.data_root() .. "/sessions",
+}
 
 local function assert_eq(actual, expected, msg)
   if actual ~= expected then
@@ -280,12 +283,27 @@ local function fresh_loop()
   manager_sequence = 0
   manager_conversation_id = nil
   agentic_loop._internals.reset()
+  local mag_root = _starter_dir .. "/../../mag"
+  local context = require("libs.mag-context").new {
+    guides = {
+      { title = "MAG in Five Minutes", path = mag_root .. "/book/01. core/00. MAG in Five Minutes.md" },
+      { title = "Nefor MAG in Five Minutes", path = mag_root .. "/book/02. nefor/00. Nefor MAG in Five Minutes.md" },
+    },
+    book_path = mag_root .. "/book/README.md",
+    module_roots = {
+      { name = "nefor-mag", path = mag_root .. "/lib" },
+      { name = "config", path = _starter_dir .. "/mag/lib" },
+    },
+    trailing_sections = { "TRAILING RUNTIME MARKER" },
+  }
   agentic_loop.configure {
     provider = "mock", model = "test-model",
     reasoning_effort = "high", system = "lead system prompt",
-    -- Point the lead-program / mag-lib source dir at the real starter tree
-    -- so the ambient MAG-context block can read mag/lib/*.
-    lead_program = { source_dir = _starter_dir },
+    ambient_context = context,
+    lead_program = {
+      source_dir = _starter_dir,
+      module_roots = { mag_root .. "/lib", _starter_dir .. "/mag/lib" },
+    },
   }
   _test.set_plugins({ "mock", "mag", "nefor-tui" })
   _test.calls_clear()
@@ -317,8 +335,24 @@ local function project_pending_conversation(calls)
       and type(system_chunk.chunk.data) == "string"
       and system_chunk.chunk.data:find("lead system prompt", 1, true),
     "canonical system message carries the configured prompt")
-  assert(system_chunk.chunk.data:find("## MAG workspace", 1, true),
+  assert(system_chunk.chunk.data:find("# MAG workspace", 1, true),
     "canonical system message carries ambient MAG context")
+  local text = system_chunk.chunk.data
+  local base_at = assert(text:find("lead system prompt", 1, true))
+  local core_at = assert(text:find("# MAG in Five Minutes", 1, true))
+  local nefor_at = assert(text:find("# Nefor MAG in Five Minutes", 1, true))
+  local book_at = assert(text:find("Full MAG Book:", 1, true))
+  local inventory_at = assert(text:find("Available MAG modules:", 1, true))
+  local runtime_at = assert(text:find("TRAILING RUNTIME MARKER", 1, true))
+  assert(base_at < core_at and core_at < nefor_at and nefor_at < book_at
+      and book_at < inventory_at and inventory_at < runtime_at,
+    "system, guides, references/inventory, and trailing ambient context keep exact order")
+  assert(text:find("nefor.graph", 1, true) and text:find("nefor-mag:", 1, true),
+    "ambient inventory exposes canonical package modules")
+  local _, core_titles = text:gsub("# MAG in Five Minutes", "")
+  local _, nefor_titles = text:gsub("# Nefor MAG in Five Minutes", "")
+  assert_eq(core_titles, 1, "authored core guide heading is not duplicated")
+  assert_eq(nefor_titles, 1, "authored Nefor guide heading is not duplicated")
   manager_delta({
     kind = "message_completed",
     message = { id = system_completed.message_id, role = "system", content = {} },
@@ -326,14 +360,16 @@ local function project_pending_conversation(calls)
   return true
 end
 
--- The legacy/default composition searches only the config-owned library.
+-- The standard composition explicitly selects canonical and config roots.
 do
   fresh_loop()
   send_to_loop("nefor-tui", { kind = "chat.input.submit", text = "default roots" })
   local load = find_kind(decode_calls(), "mag.load")
   assert(load ~= nil, "default-root submit emits mag.load")
-  assert_list_eq(load.body.module_roots, { _starter_dir .. "/mag/lib" },
-    "default module roots")
+  assert_list_eq(load.body.module_roots, {
+    _starter_dir .. "/../../mag/lib",
+    _starter_dir .. "/mag/lib",
+  }, "standard module roots")
 end
 
 -- A composition can supply a complete ordered search path. configure copies
@@ -828,9 +864,8 @@ do
     "the next turn reconstructs the tool transcript through the provider")
 end
 
--- (ambient MAG context caching) the static section (inventory + canonical
--- patterns + prompt roster) is read once and reused
--- across turns; only the per-session workspace dir varies.
+-- Ambient context is recorded once in the canonical system message and never
+-- duplicated into per-turn actor overlays.
 do
   fresh_loop()
   local exec1 = begin_turn("first ambient")
@@ -843,8 +878,6 @@ do
   local exec2 = begin_turn("second ambient")
   assert_eq(exec2.body.params_overlay["lead.llm"].system, nil,
     "turn 2 does not duplicate the canonical system message")
-  assert_eq(agentic_loop._internals.state.mag_context.static_builds, 1,
-    "the static MAG section is read from disk once and cached across turns")
 end
 
 -- A non-streaming provider still reaches the TUI through the canonical

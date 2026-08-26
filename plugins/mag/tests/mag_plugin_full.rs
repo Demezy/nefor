@@ -42,7 +42,10 @@ pub mod kernel {
                 &source_dir,
                 "main.mag",
                 serde_json::json!({"factory_contracts": contracts}),
-                &[manifest.join("../../examples/nefor-agent/mag/lib")],
+                &[
+                    manifest.join("../../mag/lib"),
+                    manifest.join("../../examples/nefor-agent/mag/lib"),
+                ],
             )
             .expect("compile MAG test program");
             let artifact =
@@ -1165,7 +1168,8 @@ mod tests {
 "#,
         )
         .expect("program");
-        let module_root =
+        let module_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
+        let config_module_root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/nefor-agent/mag/lib");
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let host = LuaHost::load_kernel(
@@ -1176,7 +1180,7 @@ mod tests {
         let body = serde_json::json!({
             "id": "load-malformed",
             "source_dir": root,
-            "module_roots": [module_root],
+            "module_roots": [module_root, config_module_root],
             "entry": "main.mag"
         });
         let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
@@ -1296,7 +1300,8 @@ mod tests {
 "#,
         )
         .expect("program");
-        let module_root =
+        let module_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
+        let config_module_root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/nefor-agent/mag/lib");
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let host = LuaHost::load_kernel(
@@ -1307,7 +1312,7 @@ mod tests {
         let body = serde_json::json!({
             "id": "load-valid",
             "source_dir": root,
-            "module_roots": [module_root],
+            "module_roots": [module_root, config_module_root],
             "entry": "main.mag"
         });
         let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
@@ -1411,13 +1416,14 @@ mod tests {
             "#,
         )
         .expect("program");
-        let module_root =
+        let module_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
+        let config_module_root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/nefor-agent/mag/lib");
         let program = nefor_mag::load_with_inputs_and_module_roots(
             &root,
             "main.mag",
             serde_json::json!({}),
-            &[root.clone(), module_root],
+            &[root.clone(), module_root, config_module_root],
         )
         .expect("load program");
         let artifact = program.artifact.clone();

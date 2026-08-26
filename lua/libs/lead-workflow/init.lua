@@ -138,6 +138,7 @@ local run_registry = RunRegistry.new({
 
 local dependency_module_roots = {}
 local agent_defaults = nil
+local ambient_context = nil
 
 local SYNC_COMPLETION_GRACE_MS = 3000
 local TERMINATION_CONFIRM_TIMEOUT_MS = 30000
@@ -420,11 +421,14 @@ local function result_actor(modification)
   return result.actor, nil
 end
 
-local function compose_agent_system(base, positional_overlay)
+local function compose_agent_system(base, positional_overlay, session_id)
+  local authored = base
   if type(positional_overlay) == "string" and positional_overlay:match("%S") then
-    return base .. "\n\n---\n\n" .. positional_overlay
+    authored = base .. "\n\n---\n\n" .. positional_overlay
   end
-  return base
+  if ambient_context == nil then return authored end
+  local ws = mag.workspace_dir(session_id)
+  return ambient_context:compose(authored, { workspace = ws })
 end
 
 local function is_llm_actor(actor)
@@ -444,7 +448,7 @@ end
 -- may select an explicit profile or reasoning effort; composition-provided
 -- ready agents omit both and receive the configured defaults. The runtime
 -- prepends the shared base prompt to each actor's positional system overlay.
-local function resolve_agent_params(actors)
+local function resolve_agent_params(actors, session_id)
   local overlay = {}
   local profiles
   local profiles_err
@@ -492,7 +496,8 @@ local function resolve_agent_params(actors)
     if is_llm_actor(actor)
         and agent_defaults ~= nil then
       overlay[actor.id] = overlay[actor.id] or {}
-      overlay[actor.id].system = compose_agent_system(agent_defaults.system, params.system)
+      overlay[actor.id].system = compose_agent_system(
+        agent_defaults.system, params.system, session_id)
     end
   end
   return overlay, nil
@@ -1756,8 +1761,8 @@ local function lead_workflow_tool_schemas()
         "an output such as (type-tag nefor.contracts.TextAnswer). Exactly one " ..
         "concrete output<T> identity node marks the result boundary. Graph " ..
         "operations are pure, retrieve no stored graph, and never mutate a live run. Agent loops are unbounded; " ..
-        "stop early via interrupt/kill. The injected lib/nefor-mag-in-five-minutes.md is the " ..
-        "canonical complete example: use literal (require \"...\") forms and " ..
+        "stop early via interrupt/kill. The ambient core and Nefor five-minute guides are " ..
+        "the canonical complete examples: use literal (require \"...\") forms and " ..
         "never copy historical session files or use removed import/bare-helper syntax. " ..
         "For a one-off shell expression whose result you just need back, " ..
         "use mag-eval instead — no file, no workspace ceremony.",
@@ -1944,7 +1949,7 @@ submit_loaded_run = function(pending, body, error_prefix)
     emit_tool_result_err(pending.firing_id, error_prefix .. ": " .. result_err)
     return false
   end
-  local overlay, params_err = resolve_agent_params(actors)
+  local overlay, params_err = resolve_agent_params(actors, pending.session_id)
   if not overlay then
     emit_tool_result_err(pending.firing_id, error_prefix .. ": " .. params_err)
     return false
@@ -2435,6 +2440,7 @@ local M = {
       end
       dependency_module_roots = {}
       agent_defaults = nil
+      ambient_context = nil
       mag_eval._internals.reset()
       advertised = false
     end,
@@ -2450,6 +2456,15 @@ function M.configure(opts)
   if roots == nil then roots = {} end
   validate_dependency_module_roots(roots)
   dependency_module_roots = copy_roots(roots)
+  if opts.ambient_context ~= nil then
+    if type(opts.ambient_context) ~= "table"
+        or type(opts.ambient_context.compose) ~= "function" then
+      error("lead-workflow: ambient_context must provide compose(base, opts)", 2)
+    end
+    ambient_context = opts.ambient_context
+  else
+    ambient_context = nil
+  end
   local defaults = opts.agent_defaults
   if defaults ~= nil then
     if type(defaults) ~= "table" then

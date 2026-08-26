@@ -13,4 +13,4 @@ Nefor is what we use MAG for today, not a boundary on what MAG can be used for.
 Future applications can sit beside it without changing the core language path.
 
 Complete examples live in
-[`crates/nefor-mag/examples/book`](../../examples/book/).
+[`mag/examples`](../examples/).
