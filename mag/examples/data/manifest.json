@@ -1,0 +1,4 @@
+{
+  "project": "MAG Book",
+  "chapters": ["values", "types", "functions", "modules"]
+}

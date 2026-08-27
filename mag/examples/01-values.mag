@@ -5,7 +5,10 @@
               :string "MAG"
               :list [1 2 3]
               :map (as (Map String Int) {:one 1 :two 2})})
+
+;; Collection transforms return new values; numbers remains [1 2 3].
 (let numbers [1 2 3])
 (let copied (map (fn [[value Int]] -> Int value) numbers))
+
 (artifact {:record record
      :copied copied})

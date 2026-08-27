@@ -1,7 +1,14 @@
 (require "modules.labels")
 
+;; Required bindings live in the module's qualified namespace.
 (let title modules.labels.title)
+
+;; File inputs become immutable values in the loaded source snapshot.
 (let source (read "data/note.md"))
+(let manifest (read-json "data/manifest.json"))
+(let project (get manifest "project"))
+
 (artifact {:title title
      :source source
+     :project project
      :label (modules.labels.number-label 4)})

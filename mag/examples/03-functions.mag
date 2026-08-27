@@ -1,12 +1,11 @@
-(type Box [T] {:value T})
 (type Entry [K V] {:key K :value V})
 
-(let box (fn [T] [[value T]] -> (Box T)
-  (as (Box T) {:value value})))
-
+;; Both type parameters are inferred from a call such as
+;; (entry "answer" 42), which returns Entry String Int.
 (let entry (fn [K V] [[key K] [value V]] -> (Entry K V)
   (as (Entry K V) {:key key :value value})))
 
+;; A regular helper can itself be passed into a higher-order operation.
 (let label (fn [[name String] [value Int]] -> {:name String :value Int}
   {:name name :value value}))
 
@@ -15,6 +14,6 @@
                 (fn [[index Int] [name String]] -> {:name String :value Int}
                   (label name index))
                 names))
-(artifact {:boxed (box "typed")
-           :entry (entry "answer" 42)
+
+(artifact {:entry (entry "answer" 42)
            :entries entries})

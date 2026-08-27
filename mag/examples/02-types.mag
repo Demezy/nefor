@@ -4,11 +4,14 @@
 (type Decision (| Accepted Rejected))
 (type Entry [K V] {:key K :value V})
 
+;; Functions return the declared sum while selecting one concrete arm.
 (let decide (fn [[score Score]] -> Decision
   (if (get score "accepted")
     (as Decision (as Accepted {:score score}))
     (as Decision
       (as Rejected {:score score :reason "score was not accepted"})))))
 
+;; Entry demonstrates one reusable type with two independent parameters: this
+;; value instantiates it as Entry String Int.
 (artifact {:decision (decide (as Score {:name "example" :accepted true}))
            :entry (as (Entry String Int) {:key "answer" :value 42})})
