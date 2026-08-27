@@ -11,13 +11,11 @@
                   graph
                   (host-input "factory_contracts"
                     (type-tag (List nefor.graph.FactoryContract)))))
-  (let checked-tag (get checked "tag"))
-  (if (= checked-tag "core.validated.Valid")
-      (artifact
-        (nefor.graph.lower
-          (get (as (core.validated.Valid nefor.graph.Graph) checked)
-               "value")))
-      (fail checked))))
+  (match checked
+    [(core.validated.Valid nefor.graph.Graph) valid
+      (artifact (nefor.graph.lower (get valid "value")))]
+    [(core.validated.Invalid String) invalid
+      (fail invalid)])))
 
 (let compile-program (fn [[transform (Fn nefor.graph.Graph nefor.graph.Graph)]
                           [rules (List nefor.graph.Rule)]]
@@ -28,14 +26,14 @@
                   rules
                   (host-input "factory_contracts"
                     (type-tag (List nefor.graph.FactoryContract)))))
-  (let checked-tag (get checked "tag"))
-  (if (= checked-tag "core.validated.Valid")
+  (match checked
+    [(core.validated.Valid nefor.graph.Graph) valid
       (artifact
         (nefor.graph.lower-program
           (as nefor.graph.Program
-            {:graph (get (as (core.validated.Valid nefor.graph.Graph) checked) "value")
-             :rules rules})))
-      (fail checked))))
+            {:graph (get valid "value") :rules rules})))]
+    [(core.validated.Invalid String) invalid
+      (fail invalid)])))
 
 ;; A rule result has no result boundary and cannot replace the run's immutable
 ;; rule subscriptions.
