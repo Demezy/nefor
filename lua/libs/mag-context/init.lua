@@ -8,6 +8,15 @@ local M = {}
 local Context = {}
 Context.__index = Context
 
+local REASONER_MENTAL_MODEL = [[# Reasoner mental model
+
+A reasoner has the typed shape `Context -> Context`. Agents, deterministic
+commands, human decisions, and complete workflows can all be reasoners. A graph
+of reasoners is itself a reasoner: package a complicated subgraph behind typed
+inputs and outputs, bind it once, and compose it as a node in a larger graph. In
+Nefor, nodes can represent reasoners; MAG itself only manipulates values defined
+by libraries and knows neither concept.]]
+
 local function dense_list(value, label)
   if type(value) ~= "table" then error(label .. " must be a list", 3) end
   local count = 0
@@ -106,6 +115,7 @@ function Context:compose(base_system, opts)
   if type(opts) ~= "table" then error("mag-context compose options must be a table", 2) end
   local parts = {}
   append_nonempty(parts, base_system)
+  parts[#parts + 1] = REASONER_MENTAL_MODEL
 
   for _, guide in ipairs(self.guides) do
     parts[#parts + 1] = headed_guide(guide)

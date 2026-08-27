@@ -165,8 +165,9 @@ do
     "shared mag-eval schema preserves worker dependency waiting without assuming a surface")
   assert_true(await_schema.description:find("waits indefinitely", 1, true) ~= nil,
     "await-run canonically warns about persistent foreground processes")
-  assert_true(string.find(mag_schema.description, "ambient core and Nefor five-minute guides", 1, true) ~= nil,
-    "the MAG schema points to the ambient canonical guides")
+  assert_true(string.find(mag_schema.description,
+      "ambient reasoner model plus core and Nefor five-minute guides", 1, true) ~= nil,
+    "the MAG schema points to the ambient reasoner model and canonical guides")
   assert_true(string.find(mag_schema.description, "lib/nefor/*.mag", 1, true) == nil,
     "the MAG schema does not point at unreadable library implementation files")
   assert_true(string.find(mag_schema.description, "(require \"...\")", 1, true) ~= nil,
@@ -646,14 +647,18 @@ do
   local system = patch.system
   local base_at = assert(system:find("universal composed prompt", 1, true))
   local position_at = assert(system:find("Answer the task.", 1, true))
+  local reasoner_at = assert(system:find("# Reasoner mental model", 1, true))
   local core_at = assert(system:find("# MAG in Five Minutes", 1, true))
   local nefor_at = assert(system:find("# Nefor MAG in Five Minutes", 1, true))
   local book_at = assert(system:find("Full MAG Book:", 1, true))
   local inventory_at = assert(system:find("Available MAG modules:", 1, true))
   local trailing_at = assert(system:find("NESTED TRAILING CONTEXT", 1, true))
-  assert_true(base_at < position_at and position_at < core_at and core_at < nefor_at
+  assert_true(base_at < position_at and position_at < reasoner_at
+      and reasoner_at < core_at and core_at < nefor_at
       and nefor_at < book_at and book_at < inventory_at and inventory_at < trailing_at,
-    "nested agents receive authored system first, then both guides, references, inventory, and trailing context")
+    "nested agents receive authored system first, then reasoner model, both guides, references, inventory, and trailing context")
+  local _, reasoner_titles = system:gsub("# Reasoner mental model", "")
+  assert_eq(reasoner_titles, 1, "nested reasoner mental model is injected exactly once")
   assert_true(system:find(mag_root .. "/book/README.md", 1, true) ~= nil,
     "nested agents receive the resolved full-book path")
   assert_true(system:find("nefor.graph", 1, true) ~= nil,

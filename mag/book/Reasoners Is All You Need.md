@@ -4,8 +4,12 @@ An LLM call, script, tool, human decision, and complete workflow have different
 implementations but share one external shape: each receives context and returns
 context.
 
-> **Definition 1.** A reasoner over context types `C` and `C'` is a function
-> `R: C -> C'`.
+> **Definition 1.** A reasoner has the shape `R: Context -> Context`.
+
+`Context` names the information boundary relevant at one composition level; it
+does not require every reasoner to exchange one universal record. A typed Nefor
+node may project that boundary as `Node I O` while retaining the same mental
+model: it transforms the context it receives into the context it returns.
 
 The types may differ:
 
@@ -34,11 +38,11 @@ public boundary hides the cycle.
 
 ## Static projection of a dynamic reasoner
 
-`C -> C'` describes one application of a fixed reasoner. Over longer time
+`Context -> Context` describes one application of a fixed reasoner. Over longer time
 scales, the reasoner may change too:
 
 > **Definition 2.** A dynamic reasoner has the shape
-> `r: (C, R) -> (C', R')`.
+> `r: (Context, R) -> (Context, R')`.
 
 Nefor's graph boundary uses the static projection for composition. State owned
 by actors may evolve between firings while their typed node boundary remains

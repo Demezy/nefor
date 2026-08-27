@@ -339,10 +339,10 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "shipped MAG libraries failed to compile: {library_result:#?}"
     );
 
-    // The first Lisp fence in the Nefor MAG guide is the canonical minimal agent
-    // program injected into every lead turn. Compile that exact text rather
-    // than maintaining a test-side approximation that can drift from the
-    // documentation agents actually see.
+    // The first Lisp fence in the Nefor MAG guide is the canonical progressive
+    // agent/SDLC/swarm program injected into every lead turn. Compile that exact
+    // text rather than maintaining a test-side approximation that can drift
+    // from the documentation agents actually see.
     let guide_path = root.join("mag/book/02. nefor/00. Nefor MAG in Five Minutes.md");
     let guide = fs::read_to_string(&guide_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", guide_path.display()));
@@ -351,20 +351,20 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         .and_then(|(_, rest)| rest.split_once("\n```").map(|(source, _)| source))
         .expect("the Nefor MAG guide contains a complete canonical Lisp fence");
     assert!(
-        canonical.contains("(nefor.actors.task-source \"task\" \"Inspect the repository.\")"),
+        canonical.contains("(nefor.actors.task-source \"development-task\" task)"),
         "the canonical example must use the public Task source helper"
     );
     assert!(
         canonical.contains("(nefor.actors.agent"),
-        "the first Lisp fence must remain the canonical minimal agent program"
+        "the first Lisp fence must construct agents through the public helper"
     );
     assert!(
-        !canonical.contains("\"mag\""),
-        "ordinary child agents in the canonical example must not receive the lead orchestration tool"
+        canonical.contains("(nefor.worktree.create \"development-worktree\""),
+        "the canonical example must feed a real worktree into its SDLC"
     );
     assert!(
-        canonical.contains("\"mag-eval\""),
-        "ordinary child agents retain mag-eval for one-off world work"
+        canonical.contains("(let expand-swarm"),
+        "the canonical example must derive its dynamic swarm at runtime"
     );
     fs::write(temp_root.join("canonical-agent.mag"), canonical)
         .expect("write exact canonical agent regression");
@@ -380,7 +380,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     assert_eq!(
         canonical_result.get("kind").and_then(Value::as_str),
         Some("mag.loaded"),
-        "the exact canonical guide agent must compile against runtime contracts: {canonical_result:#?}"
+        "the exact canonical guide program must compile against runtime contracts: {canonical_result:#?}"
     );
 
     fs::write(

@@ -1,6 +1,11 @@
 # The MAG Book
 
-This book has two parts:
+Start with [Reasoners Is All You Need](<Reasoners Is All You Need.md>) for the
+small composition model used throughout the Nefor chapters: anything with a
+typed context input and output can be composed as a reasoner, and a graph of
+reasoners is itself a reasoner.
+
+The book then has two parts:
 
 - [Core MAG](<01. core/README.md>) introduces the strictly typed, pure functional
   language on its own: values, types, functions, modules, immutable file inputs,

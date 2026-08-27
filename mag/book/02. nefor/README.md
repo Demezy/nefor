@@ -9,14 +9,16 @@ This section describes that application in terms of the
 worktrees, and development cycles are Nefor vocabulary implemented with MAG
 values, types, functions, and artifacts.
 
+The book-wide prelude [Reasoners Is All You Need](<../Reasoners Is All You Need.md>)
+states the composition model used here.
+
 Read the chapters in order:
 
 1. [MAG's Place Inside Nefor](<01. MAG's Place Inside Nefor.md>)
 2. [Graphs as Library Data](<02. Graphs as Library Data.md>)
-3. [Reasoners Is All You Need](<03. Reasoners Is All You Need.md>)
-4. [Hierarchical Composition](<04. Hierarchical Composition.md>)
-5. [Development Workflows](<05. Development Workflows.md>)
-6. [Lowering and Execution](<06. Lowering and Execution.md>)
+3. [Hierarchical Composition](<03. Hierarchical Composition.md>)
+4. [Development Workflows](<04. Development Workflows.md>)
+5. [Lowering and Execution](<05. Lowering and Execution.md>)
 
 For the complete Nefor library model compressed into commented MAG source, read
 [Nefor MAG in Five Minutes](<00. Nefor MAG in Five Minutes.md>).

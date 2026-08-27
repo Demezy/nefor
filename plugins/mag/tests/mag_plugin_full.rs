@@ -75,6 +75,74 @@ pub mod kernel {
         }
 
         #[test]
+        fn nefor_mag_in_five_minutes_satisfies_runtime_factory_contracts() {
+            let host = shipped_host();
+            let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let repository = manifest.join("../..");
+            let book = repository.join("mag/book/02. nefor/00. Nefor MAG in Five Minutes.md");
+            let markdown = std::fs::read_to_string(&book).expect("read Nefor guide");
+            let source = markdown
+                .split_once("```lisp\n")
+                .and_then(|(_, rest)| rest.split_once("\n```").map(|(source, _)| source))
+                .expect("Nefor guide contains one complete Lisp program");
+            let workspace = repository
+                .join("tmp")
+                .join(format!("mag-book-host-contracts-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&workspace);
+            std::fs::create_dir_all(&workspace).expect("create guide host workspace");
+            std::fs::write(workspace.join("main.mag"), source).expect("write guide program");
+
+            let contracts = host.registry_contracts().expect("runtime contracts");
+            let loaded = nefor_mag::load_with_inputs_and_module_roots(
+                &workspace,
+                "main.mag",
+                serde_json::json!({"factory_contracts": contracts}),
+                &[
+                    repository.join("mag/lib"),
+                    repository.join("examples/nefor-agent/mag/lib"),
+                ],
+            )
+            .expect("compile Nefor guide with runtime contracts");
+            let initial = crate::artifact_modification(&loaded.artifact)
+                .expect("normalize guide initial modification");
+
+            assert!(
+                host.begin_run("mag-book-contracts", "mag-book-contracts", None)
+                    .expect("begin guide run")
+                    .ok
+            );
+            let started = host
+                .start("mag-book-contracts", &initial)
+                .expect("start guide modification");
+            assert!(
+                started.ok,
+                "guide host validation failed: {:?}",
+                started.error
+            );
+
+            let dynamic = nefor_mag::eval_fn(
+                &loaded,
+                "expand-swarm",
+                serde_json::json!([
+                    {"title": "inspect", "instructions": "Inspect the implementation."}
+                ]),
+            )
+            .expect("evaluate guide dynamic swarm");
+            let applied = host
+                .apply("mag-book-contracts", &dynamic)
+                .expect("apply dynamic guide modification");
+            assert!(
+                applied.ok,
+                "dynamic guide host validation failed: {:?}",
+                applied.error
+            );
+
+            host.end_run("mag-book-contracts", TeardownReason::RunComplete)
+                .expect("end guide host run");
+            std::fs::remove_dir_all(workspace).expect("remove guide host workspace");
+        }
+
+        #[test]
         fn inline_actor_type_arguments_must_be_dense_lists() {
             let host = shipped_host();
             for (run_id, type_arguments) in [

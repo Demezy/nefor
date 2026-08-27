@@ -339,18 +339,21 @@ local function project_pending_conversation(calls)
     "canonical system message carries ambient MAG context")
   local text = system_chunk.chunk.data
   local base_at = assert(text:find("lead system prompt", 1, true))
+  local reasoner_at = assert(text:find("# Reasoner mental model", 1, true))
   local core_at = assert(text:find("# MAG in Five Minutes", 1, true))
   local nefor_at = assert(text:find("# Nefor MAG in Five Minutes", 1, true))
   local book_at = assert(text:find("Full MAG Book:", 1, true))
   local inventory_at = assert(text:find("Available MAG modules:", 1, true))
   local runtime_at = assert(text:find("TRAILING RUNTIME MARKER", 1, true))
-  assert(base_at < core_at and core_at < nefor_at and nefor_at < book_at
+  assert(base_at < reasoner_at and reasoner_at < core_at and core_at < nefor_at and nefor_at < book_at
       and book_at < inventory_at and inventory_at < runtime_at,
-    "system, guides, references/inventory, and trailing ambient context keep exact order")
+    "system, reasoner model, guides, references/inventory, and trailing ambient context keep exact order")
   assert(text:find("nefor.graph", 1, true) and text:find("nefor-mag:", 1, true),
     "ambient inventory exposes canonical package modules")
   local _, core_titles = text:gsub("# MAG in Five Minutes", "")
   local _, nefor_titles = text:gsub("# Nefor MAG in Five Minutes", "")
+  local _, reasoner_titles = text:gsub("# Reasoner mental model", "")
+  assert_eq(reasoner_titles, 1, "reasoner mental model is injected exactly once")
   assert_eq(core_titles, 1, "authored core guide heading is not duplicated")
   assert_eq(nefor_titles, 1, "authored Nefor guide heading is not duplicated")
   manager_delta({
