@@ -126,9 +126,9 @@ There are no compiler forms named `agent`, `bash`, `graph`, `subgraph`, or
          :provider "chatgpt"
          :system "Answer the task."
          :tools ["read_file" "mag-eval"]
-         :da-policy (nefor.contracts.no-da-policy)})
+         :da-policy (nefor.contracts.no-da-policy)
+         :max-corrections 2})
         (type-tag nefor.contracts.Task)
-        "task"
         (type-tag nefor.contracts.TextAnswer)))
 (let result (nefor.graph.output "result"
         (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
@@ -140,8 +140,9 @@ There are no compiler forms named `agent`, `bash`, `graph`, `subgraph`, or
 ```
 
 `nefor.actors.agent` returns a typed `nefor.graph.Node<I, O>`. Its semantic
-input/output types are compiler-created `TypeTag` witnesses, separate from its
-runtime wire tags. A graph is an immutable semantic set of typed edges. Edge
+input/output types are compiler-created `TypeTag` witnesses. The library derives
+runtime protocol wires from those types; MAG programs never author them. A graph
+is an immutable semantic set of typed edges. Edge
 endpoints introduce or reuse nodes; there is no add-node operation. Construct
 one flat edge list with `nefor.graph.graph`, and transform a graph with the pure
 functions `add-edges` and `remove-edges`. They return new graphs, collapse

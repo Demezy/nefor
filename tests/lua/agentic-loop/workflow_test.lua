@@ -243,7 +243,7 @@ local function lead_artifact()
         id = "lead.source", factory = "nefor.factory.source", type_arguments = { task_type },
         params = { value = { prompt = "<initial task text>" } },
         routes = { ["nefor.graph.Value"] = {
-          { actor = "lead.entry", wire = "task" },
+          { actor = "lead.entry", wire = "nefor.agent.Input" },
         } },
       },
       {

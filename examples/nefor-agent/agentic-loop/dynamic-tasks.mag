@@ -23,7 +23,7 @@
                    :system (str "Complete this task: " (get task "description"))
                    :tools [] :da-policy (nefor.contracts.no-da-policy)
                    :max-corrections 2})
-                (type-tag Task) "task" (type-tag WorkerResult)))
+                (type-tag Task) (type-tag WorkerResult)))
   agent))
 
 (let add-worker (fn [[collector-input (nefor.graph.Port (| WorkerResult nefor.contracts.AgentError))]
@@ -40,7 +40,7 @@
     :profile (nefor.contracts.no-identifier) :provider "mock-provider"
     :system "Return the task plan." :tools []
     :da-policy (nefor.contracts.no-da-policy) :max-corrections 2})
-  (type-tag nefor.contracts.Task) "task" (type-tag (List Task))))
+  (type-tag nefor.contracts.Task) (type-tag (List Task))))
 (let planner-success
   (nefor.actors.result-arm planner-agent (type-tag (List Task))))
 (let planner-error-port
@@ -53,7 +53,7 @@
     :profile (nefor.contracts.no-identifier) :provider "mock-provider"
     :system "Summarize the ordered worker results." :tools []
     :da-policy (nefor.contracts.no-da-policy) :max-corrections 2})
-  (type-tag nefor.contracts.ProviderInput) "generic-provider.ProviderOut" (type-tag Summary)))
+  (type-tag nefor.contracts.ProviderInput) (type-tag Summary)))
 (let result (nefor.graph.output "result"
   (type-tag (| Summary nefor.contracts.AgentError))))
 (let summary-input (get prompt "input"))

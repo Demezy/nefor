@@ -177,7 +177,7 @@ local function gate_actors()
       input={type={kind="named",name="nefor.contracts.TextAnswer",arguments={}},wire="generic-provider.TextAnswer"},outputs={{type={kind="named",name="test.Approved",arguments={}},wire="human.Approved"},{type={kind="named",name="test.Rejected",arguments={}},wire="human.Rejected"}},
       routes = {
         ["human.Approved"] = { { actor = "out", wire = "human.Approved" } },
-        ["human.Rejected"] = { { actor = "rework", wire = "human.Rejected" } },
+        ["human.Rejected"] = { { actor = "rework", wire = "nefor.agent.Input" } },
       },
     },
     {
@@ -185,7 +185,7 @@ local function gate_actors()
       type_arguments = {{kind="named",name="test.Rejected",arguments={}}},
       params = { seed = "provider-in" },
       evidence={version=2,identity="nefor.factory.adapter",arguments={{kind="named",name="test.Rejected",arguments={}}},input={kind="named",name="test.Rejected",arguments={}},output={kind="named",name="nefor.contracts.ProviderInput",arguments={}}},
-      input={type={kind="named",name="test.Rejected",arguments={}},wire="human.Rejected"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
+      input={type={kind="named",name="test.Rejected",arguments={}},wire="nefor.agent.Input"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
       routes = { ["generic-provider.ProviderOut"] = { { actor = "produce", wire = "generic-provider.ProviderOut" } } },
     },
     { id = "out", factory = "sink",
@@ -244,14 +244,14 @@ do
   assert_eq(#events_of_kind(h, "mag.run_complete"), 0, "still waiting on the human")
   assert_eq(#events_of_kind(h, "mag.run_failed"), 0, "no failure escalated in the revise loop")
 
-  -- The rework adapter lifted exactly the reason into the next provider turn.
+  -- The rework adapter preserves the complete typed rejection value.
   local lifted
   for _, p in ipairs(h.persisted) do
     if p.id == "rework" then lifted = p.output end
   end
   assert_true(lifted ~= nil, "the rework adapter emitted a routed provider turn")
-  assert_eq(lifted.messages[1].content.value, "tighten the wording",
-    "the rejection reason is the next turn's content")
+  assert_eq(lifted.messages[1].content.value.reason, "tighten the wording",
+    "the typed rejection is the next turn's content")
 
   -- The human approves: the gate exits human.Approved into the sink.
   local approved = h.obs:apply({
@@ -405,7 +405,7 @@ do
         type_arguments = {{kind="named",name="test.Task",arguments={}}},
         params = { seed = "provider-in" },
         evidence={version=2,identity="nefor.factory.adapter",arguments={{kind="named",name="test.Task",arguments={}}},input={kind="named",name="test.Task",arguments={}},output={kind="named",name="nefor.contracts.ProviderInput",arguments={}}},
-        input={type={kind="named",name="test.Task",arguments={}},wire="task"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
+        input={type={kind="named",name="test.Task",arguments={}},wire="nefor.agent.Input"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
         routes = { ["generic-provider.ProviderOut"] = { { actor = "review.produce", wire = "generic-provider.ProviderOut" } } },
       },
       {
@@ -425,7 +425,7 @@ do
         input={type=named("nefor.contracts.TextAnswer"),wire="generic-provider.TextAnswer"},outputs={{type={kind="named",name="test.Approved",arguments={}},wire="human.Approved"},{type={kind="named",name="test.Rejected",arguments={}},wire="human.Rejected"}},
         routes = {
           ["human.Approved"] = { { actor = "sink", wire = "human.Approved" } },
-          ["human.Rejected"] = { { actor = "review.rework", wire = "human.Rejected" } },
+          ["human.Rejected"] = { { actor = "review.rework", wire = "nefor.agent.Input" } },
         },
       },
       {
@@ -433,7 +433,7 @@ do
         type_arguments = {{kind="named",name="test.Rejected",arguments={}}},
         params = { seed = "provider-in" },
         evidence={version=2,identity="nefor.factory.adapter",arguments={{kind="named",name="test.Rejected",arguments={}}},input={kind="named",name="test.Rejected",arguments={}},output={kind="named",name="nefor.contracts.ProviderInput",arguments={}}},
-        input={type={kind="named",name="test.Rejected",arguments={}},wire="human.Rejected"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
+        input={type={kind="named",name="test.Rejected",arguments={}},wire="nefor.agent.Input"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
         routes = { ["generic-provider.ProviderOut"] = { { actor = "review.produce", wire = "generic-provider.ProviderOut" } } },
       },
       { id = "sink", factory = "sink",

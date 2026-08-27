@@ -492,7 +492,6 @@ async fn load_text_answer_program(
                 :da-policy (nefor.contracts.no-da-policy)
                 :max-corrections 0})
                (type-tag nefor.contracts.Task)
-               "task"
                (type-tag nefor.contracts.TextAnswer)))
 (let output (nefor.graph.output "result"
                (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))

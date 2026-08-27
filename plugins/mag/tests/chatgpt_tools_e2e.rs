@@ -230,7 +230,7 @@ async fn chatgpt_projects_stale_allowlist_and_returns_tool_result_through_gate()
                (as nefor.actors.AgentConfig {:id "answer" :model (nefor.contracts.identifier "test-model")
                 :profile (nefor.contracts.no-identifier) :provider "provider" :system "Read fixture.txt, then answer."
                 :tools ["read_file" "python-read"] :da-policy (nefor.contracts.no-da-policy) :max-corrections 0})
-               (type-tag nefor.contracts.Task) "task" (type-tag nefor.contracts.TextAnswer)))
+               (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer)))
 (let output (nefor.graph.output "result" (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
 (let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
                  (nefor.graph.add-edges graph [(nefor.graph.edge start answer) (nefor.graph.edge answer output)])))

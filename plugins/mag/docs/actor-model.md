@@ -395,6 +395,11 @@ The canonical MAG constructor is `nefor.actors.agent`. Its public type is
 `I -> (O | AgentError)`. `max_corrections = 0` means no correction,
 `1` means one correction, and so on.
 
+The constructor derives its runtime entry protocol from `I`. The nominal
+`ProviderInput` type denotes an already-built provider continuation; every
+other type denotes a fresh typed user turn. Runtime wire strings remain factory
+and lowering details and are not accepted by the MAG authoring API.
+
 The descriptor and semantic error type identities are compiler-derived
 protected params data. `mag.execute` rejects any `params_overlay` that attempts
 to replace `schema`, `provider_error_type`, or `validation_error_type`;

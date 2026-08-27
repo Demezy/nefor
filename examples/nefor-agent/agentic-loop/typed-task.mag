@@ -22,7 +22,6 @@
          :da-policy (nefor.contracts.no-da-policy)
          :max-corrections 2})
         (type-tag nefor.contracts.Task)
-        "task"
         (type-tag TaskDescription)))
 (let result (nefor.graph.output "typed-task-output"
                (type-tag (| TaskDescription nefor.contracts.AgentError))))

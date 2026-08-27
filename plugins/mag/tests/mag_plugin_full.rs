@@ -194,7 +194,7 @@ pub mod kernel {
     (require "nefor.graph")
 
     (let make-agent (fn [I O] [[id String] [input-type (TypeTag I)]
-                                [input-wire String] [output-type (TypeTag O)]]
+                                [output-type (TypeTag O)]]
       -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
       (nefor.actors.agent
         (as nefor.actors.AgentConfig
@@ -202,7 +202,7 @@ pub mod kernel {
            :profile (nefor.contracts.no-identifier) :provider "test-provider"
            :system "" :tools [] :da-policy (nefor.contracts.no-da-policy)
            :max-corrections 2})
-        input-type input-wire output-type)))
+        input-type output-type)))
 
     (let left-task (nefor.graph.source "left-task" (type-tag nefor.contracts.Task)
                        (as nefor.contracts.Task {:prompt "left"})))
@@ -210,17 +210,17 @@ pub mod kernel {
                          (as nefor.contracts.Task {:prompt "middle"})))
     (let right-task (nefor.graph.source "right-task" (type-tag nefor.contracts.Task)
                         (as nefor.contracts.Task {:prompt "right"})))
-    (let left (make-agent "left" (type-tag nefor.contracts.Task) "task"
+    (let left (make-agent "left" (type-tag nefor.contracts.Task)
                  (type-tag nefor.contracts.TextAnswer)))
-    (let middle (make-agent "middle" (type-tag nefor.contracts.Task) "task"
+    (let middle (make-agent "middle" (type-tag nefor.contracts.Task)
                    (type-tag nefor.contracts.TextAnswer)))
-    (let right (make-agent "right" (type-tag nefor.contracts.Task) "task"
+    (let right (make-agent "right" (type-tag nefor.contracts.Task)
                   (type-tag nefor.contracts.TextAnswer)))
     (let synthesis (make-agent "synthesis"
                       (type-tag (+ (| nefor.contracts.TextAnswer nefor.contracts.AgentError)
                                    (| nefor.contracts.TextAnswer nefor.contracts.AgentError)
                                    (| nefor.contracts.TextAnswer nefor.contracts.AgentError)))
-                      "nefor.agent.Result" (type-tag nefor.contracts.TextAnswer)))
+                      (type-tag nefor.contracts.TextAnswer)))
     (let result (nefor.graph.output "result"
                    (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
     (let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
@@ -1222,7 +1222,7 @@ mod tests {
          :tools (as (List String) [])
          :da-policy (nefor.contracts.no-da-policy)
          :max-corrections 0})
-        (type-tag nefor.contracts.Task) "task"
+        (type-tag nefor.contracts.Task)
         (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
 (let result (nefor.graph.output "result"
         (type-tag (| (| nefor.contracts.TextAnswer nefor.contracts.AgentError)
@@ -1355,7 +1355,7 @@ mod tests {
          :tools (as (List String) [])
          :da-policy (nefor.contracts.no-da-policy)
          :max-corrections 0})
-        (type-tag nefor.contracts.Task) "task"
+        (type-tag nefor.contracts.Task)
         (type-tag nefor.contracts.TextAnswer)))
 (let result (nefor.graph.output "result"
         (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))

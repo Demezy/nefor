@@ -4,9 +4,8 @@
 -- Driven from engine/tests/starter_mag_kernel_test.rs (installs the minimal
 -- nefor.log surface, points package.path at plugins/mag/lua/mag-kernel/). Tests the
 -- factory in isolation: a capturing `emit` stands in for the kernel outbound.
--- The adapter is the agent's boundary type shift — it lifts either the initial
--- task seed OR an upstream agent's TextAnswer into the `ProviderInput` turn the
--- downstream `llm` consumes. Both directions are asserted here.
+-- The adapter lifts fresh typed input into a `ProviderInput` turn and passes an
+-- already-built `ProviderInput` continuation through unchanged.
 
 local Registry = require("registry")
 local adapter  = require("factories.adapter")
@@ -100,13 +99,15 @@ do
   local decl, err = reg:register({ declaration = adapter.declaration, construct = adapter.construct })
   assert_true(decl ~= nil and err == nil, "adapter factory registers cleanly: " .. tostring(err))
 
-  -- Union input mentions both boundary tags (fires on either).
+  -- The only runtime alternatives are derived from semantic entry modes.
   local input = reg:declared_input("adapter", "boundary")
   assert_true(type(input) == "table", "adapter declares a union boundary input")
   local tags = {}
   for _, t in ipairs(input) do tags[t] = true end
-  assert_true(tags["task"], "boundary input accepts the initial task seed")
-  assert_true(tags["generic-provider.TextAnswer"], "boundary input accepts an upstream TextAnswer")
+  assert_true(tags["nefor.agent.Input"], "boundary accepts a fresh typed turn")
+  assert_true(tags["generic-provider.ProviderOut"], "boundary accepts a provider continuation")
+  assert_true(not tags["task"], "legacy caller-authored task wire is not accepted")
+  assert_true(not tags["nefor.agent.Result"], "result wire cannot select entry behavior")
 
   assert_eq(decl.outputs[1], "generic-provider.ProviderOut", "adapter output is the provider turn")
   assert_eq(#decl.signals, 0, "adapter is synchronous — declares no signal handlers")
@@ -134,7 +135,7 @@ do
   local inst = adapter.construct("docs-explorer.entry", { seed = "provider-in", schema = schema }, emit)
 
   local completion = inst.deliver(single("__initial",
-    "task", { kind = "task", prompt = "explore the codebase" }))
+    "nefor.agent.Input", { value = { prompt = "explore the codebase" } }))
   assert_eq(completion.status, "ok", "synchronous shift returns a successful completion")
 
   local out = find_kind(msgs, "generic-provider.ProviderOut")
@@ -167,7 +168,7 @@ do
     local canonical = { value = value, output_path = "/runs/task/output.json" }
     local msgs, emit = capture()
     local inst = adapter.construct("lead.entry", { schema = task_schema }, emit)
-    inst.deliver(single("lead.source", "task", canonical))
+    inst.deliver(single("lead.source", "nefor.agent.Input", canonical))
     return find_kind(msgs, "generic-provider.ProviderOut"), canonical
   end
 
@@ -191,44 +192,67 @@ do
 end
 
 -- ==================================================================
--- TextAnswer in -> ProviderInput out (upstream agent hand-off)
+-- ordinary nominal input -> ProviderInput out
 -- ==================================================================
 
 do
   local msgs, emit = capture()
   local inst = adapter.construct("code-writer.entry", { seed = "provider-in", schema = schema }, emit)
 
-  -- text_answer preferred when present.
-  inst.deliver(single("docs-explorer.llm", "generic-provider.TextAnswer",
-    { kind = "generic-provider.TextAnswer", text_answer = "found the bug in foo.rs", text = "raw text" }))
+  inst.deliver(single("docs-explorer.llm", "nefor.agent.Input",
+    { value = "found the bug in foo.rs" }))
   local out = find_kind(msgs, "generic-provider.ProviderOut")
   assert_true(out ~= nil, "an upstream TextAnswer lifts into a ProviderInput turn")
   assert_eq(out.from, "code-writer.entry", "ProviderInput is id-signed")
   assert_eq(out.messages[1].role, "user", "the hand-off becomes a user-role turn")
   assert_eq(out.messages[1].content.value, "found the bug in foo.rs",
-    "text_answer is preferred as the turn content")
+    "the typed value becomes the turn content")
 end
 
 -- ==================================================================
--- TextAnswer content fallbacks: text, then raw result
+-- sum input preserves the selected feedback constructor
+-- ==================================================================
+
+do
+  local feedback_schema = { version = 1, root = { kind = "union", variants = {
+    { tag = "build-failed-id", schema = {
+      kind = "named", name = "BuildFailed", body = { kind = "record", fields = {} },
+    } },
+    { tag = "need-changes-id", schema = {
+      kind = "named", name = "NeedChanges", body = { kind = "record", fields = {} },
+    } },
+  } } }
+  local msgs, emit = capture()
+  local inst = adapter.construct("builder.entry", { schema = feedback_schema }, emit)
+  inst.deliver({ shape = "union", messages = { {
+    from = "build",
+    tag = "nefor.agent.Input",
+    message = { value = { stderr = "compile failed" } },
+    arrival = { constructor_id = "build-failed-id" },
+  } } })
+
+  local out = find_kind(msgs, "generic-provider.ProviderOut")
+  assert_eq(out.messages[1].content.value.type, "build-failed-id",
+    "feedback input preserves its selected sum constructor")
+  assert_eq(out.messages[1].content.value.value.stderr, "compile failed",
+    "feedback input preserves its complete payload")
+end
+
+-- ==================================================================
+-- ProviderInput continuation passes through without rebuilding it
 -- ==================================================================
 
 do
   local msgs, emit = capture()
   local inst = adapter.construct("code-writer.entry", { schema = schema }, emit)
-
-  -- text used when no text_answer.
-  inst.deliver(single("up", "generic-provider.TextAnswer",
-    { kind = "generic-provider.TextAnswer", text = "just the text" }))
-  local out1 = msgs[#msgs]
-  assert_eq(out1.messages[1].content.value, "just the text", "text is used when text_answer is absent")
-
-  -- raw result passes through verbatim when neither text_answer nor text.
-  inst.deliver(single("up", "generic-provider.TextAnswer",
-    { kind = "generic-provider.TextAnswer", result = { nested = "structured" } }))
-  local out2 = msgs[#msgs]
-  assert_eq(out2.messages[1].content.value.nested, "structured",
-    "the raw result passes through verbatim for the provider layer to serialize")
+  local continuation = {
+    kind = "generic-provider.ProviderOut",
+    value = { content = "continue" },
+    messages = { { role = "user", content = "continue" } },
+  }
+  inst.deliver(single("up", "generic-provider.ProviderOut", continuation))
+  assert_true(msgs[#msgs] == continuation,
+    "the nominal ProviderInput continuation remains the exact runtime value")
 end
 
 -- ==================================================================
@@ -247,11 +271,11 @@ do
   local msgs, emit = capture()
   local inst = adapter.construct("fan-in.entry", { schema = product_schema }, emit)
   inst.deliver({ shape = "product", messages = {
-    { tag = "task", message = { value = { prompt = "coordinate" } },
+    { tag = "nefor.agent.Input", message = { value = { prompt = "coordinate" } },
       arrival = { constructor_id = "task-id" } },
-    { tag = "generic-provider.TextAnswer", message = { text_answer = "done" },
+    { tag = "nefor.agent.Input", message = { value = "done" },
       arrival = { constructor_id = "final-id" } },
-    { tag = "nefor.agent.Result", message = { value = { error = "blocked" } },
+    { tag = "nefor.agent.Input", message = { value = { error = "blocked" } },
       arrival = { constructor_id = "error-id" } },
   } })
 
@@ -285,7 +309,7 @@ do
   local msgs, emit = capture()
   local inst = adapter.construct("whole.entry", { schema = product_schema }, emit)
   inst.deliver({ shape = "product", whole = true, messages = {
-    { tag = "task", message = { value = { { prompt = "go" }, "done" } } },
+    { tag = "nefor.agent.Input", message = { value = { { prompt = "go" }, "done" } } },
   } })
   local out = find_kind(msgs, "generic-provider.ProviderOut")
   assert_eq(#out.messages, 1, "a whole product remains one provider message")
@@ -328,8 +352,8 @@ do
     end
   end)
   entry.deliver({ shape = "product", messages = {
-    { tag = "task", message = { value = { prompt = "go" } } },
-    { tag = "generic-provider.TextAnswer", message = {
+    { tag = "nefor.agent.Input", message = { value = { prompt = "go" } } },
+    { tag = "nefor.agent.Input", message = {
         value = { content = string.rep("v", 2048) },
         transcript_delta = { { role = "tool", content = string.rep("x", 2 * 1024 * 1024) } },
         result = { raw_log = string.rep("y", 2 * 1024 * 1024) },

@@ -33,9 +33,9 @@
 (let empty-to (fn [T] [[target (nefor.graph.Port (List T))]] -> nefor.graph.Message
   (nefor.graph.typed-message target (as (List T) []))))
 
-(let collect-item (fn [T] [[id String] [type (TypeTag T)] [input-wire String]]
+(let collect-item (fn [T] [[id String] [type (TypeTag T)]]
   -> (nefor.graph.Node T T)
-  (let input (nefor.graph.port id type input-wire))
+  (let input (nefor.graph.port id type "nefor.dynamic.CollectInput"))
   (let output (nefor.graph.port id type "nefor.dynamic.Item"))
   (as (nefor.graph.Node T T)
       {:id id :role "ordinary" :actors [(nefor.graph.actor id collect-item-factory

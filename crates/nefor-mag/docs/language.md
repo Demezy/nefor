@@ -86,7 +86,6 @@ used for different semantic types but not twice for the same type.
            :da-policy (nefor.contracts.no-da-policy)
            :max-corrections 2})
         (type-tag nefor.contracts.Task)
-        "task"
         (type-tag nefor.contracts.TextAnswer)))
 (let result (nefor.graph.output "result"
         (type-tag (| nefor.contracts.TextAnswer
@@ -106,14 +105,20 @@ An authored program is a pure `Graph -> Graph` function. `nefor.artifact.compile
 
 `nefor.graph.output<T>` is a concrete `T -> T` identity node and the result boundary. A graph must contain exactly one, it must be terminal, and every ordinary node must be reachable from a source and able to reach it. `nefor.graph.output-for` derives the compatible type from a preceding node.
 
-### Semantic types and wire names
+### Semantic types and runtime wires
 
-A port has two distinct pieces of information:
+A port stores compiler-checked semantic evidence and a runtime protocol wire.
+Public constructors derive the latter internally:
 
-- `(type-tag T)` is compiler-checked semantic evidence used for values and edge compatibility.
-- A wire string names the runtime protocol channel expected by the library constructor.
+- Any input type other than `nefor.contracts.ProviderInput` starts a fresh typed
+  user turn.
+- `nefor.contracts.ProviderInput` is the nominal continuation type and passes an
+  already-built provider turn through unchanged.
 
-For example, an agent may take semantic `nefor.contracts.Task` on wire `"task"`. Do not substitute a wire string for a type, invent protocol names, or attempt to build lower-level runtime records. Prefer public constructors such as `source`, `agent`, `output`, `command`, and `worktree.create`.
+MAG programs provide only `(type-tag T)` and connect compatible typed ports.
+They do not name, invent, or construct the runtime wire protocol. Prefer public
+constructors such as `source`, `agent`, `output`, `command`, and
+`worktree.create`.
 
 ## Agents
 

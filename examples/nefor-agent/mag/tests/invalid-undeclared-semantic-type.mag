@@ -11,5 +11,4 @@
    :da-policy (nefor.contracts.no-da-policy)
    :max-corrections 0})
   (type-tag nefor.contracts.Task)
-  "task"
   (type-tag MissingSemanticType))

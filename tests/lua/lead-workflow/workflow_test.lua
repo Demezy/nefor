@@ -210,7 +210,7 @@ local READ_ONLY_MAG = [=[
     :tools ["read_file"]
     :da-policy (nefor.contracts.no-da-policy)
     :max-corrections 2})
-  (type-tag nefor.contracts.Task) "task"
+  (type-tag nefor.contracts.Task)
   (type-tag nefor.contracts.TextAnswer)))
 (let out (nefor.graph.output "worker-output"
   (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
@@ -236,7 +236,7 @@ local WRITER_MAG = [=[
     :tools ["read_file" "write_file"]
     :da-policy (nefor.contracts.no-da-policy)
     :max-corrections 2})
-  (type-tag nefor.contracts.Task) "task"
+  (type-tag nefor.contracts.Task)
   (type-tag nefor.contracts.TextAnswer)))
 (let out (nefor.graph.output "build-output"
   (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
@@ -323,7 +323,9 @@ local function read_only_modification()
         routes = { ["generic-provider.TextAnswer"] = { { actor = "sink", wire = "generic-provider.TextAnswer" } } } },
       { id = "sink", factory = "sink", params = {}, routes = {} },
     },
-    messages = { { to = "worker.entry", content = { kind = "task", prompt = "<initial task text>" } } },
+    messages = { { to = "worker.entry", content = {
+      kind = "nefor.agent.Input", value = { prompt = "<initial task text>" },
+    } } },
     kills = {},
     rules = {},
   }
@@ -923,7 +925,7 @@ do
     "worker.llm (nefor.factory.llm)",                      -- actor + factory
     "provider: \"chatgpt\"",                               -- params summary
     "Result: worker.llm (generic-provider.TextAnswer)",   -- structural result
-    "-> worker.entry (task)",                              -- initial message
+    "-> worker.entry (nefor.agent.Input)",                 -- initial message
     "Hash: sha256:test",                                   -- hash
     "Registry factories: adapter, llm",                    -- kernel registry
   }) do
@@ -1179,7 +1181,7 @@ local function lead_turn_modification()
       { id = "lead.source", factory = "source",
         params = { value = { prompt = "<initial task text>" } },
         routes = { ["nefor.graph.Value"] = {
-          { actor = "lead.entry", wire = "task" },
+          { actor = "lead.entry", wire = "nefor.agent.Input" },
         } } },
       { id = "lead.entry", factory = "adapter", params = { seed = "provider-in" },
         routes = { ["generic-provider.ProviderOut"] = { { actor = "lead.llm", wire = "generic-provider.ProviderOut" } } } },
