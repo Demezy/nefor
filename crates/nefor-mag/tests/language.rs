@@ -1104,6 +1104,112 @@ fn sum_refinement_preserves_explicit_leaf_constructor_evidence() {
 }
 
 #[test]
+fn match_eliminates_named_and_generic_sum_aliases_by_constructor_evidence() {
+    let root = workspace("match-sums");
+    let artifact = compile(
+        r#"
+          (type Some [T] {:value T})
+          (type None {})
+          (type Option [T] (| (Some T) None))
+          (type Alias [T] (Option T))
+          (let render
+            (fn [[choice (Alias Int)]] -> String
+              (match choice
+                [(Some Int) present (str (get present "value"))]
+                [None absent "none"])))
+          (artifact
+            {:some (render (as (Alias Int) (as (Some Int) {:value 7})))
+             :none (render (as (Alias Int) (as None {})))})
+        "#,
+        &root,
+    )
+    .unwrap();
+
+    assert_eq!(artifact, json!({"some": "7", "none": "none"}));
+}
+
+#[test]
+fn match_is_exhaustive_unique_nominal_and_result_typed() {
+    let root = workspace("match-errors");
+    let prelude = r#"
+      (type X {:value Int})
+      (type Y {:value Int})
+      (type Z {:value Int})
+      (type XY (| X Y))
+      (let selected (as XY (as X {:value 1})))
+    "#;
+    for (body, expected) in [
+        (
+            "(artifact (match selected [X x (get x \"value\")]))",
+            "non-exhaustive match; missing main.Y",
+        ),
+        (
+            "(artifact (match selected [X x 1] [X again 2] [Y y 3]))",
+            "duplicate match arm for main.X",
+        ),
+        (
+            "(artifact (match selected [X x 1] [Z z 2] [Y y 3]))",
+            "constructor main.Z is not an arm of main.XY",
+        ),
+        (
+            "(artifact (match selected [X x 1] [Y y \"wrong\"]))",
+            "expected Int, got String",
+        ),
+    ] {
+        let error = compile(&format!("{prelude}\n{body}"), &root)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+
+    let error = compile("(artifact (match 1 [Int value value]))", &root)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("match expects a sum value"), "{error}");
+
+    let repeated = compile(
+        r#"
+          (type Some [T] {:value T})
+          (type Repeated (| (Some Int) (Some String)))
+          (let selected (as Repeated (as (Some Int) {:value 1})))
+          (artifact
+            (match selected
+              [(Some Int) integer 1]
+              [(Some String) string 2]))
+        "#,
+        &root,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        repeated.contains("match cannot distinguish repeated nominal constructor main.Some"),
+        "{repeated}"
+    );
+}
+
+#[test]
+fn match_preserves_mag_generated_sum_serialization() {
+    let root = workspace("match-serialization");
+    let artifact = compile(
+        r#"
+          (type X {:value Int})
+          (type Y {:value Int})
+          (type XY (| X Y))
+          (type Alias XY)
+          (let selected (as Alias (as X {:value 9})))
+          (artifact
+            (match selected
+              [X x (as Alias x)]
+              [Y y (as Alias y)]))
+        "#,
+        &root,
+    )
+    .unwrap();
+    assert!(artifact["type"].as_str().unwrap().starts_with("sha256:"));
+    assert_eq!(artifact["value"], json!({"value": 9}));
+}
+
+#[test]
 fn sum_refinement_rejects_lookalikes_without_matching_constructor_evidence() {
     let root = workspace("sum-constructor-rejection");
     let untagged = compile(
@@ -1488,10 +1594,10 @@ fn graph_product_input_accepts_repeated_typed_fan_in() {
           (let destinations (concat
                     (get (get lowered-left "routes") "nefor.graph.Value")
                     (get (get lowered-right "routes") "nefor.graph.Value")))
-          (artifact {:tag (get checked "tag")
-               :output-tag (get output-checked "tag")
-               :choice-without-rule (get choice-without-rule "tag")
-               :choice-with-rule (get choice-with-rule "tag")
+          (artifact {:valid (core.validated.valid? checked)
+               :output-valid (core.validated.valid? output-checked)
+               :choice-without-rule-valid (core.validated.valid? choice-without-rule)
+               :choice-with-rule-valid (core.validated.valid? choice-with-rule)
                :type-count (count (get lowered "types"))
                :left-output-id
                  (get (first (get lowered-left "outputs")) "type_id")
@@ -1545,10 +1651,10 @@ fn graph_product_input_accepts_repeated_typed_fan_in() {
         load_with_inputs_and_module_roots(&root, "main.mag", inputs, &[root.clone(), mag_lib])
             .unwrap()
             .artifact;
-    assert_eq!(artifact["tag"], "core.validated.Valid", "{:?}", artifact);
-    assert_eq!(artifact["output-tag"], "core.validated.Valid");
-    assert_eq!(artifact["choice-without-rule"], "core.validated.Invalid");
-    assert_eq!(artifact["choice-with-rule"], "core.validated.Valid");
+    assert_eq!(artifact["valid"], true, "{:?}", artifact);
+    assert_eq!(artifact["output-valid"], true);
+    assert_eq!(artifact["choice-without-rule-valid"], false);
+    assert_eq!(artifact["choice-with-rule-valid"], true);
     assert!(artifact["type-count"].as_u64().unwrap() >= 4);
     assert_eq!(artifact["left-output-id"], artifact["left-route-source-id"]);
     assert_eq!(

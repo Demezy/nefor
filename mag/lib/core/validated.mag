@@ -1,28 +1,31 @@
 (require "core.types")
 
 ;; Validation is a library algebra, not a distinguished evaluator result.
-(type Valid [T] {:tag String :value T})
-(type Invalid [E] {:tag String :errors (List E)})
+(type Valid [T] {:value T})
+(type Invalid [E] {:errors (List E)})
 (type Validated [E T] (| (Valid T) (Invalid E)))
 
 (let valid (fn [T] [[value T]] -> (Valid T)
-  (as (Valid T) {:tag "core.validated.Valid" :value value})))
+  (as (Valid T) {:value value})))
 
 (let invalid (fn [E] [[errors (List E)]] -> (Invalid E)
-  (as (Invalid E) {:tag "core.validated.Invalid" :errors errors})))
+  (as (Invalid E) {:errors errors})))
 
 (let valid? (fn [E T] [[validated (Validated E T)]] -> Bool
-  (= (get validated "tag") "core.validated.Valid")))
+  (match validated
+    [(Valid T) accepted true]
+    [(Invalid E) rejected false])))
 
 (let map (fn [E T U] [[f (Fn T U)] [validated (Validated E T)]] -> (Validated E U)
-  (as (Validated E U)
-    (if (= (get validated "tag") "core.validated.Valid")
-      (valid (f (get (as (Valid T) validated) "value")))
-      (as (Invalid E) validated)))))
+  (match validated
+    [(Valid T) accepted
+      (as (Validated E U) (as (Valid U) {:value (f (get accepted "value"))}))]
+    [(Invalid E) rejected
+      (as (Validated E U) (as (Invalid E) {:errors (get rejected "errors")}))])))
 
 (let and-then (fn [E T U] [[f (Fn T (Validated E U))]
                             [validated (Validated E T)]] -> (Validated E U)
-  (as (Validated E U)
-    (if (= (get validated "tag") "core.validated.Valid")
-      (f (get (as (Valid T) validated) "value"))
-      (as (Invalid E) validated)))))
+  (match validated
+    [(Valid T) accepted (f (get accepted "value"))]
+    [(Invalid E) rejected
+      (as (Validated E U) (as (Invalid E) {:errors (get rejected "errors")}))])))

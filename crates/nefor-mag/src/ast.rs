@@ -30,6 +30,10 @@ pub enum CheckedExprKind {
         then_branch: Box<CheckedExpr>,
         else_branch: Box<CheckedExpr>,
     },
+    Match {
+        value: Box<CheckedExpr>,
+        arms: Vec<CheckedMatchArm>,
+    },
     Call {
         callee: Box<CheckedExpr>,
         args: Vec<CheckedExpr>,
@@ -40,6 +44,13 @@ pub enum CheckedExprKind {
         value: Box<CheckedExpr>,
     },
     TypeTag(MagType),
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckedMatchArm {
+    pub constructor: MagType,
+    pub binding: CheckedParam,
+    pub body: Box<CheckedExpr>,
 }
 
 #[derive(Debug, Clone)]

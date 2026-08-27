@@ -246,4 +246,23 @@ mod tests {
         assert_eq!(d.location.start.display_column, 6);
         assert_eq!(d.related.unwrap().span, ByteSpan::new(7, 8));
     }
+    #[test]
+    fn parses_match_arms_as_constructor_binding_expression_triples() {
+        let source = SourceSnapshot::named(
+            "test.mag",
+            "(match choice [(Some Int) present (get present :value)] [None absent 0])",
+        );
+        let tokens = tokenize_source(&source).unwrap();
+        let parsed = parse_source(&tokens, &source).unwrap();
+        let Expr::List(form) = &parsed[0] else {
+            panic!("match form")
+        };
+        assert_eq!(form[0], Expr::Symbol("match".into()));
+        assert_eq!(form[1], Expr::Symbol("choice".into()));
+        let Expr::Vector(first) = &form[2] else {
+            panic!("first match arm")
+        };
+        assert_eq!(first.len(), 3);
+        assert_eq!(first[1], Expr::Symbol("present".into()));
+    }
 }

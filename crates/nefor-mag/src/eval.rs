@@ -290,6 +290,26 @@ fn eval_checked_expr(env: &mut Env, expression: &CheckedExpr) -> Result<Value, M
                 eval_checked_expr(env, else_branch)
             }
         }
+        CheckedExprKind::Match { value, arms } => {
+            let value = eval_checked_expr(env, value)?;
+            let constructor = selected_constructor_type(env, &value)?.ok_or_else(|| {
+                MagError::Type("match value lacks selected constructor evidence".into())
+            })?;
+            let arm = arms
+                .iter()
+                .find(|arm| nominal_name(&arm.constructor) == nominal_name(&constructor))
+                .ok_or_else(|| {
+                    MagError::Type(format!(
+                        "match has no arm for selected constructor {constructor}"
+                    ))
+                })?;
+            let payload = selected_constructor_value(env, &value, &constructor)?;
+            env.push_scope();
+            env.define_ready(arm.binding.id, &arm.binding.name, payload);
+            let result = eval_checked_expr(env, &arm.body);
+            env.pop_scope();
+            result
+        }
         CheckedExprKind::Call { callee, args } => {
             let function = eval_checked_expr(env, callee)?;
             let args = args
@@ -894,6 +914,91 @@ fn explicit_constructor(
         }
     }
     Ok(None)
+}
+
+fn selected_constructor_value(
+    env: &Env,
+    value: &Value,
+    selected: &MagType,
+) -> Result<Value, MagError> {
+    let mut current = value;
+    while let Value::Typed(inner, evidence) = current {
+        let evidence = runtime_type(env, evidence);
+        if runtime_sum_alias(env, &evidence, &mut HashSet::new())? {
+            current = inner;
+        } else {
+            match evidence {
+                constructor @ MagType::Named(_, _)
+                    if nominal_name(&constructor) == nominal_name(selected) =>
+                {
+                    return Ok(current.clone());
+                }
+                constructor @ MagType::Named(_, _) => {
+                    return Err(MagError::Type(format!(
+                        "selected constructor evidence changed from {selected} to {constructor}"
+                    )));
+                }
+                _ => break,
+            }
+        }
+    }
+    Err(MagError::Type(
+        "match value lacks selected nominal payload".into(),
+    ))
+}
+
+fn nominal_name(ty: &MagType) -> Option<&str> {
+    match ty {
+        MagType::Named(name, _) => Some(name),
+        _ => None,
+    }
+}
+
+fn selected_constructor_type(env: &Env, value: &Value) -> Result<Option<MagType>, MagError> {
+    let mut current = value;
+    while let Value::Typed(inner, evidence) = current {
+        let evidence = runtime_type(env, evidence);
+        if runtime_sum_alias(env, &evidence, &mut HashSet::new())? {
+            current = inner;
+        } else if matches!(evidence, MagType::Named(_, _)) {
+            return Ok(Some(evidence));
+        } else {
+            return Ok(None);
+        }
+    }
+    Ok(None)
+}
+
+fn runtime_sum_alias(
+    env: &Env,
+    ty: &MagType,
+    seen: &mut HashSet<String>,
+) -> Result<bool, MagError> {
+    match ty {
+        MagType::Union(_) => Ok(true),
+        MagType::Named(name, arguments) => {
+            let key = format!("{name}<{arguments:?}>");
+            if !seen.insert(key.clone()) {
+                return Err(MagError::Type(format!(
+                    "recursive sum alias {name} is unsupported"
+                )));
+            }
+            let declaration = env
+                .type_decl(name)
+                .ok_or_else(|| MagError::Type(format!("unknown nominal type {name}")))?;
+            let substitutions = declaration
+                .params
+                .iter()
+                .cloned()
+                .zip(arguments.iter().cloned())
+                .collect();
+            let body = crate::checker::substitute(&declaration.body, &substitutions);
+            let result = runtime_sum_alias(env, &body, seen);
+            seen.remove(&key);
+            result
+        }
+        _ => Ok(false),
+    }
 }
 
 fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError> {

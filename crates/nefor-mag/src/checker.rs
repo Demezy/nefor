@@ -1,6 +1,6 @@
 use crate::ast::{
-    BindingId, CheckedBinding, CheckedBlock, CheckedExpr, CheckedExprKind, CheckedFn, CheckedParam,
-    Expr, Value,
+    BindingId, CheckedBinding, CheckedBlock, CheckedExpr, CheckedExprKind, CheckedFn,
+    CheckedMatchArm, CheckedParam, Expr, Value,
 };
 use crate::env::Env;
 use crate::error::MagError;
@@ -331,6 +331,7 @@ fn infer_form(env: &Env, locals: &mut Locals, items: &[Expr]) -> Result<MagType,
                 }
                 return Ok(MagType::Union(vec![left, right]));
             }
+            "match" => return infer_match(env, locals, items),
             "let" => {
                 return Err(MagError::Type(
                     "let is only valid directly in a source or function block".into(),
@@ -480,6 +481,47 @@ fn infer_form(env: &Env, locals: &mut Locals, items: &[Expr]) -> Result<MagType,
         compatible(env, &actual, expected, &mut subst).map_err(MagError::Type)?;
     }
     Ok(substitute(&result, &subst))
+}
+
+fn infer_match(env: &Env, locals: &Locals, items: &[Expr]) -> Result<MagType, MagError> {
+    let (value, arms) = match_form(items)?;
+    let value_type = infer(env, &mut locals.clone(), value)?;
+    let constructors = sum_constructors(env, &value_type)?;
+    let mut seen = HashSet::new();
+    let mut result = None;
+    for arm in arms {
+        let (constructor_expression, binding, body) = match_arm(arm)?;
+        let mut vars = HashSet::new();
+        for ty in locals.values().flatten() {
+            collect_vars(ty, &mut vars);
+        }
+        let constructor_type = crate::eval::parse_type(env, constructor_expression, &vars)?;
+        let concrete = nominal_constructor(env, &constructor_type)?;
+        if !constructors.iter().any(|accepted| *accepted == concrete) {
+            return Err(MagError::Type(format!(
+                "constructor {constructor_type} is not an arm of {value_type}"
+            )));
+        }
+        if !seen.insert(concrete) {
+            return Err(MagError::Type(format!(
+                "duplicate match arm for {constructor_type}"
+            )));
+        }
+        let mut arm_locals = locals.clone();
+        add_local(&mut arm_locals, binding.to_owned(), constructor_type)?;
+        let body_type = infer(env, &mut arm_locals, body)?;
+        if let Some(current) = &result {
+            compatible(env, &body_type, current, &mut HashMap::new()).map_err(|_| {
+                MagError::Type(format!(
+                    "match arms must return one compatible type, got {current} and {body_type}"
+                ))
+            })?;
+        } else {
+            result = Some(body_type);
+        }
+    }
+    ensure_exhaustive(&constructors, &seen)?;
+    Ok(result.unwrap_or(MagType::Unit))
 }
 
 fn infer_fn(env: &Env, outer: &Locals, items: &[Expr]) -> Result<MagType, MagError> {
@@ -1740,6 +1782,7 @@ fn compile_form(
                 ))
             }
             "if" => return compile_if(env, scopes, items, expected),
+            "match" => return compile_match(env, scopes, items, expected),
             "as" => return compile_ascribe(env, scopes, items),
             "type-tag" => return compile_type_tag(env, scopes, items),
             "fn" => {
@@ -1801,6 +1844,231 @@ fn compile_form(
             args,
         },
     ))
+}
+
+fn compile_match(
+    env: &Env,
+    scopes: &[CheckedScope],
+    items: &[Expr],
+    expected: Option<&MagType>,
+) -> Result<CheckedExpr, MagError> {
+    let (value_expression, arm_expressions) = match_form(items)?;
+    let value = compile_expr(env, scopes, value_expression, None)?;
+    let constructors = sum_constructors(env, &value.ty)?;
+    let mut seen = HashSet::new();
+    let mut arms = Vec::with_capacity(arm_expressions.len());
+    let mut result = expected.cloned();
+
+    for arm_expression in arm_expressions {
+        let (constructor_expression, binding_name, body_expression) = match_arm(arm_expression)?;
+        let constructor_type = parse_checked_type(env, scopes, constructor_expression)?;
+        let constructor = nominal_constructor(env, &constructor_type)?;
+        if !constructors.iter().any(|accepted| *accepted == constructor) {
+            return Err(MagError::Type(format!(
+                "constructor {constructor_type} is not an arm of {}",
+                value.ty
+            )));
+        }
+        if !seen.insert(constructor.clone()) {
+            return Err(MagError::Type(format!(
+                "duplicate match arm for {constructor_type}"
+            )));
+        }
+
+        let binding_id = env.allocate_binding_id(binding_name, Some(constructor_type.clone()));
+        let mut arm_scope = CheckedScope::new();
+        insert_checked_candidate(
+            env,
+            scopes,
+            &mut arm_scope,
+            binding_name,
+            binding_id,
+            constructor_type.clone(),
+            vec![],
+            false,
+        )?;
+        let mut arm_scopes = scopes.to_vec();
+        arm_scopes.push(arm_scope);
+        let body = compile_expr(env, &arm_scopes, body_expression, result.as_ref())?;
+        if let Some(current) = &result {
+            compatible_static(env, &body.ty, current, &mut HashMap::new()).map_err(|_| {
+                MagError::Type(format!(
+                    "match arms must return one compatible type, got {current} and {}",
+                    body.ty
+                ))
+            })?;
+        } else {
+            result = Some(body.ty.clone());
+        }
+        arms.push(CheckedMatchArm {
+            constructor,
+            binding: CheckedParam {
+                id: binding_id,
+                name: binding_name.to_owned(),
+                ty: constructor_type,
+            },
+            body: Box::new(body),
+        });
+    }
+    ensure_exhaustive(&constructors, &seen)?;
+    Ok(checked(
+        result.unwrap_or(MagType::Unit),
+        CheckedExprKind::Match {
+            value: Box::new(value),
+            arms,
+        },
+    ))
+}
+
+fn match_form(items: &[Expr]) -> Result<(&Expr, &[Expr]), MagError> {
+    if items.len() < 3 {
+        return Err(MagError::Type(
+            "match expects a value and at least one arm".into(),
+        ));
+    }
+    Ok((&items[1], &items[2..]))
+}
+
+fn match_arm(arm: &Expr) -> Result<(&Expr, &str, &Expr), MagError> {
+    let Expr::Vector(items) = arm else {
+        return Err(MagError::Type(
+            "match arm must be [Constructor binding expression]".into(),
+        ));
+    };
+    let [constructor, binding, body] = items.as_slice() else {
+        return Err(MagError::Type(
+            "match arm must be [Constructor binding expression]".into(),
+        ));
+    };
+    let binding = binding
+        .as_symbol()
+        .ok_or_else(|| MagError::Type("match binding must be a symbol".into()))?;
+    Ok((constructor, binding, body))
+}
+
+fn sum_constructors(env: &Env, ty: &MagType) -> Result<Vec<MagType>, MagError> {
+    if !is_sum_type(env, ty, &mut HashSet::new())? {
+        return Err(MagError::Type(format!(
+            "match expects a sum value, got {ty}"
+        )));
+    }
+    let mut constructors = Vec::new();
+    collect_sum_constructors(env, ty, &mut HashSet::new(), &mut constructors)?;
+    let mut names = HashSet::new();
+    for constructor in &constructors {
+        let MagType::Named(name, _) = constructor else {
+            unreachable!("sum constructor collection accepts only named arms")
+        };
+        if !names.insert(name.clone()) {
+            return Err(MagError::Type(format!(
+                "match cannot distinguish repeated nominal constructor {name}"
+            )));
+        }
+    }
+    Ok(constructors)
+}
+
+fn collect_sum_constructors(
+    env: &Env,
+    ty: &MagType,
+    aliases: &mut HashSet<String>,
+    constructors: &mut Vec<MagType>,
+) -> Result<(), MagError> {
+    match ty {
+        MagType::Union(arms) => {
+            for arm in arms {
+                collect_sum_constructors(env, arm, aliases, constructors)?;
+            }
+        }
+        MagType::Named(name, arguments) => {
+            if is_sum_type(env, ty, &mut HashSet::new())? {
+                let key = format!("{name}<{arguments:?}>");
+                if !aliases.insert(key.clone()) {
+                    return Err(MagError::Type(format!(
+                        "recursive sum alias {name} is unsupported"
+                    )));
+                }
+                let declaration = env
+                    .type_decl(name)
+                    .ok_or_else(|| MagError::Type(format!("unknown nominal type {name}")))?;
+                let substitutions = declaration
+                    .params
+                    .iter()
+                    .cloned()
+                    .zip(arguments.iter().cloned())
+                    .collect::<HashMap<_, _>>();
+                let body = substitute(&declaration.body, &substitutions);
+                collect_sum_constructors(env, &body, aliases, constructors)?;
+                aliases.remove(&key);
+            } else {
+                constructors.push(ty.clone());
+            }
+        }
+        other => {
+            return Err(MagError::Type(format!(
+                "match requires nominal constructor arms, found {other}"
+            )))
+        }
+    }
+    Ok(())
+}
+
+fn nominal_constructor(env: &Env, ty: &MagType) -> Result<MagType, MagError> {
+    if !matches!(ty, MagType::Named(_, _)) {
+        return Err(MagError::Type(format!(
+            "match arm must name a nominal constructor, got {ty}"
+        )));
+    }
+    if is_sum_type(env, ty, &mut HashSet::new())? {
+        return Err(MagError::Type(format!(
+            "match arm must name one constructor, got sum alias {ty}"
+        )));
+    }
+    Ok(ty.clone())
+}
+
+fn ensure_exhaustive(constructors: &[MagType], seen: &HashSet<MagType>) -> Result<(), MagError> {
+    let missing = constructors
+        .iter()
+        .filter(|constructor| !seen.contains(*constructor))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(MagError::Type(format!(
+            "non-exhaustive match; missing {}",
+            missing.join(", ")
+        )))
+    }
+}
+
+fn is_sum_type(env: &Env, ty: &MagType, aliases: &mut HashSet<String>) -> Result<bool, MagError> {
+    match ty {
+        MagType::Union(_) => Ok(true),
+        MagType::Named(name, arguments) => {
+            let key = format!("{name}<{arguments:?}>");
+            if !aliases.insert(key.clone()) {
+                return Err(MagError::Type(format!(
+                    "recursive sum alias {name} is unsupported"
+                )));
+            }
+            let declaration = env
+                .type_decl(name)
+                .ok_or_else(|| MagError::Type(format!("unknown nominal type {name}")))?;
+            let substitutions = declaration
+                .params
+                .iter()
+                .cloned()
+                .zip(arguments.iter().cloned())
+                .collect::<HashMap<_, _>>();
+            let body = substitute(&declaration.body, &substitutions);
+            let result = is_sum_type(env, &body, aliases);
+            aliases.remove(&key);
+            result
+        }
+        _ => Ok(false),
+    }
 }
 
 fn compile_if(

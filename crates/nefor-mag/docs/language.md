@@ -25,6 +25,25 @@ Declare nominal records and algebraic types with `type`:
 
 `A | B` is a one-of union. `A + B` is an all-of product. Product occurrences matter: `T + T` requires two matching incoming edges from distinct senders.
 
+Eliminate a sum with an exhaustive `match`. Each arm names one nominal
+constructor, binds its payload at that constructor's concrete type, and
+produces the same result type:
+
+```lisp
+(let describe
+  (fn [[decision Decision]] -> String
+    (match decision
+      [Finding finding (get finding "summary")]
+      [nefor.contracts.AgentError failure (get failure "last_output")])))
+```
+
+An arm has the shape `[Constructor binding expression]`; a generic constructor
+is written as a type application such as `[(Some String) present ...]`.
+Missing, repeated, foreign, or non-nominal arms are rejected while checking.
+Evaluation selects the arm from constructor evidence retained by MAG, never
+from a user-authored string field. Named and generic aliases of sums are
+unfolded for exhaustiveness.
+
 ## Bindings and lexical blocks
 
 MAG has one binding form:

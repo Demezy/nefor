@@ -51,19 +51,33 @@ pub fn value_to_json(env: &Env, value: &Value) -> Result<serde_json::Value, MagE
                 .collect::<Result<_, MagError>>()?,
         )),
         Value::Artifact(v) => Ok(v.clone()),
-        Value::Typed(value, MagType::Union(_)) => {
-            let (selected, payload) = selected_sum_payload(value).ok_or_else(|| {
-                MagError::Eval(
-                    "cannot serialize a sum without selected constructor evidence".into(),
-                )
-            })?;
-            let tag = crate::types::ConcreteType::resolve(env, selected)?.stable_id();
-            Ok(serde_json::json!({
-                "type": tag.as_str(),
-                "value": value_to_json(env, payload)?,
-            }))
+        Value::Typed(value, ty) => {
+            let resolved = crate::types::ConcreteType::resolve(env, ty).ok();
+            if matches!(resolved, Some(crate::types::ConcreteType::Sum { .. })) {
+                let (selected, payload) = selected_sum_payload(env, value)?.ok_or_else(|| {
+                    MagError::Eval(
+                        "cannot serialize a sum without selected constructor evidence".into(),
+                    )
+                })?;
+                let tag = crate::types::ConcreteType::resolve(env, selected)?.stable_id();
+                Ok(serde_json::json!({
+                    "type": tag.as_str(),
+                    "value": value_to_json(env, payload)?,
+                }))
+            } else if matches!(resolved, Some(crate::types::ConcreteType::Named { .. })) {
+                if let Some((selected, payload)) = selected_sum_payload(env, value)? {
+                    if Some(crate::types::ConcreteType::resolve(env, selected)?) == resolved {
+                        value_to_json(env, payload)
+                    } else {
+                        value_to_json(env, value)
+                    }
+                } else {
+                    value_to_json(env, value)
+                }
+            } else {
+                value_to_json(env, value)
+            }
         }
-        Value::Typed(value, _) => value_to_json(env, value),
         other => Err(MagError::Eval(format!(
             "cannot serialize {} to JSON",
             other.type_name()
@@ -71,11 +85,17 @@ pub fn value_to_json(env: &Env, value: &Value) -> Result<serde_json::Value, MagE
     }
 }
 
-fn selected_sum_payload(value: &Value) -> Option<(&MagType, &Value)> {
+fn selected_sum_payload<'a>(
+    env: &Env,
+    value: &'a Value,
+) -> Result<Option<(&'a MagType, &'a Value)>, MagError> {
     match value {
-        Value::Typed(inner, selected @ MagType::Named(_, _)) => Some((selected, inner)),
-        Value::Typed(inner, MagType::Union(_)) => selected_sum_payload(inner),
-        _ => None,
+        Value::Typed(inner, evidence) => match crate::types::ConcreteType::resolve(env, evidence) {
+            Ok(crate::types::ConcreteType::Sum { .. }) => selected_sum_payload(env, inner),
+            Ok(crate::types::ConcreteType::Named { .. }) => Ok(Some((evidence, inner))),
+            Ok(_) | Err(_) => Ok(None),
+        },
+        _ => Ok(None),
     }
 }
 
