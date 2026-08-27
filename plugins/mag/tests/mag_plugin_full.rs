@@ -486,8 +486,47 @@ pub mod kernel {
             let value = completion.result.expect("typed result");
             assert_eq!(value["value"]["stdout"], "output");
             assert_eq!(value["value"]["stderr"], "warning");
-            assert_eq!(value["value"]["termination"]["kind"], "code");
-            assert_eq!(value["value"]["termination"]["value"], 9);
+            assert!(value["value"]["termination"]["type"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("sha256:")));
+            assert_eq!(value["value"]["termination"]["value"]["code"], 9);
+
+            let expression = r#"(nefor.process.exec "signaled"
+              (as nefor.process.ProcessExecParams
+                {:argv ["sleep" "5"] :cwd nefor.process.cwd
+                 :timeout (nefor.contracts.no-timeout)}))"#;
+            let emits = start_shell_expression(&host, "process-signaled", expression);
+            let invoke = tool_invoke(&emits, "process.exec");
+            assert_eq!(
+                invoke["args"]["args"]["argv"],
+                serde_json::json!(["sleep", "5"])
+            );
+            assert!(invoke["args"]["args"].get("exited_type").is_none());
+            assert!(invoke["args"]["args"].get("signaled_type").is_none());
+            let id = invoke["id"].as_str().expect("correlation id");
+            assert_eq!(
+                host.bus_response(
+                    id,
+                    Some(&serde_json::json!({
+                        "stdout": "partial", "stderr": "terminated",
+                        "termination": {"kind": "signal", "signal": 15}
+                    })),
+                    None,
+                    Some("async")
+                )
+                .expect("structured response"),
+                Some("process-signaled".into())
+            );
+            let completion = host
+                .take_run_complete("process-signaled")
+                .expect("completion")
+                .expect("signal termination completes normally");
+            let value = completion.result.expect("typed result");
+            let signaled = &value["value"]["termination"];
+            assert!(signaled["type"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("sha256:")));
+            assert_eq!(signaled["value"]["signal"], 15);
         }
 
         #[test]

@@ -103,8 +103,9 @@ Direct tool invocations may pass optional string `stdin`. In a MAG graph a
 `Unit` input starts the process with no stdin, while an upstream
 `nefor.contracts.Text` value supplies its `content` as stdin. The result is
 structured data with independent `stdout`, `stderr`, and `termination`; MAG
-normalizes termination to `{ kind = "code" | "signal", value = N }`. A nonzero
-exit code is still result data. Validation, spawn, I/O, timeout, and cancellation
+translates the raw capability result into the nominal `ProcessExited {code}` or
+`ProcessSignaled {signal}` constructor. A nonzero exit code is still result
+data. Validation, spawn, I/O, timeout, and cancellation
 failures use the error channel; timeout and cancellation diagnostics retain
 partial stdout/stderr after killing and reaping the dedicated process group.
 Both capabilities support `basic-tools.tool.cancel { id }`.

@@ -187,8 +187,10 @@ Both nodes require a non-empty `cwd`; relative paths resolve from the MAG host's
 inherited working directory, exposed as `nefor.process.cwd` (`"."`). They accept
 a `Unit` input for no stdin or `nefor.contracts.Text` to pass upstream
 `content` as stdin. The output is `ProcessResult`, containing separate `stdout`,
-`stderr`, and an exit-or-signal termination record. Nonzero exit is result data,
-not a compilation failure.
+`stderr`, and a nominal `ProcessExited {code}` or `ProcessSignaled {signal}`
+termination value. Use exhaustive `match` to distinguish the two constructors;
+authored MAG never compares process-termination strings. Nonzero exit is result
+data, not a compilation failure.
 
 Timeouts are mandatory and explicit. `(nefor.contracts.no-timeout)` is
 unbounded; use it only when waiting indefinitely is intentional.

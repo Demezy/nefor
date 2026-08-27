@@ -30,12 +30,19 @@ end
 local function unbounded()
   return { present = false, milliseconds = 0 }
 end
+local EXITED_TYPE = "sha256:process-exited"
+local SIGNALED_TYPE = "sha256:process-signaled"
+local function typed_params(params)
+  params.exited_type = EXITED_TYPE
+  params.signaled_type = SIGNALED_TYPE
+  return params
+end
 
 for _, case in ipairs({
   { module = process.exec, name = "process-exec", capability = "process.exec",
-    params = { argv = {"printf", "%s", "hello"}, cwd = "/repo", timeout = unbounded() } },
+    params = typed_params({ argv = {"printf", "%s", "hello"}, cwd = "/repo", timeout = unbounded() }) },
   { module = process.script, name = "shell-script", capability = "shell.script",
-    params = { script = "printf hello", cwd = "/repo", timeout = unbounded() } },
+    params = typed_params({ script = "printf hello", cwd = "/repo", timeout = unbounded() }) },
 }) do
   local registry = Registry.new()
   local declaration, error = registry:register({
@@ -48,7 +55,10 @@ for _, case in ipairs({
   assert_eq(declaration.outputs[2], "nefor.process.CapabilityFailed", "typed failure wire")
 
   local messages, emit = capture()
-  local instance, construct_error = case.module.construct("operation", case.params, emit)
+  local diagnostics = {}
+  local instance, construct_error = case.module.construct("operation", case.params, emit, {
+    diagnostic = function(value) diagnostics[#diagnostics + 1] = value end,
+  })
   assert_true(instance ~= nil and construct_error == nil, case.name .. " constructs")
   assert_true(find(messages, "mag.ready") ~= nil, "ready emitted")
   assert_eq(instance.deliver(input("mag.Unit", {})).status, "pending", "invoke pending")
@@ -66,15 +76,39 @@ for _, case in ipairs({
   local result = find(messages, "nefor.process.Result")
   assert_eq(result.value.stdout, "hello", "stdout preserved")
   assert_eq(result.value.stderr, "warning", "stderr preserved")
-  assert_eq(result.value.termination.kind, "code", "status kind preserved")
-  assert_eq(result.value.termination.value, 7, "exit code preserved")
+  assert_eq(result.value.termination.type, EXITED_TYPE, "exit constructor preserved")
+  assert_eq(result.value.termination.value.code, 7, "exit code preserved")
+  assert_eq(diagnostics[1].kind, "process_exit", "process exit diagnostic emitted")
+  assert_eq(diagnostics[1].code, 7, "exit diagnostic preserves the raw code")
 end
 
 do
   local messages, emit = capture()
-  local instance = process.exec.construct("piped", {
+  local diagnostics = {}
+  local instance = process.exec.construct("signaled", typed_params({
+    argv = {"sleep", "5"}, cwd = "/repo", timeout = unbounded(),
+  }), emit, {
+    diagnostic = function(value) diagnostics[#diagnostics + 1] = value end,
+  })
+  instance.deliver(input("mag.Unit", {}))
+  local invocation = find(messages, "capability.invoke")
+  local completion = instance.deliver(reply(invocation.ref, {
+    stdout = "partial", stderr = "terminated",
+    termination = { kind = "signal", signal = 15 },
+  }))
+  assert_eq(completion.status, "ok", "signal termination is a normal process result")
+  local result = find(messages, "nefor.process.Result")
+  assert_eq(result.value.termination.type, SIGNALED_TYPE, "signal constructor preserved")
+  assert_eq(result.value.termination.value.signal, 15, "signal number preserved")
+  assert_eq(diagnostics[1].kind, "process_exit", "signal diagnostic emitted")
+  assert_eq(diagnostics[1].signal, 15, "signal diagnostic preserves the raw signal")
+end
+
+do
+  local messages, emit = capture()
+  local instance = process.exec.construct("piped", typed_params({
     argv = {"cat"}, cwd = "/repo", timeout = {present=true, milliseconds=25},
-  }, emit)
+  }), emit)
   instance.deliver(input("mag.Text", {value={content="stdin"}}))
   local invocation = find(messages, "capability.invoke")
   assert_eq(invocation.request.args.stdin, "stdin", "Text becomes stdin")
@@ -86,27 +120,35 @@ do
   assert_eq(failed.value.operation, "process.exec", "failure identifies operation")
 end
 
-do
+for _, malformed in ipairs({
+  "dumped output summary",
+  { stdout="", stderr="", termination={kind="code", code="7"} },
+  { stdout="", stderr="", termination={kind="signal", signal=1.5} },
+}) do
   local messages, emit = capture()
-  local instance = process.script.construct("malformed", {
+  local diagnostics = {}
+  local instance = process.script.construct("malformed", typed_params({
     script="printf hello", cwd="/repo", timeout=unbounded(),
-  }, emit)
+  }), emit, {
+    diagnostic = function(value) diagnostics[#diagnostics + 1] = value end,
+  })
   instance.deliver(input("mag.Unit", {}))
   local invocation = find(messages, "capability.invoke")
-  local failed = instance.deliver(reply(invocation.ref, "dumped output summary"))
+  local failed = instance.deliver(reply(invocation.ref, malformed))
   assert_eq(failed.status, "failed", "malformed process result fails without crashing")
   assert_eq(failed.failure, "nefor.process.CapabilityFailed", "malformed result uses typed failure")
   assert_eq(failed.value.error, "capability returned malformed ProcessResult",
     "malformed result explains the contract failure")
+  assert_eq(#diagnostics, 0, "malformed result emits no process-exit diagnostic")
 end
 
 for _, bad in ipairs({
-  {argv={"true"}, cwd="/repo", timeout={present=true,milliseconds=0}},
-  {argv={"true"}, cwd="/repo", timeout={present=true,milliseconds=-1}},
-  {argv={"true"}, cwd="/repo", timeout={present=true,milliseconds=1.5}},
-  {argv={}, cwd="/repo", timeout=unbounded()},
-  {argv={"true", 2}, cwd="/repo", timeout=unbounded()},
-  {argv={"true"}, cwd="", timeout=unbounded()},
+  typed_params({argv={"true"}, cwd="/repo", timeout={present=true,milliseconds=0}}),
+  typed_params({argv={"true"}, cwd="/repo", timeout={present=true,milliseconds=-1}}),
+  typed_params({argv={"true"}, cwd="/repo", timeout={present=true,milliseconds=1.5}}),
+  typed_params({argv={}, cwd="/repo", timeout=unbounded()}),
+  typed_params({argv={"true", 2}, cwd="/repo", timeout=unbounded()}),
+  typed_params({argv={"true"}, cwd="", timeout=unbounded()}),
 }) do
   local messages, emit = capture()
   local instance, error = process.exec.construct("invalid", bad, emit)
@@ -116,18 +158,18 @@ end
 
 do
   local messages, emit = capture()
-  local instance, error = process.script.construct("invalid", {
+  local instance, error = process.script.construct("invalid", typed_params({
     script="", cwd="/repo", timeout=unbounded(),
-  }, emit)
+  }), emit)
   assert_true(instance == nil and error ~= nil, "empty script rejected")
   assert_true(find(messages, "capability.invoke") == nil, "invalid script never invokes")
 end
 
 do
   local messages, emit = capture()
-  local instance = process.exec.construct("killed", {
+  local instance = process.exec.construct("killed", typed_params({
     argv={"sleep", "5"}, cwd="/repo", timeout=unbounded(),
-  }, emit)
+  }), emit)
   instance.deliver(input("mag.Unit", {}))
   local invocation = find(messages, "capability.invoke")
   instance.handle_kill()

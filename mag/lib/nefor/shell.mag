@@ -5,6 +5,11 @@
 (type ShellScriptParams {:script String
                          :cwd String
                          :timeout nefor.contracts.Timeout})
+(type ShellScriptActorParams {:script String
+                              :cwd String
+                              :timeout nefor.contracts.Timeout
+                              :exited_type SemanticTypeId
+                              :signaled_type SemanticTypeId})
 
 (let script (fn [[name String] [params ShellScriptParams]]
   -> (nefor.graph.Node (| Unit nefor.contracts.Text) nefor.contracts.ProcessResult)
@@ -16,7 +21,19 @@
                  "nefor.process.Result"))
   (as (nefor.graph.Node (| Unit nefor.contracts.Text) nefor.contracts.ProcessResult)
       {:id name :role "ordinary"
-       :actors [(nefor.graph.actor name factory [] params
+       :actors [(nefor.graph.actor name factory []
+                   (as ShellScriptActorParams
+                     {:script (get params "script")
+                      :cwd (get params "cwd")
+                      :timeout (get params "timeout")
+                      :exited_type
+                        (type-id
+                          (type-evidence
+                            (type-tag nefor.contracts.ProcessExited)))
+                      :signaled_type
+                        (type-id
+                          (type-evidence
+                            (type-tag nefor.contracts.ProcessSignaled)))})
                    (nefor.graph.store-port input)
                    [(nefor.graph.store-port output)])]
        :routes (as (List nefor.graph.StoredRoute) [])

@@ -30,8 +30,12 @@
 
 (type DaPolicy {:rules (Map String String)})
 (type Timeout {:present Bool :milliseconds Int})
-(type TerminationStatus {:kind String :value Int})
-(type ProcessResult {:stdout String :stderr String :termination TerminationStatus})
+(type ProcessExited {:code Int})
+(type ProcessSignaled {:signal Int})
+(type ProcessTermination (| ProcessExited ProcessSignaled))
+(type ProcessResult {:stdout String
+                     :stderr String
+                     :termination ProcessTermination})
 (type ProcessFailure {:operation String :error String})
 
 (let no-identifier (fn [] -> OptionalIdentifier

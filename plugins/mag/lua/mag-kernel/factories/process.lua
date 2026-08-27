@@ -36,11 +36,19 @@ local function validate_common(params, actor)
   end
   local _, err = timeout_ms(params.timeout, actor)
   if err then return nil, err end
-  return params.timeout
+  if type(params.exited_type) ~= "string" or params.exited_type == ""
+      or type(params.signaled_type) ~= "string" or params.signaled_type == "" then
+    return nil, actor .. " requires compiler-issued process termination constructor ids"
+  end
+  return {
+    timeout = params.timeout,
+    exited_type = params.exited_type,
+    signaled_type = params.signaled_type,
+  }
 end
 
 local function validate_exec(params)
-  local timeout, err = validate_common(params, "process-exec actor")
+  local common, err = validate_common(params, "process-exec actor")
   if err then return nil, err end
   if type(params.argv) ~= "table" or #params.argv == 0 then
     return nil, "process-exec actor requires a non-empty list params.argv"
@@ -50,16 +58,24 @@ local function validate_exec(params)
       return nil, string.format("process-exec actor params.argv[%d] must be a string", index)
     end
   end
-  return { argv = params.argv, cwd = params.cwd, timeout = timeout }
+  return {
+    request = { argv = params.argv, cwd = params.cwd, timeout = common.timeout },
+    exited_type = common.exited_type,
+    signaled_type = common.signaled_type,
+  }
 end
 
 local function validate_script(params)
-  local timeout, err = validate_common(params, "shell-script actor")
+  local common, err = validate_common(params, "shell-script actor")
   if err then return nil, err end
   if type(params.script) ~= "string" or params.script == "" then
     return nil, "shell-script actor requires a non-empty string params.script"
   end
-  return { script = params.script, cwd = params.cwd, timeout = timeout }
+  return {
+    request = { script = params.script, cwd = params.cwd, timeout = common.timeout },
+    exited_type = common.exited_type,
+    signaled_type = common.signaled_type,
+  }
 end
 
 local function declaration(name, identity, params_type)
@@ -91,7 +107,7 @@ local function factory(config)
 
   function factory_module.construct(id, params, emit, deps)
     params = params or {}
-    local args, validation_error = config.validate(params)
+    local config_args, validation_error = config.validate(params)
     if validation_error then return nil, validation_error end
 
     local function sign(message)
@@ -143,16 +159,28 @@ local function factory(config)
       if deps and type(deps.diagnostic) == "function" then
         deps.diagnostic({ kind = "process_exit", [termination_kind] = termination_value })
       end
+      local typed_termination
+      if termination_kind == "code" then
+        typed_termination = {
+          type = config_args.exited_type,
+          value = { code = termination_value },
+        }
+      else
+        typed_termination = {
+          type = config_args.signaled_type,
+          value = { signal = termination_value },
+        }
+      end
       emit(sign({ kind = RESULT_WIRE, value = {
         stdout = result.stdout, stderr = result.stderr,
-        termination = { kind = termination_kind, value = termination_value },
+        termination = typed_termination,
       }}))
       return { status = "ok" }
     end
 
     local function handle_input(one)
       local request_args = {}
-      for key, value in pairs(args) do request_args[key] = value end
+      for key, value in pairs(config_args.request) do request_args[key] = value end
       local arrival = one.arrival or {}
       local constructor = arrival.constructor_id or arrival.type_id
       local descriptor = arrival.type or {}
