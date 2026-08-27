@@ -39,7 +39,7 @@ struct CompileArgs {
     #[arg(long = "input", value_name = "NAME=PATH")]
     inputs: Vec<String>,
 
-    /// Include phase timings and deterministic operation counters in metadata
+    /// Print phase timings and deterministic operation counters to stderr
     #[arg(long)]
     profile: bool,
 
@@ -75,7 +75,12 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         Command::Compile(args) => match compile(args) {
-            Ok(result) => print_json_stdout(&result),
+            Ok((artifact, profile)) => {
+                print_json_stdout(&artifact);
+                if let Some(profile) = profile {
+                    print_json_stderr(&profile);
+                }
+            }
             Err(error) => {
                 print_json_stderr(&error);
                 std::process::exit(1);
@@ -84,7 +89,9 @@ fn main() {
     }
 }
 
-fn compile(args: CompileArgs) -> Result<nefor_mag::CompilationResult, Diagnostic> {
+fn compile(
+    args: CompileArgs,
+) -> Result<(Value, Option<nefor_mag::profile::CompileProfile>), Diagnostic> {
     require_directory(&args.source_dir, "source_dir")?;
     let module_roots = if args.module_roots.is_empty() {
         vec![args.source_dir.clone()]
@@ -109,7 +116,7 @@ fn compile(args: CompileArgs) -> Result<nefor_mag::CompilationResult, Diagnostic
         },
     };
     let profiler = args.profile.then(nefor_mag::profile::CompileProfiler::new);
-    let mut loaded = if let Some(profiler) = &profiler {
+    let loaded = if let Some(profiler) = &profiler {
         nefor_mag::load_with_profiler_and_options(
             &args.source_dir,
             &args.entry,
@@ -128,10 +135,10 @@ fn compile(args: CompileArgs) -> Result<nefor_mag::CompilationResult, Diagnostic
         )
     }
     .map_err(mag_diagnostic)?;
-    if let Some(profiler) = profiler {
-        loaded.result.metadata.profile = Some(profiler.snapshot());
-    }
-    Ok(loaded.result)
+    Ok((
+        loaded.artifact,
+        profiler.map(|profiler| profiler.snapshot()),
+    ))
 }
 
 fn require_directory(path: &Path, kind: &'static str) -> Result<(), Diagnostic> {

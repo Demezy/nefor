@@ -1,5 +1,5 @@
 use nefor_mag::{
-    compile as compile_result, compile_with_options, eval_fn, load_with_inputs,
+    compile as compile_artifact, compile_with_options, eval_fn, load_with_inputs,
     load_with_inputs_and_module_roots, load_with_options, validate_fn, validate_fn_input,
     CompilerLimits, CompilerOptions,
 };
@@ -10,7 +10,7 @@ fn compile(
     source: &str,
     source_dir: &std::path::Path,
 ) -> Result<serde_json::Value, nefor_mag::error::MagError> {
-    compile_result(source, source_dir).map(|result| result.artifact)
+    compile_artifact(source, source_dir)
 }
 
 fn workspace(name: &str) -> std::path::PathBuf {
@@ -33,8 +33,8 @@ fn artifact_is_the_only_top_level_output() {
 }
 
 #[test]
-fn rust_compilation_result_matches_the_serialized_transport_shape() {
-    let root = workspace("compilation-result");
+fn rust_compilation_returns_the_artifact_directly() {
+    let root = workspace("compilation-artifact");
     assert_eq!(
         CompilerLimits::default(),
         CompilerLimits {
@@ -44,13 +44,8 @@ fn rust_compilation_result_matches_the_serialized_transport_shape() {
             memoized_calls: 16_384,
         }
     );
-    let result = compile_result("(artifact {:answer 42})", &root).unwrap();
-    let json = serde_json::to_value(&result).unwrap();
-
-    assert_eq!(json["metadata"]["version"], 1);
-    assert_eq!(json["metadata"]["hash"].as_str().map(str::len), Some(64));
-    assert!(json["metadata"].get("profile").is_none());
-    assert_eq!(json["artifact"], json!({"answer": 42}));
+    let artifact = compile_artifact("(artifact {:answer 42})", &root).unwrap();
+    assert_eq!(artifact, json!({"answer": 42}));
 
     let constrained = compile_with_options(
         "(artifact {:answer 42})",
@@ -1549,7 +1544,6 @@ fn graph_product_input_accepts_repeated_typed_fan_in() {
     let artifact =
         load_with_inputs_and_module_roots(&root, "main.mag", inputs, &[root.clone(), mag_lib])
             .unwrap()
-            .result
             .artifact;
     assert_eq!(artifact["tag"], "core.validated.Valid", "{:?}", artifact);
     assert_eq!(artifact["output-tag"], "core.validated.Valid");
@@ -1737,7 +1731,6 @@ fn type_schema_preserves_qualified_nominals_and_substitutes_generics() {
     .unwrap();
     let artifact = load_with_inputs(&root, "main.mag", json!({}))
         .unwrap()
-        .result
         .artifact;
     assert_eq!(artifact["version"], 1);
     assert_eq!(artifact["root"]["kind"], "named");

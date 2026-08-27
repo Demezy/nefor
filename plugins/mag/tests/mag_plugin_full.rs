@@ -48,8 +48,7 @@ pub mod kernel {
                 ],
             )
             .expect("compile MAG test program");
-            let artifact =
-                serde_json::to_value(loaded.result.artifact).expect("serialize shell artifact");
+            let artifact = serde_json::to_value(loaded.artifact).expect("serialize shell artifact");
             let modification =
                 crate::artifact_modification(&artifact).expect("normalize shell artifact");
             let _ = std::fs::remove_dir_all(source_dir);

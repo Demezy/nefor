@@ -69,9 +69,9 @@ mag compile workflow.mag \
   --input factory_contracts=./factory-contracts.json
 ```
 
-`workflow.mag` is resolved beneath `--source-dir`. Repeat `--module-root` to add module search roots and `--input NAME=PATH` to expose immutable JSON values through the typed host-input boundary. If no module root is supplied, the source directory is used. The CLI prints the same `{metadata, artifact}` `CompilationResult` returned by Rust compiler APIs. `--profile` adds compiler phase timings and deterministic counters under `metadata.profile`. Compilation failures write a structured diagnostic to stderr, exit nonzero, and produce no stdout result. The `artifact` field is the exact raw MAG artifact; compilation metadata does not define an artifact schema.
+`workflow.mag` is resolved beneath `--source-dir`. Repeat `--module-root` to add module search roots and `--input NAME=PATH` to expose immutable JSON values through the typed host-input boundary. If no module root is supplied, the source directory is used. Successful Rust compilation APIs return the raw artifact value, and the CLI prints exactly that value as JSON with no compiler-owned envelope or fields. `--profile` keeps stdout unchanged and prints one machine-readable profile object to stderr on success. Compilation failures write a structured diagnostic to stderr, exit nonzero, and produce no stdout result; the exit status distinguishes a failure diagnostic from requested profiling output.
 
-Standalone compilation emits an artifact and content hash, but has no execute subcommand. Runtime execution belongs to Nefor's lead workflow because it needs the configured providers, tools, approval policy, session, and run control.
+Standalone compilation emits an artifact but has no execute subcommand. Runtime execution belongs to Nefor's lead workflow because it needs the configured providers, tools, approval policy, session, and run control.
 
 ## Orchestration checklist
 

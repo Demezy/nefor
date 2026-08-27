@@ -17,12 +17,9 @@ use error::MagError;
 use profile::{CompileProfile, CompileProfiler, Phase};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::ops::Deref;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
-
-pub const COMPILATION_RESULT_VERSION: u8 = 1;
 
 /// Resource bounds applied to initial compilation and resident function calls.
 /// These limits bound cost and failure; they do not alter successful values.
@@ -60,23 +57,7 @@ pub struct CompilerOptions {
     pub limits: CompilerLimits,
 }
 
-/// Compiler-owned metadata around an application-owned artifact.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CompilationMetadata {
-    pub version: u8,
-    pub hash: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile: Option<CompileProfile>,
-}
-
-/// The common successful value returned by Rust compilation APIs and the CLI.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CompilationResult {
-    pub metadata: CompilationMetadata,
-    pub artifact: serde_json::Value,
-}
-
-pub fn compile(source: &str, source_dir: &Path) -> Result<CompilationResult, MagError> {
+pub fn compile(source: &str, source_dir: &Path) -> Result<serde_json::Value, MagError> {
     compile_with_options(source, source_dir, CompilerOptions::default())
 }
 
@@ -84,7 +65,7 @@ pub fn compile_with_options(
     source: &str,
     source_dir: &Path,
     options: CompilerOptions,
-) -> Result<CompilationResult, MagError> {
+) -> Result<serde_json::Value, MagError> {
     compile_with_inputs_and_options(
         source,
         source_dir,
@@ -97,7 +78,7 @@ pub fn compile_with_inputs(
     source: &str,
     source_dir: &Path,
     inputs: serde_json::Value,
-) -> Result<CompilationResult, MagError> {
+) -> Result<serde_json::Value, MagError> {
     compile_with_inputs_and_options(source, source_dir, inputs, CompilerOptions::default())
 }
 
@@ -106,7 +87,7 @@ pub fn compile_with_inputs_and_options(
     source_dir: &Path,
     inputs: serde_json::Value,
     options: CompilerOptions,
-) -> Result<CompilationResult, MagError> {
+) -> Result<serde_json::Value, MagError> {
     compile_with_inputs_and_module_roots_and_options(
         source,
         source_dir,
@@ -121,7 +102,7 @@ pub fn compile_with_inputs_and_module_roots(
     source_dir: &Path,
     inputs: serde_json::Value,
     module_roots: &[std::path::PathBuf],
-) -> Result<CompilationResult, MagError> {
+) -> Result<serde_json::Value, MagError> {
     compile_with_inputs_and_module_roots_and_options(
         source,
         source_dir,
@@ -137,7 +118,7 @@ pub fn compile_with_inputs_and_module_roots_and_options(
     inputs: serde_json::Value,
     module_roots: &[std::path::PathBuf],
     options: CompilerOptions,
-) -> Result<CompilationResult, MagError> {
+) -> Result<serde_json::Value, MagError> {
     compile_impl(source, source_dir, inputs, module_roots, options, None)
 }
 
@@ -146,7 +127,7 @@ pub fn compile_profiled(
     source_dir: &Path,
     inputs: serde_json::Value,
     module_roots: &[std::path::PathBuf],
-) -> Result<(CompilationResult, CompileProfile), MagError> {
+) -> Result<(serde_json::Value, CompileProfile), MagError> {
     compile_profiled_with_options(
         source,
         source_dir,
@@ -162,9 +143,9 @@ pub fn compile_profiled_with_options(
     inputs: serde_json::Value,
     module_roots: &[std::path::PathBuf],
     options: CompilerOptions,
-) -> Result<(CompilationResult, CompileProfile), MagError> {
+) -> Result<(serde_json::Value, CompileProfile), MagError> {
     let profiler = CompileProfiler::new();
-    let mut result = compile_impl(
+    let artifact = compile_impl(
         source,
         source_dir,
         inputs,
@@ -173,8 +154,7 @@ pub fn compile_profiled_with_options(
         Some(&profiler),
     )?;
     let profile = profiler.snapshot();
-    result.metadata.profile = Some(profile.clone());
-    Ok((result, profile))
+    Ok((artifact, profile))
 }
 
 fn compile_impl(
@@ -184,7 +164,7 @@ fn compile_impl(
     module_roots: &[std::path::PathBuf],
     options: CompilerOptions,
     profiler: Option<&CompileProfiler>,
-) -> Result<CompilationResult, MagError> {
+) -> Result<serde_json::Value, MagError> {
     let _fuel = eval::fuel::install(options.limits);
     let mut env = Env::new_with_stdlib_source_dir_module_roots_profiler_and_limits(
         source_dir,
@@ -206,21 +186,14 @@ fn compile_impl(
     let started = phase_started(profiler);
     let artifact = extract_artifact(value, "top-level program")?;
     record_phase(profiler, Phase::ArtifactConversion, started);
-    compilation_result(artifact)
+    Ok(artifact)
 }
 
 #[derive(Debug, Clone)]
 pub struct LoadedProgram {
     pub env: Env,
-    pub result: CompilationResult,
-}
-
-impl Deref for LoadedProgram {
-    type Target = CompilationResult;
-
-    fn deref(&self) -> &Self::Target {
-        &self.result
-    }
+    pub artifact: serde_json::Value,
+    pub hash: String,
 }
 
 /// Opaque reference to a resolved unary MAG function returning `Artifact`.
@@ -320,7 +293,7 @@ pub fn load_profiled_with_options(
     options: CompilerOptions,
 ) -> Result<(LoadedProgram, CompileProfile), MagError> {
     let profiler = CompileProfiler::new();
-    let mut program = load_with_profiler_and_options(
+    let program = load_with_profiler_and_options(
         source_dir,
         entry,
         inputs,
@@ -329,7 +302,6 @@ pub fn load_profiled_with_options(
         options,
     )?;
     let profile = profiler.snapshot();
-    program.result.metadata.profile = Some(profile.clone());
     Ok((program, profile))
 }
 
@@ -403,21 +375,14 @@ fn load_impl(
     let artifact = extract_artifact(value, "top-level program")?;
     record_phase(profiler, Phase::ArtifactConversion, started);
     let started = phase_started(profiler);
-    let result = compilation_result(artifact)?;
-    record_phase(profiler, Phase::ArtifactSerializeHash, started);
-    Ok(LoadedProgram { env, result })
-}
-
-fn compilation_result(artifact: serde_json::Value) -> Result<CompilationResult, MagError> {
     let encoded = serde_json::to_vec(&artifact)
         .map_err(|e| MagError::Eval(format!("serialize artifact: {e}")))?;
-    Ok(CompilationResult {
-        metadata: CompilationMetadata {
-            version: COMPILATION_RESULT_VERSION,
-            hash: format!("{:x}", Sha256::digest(encoded)),
-            profile: None,
-        },
+    let hash = format!("{:x}", Sha256::digest(encoded));
+    record_phase(profiler, Phase::ArtifactSerializeHash, started);
+    Ok(LoadedProgram {
+        env,
         artifact,
+        hash,
     })
 }
 

@@ -643,7 +643,7 @@ async fn handle_load(
         &module_roots,
     ) {
         Ok(loaded) => {
-            let artifact = loaded.result.artifact.clone();
+            let artifact = loaded.artifact.clone();
             let modification = match artifact_modification(&artifact) {
                 Ok(modification) => modification,
                 Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
@@ -664,7 +664,7 @@ async fn handle_load(
                 .unwrap_or_else(|_| Value::Array(Vec::new()));
             let reply = loaded_body(
                 in_reply_to,
-                &loaded.result.metadata.hash,
+                &loaded.hash,
                 artifact,
                 &factories,
                 contracts,

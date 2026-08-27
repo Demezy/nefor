@@ -98,28 +98,31 @@ fn compiles_with_caller_supplied_module_root_and_host_input() {
         String::from_utf8_lossy(&output.stderr)
     );
     let body = json_stdout(&output);
-    assert_eq!(body["metadata"]["version"], 1);
-    assert_eq!(
-        body["artifact"]["contracts"].as_array().map(Vec::len),
-        Some(1)
-    );
-    assert_eq!(body["metadata"]["hash"].as_str().map(str::len), Some(64));
+    assert_eq!(body["contracts"].as_array().map(Vec::len), Some(1));
+    assert!(output.stderr.is_empty());
 }
 
 #[test]
-fn profile_is_opt_in_and_machine_readable() {
+fn profile_is_opt_in_machine_readable_and_separate_from_the_artifact() {
     let fixture = Fixture::new("profile");
-    fixture.write("main.mag", "(artifact {})");
+    fixture.write("main.mag", "(artifact {:metadata \"application data\"})");
 
-    let ordinary = json_stdout(&run(&compile_args(&fixture.root, &[])));
-    assert!(ordinary["metadata"].get("profile").is_none());
-
-    let profiled = json_stdout(&run(&compile_args(&fixture.root, &["--profile"])));
-    assert!(profiled["metadata"]["profile"]["phases"]["entry_evaluate_ns"].is_u64());
+    let ordinary = run(&compile_args(&fixture.root, &[]));
     assert_eq!(
-        profiled["metadata"]["profile"]["counters"]["evaluator_steps"],
-        3
+        json_stdout(&ordinary),
+        serde_json::json!({"metadata": "application data"})
     );
+    assert!(ordinary.stderr.is_empty());
+
+    let profiled = run(&compile_args(&fixture.root, &["--profile"]));
+    assert!(profiled.status.success());
+    assert_eq!(
+        json_stdout(&profiled),
+        serde_json::json!({"metadata": "application data"})
+    );
+    let profile = json_stderr(&profiled);
+    assert!(profile["phases"]["entry_evaluate_ns"].is_u64());
+    assert!(profile["counters"]["evaluator_steps"].is_u64());
 }
 
 #[test]
@@ -229,8 +232,9 @@ fn compiler_limits_are_overridable_from_the_cli() {
         &["--memoized-call-limit", "0", "--profile"],
     ));
     assert!(output.status.success());
-    let body = json_stdout(&output);
-    let counters = &body["metadata"]["profile"]["counters"];
+    assert_eq!(json_stdout(&output), serde_json::json!([1, 1]));
+    let body = json_stderr(&output);
+    let counters = &body["counters"];
     assert_eq!(counters["memoized_call_hits"], 0);
     assert_eq!(counters["memoized_call_stores"], 0);
 }
