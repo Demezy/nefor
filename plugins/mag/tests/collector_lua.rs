@@ -152,3 +152,21 @@ fn product_join_uses_declared_sender_order() {
         .exec()
         .unwrap();
 }
+
+#[test]
+fn discard_turns_successful_delivery_into_kernel_unit() {
+    harness()
+        .load(
+            r#"
+            local factory = require("factories.discard")
+            local emitted = {}
+            local actor = assert(factory.construct("void", {},
+              function(message) emitted[#emitted + 1] = message end))
+            local completion = actor.deliver({ messages = {{ message = { value = "ignored" } }} })
+            assert(completion.status == "ok")
+            assert(#emitted == 1 and emitted[1].kind == "mag.ready")
+            "#,
+        )
+        .exec()
+        .unwrap();
+}

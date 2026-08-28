@@ -41,3 +41,15 @@
        :rules []
        :input input
        :output output})))
+
+;; The common dependency form: a Unit occurrence starts the authored script.
+;; `script` keeps the wider Unit | Text boundary for callers that deliberately
+;; pass textual stdin; `run` makes deterministic sequencing read directly.
+(let run (fn [[name String] [params ShellScriptParams]]
+  -> (nefor.graph.Node Unit nefor.contracts.ProcessResult)
+  (let value (script name params))
+  (let input
+    (nefor.graph.port name (type-tag Unit) "nefor.process.Input"))
+  (nefor.graph.node-with-rules name "ordinary"
+    (get value "actors") (get value "routes") (get value "messages")
+    (get value "rules") input (get value "output"))))

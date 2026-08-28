@@ -7,11 +7,13 @@
 (let collector-factory "nefor.factory.collector")
 (let product-split-factory "nefor.factory.product-split")
 (let product-join-factory "nefor.factory.product-join")
+(let discard-factory "nefor.factory.discard")
 
 (type SequenceEmptyParams {})
 (type CollectorParams {:expected_senders (List String)})
 (type ProductSplitParams {})
 (type ProductJoinParams {:expected_senders (List String)})
+(type DiscardParams {})
 
 (let composite-id
   (fn [[left String] [operator String] [right String]] -> String
@@ -41,6 +43,52 @@
     [[left (nefor.graph.Node A B)] [right (nefor.graph.Node B C)]]
     -> (nefor.graph.Node A C)
     (compose left right)))
+
+;; Forget one node's result and retain only its successful completion. This is
+;; the ordinary functional `void` operation expressed as a node.
+(let discard
+  (fn [T] [[id String] [type (TypeTag T)]] -> (nefor.graph.Node T Unit)
+    (let input
+      (nefor.graph.port id type "nefor.node.DiscardInput"))
+    (let output
+      (nefor.graph.port id (type-tag Unit) "mag.Unit"))
+    (nefor.graph.node id "ordinary"
+      [(nefor.graph.actor id discard-factory
+         [(type-evidence type)] (as DiscardParams {})
+         (nefor.graph.store-port input)
+         [(nefor.graph.store-port output)])]
+      [] [] input output)))
+
+;; Run `right` after `left` succeeds, discarding the left result and keeping
+;; the right result. `*>` is the established Applicative spelling.
+(let then
+  (fn [I A B]
+    [[id String]
+     [left (nefor.graph.Node I A)]
+     [right (nefor.graph.Node Unit B)]]
+    -> (nefor.graph.Node I B)
+    (let bridge (discard (str id ".discard") (type-tag A)))
+    (nefor.graph.node-with-rules id "ordinary"
+      (concat (get left "actors")
+        (concat (get bridge "actors") (get right "actors")))
+      (concat
+        (concat (get left "routes")
+          (concat (get bridge "routes") (get right "routes")))
+        [(nefor.graph.stored-route (get left "output") (get bridge "input"))
+         (nefor.graph.stored-route (get bridge "output") (get right "input"))])
+      (concat (get left "messages")
+        (concat (get bridge "messages") (get right "messages")))
+      (concat (get left "rules")
+        (concat (get bridge "rules") (get right "rules")))
+      (get left "input")
+      (get right "output"))))
+(let *>
+  (fn [I A B]
+    [[id String]
+     [left (nefor.graph.Node I A)]
+     [right (nefor.graph.Node Unit B)]]
+    -> (nefor.graph.Node I B)
+    (then id left right)))
 
 ;; Run two nodes from the same input. The product boundary records that both
 ;; results are required; its ordinary firing semantics waits for both child
