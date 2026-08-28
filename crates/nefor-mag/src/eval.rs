@@ -1241,6 +1241,18 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 .map(Value::Str)
                 .map_err(|error| MagError::Eval(format!("canonical serialization failed: {error}")))
         }
+        "function-name" => {
+            arity(args, 1)?;
+            match raw(&args[0]) {
+                Value::Fn(function) => function.name.clone().map(Value::Str).ok_or_else(|| {
+                    MagError::Eval(
+                        "function-name requires a function bound by let; anonymous closures have no resident identity"
+                            .into(),
+                    )
+                }),
+                _ => Err(MagError::Type("function-name expects a function".into())),
+            }
+        }
         "conforms?" => {
             arity(args, 2)?;
             let ty = match raw(&args[1]) {

@@ -776,6 +776,15 @@ fn infer_builtin(
             let _ = infer(env, locals, &args[0])?;
             Ok(MagType::String)
         }
+        "function-name" => {
+            exact(1)?;
+            match infer(env, locals, &args[0])? {
+                MagType::Function(_, _) => Ok(MagType::String),
+                actual => Err(MagError::Type(format!(
+                    "function-name expects a function, got {actual}"
+                ))),
+            }
+        }
         "conforms?" => {
             exact(2)?;
             let _ = infer(env, locals, &args[0])?;
@@ -1048,6 +1057,7 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "count",
     "first",
     "canonical",
+    "function-name",
     "sort-by",
     "remove-at",
     "conforms?",
@@ -1136,6 +1146,10 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
             descriptor.clone(),
         )],
         "canonical" => vec![function(vec![var("value")], MagType::String)],
+        "function-name" => vec![function(
+            vec![function(vec![var("input")], var("output"))],
+            MagType::String,
+        )],
         "conforms?" => vec![function(vec![var("value"), descriptor], MagType::Bool)],
         "fail" => vec![function(vec![var("value")], MagType::Never)],
         "pack" => vec![function(vec![var("value")], packed.clone())],
