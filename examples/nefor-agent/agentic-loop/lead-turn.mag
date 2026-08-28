@@ -1,20 +1,17 @@
 ;; Each user message executes one short-lived lead constellation over the
-;; persistent canonical chat history. Runtime-selected provider/model/system
-;; values overlay lead.llm params before execution.
+;; persistent canonical chat history. Model selection is resolved by the
+;; config-owned agents module; the runtime composes ambient system context.
 
-(require "nefor.actors")
+(require "agents")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
 
-(let start (nefor.actors.task-source "lead-task" "<initial task text>"))
-(let lead (nefor.actors.agent
-        (as nefor.actors.AgentConfig {:id "lead"
-         :model (nefor.contracts.no-identifier)
-         :profile (nefor.contracts.no-identifier)
-         :provider "chatgpt"
-         :system ""
-         :tools ["read_file"
+(let start (nefor.graph.source "lead-task"
+             (type-tag nefor.contracts.Task)
+             (as nefor.contracts.Task {:prompt "<initial task text>"})))
+(let lead (agents.with-tools agents.standard "lead" ""
+         ["read_file"
                  "read_image"
                  "instructions"
                  "edit_file"
@@ -24,10 +21,9 @@
                  "write-review"
                  "mag"
                  "mag-eval"]
-         :da-policy (nefor.contracts.no-da-policy)
-         :max-corrections 2})
         (type-tag nefor.contracts.Task)
-        (type-tag nefor.contracts.TextAnswer)))
+        (type-tag nefor.contracts.TextAnswer)
+        2))
 (let result (nefor.graph.output "lead-output"
                (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
 (let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph

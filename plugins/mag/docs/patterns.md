@@ -4,12 +4,13 @@
 
 A typed result selector exposes the planner's `List<Task>` and `AgentError`
 ports to separate resident rules. The success rule uses `indexed-map` to pair the actual task list with deterministic
-positions, maps those values into real structured-agent nodes, then
-returns one atomic delta containing those workers, typed task messages,
-worker-to-collector routes, and the collector route to a summarizer already in
-the initial graph. The error rule routes the complete `AgentError` to the
-static outcome and spawns nothing. For `[]`, `nefor.dynamic.empty-to` targets the summarizer's
-typed `Port<List<T>>`; a zero-input collector would never fire. The shipped
+positions, maps those values into real structured-agent nodes, then returns one
+atomic delta containing those workers, typed task messages, and a
+`nefor.dynamic.collect-all` fragment built from their typed output ports. The
+supplied port order defines the output `List<T>` order even when workers finish
+out of order. The error rule routes the complete `AgentError` to the static
+outcome and spawns nothing. For `[]`, `collect-all` produces the ordinary empty
+list identity immediately. The shipped
 program is `examples/nefor-agent/agentic-loop/dynamic-tasks.mag` and its real provider E2Es
 cover zero, invalid, and reverse worker completion.
 
@@ -69,6 +70,13 @@ a failure tag (for example the shell capability's `mag.CommandFailed`). Route th
 type to the repair actor; compose produce → check → repair as an ordinary cycle.
 Unhandled failures escalate to `mag.run_failed`. `kill` removes actors and voids
 late outputs; it is not a general routeable failure output.
+
+This is errors-as-values in the ordinary functional sense. `AgentError` is a
+semantic value in an agent's declared result sum and can be routed, collected,
+retried, or accepted as partial evidence according to the workflow. A
+`mag.run_failed` event means execution escaped that typed business model—for
+example, an actor could not be constructed or an unhandled runtime failure
+ended the run.
 
 **Not:** parsing error text out of a success-shaped output.
 

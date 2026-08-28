@@ -28,7 +28,8 @@ M.declaration = {
     },
   },
   params = {
-    model = "table?", profile = "table?", provider = "string",
+    model = "string", provider = "string",
+    reasoning_effort = "string",
     system = "string?", tools = "table?", history = "table?", schema = "table",
     output_type = "string", error_type = "string",
     provider_error_type = "string", validation_error_type = "string",

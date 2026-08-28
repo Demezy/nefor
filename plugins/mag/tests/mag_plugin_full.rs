@@ -193,13 +193,18 @@ pub mod kernel {
     (require "nefor.contracts")
     (require "nefor.graph")
 
+    (let exact-model (fn [[model nefor.actors.ResolvedModel]]
+      -> nefor.actors.ResolvedModel model))
+    (let model (as nefor.actors.ResolvedModel
+      {:provider "test-provider" :model "test-model"
+       :reasoning-effort "medium"}))
+
     (let make-agent (fn [I O] [[id String] [input-type (TypeTag I)]
                                 [output-type (TypeTag O)]]
       -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
-      (nefor.actors.agent
-        (as nefor.actors.AgentConfig
-          {:id id :model (nefor.contracts.no-identifier)
-           :profile (nefor.contracts.no-identifier) :provider "test-provider"
+      (nefor.actors.agent exact-model
+        (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel)
+          {:id id :model model
            :system "" :tools [] :da-policy (nefor.contracts.no-da-policy)
            :max-corrections 2})
         input-type output-type)))
@@ -1251,12 +1256,12 @@ mod tests {
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
+(let exact-model (fn [[model nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel model))
+(let model (as nefor.actors.ResolvedModel {:provider "mock-provider" :model "mock-model" :reasoning-effort "medium"}))
 (let start (nefor.actors.task-source "task" "test"))
-(let worker (nefor.actors.agent
-        (as nefor.actors.AgentConfig {:id "worker"
-         :model (nefor.contracts.no-identifier)
-         :profile (nefor.contracts.no-identifier)
-         :provider "mock-provider"
+(let worker (nefor.actors.agent exact-model
+        (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "worker"
+         :model model
          :system "Answer."
          :tools (as (List String) [])
          :da-policy (nefor.contracts.no-da-policy)
@@ -1384,12 +1389,12 @@ mod tests {
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
+(let exact-model (fn [[model nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel model))
+(let model (as nefor.actors.ResolvedModel {:provider "mock-provider" :model "mock-model" :reasoning-effort "medium"}))
 (let start (nefor.actors.task-source "task" "test"))
-(let worker (nefor.actors.agent
-        (as nefor.actors.AgentConfig {:id "worker"
-         :model (nefor.contracts.no-identifier)
-         :profile (nefor.contracts.no-identifier)
-         :provider "mock-provider"
+(let worker (nefor.actors.agent exact-model
+        (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "worker"
+         :model model
          :system "Answer."
          :tools (as (List String) [])
          :da-policy (nefor.contracts.no-da-policy)

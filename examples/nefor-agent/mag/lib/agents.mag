@@ -1,0 +1,35 @@
+(require "nefor.actors")
+(require "nefor.contracts")
+(require "nefor.graph")
+
+;; This example configuration owns the finite model vocabulary. Nefor only
+;; asks for a typed resolver and receives concrete execution parameters.
+(type Standard {})
+(type Mock {})
+(type Model (| Standard Mock))
+
+(let standard (as Model (as Standard {})))
+(let mock (as Model (as Mock {})))
+
+(let resolve-model (fn [[model Model]] -> nefor.actors.ResolvedModel
+  (match model
+    [Standard value
+      (as nefor.actors.ResolvedModel
+        {:provider "chatgpt" :model "gpt-5.6-sol"
+         :reasoning-effort "medium"})]
+    [Mock value
+      (as nefor.actors.ResolvedModel
+        {:provider "mock-provider" :model "mock-model"
+         :reasoning-effort "medium"})])))
+
+(let with-tools (fn [I O] [[model Model] [id String] [system String]
+                            [tools (List String)]
+                            [input-type (TypeTag I)] [output-type (TypeTag O)]
+                            [max-corrections Int]]
+  -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
+  (nefor.actors.agent resolve-model
+    (as (nefor.actors.AgentConfig Model)
+      {:id id :model model :system system :tools tools
+       :da-policy (nefor.contracts.no-da-policy)
+       :max-corrections max-corrections})
+    input-type output-type)))

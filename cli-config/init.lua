@@ -75,10 +75,11 @@ pm.register({
   { name = "nefor-mag", dir = PROJECT_ROOT .. "/mag" },
 })
 
+local cfg = require("config").active
 local MAG_PACKAGE_ROOT = pm.root("nefor-mag")
 local MAG_MODULE_ROOTS = {
   MAG_PACKAGE_ROOT .. "/lib",
-  STARTER_ROOT .. "/mag/lib",
+  STARTER_ROOT .. "/mag/" .. (cfg.plugins.spawn_mock and "test" or "prod"),
 }
 
 local ncp      = require("core.ncp")
@@ -89,8 +90,6 @@ if sessions_root == nil or sessions_root == "" then
   sessions_root = nefor.fs.data_root() .. "/sessions"
 end
 sessions.configure { root = sessions_root }
-local cfg      = require("config").active
-
 function dispatch(current_log)
   ncp.dispatch(current_log)
 end
@@ -237,12 +236,7 @@ local lead_workflow = require("libs.lead-workflow")
 lead_workflow.configure {
   dependency_module_roots = MAG_MODULE_ROOTS,
   ambient_context = mag_context,
-  agent_defaults = {
-    provider = cfg.provider.name,
-    model = cfg.provider.model,
-    reasoning_effort = "medium",
-    system = cli_system,
-  },
+  agent_system = cli_system,
 }
 actor.spawn(lead_workflow)
 

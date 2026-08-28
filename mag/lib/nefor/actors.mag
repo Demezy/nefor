@@ -10,17 +10,20 @@
 (let human-factory "nefor.factory.human")
 
 (type AdapterParams {:seed String :schema TypeSchema})
-(type LlmParams {:model nefor.contracts.OptionalIdentifier
-                 :profile nefor.contracts.OptionalIdentifier
+(type ResolvedModel {:provider String
+                     :model String
+                     :reasoning-effort String})
+(type LlmParams {:model String
                  :provider String
+                 :reasoning_effort String
                  :system String
                  :tools (List String)
                  :output_type SemanticTypeId
                  :error_type SemanticTypeId
                  :provider_error_type SemanticTypeId})
-(type StructuredOutputParams {:model nefor.contracts.OptionalIdentifier
-                              :profile nefor.contracts.OptionalIdentifier
+(type StructuredOutputParams {:model String
                               :provider String
+                              :reasoning_effort String
                               :system String
                               :tools (List String)
                               :schema TypeSchema
@@ -35,10 +38,8 @@
 (type RetryGateParams {:max_retries Int})
 (type HumanParams {:prompt String})
 
-(type AgentConfig {:id String
-                   :model nefor.contracts.OptionalIdentifier
-                   :profile nefor.contracts.OptionalIdentifier
-                   :provider String
+(type AgentConfig [M] {:id String
+                   :model M
                    :system String
                    :tools (List String)
                    :da-policy nefor.contracts.DaPolicy
@@ -72,10 +73,12 @@
 ;; The stable result wire carries the selected constructor identity. Ordinary
 ;; edges route compatible arms directly; `result-arm` creates a typed resident
 ;; subscription on that same actor/wire without inserting a selector actor.
-(let agent (fn [I O] [[config AgentConfig] [input-type (TypeTag I)]
+(let agent (fn [M I O] [[resolve-model (Fn M ResolvedModel)]
+                [config (AgentConfig M)] [input-type (TypeTag I)]
                 [output-type (TypeTag O)]]
   -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
   (let id (get config "id"))
+  (let resolved-model (resolve-model (get config "model")))
   (let entry-id (str id ".entry"))
   (let llm-id (str id ".llm"))
   (let run-tool-id (str id ".run-tool"))
@@ -123,9 +126,9 @@
        (if (= (type-id (type-evidence output-type))
               (type-id (type-evidence (type-tag nefor.contracts.TextAnswer))))
          (nefor.graph.actor llm-id llm-factory []
-           (as LlmParams {:model (get config "model")
-            :profile (get config "profile")
-            :provider (get config "provider")
+           (as LlmParams {:model (get resolved-model "model")
+            :provider (get resolved-model "provider")
+            :reasoning_effort (get resolved-model "reasoning-effort")
             :system (get config "system")
             :tools (or (get config "tools") (as (List String) []))
             :output_type (type-id (type-evidence output-type))
@@ -138,9 +141,9 @@
             (nefor.graph.store-port result)])
          (nefor.graph.actor llm-id structured-output-factory
            [(type-evidence output-type)]
-           (as StructuredOutputParams {:model (get config "model")
-            :profile (get config "profile")
-            :provider (get config "provider")
+           (as StructuredOutputParams {:model (get resolved-model "model")
+            :provider (get resolved-model "provider")
+            :reasoning_effort (get resolved-model "reasoning-effort")
             :system (get config "system")
             :tools (or (get config "tools") (as (List String) []))
             :schema (type-schema output-type)

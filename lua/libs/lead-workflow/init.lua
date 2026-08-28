@@ -137,7 +137,7 @@ local run_registry = RunRegistry.new({
 })
 
 local dependency_module_roots = {}
-local agent_defaults = nil
+local agent_system = nil
 local ambient_context = nil
 
 local SYNC_COMPLETION_GRACE_MS = 3000
@@ -275,38 +275,6 @@ local expire_completion_grace
 local take_termination_waiters
 local expire_termination_waiter
 
-local function orchestration_profiles()
-  local ok, cfg = pcall(require, "config")
-  if not ok or type(cfg) ~= "table" or type(cfg.active) ~= "table" then
-    return nil, "config.active.orchestration_profiles is missing"
-  end
-  local profiles = cfg.active.orchestration_profiles
-  if type(profiles) ~= "table" then
-    return nil, "config.active.orchestration_profiles must be a table"
-  end
-  for name in pairs(profiles) do
-    if type(name) ~= "string" or #name == 0 then
-      return nil, "config.active.orchestration_profiles keys must be non-empty strings"
-    end
-  end
-  local names = {}
-  for name in pairs(profiles) do names[#names + 1] = name end
-  table.sort(names)
-  for _, name in ipairs(names) do
-    local profile = profiles[name]
-    if type(profile) ~= "table" then
-      return nil, "configured profile '" .. name .. "' must be a table"
-    end
-    for _, field in ipairs({ "provider", "model", "reasoning_effort" }) do
-      if type(profile[field]) ~= "string" or #profile[field] == 0 then
-        return nil, "configured profile '" .. name ..
-          "' requires a non-empty string " .. field
-      end
-    end
-  end
-  return profiles, nil
-end
-
 local function emit_tool_result_ok(firing_id, output, completion_delivery)
   local body = {
     kind   = "tool.result",
@@ -440,71 +408,19 @@ local function is_llm_actor(actor)
       or actor.factory == "nefor.factory.structured-output"
 end
 
-local function selected_profile(value)
-  if type(value) == "string" then return value end
-  if type(value) == "table" and value.present == true then
-    return value.value
-  end
-  return nil
-end
-
--- Resolve runtime-owned LLM parameters over an artifact's actors. A raw actor
--- may select an explicit profile or reasoning effort; composition-provided
--- ready agents omit both and receive the configured defaults. The runtime
--- prepends the shared base prompt to each actor's positional system overlay.
-local function resolve_agent_params(actors, session_id)
+-- Model choice is already concrete in the compiled artifact. The runtime only
+-- composes ambient instructions with each actor's authored system prompt.
+local function compose_agent_params(actors, session_id)
   local overlay = {}
-  local profiles
-  local profiles_err
   for _, actor in ipairs(actors or {}) do
     local params = type(actor.params) == "table" and actor.params or {}
-    local profile_name = selected_profile(params.profile)
-    local has_raw_effort = params.reasoning_effort ~= nil
-    if profile_name ~= nil and has_raw_effort then
-      return nil, "actor '" .. tostring(actor.id) ..
-        "' sets both profile and reasoning_effort; use profile only"
-    end
-    if type(profile_name) == "string" and #profile_name > 0 then
-      if profiles == nil and profiles_err == nil then
-        profiles, profiles_err = orchestration_profiles()
-      end
-      if profiles_err ~= nil then
-        return nil, "actor '" .. tostring(actor.id) .. "' uses profile '" ..
-          profile_name .. "', but " .. profiles_err
-      end
-      local resolved = profiles[profile_name]
-      if resolved == nil then
-        local configured = sorted_keys(profiles)
-        local suffix = #configured > 0 and table.concat(configured, ", ") or "none"
-        return nil, "actor '" .. tostring(actor.id) ..
-          "' has unknown profile '" .. profile_name ..
-          "'. Configured profiles: " .. suffix .. "."
-      end
-      overlay[actor.id] = {
-        provider = resolved.provider,
-        model = resolved.model,
-        reasoning_effort = resolved.reasoning_effort,
-      }
-    elseif is_llm_actor(actor) and not has_raw_effort then
-      if agent_defaults == nil then
-        return nil, "llm actor '" .. tostring(actor.id) ..
-          "' is missing required :profile. " ..
-          "Set :profile in the MAG library wrapper or configure agent_defaults."
-      end
-      overlay[actor.id] = {
-        provider = agent_defaults.provider,
-        model = agent_defaults.model,
-        reasoning_effort = agent_defaults.reasoning_effort,
-      }
-    end
-    if is_llm_actor(actor)
-        and agent_defaults ~= nil then
-      overlay[actor.id] = overlay[actor.id] or {}
+    if is_llm_actor(actor) and agent_system ~= nil then
+      overlay[actor.id] = {}
       overlay[actor.id].system = compose_agent_system(
-        agent_defaults.system, params.system, session_id)
+        agent_system, params.system, session_id)
     end
   end
-  return overlay, nil
+  return overlay
 end
 
 local function sh_quote(value)
@@ -2028,11 +1944,7 @@ submit_loaded_run = function(pending, body, error_prefix)
     emit_tool_result_err(pending.firing_id, error_prefix .. ": " .. result_err)
     return false
   end
-  local overlay, params_err = resolve_agent_params(actors, pending.session_id)
-  if not overlay then
-    emit_tool_result_err(pending.firing_id, error_prefix .. ": " .. params_err)
-    return false
-  end
+  local overlay = compose_agent_params(actors, pending.session_id)
   local exec = {
     kind = "mag.execute",
     id = pending.run_id,
@@ -2091,11 +2003,7 @@ local function submit_loaded_apply(pending, body)
       "and get approval before applying it.")
     return false
   end
-  local overlay, params_err = resolve_agent_params(actors, pending.session_id)
-  if not overlay then
-    emit_tool_result_err(pending.firing_id, "mag apply: " .. params_err)
-    return false
-  end
+  local overlay = compose_agent_params(actors, pending.session_id)
   local request_id = "mag-apply-" .. envelope.uuid_lite()
   state.pending_mag_apply[request_id] = {
     firing_id = pending.firing_id,
@@ -2153,11 +2061,9 @@ end
 -- delta artifact and its named live target. Only then is the request submitted.
 -- Validation failure acks the firing with an error and drops the pending entry.
 --
--- Agent params resolved lead-side from the configured registry/defaults are
--- threaded to the actors via `params_overlay` on
--- mag.execute or mag.apply — a per-actor-id param patch the kernel merges before spawn
--- (actor params are kernel-opaque, so an overlay is legitimate control-plane
--- input, ir.md). The overlay keys on the namespaced LLM actor ids.
+-- The composed system prompt is threaded to agents through `params_overlay`
+-- on mag.execute or mag.apply. Model selection is already concrete in the
+-- compiled artifact; the runtime does not reinterpret config-owned values.
 local function resume_pending_load(body)
   local load_id = body.in_reply_to
   local pending = type(load_id) == "string" and state.pending_mag_load[load_id] or nil
@@ -2623,7 +2529,7 @@ local M = {
         return nil
       end
       dependency_module_roots = {}
-      agent_defaults = nil
+      agent_system = nil
       ambient_context = nil
       mag_eval._internals.reset()
       advertised = false
@@ -2649,25 +2555,13 @@ function M.configure(opts)
   else
     ambient_context = nil
   end
-  local defaults = opts.agent_defaults
-  if defaults ~= nil then
-    if type(defaults) ~= "table" then
-      error("lead-workflow: agent_defaults must be a table", 2)
+  if opts.agent_system ~= nil then
+    if type(opts.agent_system) ~= "string" or #opts.agent_system == 0 then
+      error("lead-workflow: agent_system must be a non-empty string", 2)
     end
-    for _, field in ipairs({ "provider", "model", "reasoning_effort", "system" }) do
-      if type(defaults[field]) ~= "string" or #defaults[field] == 0 then
-        error("lead-workflow: agent_defaults." .. field ..
-          " must be a non-empty string", 2)
-      end
-    end
-    agent_defaults = {
-      provider = defaults.provider,
-      model = defaults.model,
-      reasoning_effort = defaults.reasoning_effort,
-      system = defaults.system,
-    }
+    agent_system = opts.agent_system
   else
-    agent_defaults = nil
+    agent_system = nil
   end
   mag_eval.configure({
     dependency_module_roots = copy_roots(roots),

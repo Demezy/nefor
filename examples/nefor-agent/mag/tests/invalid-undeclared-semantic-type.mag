@@ -1,11 +1,15 @@
 (require "nefor.actors")
 (require "nefor.contracts")
 
-(nefor.actors.agent
-  (as nefor.actors.AgentConfig {:id "invalid"
-   :model (nefor.contracts.no-identifier)
-   :profile (nefor.contracts.no-identifier)
-   :provider "mock-plugin"
+(let exact-model (fn [[model nefor.actors.ResolvedModel]]
+  -> nefor.actors.ResolvedModel model))
+(let resolved-model-value (as nefor.actors.ResolvedModel
+  {:provider "mock-plugin" :model "mock-model"
+   :reasoning-effort "medium"}))
+
+(nefor.actors.agent exact-model
+  (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "invalid"
+   :model resolved-model-value
    :system ""
    :tools []
    :da-policy (nefor.contracts.no-da-policy)

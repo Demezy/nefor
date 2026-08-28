@@ -113,23 +113,20 @@ There are no compiler forms named `agent`, `bash`, `graph`, `subgraph`, or
 `sink`. Use the shipped libraries. A minimal agent program is:
 
 ```lisp
-(require "nefor.actors")
+(require "agents")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
 
-(let start (nefor.actors.task-source "task" "<initial task text>"))
-(let worker (nefor.actors.agent
-        (as nefor.actors.AgentConfig {:id "worker"
-         :model (nefor.contracts.no-identifier)
-         :profile (nefor.contracts.identifier "standard")
-         :provider "chatgpt"
-         :system "Answer the task."
-         :tools ["read_file" "mag-eval"]
-         :da-policy (nefor.contracts.no-da-policy)
-         :max-corrections 2})
+(let start (nefor.graph.source "task"
         (type-tag nefor.contracts.Task)
-        (type-tag nefor.contracts.TextAnswer)))
+        (as nefor.contracts.Task {:prompt "<initial task text>"})))
+(let worker (agents.with-tools agents.standard "worker"
+        "Answer the task."
+        ["read_file" "mag-eval"]
+        (type-tag nefor.contracts.Task)
+        (type-tag nefor.contracts.TextAnswer)
+        2))
 (let result (nefor.graph.output "result"
         (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
 (let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
@@ -161,9 +158,10 @@ and returns a raw graph-modification `Artifact`. Edit or compose
 the function to describe another fresh run; graph functions never patch a live
 actor constellation or retrieve a stored graph.
 
-Use only supported agent config fields: `id`, `model`, `profile`, `provider`,
-`system`, `tools`, and `da-policy`. Prefer `fast`, `standard`, `deep`, or `max`
-profiles. `provider` is required. Read-only investigators normally receive
+The configuration-owned `agents` module defines its finite `Model` sum and
+exhaustively resolves each value to a concrete provider, model, and reasoning
+effort before Nefor sees the artifact. Use those typed values rather than
+inventing profile strings. Read-only investigators normally receive
 `["read_file" "mag-eval"]`; add `edit_file`/`write_file` only for builders.
 
 Paths passed to `mag` are relative to the writable session workspace. Canonical

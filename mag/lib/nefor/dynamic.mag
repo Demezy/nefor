@@ -7,31 +7,45 @@
 (let collected-prompt-factory "nefor.factory.collected-prompt")
 (type CollectorParams {:expected_senders (List String)})
 (type DynamicParams {})
+(type Collection [T] {:change nefor.graph.Delta
+                      :output (nefor.graph.Port (List T))})
 
-;; Runtime-backed typed fan-in. The wire wrapper is private to this library;
-;; callers work with semantic T and (List T) ports.
-(let collector (fn [T] [[id String]
-                         [expected-senders (List String)]
-                         [item-type (TypeTag T)]]
-  -> (nefor.graph.Node T (List T))
-  (let input (nefor.graph.port id item-type "nefor.dynamic.Item"))
-  (let output (nefor.graph.port id (type-tag (List T)) "nefor.dynamic.Collected"))
-  (as (nefor.graph.Node T (List T))
-      {:id id :role "ordinary" :actors [(nefor.graph.actor id collector-factory
-                  [(type-evidence item-type)]
-                  (as CollectorParams
-                    {:expected_senders expected-senders})
-                  (nefor.graph.store-port input)
-                  [(nefor.graph.store-port output)])]
-       :routes (as (List nefor.graph.StoredRoute) [])
-       :messages []
-       :input input
-       :output output})))
-
-;; The zero-worker branch must bypass collector construction. This message
-;; activates a static consumer that accepts the collector's output wire.
-(let empty-to (fn [T] [[target (nefor.graph.Port (List T))]] -> nefor.graph.Message
-  (nefor.graph.typed-message target (as (List T) []))))
+;; Closed, deterministic typed fan-in. The supplied port order defines the
+;; result order; producer identities and routes are derived from those ports.
+;; The empty collection is the ordinary List identity and is represented by a
+;; source node that immediately produces [].
+(let collect-all (fn [T] [[id String]
+                           [producers (List (nefor.graph.Port T))]
+                           [item-type (TypeTag T)]]
+  -> (Collection T)
+  (if (= (count producers) 0)
+    ((fn [] -> (Collection T)
+      (let source (nefor.graph.source id (type-tag (List T)) (as (List T) [])))
+      (as (Collection T)
+        {:change (nefor.graph.node-delta source)
+         :output (get source "output")})))
+    ((fn [] -> (Collection T)
+      (let input (nefor.graph.port id item-type "nefor.dynamic.Item"))
+      (let output
+        (nefor.graph.port id (type-tag (List T)) "nefor.dynamic.Collected"))
+      (let expected-senders
+        (map (fn [[producer (nefor.graph.Port T)]] -> String
+               (get producer "actor"))
+             producers))
+      (let collector
+        (nefor.graph.actor id collector-factory [(type-evidence item-type)]
+          (as CollectorParams {:expected_senders expected-senders})
+          (nefor.graph.store-port input)
+          [(nefor.graph.store-port output)]))
+      (let routes
+        (map (fn [[producer (nefor.graph.Port T)]] -> nefor.graph.StoredRoute
+               (nefor.graph.stored-route producer input))
+             producers))
+      (as (Collection T)
+        {:change (nefor.graph.delta [collector] routes
+                   (as (List nefor.graph.Message) [])
+                   (as (List String) []))
+         :output output}))))))
 
 (let collect-item (fn [T] [[id String] [type (TypeTag T)]]
   -> (nefor.graph.Node T T)

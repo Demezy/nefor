@@ -287,12 +287,7 @@ local lead_workflow = require("libs.lead-workflow")
 lead_workflow.configure {
   dependency_module_roots = MAG_MODULE_ROOTS,
   ambient_context = mag_context,
-  agent_defaults = {
-    provider = cfg.default_provider,
-    model = cfg.default_model,
-    reasoning_effort = cfg.default_reasoning_effort,
-    system = lead_role.WORKER_SYSTEM_PROMPT,
-  },
+  agent_system = lead_role.WORKER_SYSTEM_PROMPT,
 }
 actor.spawn(lead_workflow)
 

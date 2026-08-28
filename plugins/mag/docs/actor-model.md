@@ -331,16 +331,15 @@ Pinned edge semantics:
 
 ### llm params
 
-Authored data on the llm actor spec (all optional unless noted):
+Authored data on the llm actor spec:
 
 | Param              | Meaning                                                                                                                                                                                                                                                                               |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `provider`         | provider capability name — **required**; construction fails without it                                                                                                                                                                                                                |
-| `model`            | provider model id                                                                                                                                                                                                                                                                     |
+| `provider`         | provider capability name — required                                                                                                                                                                                                                                                   |
+| `model`            | provider model id — required                                                                                                                                                                                                                                                          |
 | `system`           | system prompt; rides the request's `system` field every round                                                                                                                                                                                                                         |
 | `tools`            | advertised tool list for the call                                                                                                                                                                                                                                                     |
-| `profile`          | orchestration profile name, resolved by the control plane into provider/model/`reasoning_effort` via the params overlay before spawn                                                                                                                                                  |
-| `reasoning_effort` | resolved reasoning effort for the call; this is the only shipped reasoning knob forwarded by the MAG bridge on the direct llm path                                                                                                                                                    |
+| `reasoning_effort` | reasoning effort for the call — required; this is the only shipped reasoning knob forwarded by the MAG bridge on the direct llm path                                                                                                                                                  |
 | `history`          | transcript seed: an array of provider-dialect messages (role-tagged turns; assistant tool-call turns in the wire shape the transcript records) that becomes the owned transcript's initial contents at construct — every round replays it ahead of the turns the instance accumulates |
 
 `history` is the turn-as-function seam: the lead's turn is a short-lived
@@ -362,13 +361,14 @@ fails construction with the offending detail; the instance never binds and
 the kernel escalates the construct failure as a run failure.
 
 The direct `llm` factory schema is the table above: `provider`, `model`,
-`system`, `tools`, `profile`, `reasoning_effort`, and `history`. The MAG bridge
+`system`, `tools`, `reasoning_effort`, and `history`. The MAG bridge
 forwards `model`, `system`, `tools`, and `reasoning_effort` into the provider
 `chat.create` request. For typed agents it also places the converted
 `output_schema` on `chat.complete`; `provider` selects the provider actor at
-construction. Profile resolution is control-plane composition via
-`params_overlay` (for example, the lead-workflow spawner resolves profiles to
-provider/model/`reasoning_effort` before execute). Arbitrary provider-specific
+construction. Config-owned MAG libraries may define any typed model vocabulary
+they need and pass an exhaustive `Model -> ResolvedModel` function to
+`nefor.actors.agent`; the resulting artifact already contains the concrete
+provider, model, and reasoning effort. Arbitrary provider-specific
 reasoning settings are not shipped through this path unless both the bridge and
 the provider schema add them; use `reasoning_effort` in MAG examples instead
 of provider-specific reasoning knobs.
@@ -391,7 +391,8 @@ constructor and an `OutputValidationError`; a provider terminal failure carries
 a `ProviderError`. Both errors carry mandatory agent-owned `last_output`,
 retaining an earlier completed candidate when a later correction round fails.
 
-The canonical MAG constructor is `nefor.actors.agent`. Its public type is
+The canonical MAG constructor is `nefor.actors.agent`. It is generic over the
+configuration-owned model type and its public node boundary is
 `I -> (O | AgentError)`. `max_corrections = 0` means no correction,
 `1` means one correction, and so on.
 

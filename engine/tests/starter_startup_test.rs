@@ -67,7 +67,7 @@ fn starter_startup_parser_and_mode_application() {
         .find("actor.spawn(agentic_loop)")
         .expect("agentic loop registration");
     let lead_workflow = init
-        .find("actor.spawn(require(\"libs.lead-workflow\"))")
+        .find("actor.spawn(lead_workflow)")
         .expect("lead workflow registration");
     let read_only_tools = init
         .find("actor.spawn(require(\"read-only-tools\"))")

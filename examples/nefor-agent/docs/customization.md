@@ -52,11 +52,6 @@ M.active = {
     },
   },
 
-  orchestration_profiles = {
-    fast = { provider = "local", model = "model-name", reasoning_effort = "low" },
-    deep = { provider = "local", model = "model-name", reasoning_effort = "high" },
-  },
-
   tool_gate = {
     default_action = "prompt",
     auto_tools = { "read_file", "read_image", "mag", "mag-eval" },

@@ -55,6 +55,13 @@ fn starter_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/nefor-agent")
 }
 
+fn module_roots() -> [PathBuf; 2] {
+    [
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib"),
+        starter_dir().join("mag/lib"),
+    ]
+}
+
 fn kernel_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lua/mag-kernel/init.lua")
 }
@@ -257,7 +264,7 @@ async fn load_lead_program<R: AsyncBufReadExt + Unpin>(
             "kind": "mag.load",
             "id": "lead-turn-load",
             "source_dir": starter_dir().to_string_lossy(),
-            "module_roots": [starter_dir().join("mag/lib").to_string_lossy()],
+            "module_roots": module_roots(),
             "entry": "agentic-loop/lead-turn.mag",
         })),
     )
@@ -346,7 +353,7 @@ async fn load_typed_task_program<R: AsyncBufReadExt + Unpin>(
             "kind": "mag.load",
             "id": "typed-task-load",
             "source_dir": starter_dir().to_string_lossy(),
-            "module_roots": [starter_dir().join("mag/lib").to_string_lossy()],
+            "module_roots": module_roots(),
             "entry": "agentic-loop/typed-task.mag",
         })),
     )
@@ -503,7 +510,7 @@ async fn whole_agent_error_union_can_drive_a_recovery_agent() {
             "kind": "mag.load",
             "id": "recovery-chain-load",
             "source_dir": starter_dir().to_string_lossy(),
-            "module_roots": [starter_dir().join("mag/lib").to_string_lossy()],
+            "module_roots": module_roots(),
             "entry": "agentic-loop/recovery-chain.mag",
         })),
     )
@@ -591,7 +598,7 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         &mut stdin,
         obj(json!({"kind":"mag.load","id":"dynamic-load",
       "source_dir":starter_dir().to_string_lossy(),
-      "module_roots":[starter_dir().join("mag/lib").to_string_lossy()],
+      "module_roots":module_roots(),
       "entry":"agentic-loop/dynamic-tasks.mag"})),
     )
     .await;
@@ -605,7 +612,7 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         artifact
             .pointer("/messages/0/content/kind")
             .and_then(Value::as_str),
-        Some("task")
+        Some("nefor.agent.Input")
     );
     send_event(
         &mut stdin,
@@ -696,7 +703,7 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
 }
 
 #[tokio::test]
-async fn dynamic_tasks_zero_bypasses_collector_and_reaches_static_summarizer() {
+async fn dynamic_tasks_zero_uses_empty_collection_identity_and_reaches_summarizer() {
     let data_dir = std::env::temp_dir().join(format!("mag-dynamic-zero-{}", std::process::id()));
     std::fs::remove_dir_all(&data_dir).ok();
     std::fs::create_dir_all(&data_dir).unwrap();
@@ -704,9 +711,13 @@ async fn dynamic_tasks_zero_bypasses_collector_and_reaches_static_summarizer() {
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());
     handshake(&mut reader, &mut stdin).await;
-    send_event(&mut stdin,obj(json!({"kind":"mag.load","id":"zero-load",
-      "source_dir":starter_dir().to_string_lossy(),"module_roots":[starter_dir().join("mag/lib").to_string_lossy()],
-      "entry":"agentic-loop/dynamic-tasks.mag"}))).await;
+    send_event(
+        &mut stdin,
+        obj(json!({"kind":"mag.load","id":"zero-load",
+      "source_dir":starter_dir().to_string_lossy(),"module_roots":module_roots(),
+      "entry":"agentic-loop/dynamic-tasks.mag"})),
+    )
+    .await;
     next_event_of_kind(&mut reader, "mag.loaded").await;
     send_event(
         &mut stdin,
@@ -728,8 +739,8 @@ async fn dynamic_tasks_zero_bypasses_collector_and_reaches_static_summarizer() {
         let event = next_event(&mut reader, "zero summary create").await;
         if let Some(id) = event.get("id").and_then(Value::as_str) {
             assert!(
-                !id.starts_with("expand.worker") && id != "expand.collector",
-                "zero branch spawned dynamic actor {id}"
+                !id.starts_with("expand.worker"),
+                "zero branch spawned worker actor {id}"
             );
         }
         if event.get("kind").and_then(Value::as_str) == Some("conversation.provider.invoke.request")
@@ -752,8 +763,8 @@ async fn dynamic_tasks_zero_bypasses_collector_and_reaches_static_summarizer() {
         let event = next_event(&mut reader, "zero terminal result").await;
         if let Some(id) = event.get("id").and_then(Value::as_str) {
             assert!(
-                !id.starts_with("expand.worker") && id != "expand.collector",
-                "zero branch spawned dynamic actor {id}"
+                !id.starts_with("expand.worker"),
+                "zero branch spawned worker actor {id}"
             );
         }
         if event.get("kind").and_then(Value::as_str) == Some("mag.run_result") {
@@ -774,9 +785,13 @@ async fn dynamic_tasks_one_runs_one_real_worker_and_static_summarizer() {
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());
     handshake(&mut reader, &mut stdin).await;
-    send_event(&mut stdin,obj(json!({"kind":"mag.load","id":"one-load",
-      "source_dir":starter_dir().to_string_lossy(),"module_roots":[starter_dir().join("mag/lib").to_string_lossy()],
-      "entry":"agentic-loop/dynamic-tasks.mag"}))).await;
+    send_event(
+        &mut stdin,
+        obj(json!({"kind":"mag.load","id":"one-load",
+      "source_dir":starter_dir().to_string_lossy(),"module_roots":module_roots(),
+      "entry":"agentic-loop/dynamic-tasks.mag"})),
+    )
+    .await;
     next_event_of_kind(&mut reader, "mag.loaded").await;
     send_event(
         &mut stdin,
@@ -826,9 +841,13 @@ async fn dynamic_tasks_invalid_planner_spawns_nothing_and_returns_typed_error() 
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());
     handshake(&mut reader, &mut stdin).await;
-    send_event(&mut stdin,obj(json!({"kind":"mag.load","id":"invalid-load",
-      "source_dir":starter_dir().to_string_lossy(),"module_roots":[starter_dir().join("mag/lib").to_string_lossy()],
-      "entry":"agentic-loop/dynamic-tasks.mag"}))).await;
+    send_event(
+        &mut stdin,
+        obj(json!({"kind":"mag.load","id":"invalid-load",
+      "source_dir":starter_dir().to_string_lossy(),"module_roots":module_roots(),
+      "entry":"agentic-loop/dynamic-tasks.mag"})),
+    )
+    .await;
     next_event_of_kind(&mut reader, "mag.loaded").await;
     send_event(
         &mut stdin,
@@ -944,11 +963,12 @@ async fn lead_turn_runs_through_gate_and_second_turn_replays_seeded_history() {
     );
     let canonical_initial = facts_json(&initial_facts);
     assert!(
-        canonical_initial.contains("## MAG workspace"),
+        canonical_initial.contains("# MAG workspace"),
         "the ambient MAG workspace block is canonical: {initial_facts:?}"
     );
     assert!(
-        canonical_initial.contains("workspace dir: /tmp/nefor/sessions/lead-turn-session/mag"),
+        canonical_initial
+            .contains("Writable source directory: `/tmp/nefor/sessions/lead-turn-session/mag`"),
         "the canonical block carries the session workspace dir: {initial_facts:?}"
     );
     assert!(

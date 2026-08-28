@@ -1,6 +1,6 @@
 ;; A downstream reviewer deliberately accepts the builder's whole result union,
 ;; so a failed builder can preserve partial output and still continue the graph.
-(require "nefor.actors")
+(require "agents")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
@@ -11,22 +11,15 @@
 (let start (nefor.graph.source "recovery-input"
               (type-tag nefor.contracts.Task)
               (as nefor.contracts.Task {:prompt "Implement the change"})))
-(let builder (nefor.actors.agent
-        (as nefor.actors.AgentConfig {:id "builder"
-         :model (nefor.contracts.no-identifier)
-         :profile (nefor.contracts.no-identifier) :provider "mock-provider"
-         :system "Build the requested change." :tools (as (List String) [])
-         :da-policy (nefor.contracts.no-da-policy) :max-corrections 0})
-        (type-tag nefor.contracts.Task) (type-tag BuildReport)))
-(let reviewer (nefor.actors.agent
-        (as nefor.actors.AgentConfig {:id "reviewer"
-         :model (nefor.contracts.no-identifier)
-         :profile (nefor.contracts.no-identifier) :provider "mock-provider"
-         :system "Review the builder result, including retained partial output."
-         :tools (as (List String) [])
-         :da-policy (nefor.contracts.no-da-policy) :max-corrections 0})
+(let builder (agents.with-tools agents.mock "builder"
+        "Build the requested change." (as (List String) [])
+        (type-tag nefor.contracts.Task) (type-tag BuildReport) 0))
+(let reviewer (agents.with-tools agents.mock "reviewer"
+        "Review the builder result, including retained partial output."
+        (as (List String) [])
         (type-tag (| BuildReport nefor.contracts.AgentError))
-        (type-tag ReviewReport)))
+        (type-tag ReviewReport)
+        0))
 (let result (nefor.graph.output "recovery-output"
                (type-tag (| ReviewReport nefor.contracts.AgentError))))
 (nefor.artifact.compile

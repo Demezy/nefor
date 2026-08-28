@@ -193,38 +193,22 @@ do
     "the MAG schema does not encode agent ownership policy")
 end
 
-local starter_profiles = require("config").active.orchestration_profiles
-
-local function with_profiles(profiles, fn)
-  local config = require("config")
-  config.active.orchestration_profiles = profiles
-  local ok, err = pcall(fn)
-  config.active.orchestration_profiles = starter_profiles
-  if not ok then error(err, 0) end
-end
-
 -- Current authoring dialect. The lead's validators never parse this source —
 -- compilation happens in the mag plugin and the validators run over the
 -- modification in the mag.loaded reply — so these strings only document what
 -- the lead writes to disk.
 local READ_ONLY_MAG = [=[
-(require "nefor.actors")
+(require "agents")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
 
 (let start (nefor.actors.task-source "worker-task" "Answer the task."))
-(let worker (nefor.actors.agent
-  (as nefor.actors.AgentConfig {:id "worker"
-    :model (nefor.contracts.no-identifier)
-    :profile "standard"
-    :provider "chatgpt"
-    :system "Answer the task."
-    :tools ["read_file"]
-    :da-policy (nefor.contracts.no-da-policy)
-    :max-corrections 2})
+(let worker (agents.with-tools agents.standard "worker" "Answer the task."
+  ["read_file"]
   (type-tag nefor.contracts.Task)
-  (type-tag nefor.contracts.TextAnswer)))
+  (type-tag nefor.contracts.TextAnswer)
+  2))
 (let out (nefor.graph.output "worker-output"
   (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
 (nefor.artifact.compile
@@ -234,23 +218,17 @@ local READ_ONLY_MAG = [=[
 ]=]
 
 local WRITER_MAG = [=[
-(require "nefor.actors")
+(require "agents")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
 
 (let start (nefor.actors.task-source "build-task" "Implement feature X."))
-(let build (nefor.actors.agent
-  (as nefor.actors.AgentConfig {:id "build"
-    :model (nefor.contracts.no-identifier)
-    :profile "fast"
-    :provider "chatgpt"
-    :system "Implement feature X."
-    :tools ["read_file" "write_file"]
-    :da-policy (nefor.contracts.no-da-policy)
-    :max-corrections 2})
+(let build (agents.with-tools agents.fast "build" "Implement feature X."
+  ["read_file" "write_file"]
   (type-tag nefor.contracts.Task)
-  (type-tag nefor.contracts.TextAnswer)))
+  (type-tag nefor.contracts.TextAnswer)
+  2))
 (let out (nefor.graph.output "build-output"
   (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
 (nefor.artifact.compile
@@ -332,7 +310,8 @@ local function read_only_modification()
         routes = { ["generic-provider.ProviderOut"] = { { actor = "worker.llm", wire = "generic-provider.ProviderOut" } } } },
       { id = "worker.llm", factory = "llm",
         params = { system = "Answer the task.", provider = "chatgpt",
-                   profile = "standard", tools = { "read_file" } },
+                   model = "gpt-5.6-sol", reasoning_effort = "medium",
+                   tools = { "read_file" } },
         routes = { ["generic-provider.TextAnswer"] = { { actor = "sink", wire = "generic-provider.TextAnswer" } } } },
       { id = "sink", factory = "sink", params = {}, routes = {} },
     },
@@ -349,7 +328,8 @@ local function writer_modification()
     actors = {
       { id = "build.llm", factory = "llm",
         params = { system = "Implement feature X.", provider = "chatgpt",
-                   profile = "fast", tools = { "read_file", "write_file" } },
+                   model = "gpt-5.6-luna", reasoning_effort = "low",
+                   tools = { "read_file", "write_file" } },
         routes = { ["generic-provider.TextAnswer"] = { { actor = "sink", wire = "generic-provider.TextAnswer" } } } },
       { id = "sink", factory = "sink", params = {}, routes = {} },
     },
@@ -629,19 +609,13 @@ do
   }
   lw.configure({
     ambient_context = context,
-    agent_defaults = {
-      provider = "chatgpt",
-      model = "general-model",
-      reasoning_effort = "medium",
-      system = "universal composed prompt",
-    },
+    agent_system = "universal composed prompt",
   })
   write_mag_file("system-overlay-write", "system-overlay.mag", READ_ONLY_MAG)
   _test.calls_clear()
   execute_mag("system-overlay-execute", "system-overlay.mag")
   local modification = read_only_modification()
   modification.actors[2].factory = "structured-output"
-  modification.actors[2].params.profile = nil
   feed_loaded(modification,
     { "adapter", "structured-output", "run-tool", "sink", "stub", "tool-result" })
   local exec = find_call(decode_calls(), function(c)
@@ -655,10 +629,10 @@ do
   assert_true(lw._internals.state.kernel_factories["nefor.factory.structured-output"] == true,
     "factory contracts from the plugin reply feed control-plane validation")
   local patch = exec.body.params_overlay["worker.llm"]
-  assert_eq(patch.provider, "chatgpt", "ready agent receives default provider")
-  assert_eq(patch.model, "general-model",
-    "structured-output ready agent receives default model")
-  assert_eq(patch.reasoning_effort, "medium", "ready agent receives default effort")
+  assert_eq(patch.provider, nil, "runtime does not override the authored provider")
+  assert_eq(patch.model, nil, "runtime does not override the authored model")
+  assert_eq(patch.reasoning_effort, nil,
+    "runtime does not override the authored reasoning effort")
   local system = patch.system
   local base_at = assert(system:find("universal composed prompt", 1, true))
   local position_at = assert(system:find("Answer the task.", 1, true))
@@ -851,15 +825,14 @@ do
   assert_eq(exec.body.principal, "subagent",
     "dispatched mag execute declares the subagent domain principal")
 
-  -- Profiles land via the params overlay, keyed by the ACTOR id that
-  -- authors params.profile — the agent template's namespaced llm actor.
-  local overlay = exec.body.params_overlay
-  assert_true(type(overlay) == "table" and type(overlay["worker.llm"]) == "table",
-    "params_overlay keys on the profiled llm actor id; got " .. json.encode(_test.calls()))
-  assert_eq(overlay["worker.llm"].reasoning_effort, "medium",
-    "profile 'standard' resolves to reasoning_effort=medium")
-  assert_true(type(overlay["worker.llm"].provider) == "string",
-    "profile resolution threads the provider")
+  assert_eq(exec.body.params_overlay, nil,
+    "without ambient system context the runtime emits no parameter overlay")
+  assert_eq(exec.body.artifact.actors[2].params.provider, "chatgpt",
+    "the compiled artifact carries the concrete provider")
+  assert_eq(exec.body.artifact.actors[2].params.model, "gpt-5.6-sol",
+    "the compiled artifact carries the concrete model")
+  assert_eq(exec.body.artifact.actors[2].params.reasoning_effort, "medium",
+    "the compiled artifact carries the concrete reasoning effort")
 
   local reply = find_call(calls, function(c)
     return c.body.kind == "tool.result" and c.body.id == "firing-mag-execute-1"
@@ -1010,7 +983,12 @@ do
         id = "patch.llm",
         factory = "nefor.factory.llm",
         type_arguments = {},
-        params = { profile = "standard", system = "Continue the live run." },
+        params = {
+          provider = "chatgpt",
+          model = "gpt-5.6-sol",
+          reasoning_effort = "medium",
+          system = "Continue the live run.",
+        },
         routes = {},
       },
     },
@@ -1041,11 +1019,12 @@ do
     "mag apply submits the compiler-produced messages")
   assert_eq(#apply.body.modification.kills, 0,
     "mag apply submits the compiler-produced kills")
-  local overlay = apply.body.params_overlay["patch.llm"]
-  assert_eq(overlay.provider, starter_profiles.standard.provider,
-    "apply resolves the new actor's provider profile")
-  assert_eq(overlay.model, starter_profiles.standard.model,
-    "apply resolves the new actor's model profile")
+  assert_eq(apply.body.params_overlay, nil,
+    "apply emits no parameter overlay without ambient system context")
+  assert_eq(apply.body.modification.actors[1].params.provider, "chatgpt",
+    "apply preserves the compiler-produced provider")
+  assert_eq(apply.body.modification.actors[1].params.model, "gpt-5.6-sol",
+    "apply preserves the compiler-produced model")
   assert_eq(tool_result("firing-mag-apply"), nil,
     "mag apply remains pending until the kernel acknowledgement")
 
@@ -1669,159 +1648,6 @@ do
     "an orphaned result fixture is rejected; got " .. json.encode(_test.calls()))
 end
 
--- Profile validators: config.active.orchestration_profiles is the open
--- registry. An llm actor must author :profile (or raw reasoning_effort);
--- both at once, unknown names, and malformed configured entries are rejected.
-do
-  fresh()
-  write_mag_file("firing-profile-missing-write", "no-profile.mag", READ_ONLY_MAG)
-  _test.calls_clear()
-  execute_mag("firing-profile-missing", "no-profile.mag")
-  local m = read_only_modification()
-  m.actors[2].params.profile = nil
-  feed_loaded(m)
-  local err = find_call(decode_calls(), function(c)
-    return c.body.kind == "tool.result"
-       and c.body.id == "firing-profile-missing"
-       and type(c.body.error) == "string"
-  end)
-  assert_true(err ~= nil and err.body.error:find("missing required :profile", 1, true) ~= nil,
-    "an llm actor without profile/reasoning_effort is rejected; got "
-    .. json.encode(_test.calls()))
-  assert_true(err.body.error:find("worker.llm", 1, true) ~= nil,
-    "the profile error names the llm actor")
-end
-
-do
-  fresh()
-  write_mag_file("firing-profile-both-write", "both-profile.mag", READ_ONLY_MAG)
-  _test.calls_clear()
-  execute_mag("firing-profile-both", "both-profile.mag")
-  local m = read_only_modification()
-  m.actors[2].params.reasoning_effort = "high"
-  feed_loaded(m)
-  local err = find_call(decode_calls(), function(c)
-    return c.body.kind == "tool.result"
-       and c.body.id == "firing-profile-both"
-       and type(c.body.error) == "string"
-  end)
-  assert_true(err ~= nil
-              and err.body.error:find("both profile and reasoning_effort", 1, true) ~= nil,
-    "profile + raw reasoning_effort together are rejected; got "
-    .. json.encode(_test.calls()))
-end
-
--- Structured-output actors carry the compiler-checked OptionalIdentifier
--- record rather than the plain string used by the untyped llm factory.
-do
-  fresh()
-  write_mag_file("firing-typed-profile-write", "typed-profile.mag", READ_ONLY_MAG)
-  _test.calls_clear()
-  execute_mag("firing-typed-profile", "typed-profile.mag")
-  local m = read_only_modification()
-  m.actors[2].factory = "structured-output"
-  m.actors[2].params.profile = { present = true, value = "standard" }
-  feed_loaded(m,
-    { "adapter", "structured-output", "run-tool", "sink", "stub", "tool-result" })
-  local exec = find_call(decode_calls(), function(c)
-    return c.body.kind == "mag.execute" and c.target == "mag"
-  end)
-  assert_true(exec ~= nil, "a typed OptionalIdentifier profile executes")
-  local patch = exec.body.params_overlay["worker.llm"]
-  assert_eq(patch.provider, starter_profiles.standard.provider,
-    "typed profile resolves provider")
-  assert_eq(patch.model, starter_profiles.standard.model,
-    "typed profile resolves model")
-  assert_eq(patch.reasoning_effort, starter_profiles.standard.reasoning_effort,
-    "typed profile resolves effort")
-end
-
-do
-  with_profiles({ zeta = starter_profiles.standard, alpha = starter_profiles.fast }, function()
-    fresh()
-    write_mag_file("firing-profile-unknown-write", "bad-profile.mag", READ_ONLY_MAG)
-    _test.calls_clear()
-    execute_mag("firing-profile-unknown", "bad-profile.mag")
-    local m = read_only_modification()
-    m.actors[2].params.profile = "turbo"
-    feed_loaded(m)
-    local err = find_call(decode_calls(), function(c)
-      return c.body.kind == "tool.result"
-         and c.body.id == "firing-profile-unknown"
-         and type(c.body.error) == "string"
-    end)
-    assert_true(err ~= nil and err.body.error:find("unknown profile 'turbo'", 1, true) ~= nil,
-      "unknown profile names are rejected; got " .. json.encode(_test.calls()))
-    assert_true(err.body.error:find("Configured profiles: alpha, zeta.", 1, true) ~= nil,
-      "unknown profile error lists configured names in sorted order")
-  end)
-end
-
-do
-  with_profiles({
-    strong = { provider = "chatgpt", model = "gpt-5.6-sol", reasoning_effort = "medium" },
-    bulk = { provider = "chatgpt", model = "gpt-5.6-luna", reasoning_effort = "low" },
-    audit = { provider = "openai", model = "review-model", reasoning_effort = "high" },
-    another = { provider = "openai", model = "other-model", reasoning_effort = "medium" },
-    fifth = { provider = "openai", model = "fifth-model", reasoning_effort = "low" },
-  }, function()
-    fresh()
-    write_mag_file("firing-profile-strong-write", "strong-profile.mag", READ_ONLY_MAG)
-    _test.calls_clear()
-    execute_mag("firing-profile-strong", "strong-profile.mag")
-    local m = read_only_modification()
-    m.actors[2].params.profile = "strong"
-    feed_loaded(m)
-    local exec = find_call(decode_calls(), function(c)
-      return c.body.kind == "mag.execute" and c.target == "mag"
-    end)
-    assert_true(exec ~= nil, "an arbitrary configured profile executes")
-    local patch = exec.body.params_overlay["worker.llm"]
-    assert_eq(patch.provider, "chatgpt", "custom profile resolves provider")
-    assert_eq(patch.model, "gpt-5.6-sol", "custom profile resolves model")
-    assert_eq(patch.reasoning_effort, "medium", "custom profile resolves effort")
-  end)
-end
-
-local function assert_profile_config_error(profiles, expected)
-  with_profiles(profiles, function()
-    fresh()
-    write_mag_file("firing-profile-malformed-write", "malformed-profile.mag", READ_ONLY_MAG)
-    _test.calls_clear()
-    execute_mag("firing-profile-malformed", "malformed-profile.mag")
-    feed_loaded(read_only_modification())
-    local err = find_call(decode_calls(), function(c)
-      return c.body.kind == "tool.result"
-         and c.body.id == "firing-profile-malformed"
-         and type(c.body.error) == "string"
-    end)
-    assert_true(err ~= nil and err.body.error:find(expected, 1, true) ~= nil,
-      "malformed profile registry is rejected with '" .. expected .. "'; got " ..
-      json.encode(_test.calls()))
-  end)
-end
-
-assert_profile_config_error(nil, "config.active.orchestration_profiles must be a table")
-assert_profile_config_error({ [1] = starter_profiles.standard },
-  "config.active.orchestration_profiles keys must be non-empty strings")
-assert_profile_config_error({ [""] = starter_profiles.standard },
-  "config.active.orchestration_profiles keys must be non-empty strings")
-assert_profile_config_error({}, "unknown profile 'standard'. Configured profiles: none.")
-assert_profile_config_error({ standard = "bad" }, "configured profile 'standard' must be a table")
-assert_profile_config_error({
-  standard = { provider = "", model = "model", reasoning_effort = "medium" },
-}, "configured profile 'standard' requires a non-empty string provider")
-assert_profile_config_error({
-  standard = { provider = "chatgpt", model = nil, reasoning_effort = "medium" },
-}, "configured profile 'standard' requires a non-empty string model")
-assert_profile_config_error({
-  standard = { provider = "chatgpt", model = "model", reasoning_effort = 3 },
-}, "configured profile 'standard' requires a non-empty string reasoning_effort")
-assert_profile_config_error({
-  standard = { provider = "chatgpt", model = "model", reasoning_effort = "medium" },
-  broken = { provider = "chatgpt", model = "", reasoning_effort = "low" },
-}, "configured profile 'broken' requires a non-empty string model")
-
 -- mag.loaded snapshots qualified factory identities for validation.
 do
   fresh()
@@ -1866,7 +1692,7 @@ do
     "gate rejection must NOT send mag.execute to the kernel")
 end
 
--- After /approve, the same writer program is accepted; the profile overlay
+-- After /approve, the same writer program is accepted; the system overlay
 -- keys on the writer's namespaced llm actor.
 do
   fresh()
@@ -1891,11 +1717,10 @@ do
   assert_true(exec ~= nil,
     "after plan approval, write-capable MAG execute must send mag.execute; got "
     .. json.encode(_test.calls()))
-  local overlay = exec.body.params_overlay
-  assert_true(type(overlay) == "table" and type(overlay["build.llm"]) == "table",
-    "writer profile overlay keys on the namespaced llm actor")
-  assert_eq(overlay["build.llm"].reasoning_effort, "low",
-    "profile 'fast' resolves to reasoning_effort=low")
+  assert_eq(exec.body.params_overlay, nil,
+    "writer needs no runtime overlay without ambient system context")
+  assert_eq(exec.body.artifact.actors[1].params.reasoning_effort, "low",
+    "writer keeps the effort authored in the compiled artifact")
 end
 
 -- ------------------------------------------------------------------

@@ -1,0 +1,47 @@
+(require "nefor.actors")
+(require "nefor.contracts")
+(require "nefor.graph")
+
+;; Tests keep the same typed vocabulary while resolving every choice to the
+;; deterministic mock provider.
+(type Fast {})
+(type Standard {})
+(type Deep {})
+(type Max {})
+(type Model (| Fast Standard Deep Max))
+
+(let fast (as Model (as Fast {})))
+(let standard (as Model (as Standard {})))
+(let deep (as Model (as Deep {})))
+(let max (as Model (as Max {})))
+
+(let resolve-model (fn [[model Model]] -> nefor.actors.ResolvedModel
+  (match model
+    [Fast value
+      (as nefor.actors.ResolvedModel
+        {:provider "mock-plugin" :model "mock-model"
+         :reasoning-effort "low"})]
+    [Standard value
+      (as nefor.actors.ResolvedModel
+        {:provider "mock-plugin" :model "mock-model"
+         :reasoning-effort "medium"})]
+    [Deep value
+      (as nefor.actors.ResolvedModel
+        {:provider "mock-plugin" :model "mock-model"
+         :reasoning-effort "high"})]
+    [Max value
+      (as nefor.actors.ResolvedModel
+        {:provider "mock-plugin" :model "mock-model"
+         :reasoning-effort "xhigh"})])))
+
+(let with-tools (fn [I O] [[model Model] [id String] [system String]
+                            [tools (List String)]
+                            [input-type (TypeTag I)] [output-type (TypeTag O)]
+                            [max-corrections Int]]
+  -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
+  (nefor.actors.agent resolve-model
+    (as (nefor.actors.AgentConfig Model)
+      {:id id :model model :system system :tools tools
+       :da-policy (nefor.contracts.no-da-policy)
+       :max-corrections max-corrections})
+    input-type output-type)))

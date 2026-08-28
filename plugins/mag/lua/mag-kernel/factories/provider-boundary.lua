@@ -312,13 +312,9 @@ function M.construct(id, params, emit, options)
   end
 
   local function build_request()
-    local model = params.model
-    if type(model) == "table" then
-      model = model.present and model.value or nil
-    end
     return {
       conversation_id = conversation.id,
-      model = model,
+      model = params.model,
       tools = params.tools,
       reasoning_effort = params.reasoning_effort,
       output_schema = params.schema,

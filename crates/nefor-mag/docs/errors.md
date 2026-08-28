@@ -89,7 +89,7 @@ Use the exact `run_id` returned by `mag execute` or lead `mag-eval`. Call `await
 
 Dynamic expansion is validated before its change is applied. Keep each rule's subscribed port and function result typed, return the proper delta artifact, and make the delta atomic.
 
-For collectors, expected sender ids are part of correctness. Unexpected senders, duplicate delivery, or an incomplete drain fail rather than silently reorder results. Handle an empty worker list with `nefor.dynamic.empty-to`; do not instantiate an empty collector and wait for an activation that cannot happen.
+For `nefor.dynamic.collect-all`, expected sender ids are derived from the supplied output ports. Unexpected senders, duplicate delivery, or an incomplete drain fail rather than silently reorder results. An empty port list produces `[]` immediately.
 
 ## Worktree errors
 

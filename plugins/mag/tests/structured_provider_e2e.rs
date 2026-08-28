@@ -478,15 +478,15 @@ async fn load_text_answer_program(
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
+(let exact-model (fn [[model nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel model))
+(let model (as nefor.actors.ResolvedModel {:provider "provider" :model "test-model" :reasoning-effort "medium"}))
 
 (let start (nefor.graph.source "task"
               (type-tag nefor.contracts.Task)
               (as nefor.contracts.Task {:prompt "return done"})))
-(let answer (nefor.actors.agent
-               (as nefor.actors.AgentConfig {:id "answer"
-                :model (nefor.contracts.identifier "test-model")
-                :profile (nefor.contracts.no-identifier)
-                :provider "provider"
+(let answer (nefor.actors.agent exact-model
+               (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "answer"
+                :model model
                 :system "Return the requested structured answer."
                 :tools []
                 :da-policy (nefor.contracts.no-da-policy)

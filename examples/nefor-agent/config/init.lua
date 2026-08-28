@@ -130,13 +130,6 @@ M.active = {
   },
   providers = providers,
 
-  orchestration_profiles = {
-    fast     = { provider = DEFAULT_PROVIDER, model = DEFAULT_MODEL, reasoning_effort = "low" },
-    standard = { provider = DEFAULT_PROVIDER, model = DEFAULT_MODEL, reasoning_effort = "medium" },
-    deep     = { provider = DEFAULT_PROVIDER, model = DEFAULT_MODEL, reasoning_effort = "high" },
-    max      = { provider = DEFAULT_PROVIDER, model = DEFAULT_MODEL, reasoning_effort = "xhigh" },
-  },
-
   tool_gate = {
     -- Default policy for unlisted tools. `prompt` = popup; user
     -- approves before the call lands.
