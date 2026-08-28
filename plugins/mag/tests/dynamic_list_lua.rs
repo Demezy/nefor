@@ -197,3 +197,53 @@ fn strict_routing_enforces_the_whole_dynamic_protocol() {
         .exec()
         .unwrap();
 }
+
+#[test]
+fn dynamic_context_waits_for_completion_and_preserves_order() {
+    harness()
+        .load(
+            r#"
+            local factory = require("factories.dynamic-context")
+            assert(factory.construct("bad", {}, function() end) == nil)
+            local emitted = {}
+            local actor = assert(factory.construct("context", {
+              item_schema = { version = 1, root = { kind = "record", fields = {
+                { name = "finding", schema = { kind = "string" } }
+              }}},
+            }, function(message) emitted[#emitted + 1] = message end))
+
+            actor.deliver({ messages = {{ message = {
+              value = { finding = "first" },
+              dynamic = { kind = "item", collection = "c", index = 0 },
+            }}}})
+            actor.deliver({ messages = {{ message = {
+              value = { finding = "second" },
+              dynamic = { kind = "item", collection = "c", index = 1 },
+            }}}})
+            assert(#emitted == 1) -- ready only: no partial provider turn
+            local done = actor.deliver({ messages = {{ message = {
+              dynamic = { kind = "complete", collection = "c", count = 2 },
+            }}}})
+            assert(done.status == "ok")
+            assert(#emitted == 2)
+            local turn = emitted[2]
+            assert(turn.kind == "generic-provider.ProviderOut")
+            assert(turn.value.content.value[1].finding == "first")
+            assert(turn.value.content.value[2].finding == "second")
+            assert(turn.value.content.mag_type.root.kind == "list")
+            assert(turn.messages[1].content == turn.value.content)
+
+            local empty_out = {}
+            local empty = assert(factory.construct("empty", {
+              item_schema = { version = 1, root = { kind = "string" } },
+            }, function(message) empty_out[#empty_out + 1] = message end))
+            local empty_done = empty.deliver({ messages = {{ message = {
+              dynamic = { kind = "complete", collection = "empty", count = 0 },
+            }}}})
+            assert(empty_done.status == "ok")
+            assert(#empty_out[2].value.content.value == 0)
+            "#,
+        )
+        .exec()
+        .unwrap();
+}

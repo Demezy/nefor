@@ -16,9 +16,11 @@
 (let dynamic-input-factory "nefor.factory.dynamic-input")
 (let dynamic-output-factory "nefor.factory.dynamic-output")
 (let dynamic-index-factory "nefor.factory.dynamic-index")
+(let dynamic-context-factory "nefor.factory.dynamic-context")
 (type CollectorParams {:expected_senders (List String)})
 (type DynamicParams {})
 (type DynamicIndexParams {:collection String :index Int})
+(type DynamicContextParams {:item_schema TypeSchema})
 (type Collection [T] {:change nefor.graph.Delta
                       :output (nefor.graph.Port (List T))})
 
@@ -92,6 +94,25 @@
          [(type-evidence (type-tag T))]
          (as DynamicIndexParams
            {:collection (get entry "collection") :index (get entry "index")})
+         (nefor.graph.store-port input)
+         [(nefor.graph.store-port output)])]
+      [] [] input output)))
+
+;; Turn a completed dynamic stream into one provider turn without exposing a
+;; runtime-sized MAG List value. The buffering and completion protocol remain
+;; inside this effect-aware node; downstream agents receive ProviderInput.
+(let context
+  (fn [T] [[id String] [item-type (TypeTag T)]]
+    -> (nefor.graph.Node (DynamicList T) nefor.contracts.ProviderInput)
+    (let input
+      (nefor.graph.port id (type-tag (DynamicList T)) "nefor.dynamic.Input"))
+    (let output
+      (nefor.graph.port id (type-tag nefor.contracts.ProviderInput)
+        "generic-provider.ProviderOut"))
+    (nefor.graph.node id "ordinary"
+      [(nefor.graph.actor id dynamic-context-factory
+         [(type-evidence item-type)]
+         (as DynamicContextParams {:item_schema (type-schema item-type)})
          (nefor.graph.store-port input)
          [(nefor.graph.store-port output)])]
       [] [] input output)))

@@ -7,6 +7,7 @@
 
 (type WorkItem {:task String})
 (type WorkResult {:summary String})
+(type FinalSummary {:summary String})
 
 ;; Resident expansion receives one runtime occurrence. It constructs an
 ;; ordinary worker node; `expand` supplies Unit, preserves the occurrence
@@ -36,11 +37,26 @@
     (type-tag nefor.contracts.AgentError)))
 (let run-plan
   (nefor.node.choose "run-plan" workers preserve-planner-error))
+(let result-context
+  (nefor.dynamic.context "result-context"
+    (type-tag (| WorkResult nefor.contracts.AgentError))))
+(let integrator
+  (agents.with-tools agents.mock "integrator"
+    "Integrate all ordered worker results into one summary." []
+    (type-tag nefor.contracts.ProviderInput) (type-tag FinalSummary) 1))
+(let integrate
+  (nefor.node.>>> result-context integrator))
+(let preserve-run-error
+  (nefor.graph.identity "run-error"
+    (type-tag nefor.contracts.AgentError)))
+(let finish
+  (nefor.node.choose "finish" integrate preserve-run-error))
 
 ;; The top-level graph is still assembled entirely from ordinary nodes:
 ;; source >>> planner >>> typed choice (dynamic work or preserved error).
 (let planned (nefor.node.>>> task planner))
-(let workflow (nefor.node.>>> planned run-plan))
+(let ran (nefor.node.>>> planned run-plan))
+(let workflow (nefor.node.>>> ran finish))
 (let result (nefor.graph.output-for "result" workflow))
 (let topology
   (nefor.graph.add-edges nefor.graph.empty-graph
