@@ -320,13 +320,14 @@ end
 -- and exits.
 --
 -- Async dispatch caveat: when the orchestrator turn executes a kernel
--- run (the lead's `mag` tool with action=execute) the first terminal projection
+-- run (the lead's `mag` tool with a targetless action=apply) the first terminal projection
 -- fires WHILE the run is still going. agentic_workflow then queues the
 -- run's eventual result and re-submits a relay turn. We need to wait
 -- through that second turn to print the actual final answer —
 -- the first on_complete is a transitional ack turn.
 local function is_async_dispatch(name, input)
-  return name == "mag" and type(input) == "table" and input.action == "execute"
+  return name == "mag" and type(input) == "table"
+    and input.action == "apply" and input.run_id == nil
 end
 
 local function run_single_shot(prompt, format, state, turn_start_ms, gate)

@@ -83,7 +83,7 @@ Run ids are opaque and session-scoped. Common outcomes include:
 - **expired** — its retained terminal outcome aged out;
 - **unauthorized** — a delegated agent tried to control a run it did not directly dispatch.
 
-Use the exact `run_id` returned by `mag execute` or lead `mag-eval`. Call `await-run` once when dependent work needs completion; use `graph-status` only as a one-shot snapshot. Canceling an await detaches that waiter but leaves the run alive. Use `terminate-graph(run_id)` to request termination, then wait for canonical confirmation rather than assuming the request itself killed the run.
+Use the exact `run_id` returned by a fresh `mag apply` or lead `mag-eval`. Call `await-run` once when dependent work needs completion; use `graph-status` only as a one-shot snapshot. Canceling an await detaches that waiter but leaves the run alive. Use `terminate-graph(run_id)` to request termination, then wait for canonical confirmation rather than assuming the request itself killed the run.
 
 ## Dynamic-rule errors
 

@@ -275,8 +275,8 @@ fn assert_success(out: &ProcessOutput) {
 
 /// The canonical prompt that drives the mock provider down the
 /// kernel-dispatch path: the orchestrator turn matches "octopus" +
-/// "lighthouse" and writes + executes the canned MAG program via the
-/// lead's `mag` tool (write → execute → deferred relay turn).
+/// "lighthouse" and writes + applies the canned MAG program via the
+/// lead's `mag` tool (write → apply → deferred relay turn).
 const MAG_DISPATCH_PROMPT: &str =
     "summarise octopuses and lighthouses in parallel and combine into one paragraph";
 
@@ -439,7 +439,7 @@ fn scenario_3_single_shot_stream_json() {
     assert!(
         dispatch_ack_count >= 1,
         "expected at least one tool.result with output.status (the mag \
-         write/execute acks); saw {dispatch_ack_count} across \
+         write/apply acks); saw {dispatch_ack_count} across \
          {total_lines} lines"
     );
 

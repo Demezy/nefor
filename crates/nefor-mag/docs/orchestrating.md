@@ -29,7 +29,7 @@ The lead tool operates on a session MAG workspace:
 1. **Write** — `action="write"` creates or replaces a workspace-relative `.mag` file.
 2. **Compile and preview** — `action="compile"` (the default) checks the program and renders the proposed actors and routes. Compilation does not execute the graph and is not approval for writes.
 3. **Review** — inspect the preview. Before a write-capable graph, submit its concrete plan through `write-review`.
-4. **Execute** — after approval, `action="execute"` compiles and validates the current file again, launches a fresh run, and returns a `run_id`.
+4. **Apply** — after approval, `action="apply"` without `run_id` compiles and validates the current file again, applies it to a fresh graph, and returns its `run_id`. Supplying the `run_id` of a directly dispatched live graph instead applies a Delta to that graph.
 
 Editing a graph function describes a different future run. It does not retrieve or mutate a running graph.
 
@@ -50,7 +50,7 @@ names the canonical MAG Book and available module inventory.
 
 ## Run lifecycle and control
 
-Both `mag action="execute"` and lead-dispatched `mag-eval` acknowledge dispatch with an opaque, stable `run_id`.
+Both a targetless `mag action="apply"` and lead-dispatched `mag-eval` acknowledge dispatch with an opaque, stable `run_id`.
 
 - **`await-run(run_id)`** attaches to that run and blocks until its canonical terminal outcome. Call it once when subsequent work depends on completion. Canceling the waiter does not stop the run.
 - **`graph-status()`** is a one-shot snapshot of active runs and recent completed summaries. With a `run_id`, it describes that run. Do not poll it; completion is delivered normally, or use `await-run`.
@@ -78,6 +78,6 @@ Standalone compilation emits an artifact but has no execute subcommand. Runtime 
 1. Put every predictable stage—implementation, review, verification, and correction routing—before the single graph output.
 2. Use sibling nodes for independent work and typed dependencies for real ordering.
 3. Compile and inspect the preview.
-4. Obtain `write-review` approval before a write-capable execution.
-5. Execute, retain the returned `run_id`, and await only when needed.
+4. Obtain `write-review` approval before a write-capable application.
+5. Apply, retain the returned `run_id`, and await only when needed.
 6. Report completion only to the extent established by the terminal result and checks.

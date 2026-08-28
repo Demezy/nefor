@@ -134,9 +134,10 @@ local function raw_tool_expanded(entry)
 end
 local function delayed_mag_delivery(entry, args)
   if type(entry.display) ~= "table" or entry.display.lifecycle ~= "delayed" then return nil end
-  local is_execute = entry.name == "mag-eval"
-    or (entry.name == "mag" and type(args) == "table" and args.action == "execute")
-  if not is_execute or entry.output == nil then return nil end
+  local is_detached_dispatch = entry.name == "mag-eval"
+    or (entry.name == "mag" and type(args) == "table"
+      and args.action == "apply" and args.run_id == nil)
+  if not is_detached_dispatch or entry.output == nil then return nil end
   if entry.completion_delivery == "sync" or entry.completion_delivery == "async" then
     return entry.completion_delivery
   end

@@ -23,9 +23,9 @@
 --   1. Deferred result / failure / submitted-ack from a prior kernel
 --      dispatch (relay path — must run first to keep the original
 --      octopus+lighthouse workflow intact), plus the mag pipeline's
---      write→execute intermediate step.
+--      write→apply intermediate step.
 --   2. Orchestrator-turn octopus + lighthouse + parallel/combine →
---      write + execute the canned MAG program via the lead's `mag`
+--      write + apply the canned MAG program via the lead's `mag`
 --      tool (must come before sub-agent canned text since the
 --      canonical prompt matches both).
 --   3. Sub-agent canned text (agents inside the canned MAG run —
@@ -44,7 +44,7 @@
 
 local NAME = nefor.name -- "mock-plugin"
 
--- The MAG program the orchestrator turn writes + executes via the
+-- The MAG program the orchestrator turn writes + applies via the
 -- lead's `mag` tool. A chain — sx feeds sy feeds
 -- combine — rather than a parallel join: the agent template's entry
 -- adapter lifts exactly one boundary message per activation, so an
@@ -120,14 +120,14 @@ local CANNED_TEXT = {
 -- results echoed back as the assistant's reply).
 local FINAL_RELAY_PREFIX = ""
 
--- Async kernel dispatch: the mag execute's immediate `tool.result` is
+-- Async kernel dispatch: the fresh mag apply's immediate `tool.result` is
 -- just an ack ("Program submitted to the MAG actor kernel..."). The
 -- real result arrives later as a USER-role message starting with
 -- "[mag_run(run_id=... ) result]". Pattern-match on that prefix in the
 -- latest user message to drive the relay turn.
 --
 -- The marker shape comes from `agentic-loop.results.format_deferred`;
--- the ack text from lead-workflow's mag execute tool.result.
+-- the ack text from lead-workflow's fresh mag apply tool.result.
 local DEFERRED_RESULT_MARKER = "%[mag_run%([^)]*run_id="
 local DEFERRED_FAILURE_MARKER = "%[mag_run%(run_id=[^)]*%) FAILED%]"
 local SUBMITTED_ACK_MARKER = "submitted to the MAG actor kernel"
@@ -180,13 +180,13 @@ local HELP_BODY = table.concat({
   "",
   "### 1. mag dispatch",
   "",
-  "Writes a canned MAG program to the session workspace and executes it",
+  "Writes a canned MAG program to the session workspace and applies it",
   "on the actor kernel: summarise → summarise → combine → sink. Two",
   "tool calls back to back:",
   "",
   "```json",
   "{ \"name\": \"mag\", \"arguments\": { \"action\": \"write\", \"file\": \"octo-lighthouse.mag\", \"content\": \"…\" } }",
-  "{ \"name\": \"mag\", \"arguments\": { \"action\": \"execute\", \"file\": \"octo-lighthouse.mag\" } }",
+  "{ \"name\": \"mag\", \"arguments\": { \"action\": \"apply\", \"file\": \"octo-lighthouse.mag\" } }",
   "```",
   "",
   "### 2. Tool calls",
@@ -360,7 +360,7 @@ local function pick_response_for(history)
     end
   end
 
-  -- Async ack branch: the pending tool message is the mag execute's
+  -- Async ack branch: the pending tool message is the fresh mag apply's
   -- immediate ack. We can't relay that to the user as a final answer —
   -- emit a short transitional ack so the turn terminates and the chat
   -- unblocks; the kernel run's result relays as a fresh deferred turn.
@@ -371,7 +371,7 @@ local function pick_response_for(history)
     }
   end
 
-  -- mag write→execute step 2: the workspace write acked; submit the
+  -- mag write→apply step 2: the workspace write acked; submit the
   -- run. Scoped to the canonical octopus+lighthouse orchestrator turn
   -- so unrelated write-tool relays keep their generic handling below.
   if last_tool ~= nil and type(last_user) == "string"
@@ -382,9 +382,9 @@ local function pick_response_for(history)
       finish_reason = "tool_calls",
       tool_calls = {
         {
-          id        = mint_tool_id("mag_execute"),
+          id        = mint_tool_id("mag_apply"),
           name      = "mag",
-          arguments = { action = "execute", file = CANNED_MAG_FILE },
+          arguments = { action = "apply", file = CANNED_MAG_FILE },
         },
       },
     }
@@ -446,9 +446,9 @@ local function pick_response_for(history)
   -- ----------------------------------------------------------------
   -- 2. Orchestrator turn: octopus + lighthouse anywhere in the latest
   --    user message → step 1 of the mag pipeline: write the canned
-  --    program into the session's MAG workspace (the execute call
+  --    program into the session's MAG workspace (the apply call
   --    follows once the write's tool.result relays back — see the
-  --    write→execute step above). MUST come before CANNED_TEXT. Inner
+  --    write→apply step above). MUST come before CANNED_TEXT. Inner
   --    sub-agent chats never match here: their latest user message is
   --    the kernel's task seed or an upstream summary, never both words
   --    at once, and their instructions ride the SYSTEM message.

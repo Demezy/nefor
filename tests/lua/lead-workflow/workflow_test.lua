@@ -130,13 +130,15 @@ do
   assert_true(mag_schema ~= nil, "the MAG tool schema is advertised")
   assert_true(mag_schema.description:find("A quick success or failure returns directly", 1, true) ~= nil
       and mag_schema.description:find("Do not narrate waiting after a terminal result", 1, true) ~= nil,
-    "mag execute schema explains both grace outcomes")
+    "fresh mag apply schema explains both grace outcomes")
   local actions = {}
   for _, action in ipairs(mag_schema.parameters.properties.action.enum or {}) do
     actions[action] = true
   end
   assert_true(actions.apply == true,
-    "the MAG tool advertises live-run delta application")
+    "the MAG tool advertises unified graph application")
+  assert_eq(actions.execute, nil,
+    "the MAG tool exposes no separate execute action")
   assert_true(type(mag_schema.parameters.properties.run_id) == "table",
     "the MAG tool advertises the apply target run id")
   assert_true(mag_schema.description:find("nefor.artifact.delta", 1, true) ~= nil
@@ -565,7 +567,7 @@ end
 
 local function execute_mag(id, file)
   invoke_tool(id, "mag", {
-    action = "execute",
+    action = "apply",
     file = file,
   })
 end
@@ -576,7 +578,7 @@ local function feed_loaded(modification, factories)
     return c.body.kind == "mag.load" and c.target == "mag"
   end)
   assert_true(load ~= nil,
-    "mag compile/execute must emit mag.load to the mag plugin; got "
+    "mag compile/apply must emit mag.load to the mag plugin; got "
     .. json.encode(_test.calls()))
   feed("mag", {
     kind        = "mag.loaded",
@@ -774,7 +776,7 @@ do
 end
 
 -- ------------------------------------------------------------------
--- mag execute: the load handshake — mag.load first, mag.execute only
+-- Fresh mag apply: the load handshake — mag.load first, internal mag.execute only
 -- after the mag.loaded reply validates the modification.
 -- ------------------------------------------------------------------
 
@@ -791,7 +793,7 @@ do
     return c.body.kind == "mag.load" and c.target == "mag"
   end)
   assert_true(load ~= nil,
-    "mag execute emits mag.load to the mag plugin; got " .. json.encode(_test.calls()))
+    "fresh mag apply emits mag.load to the plugin; got " .. json.encode(_test.calls()))
   assert_eq(load.body.entry, "auth-login-map.mag", "mag.load names the .mag entry file")
   assert_true(type(load.body.source_dir) == "string" and #load.body.source_dir > 0,
     "mag.load carries the workspace source_dir")
@@ -823,7 +825,7 @@ do
   assert_true(type(exec.body.session_id) == "string" and #exec.body.session_id > 0,
     "lead injects session_id on mag.execute")
   assert_eq(exec.body.principal, "subagent",
-    "dispatched mag execute declares the subagent domain principal")
+    "fresh mag apply declares the subagent domain principal")
 
   assert_eq(exec.body.params_overlay, nil,
     "without ambient system context the runtime emits no parameter overlay")
@@ -1041,22 +1043,11 @@ do
   assert_eq(reply.body.output.hash, "sha256:delta", "mag apply preserves the compiled hash")
 end
 
--- Apply requires a live target and rejects fresh-run-only artifact fields
--- before anything reaches the kernel.
+-- A targeted apply rejects fresh-run-only artifact fields before anything
+-- reaches the kernel. Omitting run_id is the fresh-run form tested above.
 do
   fresh()
   write_mag_file("firing-mag-write-apply-invalid", "invalid-delta.mag", "(artifact nil)")
-  _test.calls_clear()
-  invoke_tool("firing-mag-apply-no-run", "mag", {
-    action = "apply",
-    file = "invalid-delta.mag",
-  })
-  local missing = tool_result("firing-mag-apply-no-run")
-  assert_true(missing ~= nil and missing.body.error:find("requires a non-empty run_id", 1, true) ~= nil,
-    "mag apply rejects a missing target before compilation")
-  assert_eq(find_call(decode_calls(), function(c) return c.body.kind == "mag.load" end), nil,
-    "missing apply target emits no compiler request")
-
   local run_id = "mag-run-live-invalid-apply"
   lw._internals.register_active_run(run_id, {}, "terminal", "dispatch-live-invalid",
     "live-invalid", sessions.current_id())
@@ -1127,7 +1118,7 @@ local function has_relayed_lead_turn()
 end
 
 -- ------------------------------------------------------------------
--- Shared execute grace: mag execute and mag-eval register at the same
+-- Shared completion grace: fresh mag apply and mag-eval register at the same
 -- run owner. Tests drive the deadline callback explicitly (no wall clock).
 -- ------------------------------------------------------------------
 
@@ -1680,7 +1671,7 @@ do
        and type(c.body.error) == "string"
   end)
   assert_true(err ~= nil,
-    "write-capable MAG execute without plan must return a tool.result error")
+    "write-capable fresh MAG apply without plan must return a tool.result error")
   assert_true(err.body.error:find("write%-capable agents") ~= nil
               and err.body.error:find("write%-review") ~= nil,
     "gate-error message names the write-review precondition")
@@ -1715,7 +1706,7 @@ do
     return c.body.kind == "mag.execute" and c.target == "mag"
   end)
   assert_true(exec ~= nil,
-    "after plan approval, write-capable MAG execute must send mag.execute; got "
+    "after plan approval, write-capable fresh MAG apply must reach the kernel; got "
     .. json.encode(_test.calls()))
   assert_eq(exec.body.params_overlay, nil,
     "writer needs no runtime overlay without ambient system context")
@@ -1887,7 +1878,7 @@ end
 
 -- ------------------------------------------------------------------
 -- Single-use approval: a non-verdict user message AFTER /approve
--- flushes the approval so the next writer MAG execute is gated again.
+-- flushes the approval so the next writer MAG apply is gated again.
 -- ------------------------------------------------------------------
 
 do
@@ -1918,7 +1909,7 @@ do
        and type(c.body.error) == "string"
   end)
   assert_true(err ~= nil,
-    "after approval expires, the writer MAG execute is gated again")
+    "after approval expires, the writer MAG apply is gated again")
 end
 
 -- ------------------------------------------------------------------
@@ -2065,7 +2056,7 @@ do
   local exec = find_call(calls, function(c)
     return c.body.kind == "mag.execute" and c.target == "mag"
   end)
-  assert_true(exec ~= nil, "auto bypasses the human plan gate for writer MAG execute")
+  assert_true(exec ~= nil, "auto bypasses the human plan gate for writer MAG apply")
 end
 
 do
@@ -2079,7 +2070,7 @@ do
   local exec = find_call(calls, function(c)
     return c.body.kind == "mag.execute" and c.target == "mag"
   end)
-  assert_true(exec ~= nil, "yolo bypasses writer MAG execute approval gate")
+  assert_true(exec ~= nil, "yolo bypasses writer MAG apply approval gate")
 end
 
 -- A killed lead run invalidates its parked write-review correlation. A late
@@ -2133,7 +2124,7 @@ do
   execute_mag("firing-mag-execute-end", "session-end.mag")
   feed_loaded(read_only_modification())
   local run_id = next(lw._internals.state.active_runs)
-  assert_true(type(run_id) == "string", "active_runs has an entry after MAG execute")
+  assert_true(type(run_id) == "string", "active_runs has an entry after fresh MAG apply")
 
   -- Also submit a plan that's awaiting approval at session-end.
   feed("tool-gate", {
@@ -2903,11 +2894,54 @@ do
   assert_eq(next(registry.run_dispatchers), nil, "session reset clears reverse ownership")
 end
 
+-- A targeted MAG apply uses the same exact-dispatch authority as the other
+-- run-control operations. The invoking graph cannot modify itself or a graph
+-- dispatched by another actor, while its directly dispatched child is valid.
+do
+  fresh()
+  write_mag_file("apply-authority-source", "authority-delta.mag", "(artifact nil)")
+  local registry = lw._internals.run_registry
+  local actor = "parent.run-tool"
+  local sibling_actor = "sibling.run-tool"
+  local child_id = registry:mint_run_id()
+  lw._internals.register_active_run(child_id, {}, "terminal", "child-dispatch",
+    "child", sessions.current_id(), actor)
+  local sibling_id = registry:mint_run_id()
+  lw._internals.register_active_run(sibling_id, {}, "terminal", "sibling-dispatch",
+    "sibling", sessions.current_id(), sibling_actor)
+  local metadata = { invocation = invocation(sessions.current_id(), "subagent",
+    "scope/cap-parent-apply", actor, "mag-run-parent") }
+
+  _test.calls_clear()
+  invoke_tool_with_metadata("apply-child", "mag", {
+    action = "apply", file = "authority-delta.mag", run_id = child_id,
+  }, metadata)
+  assert_true(find_call(decode_calls(), function(c)
+    return c.body.kind == "mag.load" and c.target == "mag"
+  end) ~= nil, "an actor may apply to the graph it directly dispatched")
+
+  for _, denied in ipairs({
+    { id = "apply-self", run_id = "mag-run-parent", code = "run_control_self" },
+    { id = "apply-sibling", run_id = sibling_id, code = "run_control_unauthorized" },
+  }) do
+    _test.calls_clear()
+    invoke_tool_with_metadata(denied.id, "mag", {
+      action = "apply", file = "authority-delta.mag", run_id = denied.run_id,
+    }, metadata)
+    local result = tool_result(denied.id)
+    assert_true(result ~= nil and type(result.body.error) == "string"
+        and result.body.error:find(denied.code, 1, true) ~= nil,
+      denied.id .. " returns the stable authority denial")
+    assert_eq(find_call(decode_calls(), function(c) return c.body.kind == "mag.load" end), nil,
+      denied.id .. " is rejected before compilation")
+  end
+end
+
 -- ------------------------------------------------------------------
 -- double-Esc interrupts DETACHED dispatched runs (the tag-blocking incident)
 -- ------------------------------------------------------------------
 --
--- The `mag` execute tool is FIRE-AND-FORGET: it acks "executing" at dispatch
+-- A fresh `mag apply` is FIRE-AND-FORGET: it acks "executing" at dispatch
 -- and the lead's turn completes and goes idle while the sub-run churns. When
 -- the user double-Escs, the agentic-loop's own interrupt sees NOTHING (the lead
 -- is not blocked on a current_run_id), so the detached runs would sail on — the
@@ -2987,8 +3021,8 @@ do
     "the interrupted run is closed out of active_runs")
 end
 
--- (mag execute dispatch cancel propagation) A `tool.cancel` addressed to a
--- `mag` execute DISPATCH firing propagates into that detached run —
+-- (fresh mag apply dispatch cancel propagation) A `tool.cancel` addressed to a
+-- fresh `mag apply` DISPATCH firing propagates into that detached run —
 -- completeness for the general cancel route, mirroring mag-eval.cancel for
 -- blocking firings.
 do
@@ -3059,7 +3093,7 @@ do
   write_mag_file("provenance-write", "provenance.mag", READ_ONLY_MAG)
   _test.calls_clear()
   invoke_tool_with_metadata("provenance-mag-lead", "mag", {
-    action = "execute", file = "provenance.mag",
+    action = "apply", file = "provenance.mag",
   }, { caller_id = "opaque-gate-inner", invocation = invocation(owning_session, "lead") })
   feed_loaded(read_only_modification())
   local lead_ack = find_call(decode_calls(), function(c)
@@ -3075,7 +3109,7 @@ do
   write_mag_file("provenance-attached-write", "provenance-attached.mag", READ_ONLY_MAG)
   _test.calls_clear()
   invoke_tool_with_metadata("provenance-mag-agent", "mag", {
-    action = "execute", file = "provenance-attached.mag",
+    action = "apply", file = "provenance-attached.mag",
   }, { caller_id = "r-agent/cap-1", invocation = invocation(owning_session, "subagent", "r-agent/cap-1") })
   feed_loaded(read_only_modification())
   local detached_exec = find_call(decode_calls(), function(c) return c.body.kind == "mag.execute" end)
@@ -3096,7 +3130,7 @@ do
   sessions.new()
   _test.calls_clear()
   invoke_tool_with_metadata("stale-mag", "mag", {
-    action = "execute", file = "never-loaded.mag",
+    action = "apply", file = "never-loaded.mag",
   }, { caller_id = "r-current/cap-1", invocation = stale_mag })
   local calls = decode_calls()
   local stale_error = find_call(calls, function(c)

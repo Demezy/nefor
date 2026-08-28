@@ -3449,7 +3449,7 @@ fn delayed_mag_lifecycle_renders_required_sync_async_and_result_rows() {
         "hidden",
         "hidden-call",
         "mag",
-        json!({ "action": "execute", "file": "hidden.mag" }),
+        json!({ "action": "apply", "file": "hidden.mag" }),
         json!({ "status": "completed" }),
         "sync",
     );
@@ -3463,7 +3463,7 @@ fn delayed_mag_lifecycle_renders_required_sync_async_and_result_rows() {
         &mut engine,
         "legacy",
         "mag",
-        json!({ "action": "execute", "file": "legacy.mag" }),
+        json!({ "action": "apply", "file": "legacy.mag" }),
     );
     fixture_tool_completed(
         &mut engine,
@@ -3475,7 +3475,7 @@ fn delayed_mag_lifecycle_renders_required_sync_async_and_result_rows() {
         &mut engine,
         "async",
         "mag",
-        json!({ "action": "execute", "file": "ship.mag" }),
+        json!({ "action": "apply", "file": "ship.mag" }),
     );
     fixture_tool_completed_with_delivery(
         &mut engine,
@@ -3582,7 +3582,7 @@ fn collapsed_mag_headers_show_action_and_filename_without_changing_expanded_head
         ("mag-compile", json!({ "file": "check.mag" })),
         (
             "mag-execute",
-            json!({ "action": "execute", "file": "ship.mag" }),
+            json!({ "action": "apply", "file": "ship.mag" }),
         ),
     ] {
         fixture_tool_started(&mut engine, id, "mag", json!(input));
@@ -11981,7 +11981,7 @@ fn queued_submit_promotes_to_canonical_next_turn_without_disappearing() {
         &mut engine,
         json!({ "kind": "tool.register", "tools": [
             { "name": "mag write", "display": { "compact": { "label": "mag write", "primary": { "label": "file", "select": { "source": "args", "path": "file" }, "kind": "path" } }, "expanded": { "label": "mag write", "fields": [] }, "result": { "kind": "content", "fields": [] } } },
-            { "name": "mag execute", "display": { "compact": { "label": "mag execute", "primary": { "label": "file", "select": { "source": "args", "path": "file" }, "kind": "path" } }, "expanded": { "label": "mag execute", "fields": [] }, "result": { "kind": "content", "fields": [] } } }
+            { "name": "mag apply", "display": { "compact": { "label": "mag apply", "primary": { "label": "file", "select": { "source": "args", "path": "file" }, "kind": "path" } }, "expanded": { "label": "mag apply", "fields": [] }, "result": { "kind": "content", "fields": [] } } }
         ] }),
     );
     append_canonical_message(
@@ -12031,7 +12031,7 @@ fn queued_submit_promotes_to_canonical_next_turn_without_disappearing() {
         json!({
             "kind": "conversation.projection.delta", "conversation_id": conversation_id,
             "change": { "kind": "tool_call_completed", "turn_id": "busy-turn",
-                "exchange": { "id": "after-queue", "name": "mag execute", "status": "call_completed",
+                "exchange": { "id": "after-queue", "name": "mag apply", "status": "call_completed",
                     "arguments": { "file": "after-queue.mag" } } }
         }),
     );

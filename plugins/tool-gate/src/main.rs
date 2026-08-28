@@ -1788,7 +1788,7 @@ mod tests {
             },
             "allowlist": ["mag"],
             "name": "mag",
-            "args": {"action": "execute", "file": "build.mag"}
+            "args": {"action": "apply", "file": "build.mag"}
         })
         .as_object()
         .unwrap()

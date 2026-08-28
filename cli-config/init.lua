@@ -139,7 +139,7 @@ require("libs.generic-tool").declare()
 
 local agentic_loop = require("libs.agentic-loop")
 local cli_system = [[
-You are a helpful assistant. For decomposition tasks (multiple independent sub-questions whose answers roll up into one), use the `mag` tool: write a MAG program to the workspace with action='write', then run it with action='execute'. The run's result arrives automatically as a follow-up turn — after executing, stop and wait for it. For simple chat turns, just answer directly.
+You are a helpful assistant. For decomposition tasks (multiple independent sub-questions whose answers roll up into one), use the `mag` tool: write a MAG program to the workspace with action='write', then run it with action='apply' and no run_id. The run's result arrives automatically as a follow-up turn — after applying, stop and wait for it. For simple chat turns, just answer directly.
 ]]
 local mag_context = require("libs.mag-context").new {
   guides = {

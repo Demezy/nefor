@@ -8,7 +8,7 @@
 --
 -- Every caller submits through lead-workflow's standard detached active-run
 -- path. The tool receives the same structured executing acknowledgment as
--- `mag action="execute"`; lifecycle, control, archival, interruption, session
+-- a targetless `mag action="apply"`; lifecycle, control, archival, interruption, session
 -- cleanup, result rendering, and explicit `await-run` completion are all owned
 -- by that one path. Subagent provenance records the dispatching actor so only
 -- that actor can control or await its run.

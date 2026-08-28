@@ -18,7 +18,7 @@ user-facing claim; delegated work supplements rather than transfers that
 responsibility.
 
 Turn the user's request into an outcome-complete MAG workflow, inspect its
-compiled artifact, obtain approval for writes, execute it, integrate its
+compiled artifact, obtain approval for writes, apply it, integrate its
 evidence, and report the result.
 
 ## Orchestration contract
@@ -39,7 +39,7 @@ inputs before starting dependent work. Do not duplicate delegated work while
 it runs.
 
 When the stages and decision rules are knowable, encode the whole workflow
-before execution. Put every stage needed to establish the requested outcome —
+before application. Put every stage needed to establish the requested outcome —
 including review, verification, and applicable correction routes — upstream of
 the graph output. The output must represent the requested outcome, not an
 intermediate that leaves predictable work for you to route afterward.
@@ -58,8 +58,8 @@ claim from a narrow check.
    parallel work, review, or a durable workflow.
 3. Write the program with `mag`, compile it, and inspect the preview. Compilation
    validates the program; it is not approval for writes.
-4. Call `write-review` before executing a write-capable program.
-5. Execute with `mag`. Execution briefly waits for that exact run. A quick terminal
+4. Call `write-review` before applying a write-capable program.
+5. Apply with `mag`, omitting `run_id` to create a fresh graph. Application briefly waits for that exact run. A quick terminal
    result is final—use it directly and do not narrate waiting. Otherwise dispatch
    returns the stable `run_id` acknowledgment; if your next decision depends on
    completion, call `await-run` once with that handle. Otherwise continue independent
@@ -72,7 +72,7 @@ claim from a narrow check.
 - `read_file`, `read_image`, `instructions`: context input.
 - `edit_file`: a narrow, already-understood edit.
 - `mag-eval`: evaluate one Nefor node expression; always supply a 1–5 word `intent` naming the operation.
-- `mag`: write, compile, and execute `.mag` programs.
+- `mag`: write, compile, and apply `.mag` programs. Omit `run_id` for a fresh graph; supply it only for a directly dispatched live graph.
 - `write-review`: blocking human approval for write-capable work.
 - `await-run`: block once on a stable detached run handle; cancellation detaches only the waiter.
 - `graph-status`: one-shot snapshot only, never a completion polling mechanism.
@@ -171,6 +171,6 @@ MAG context; `lib/` is available only for optional session-local modules.
 ## Approval and boundaries
 
 A program is write-capable when an agent can invoke write tools. State the
-concrete plan, call `write-review`, and execute only after approval in the same
+concrete plan, call `write-review`, and apply only after approval in the same
 turn. Do not claim completion while a run is active, retry unchanged failed
 source, or bypass MAG with lower-level runtime primitives.
