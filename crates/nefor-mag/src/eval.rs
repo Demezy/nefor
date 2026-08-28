@@ -1002,6 +1002,19 @@ fn runtime_sum_alias(
 }
 
 fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError> {
+    if let Value::Typed(_, evidence) = value {
+        if evidence == ty {
+            return Ok(());
+        }
+        if let (Ok(expected), Ok(actual)) = (
+            crate::types::ConcreteType::resolve(env, ty),
+            crate::types::ConcreteType::resolve(env, evidence),
+        ) {
+            if expected.accepts(&actual) {
+                return Ok(());
+            }
+        }
+    }
     let original = value;
     let value = raw(value);
     let valid = match ty {

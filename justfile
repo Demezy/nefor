@@ -218,6 +218,14 @@ test-build-version:
 bench-mag *args:
     cargo bench -p nefor-mag --bench mag_compile -- {{args}}
 
+# MAG language/compiler tests, optionally filtered by ordinary Cargo test arguments.
+test-mag *args:
+    cargo test -p nefor-mag {{args}}
+
+# Build the MAG command-line compiler used for focused workflow replays.
+build-mag:
+    cargo build -p nefor-mag --bin mag
+
 # Browse aggregate byte anatomy for sessions in the resolved Nefor data directory.
 inspect-sessions host="127.0.0.1" port="3939":
     NEFOR_SESSION_INSPECTOR_HOST={{host}} NEFOR_SESSION_INSPECTOR_PORT={{port}} bun tools/session-inspector/server.ts

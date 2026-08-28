@@ -131,6 +131,8 @@ struct CompilationState {
     limits: crate::CompilerLimits,
     next_binding_id: u64,
     next_frame_id: u64,
+    frame_allocations_since_collection: usize,
+    frame_collection_interval: usize,
     bindings: HashMap<BindingId, BindingMetadata>,
     frames: HashMap<FrameId, ScopeFrame>,
     frame_roots: HashMap<FrameId, usize>,
@@ -271,6 +273,8 @@ impl Env {
         let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
         let id = FrameId(state.next_frame_id);
         state.next_frame_id = state.next_frame_id.saturating_add(1);
+        state.frame_allocations_since_collection =
+            state.frame_allocations_since_collection.saturating_add(1);
         state.frames.insert(id, ScopeFrame::default());
         *state.frame_roots.entry(id).or_default() += 1;
         id
@@ -850,12 +854,20 @@ impl Env {
     }
     pub fn frame_collection_due(&self) -> bool {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        state.frames.len().saturating_sub(state.frame_roots.len()) >= FRAME_COLLECTION_THRESHOLD
+        state.frame_allocations_since_collection
+            >= state
+                .frame_collection_interval
+                .max(FRAME_COLLECTION_THRESHOLD)
     }
     pub fn collect_frames(&self, extra_values: &[Value]) -> usize {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let collection_interval = state
+            .frame_collection_interval
+            .max(FRAME_COLLECTION_THRESHOLD);
+        state.frame_allocations_since_collection = 0;
         let before = state.frames.len();
         let mut reachable = HashSet::new();
+        let mut visited_values = HashSet::new();
         let mut pending_frames = state.frame_roots.keys().copied().collect::<Vec<_>>();
         let mut pending_values = extra_values.to_vec();
         pending_values.extend(
@@ -875,13 +887,25 @@ impl Env {
         while !pending_frames.is_empty() || !pending_values.is_empty() {
             while let Some(value) = pending_values.pop() {
                 match value {
-                    Value::Fn(function) => pending_frames.extend(function.closure.iter().copied()),
-                    Value::List(values) | Value::Vector(values) | Value::Product(values) => {
-                        pending_values.extend(values.iter().cloned());
+                    Value::Fn(function)
+                        if visited_values.insert(Arc::as_ptr(&function).cast::<()>()) =>
+                    {
+                        pending_frames.extend(function.closure.iter().copied());
                     }
-                    Value::Map(values) => pending_values.extend(values.values().cloned()),
+                    Value::List(values) | Value::Vector(values) | Value::Product(values) => {
+                        if visited_values.insert(Arc::as_ptr(&values).cast::<()>()) {
+                            pending_values.extend(values.iter().cloned());
+                        }
+                    }
+                    Value::Map(values) => {
+                        if visited_values.insert(Arc::as_ptr(&values).cast::<()>()) {
+                            pending_values.extend(values.values().cloned());
+                        }
+                    }
                     Value::Typed(value, _) | Value::PackedValue(value) => {
-                        pending_values.push(value.as_ref().clone());
+                        if visited_values.insert(Arc::as_ptr(&value).cast::<()>()) {
+                            pending_values.push(value.as_ref().clone());
+                        }
                     }
                     _ => {}
                 }
@@ -902,7 +926,13 @@ impl Env {
 
         state.frames.retain(|id, _| reachable.contains(id));
         state.frame_roots.retain(|id, _| reachable.contains(id));
-        before.saturating_sub(state.frames.len())
+        let reclaimed = before.saturating_sub(state.frames.len());
+        state.frame_collection_interval = if reclaimed < before / 4 {
+            collection_interval.saturating_mul(2)
+        } else {
+            state.frames.len().max(FRAME_COLLECTION_THRESHOLD)
+        };
+        reclaimed
     }
     pub fn child_for_call(&self) -> Self {
         let frame = Self::allocate_frame_in(&self.state);
@@ -1193,6 +1223,50 @@ mod frame_arena_tests {
             env.collect_frames(&[]);
             assert_eq!(env.live_frame_count(), baseline);
         }
+    }
+
+    #[test]
+    fn retained_frames_do_not_retrigger_collection_without_new_allocations() {
+        let mut env = Env::new();
+        let mut escaped = Vec::with_capacity(FRAME_COLLECTION_THRESHOLD);
+        for _ in 0..FRAME_COLLECTION_THRESHOLD {
+            env.push_scope();
+            escaped.push(closure(vec![*env.scopes.last().unwrap()]));
+            env.pop_scope();
+        }
+
+        assert!(env.frame_collection_due());
+        assert_eq!(env.collect_frames(&escaped), 0);
+        assert!(!env.frame_collection_due());
+
+        for _ in 0..FRAME_COLLECTION_THRESHOLD {
+            env.push_scope();
+            env.pop_scope();
+        }
+        assert!(!env.frame_collection_due());
+
+        for _ in 0..FRAME_COLLECTION_THRESHOLD {
+            env.push_scope();
+            env.pop_scope();
+        }
+        assert!(env.frame_collection_due());
+    }
+
+    #[test]
+    fn shared_value_dags_do_not_expand_during_frame_collection() {
+        let mut env = Env::new();
+        let baseline = env.live_frame_count();
+        env.push_scope();
+        let mut shared = closure(vec![*env.scopes.last().unwrap()]);
+        env.pop_scope();
+
+        for _ in 0..24 {
+            shared = Value::List(Arc::new(vec![shared.clone(), shared]));
+        }
+
+        assert_eq!(env.collect_frames(std::slice::from_ref(&shared)), 0);
+        assert_eq!(env.live_frame_count(), baseline + 1);
+        assert_eq!(env.collect_frames(&[]), 1);
     }
 
     #[test]
