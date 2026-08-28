@@ -168,6 +168,19 @@
   (node id "output" [output-actor]
       (as (List StoredRoute) []) (as (List Message) []) input result)))
 
+;; An ordinary identity node is the boundary adapter used by hierarchical
+;; node combinators. The runtime factory already forwards one typed value; the
+;; distinct role keeps this reusable internal node out of the graph's terminal
+;; output semantics.
+(let identity (fn [T] [[id String] [type (TypeTag T)]] -> (Node T T)
+  (let input (port id type "nefor.graph.Value"))
+  (let result (port id type "nefor.graph.Value"))
+  (let identity-actor (actor id output-factory [(type-evidence type)]
+                         (as OutputParams {})
+                         (store-port input) [(store-port result)]))
+  (node id "ordinary" [identity-actor]
+      (as (List StoredRoute) []) (as (List Message) []) input result)))
+
 (let output-for (fn [I T] [[id String] [from (Node I T)]] -> (Node T T)
   (output id (get (get from "output") "type"))))
 
@@ -455,9 +468,16 @@
                     (graph-actors value))) 0)))
 (let actor-by-id-exists? (fn [[actors (List Actor)] [id String]] -> Bool
   (= (actor-id-count actors id) 1)))
+(let same-port-address? (fn [[left StoredPort] [right StoredPort]] -> Bool
+  (if (= (get left "actor") (get right "actor"))
+    (= (get left "wire") (get right "wire"))
+    false)))
 (let port-is-output? (fn [[actors (List Actor)] [value StoredPort]] -> Bool
   (= (count (flat-map (fn [[candidate Actor]] -> (List StoredPort)
-    (filter (fn [[output StoredPort]] -> Bool (= output value))
+    (filter (fn [[output StoredPort]] -> Bool
+              (if (same-port-address? output value)
+                (descriptor-accepts? (get output "type") (get value "type"))
+                false))
             (get candidate "outputs"))) actors)) 1)))
 (let port-is-input? (fn [[actors (List Actor)] [value StoredPort]] -> Bool
   (= (count (filter (fn [[candidate Actor]] -> Bool
@@ -493,7 +513,7 @@
   (map (fn [[route StoredRoute]] -> TypeDescriptor
          (get (get route "to") "type"))
        (filter (fn [[candidate StoredRoute]] -> Bool
-                 (= (get candidate "from") output))
+                 (same-port-address? (get candidate "from") output))
                routes))))
 (let rule-handler-types (fn [[rules (List Rule)] [output StoredPort]]
   -> (List TypeDescriptor)

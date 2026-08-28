@@ -1,0 +1,187 @@
+(require "nefor.graph")
+
+;; Public, node-oriented composition. These functions construct larger Node
+;; values from smaller ones; ports and routes remain representation details.
+
+(let sequence-empty-factory "nefor.factory.sequence-empty")
+(let collector-factory "nefor.factory.collector")
+
+(type SequenceEmptyParams {})
+(type CollectorParams {:expected_senders (List String)})
+
+(let composite-id
+  (fn [[left String] [operator String] [right String]] -> String
+    (str left (str operator right))))
+
+(let compose
+  (fn [A B C]
+    [[left (nefor.graph.Node A B)] [right (nefor.graph.Node B C)]]
+    -> (nefor.graph.Node A C)
+    (nefor.graph.node
+      (composite-id (get left "id") ">>>" (get right "id"))
+      "ordinary"
+      (concat (get left "actors") (get right "actors"))
+      (concat
+        (concat (get left "routes") (get right "routes"))
+        [(nefor.graph.stored-route
+           (get left "output") (get right "input"))])
+      (concat (get left "messages") (get right "messages"))
+      (get left "input")
+      (get right "output"))))
+
+;; Established Arrow spelling for left-to-right composition. This is an alias
+;; with exactly the same semantics, not a separate symbolic DSL.
+(let >>>
+  (fn [A B C]
+    [[left (nefor.graph.Node A B)] [right (nefor.graph.Node B C)]]
+    -> (nefor.graph.Node A C)
+    (compose left right)))
+
+;; A typed view of one arm of a node's sum boundary. It denotes the same
+;; runtime actor and wire; the route validator proves that the selected arm is
+;; actually covered when the composed graph is compiled.
+(let arm
+  (fn [I A B T]
+    [[value (nefor.graph.Node I (| A B))] [type (TypeTag T)]]
+    -> (nefor.graph.Port T)
+    (let output (get value "output"))
+    (nefor.graph.port
+      (get output "actor") type (get output "wire"))))
+
+;; Route either input arm through its corresponding node and preserve the
+;; resulting sum. MAG's idempotent sums make (| C C) normalize to C, so this
+;; one operation also covers two branches converging on the same result type.
+(let choose
+  (fn [A B C D]
+    [[id String]
+     [left (nefor.graph.Node A C)]
+     [right (nefor.graph.Node B D)]]
+    -> (nefor.graph.Node (| A B) (| C D))
+    (let input
+      (nefor.graph.identity (str id ".input") (type-tag (| A B))))
+    (let output
+      (nefor.graph.identity (str id ".output") (type-tag (| C D))))
+    (let left-input
+      (nefor.graph.port
+        (get (get input "output") "actor")
+        (type-tag A)
+        (get (get input "output") "wire")))
+    (let right-input
+      (nefor.graph.port
+        (get (get input "output") "actor")
+        (type-tag B)
+        (get (get input "output") "wire")))
+    (nefor.graph.node id "ordinary"
+      (concat
+        (get input "actors")
+        (concat
+          (get left "actors")
+          (concat (get right "actors") (get output "actors"))))
+      (concat
+        (concat
+          (get input "routes")
+          (concat
+            (get left "routes")
+            (concat (get right "routes") (get output "routes"))))
+        [(nefor.graph.stored-route left-input (get left "input"))
+         (nefor.graph.stored-route right-input (get right "input"))
+         (nefor.graph.stored-route (get left "output") (get output "input"))
+         (nefor.graph.stored-route (get right "output") (get output "input"))])
+      (concat
+        (get input "messages")
+        (concat
+          (get left "messages")
+          (concat (get right "messages") (get output "messages"))))
+      (get input "input")
+      (get output "output"))))
+
+(let sequence-empty
+  (fn [I O] [[id String]] -> (nefor.graph.Node I (List O))
+    (let actor-id (str id ".empty"))
+    (let input
+      (nefor.graph.port actor-id (type-tag I) "nefor.node.SequenceInput"))
+    (let output
+      (nefor.graph.port actor-id (type-tag (List O))
+        "nefor.node.SequenceOutput"))
+    (let actor
+      (nefor.graph.actor actor-id sequence-empty-factory
+        [(type-evidence (type-tag I)) (type-evidence (type-tag O))]
+        (as SequenceEmptyParams {})
+        (nefor.graph.store-port input)
+        [(nefor.graph.store-port output)]))
+    (nefor.graph.node id "ordinary" [actor]
+      (as (List nefor.graph.StoredRoute) [])
+      (as (List nefor.graph.Message) [])
+      input output)))
+
+(let sequence-nonempty
+  (fn [I O] [[id String] [nodes (List (nefor.graph.Node I O))]]
+    -> (nefor.graph.Node I (List O))
+    (let relay
+      (nefor.graph.identity (str id ".input") (type-tag I)))
+    (let collector-id (str id ".collector"))
+    (let collector-input
+      (nefor.graph.port collector-id (type-tag O) "nefor.dynamic.Item"))
+    (let collector-output
+      (nefor.graph.port collector-id (type-tag (List O))
+        "nefor.dynamic.Collected"))
+    (let expected-senders
+      (map
+        (fn [[candidate (nefor.graph.Node I O)]] -> String
+          (get (get candidate "output") "actor"))
+        nodes))
+    (let collector
+      (nefor.graph.actor collector-id collector-factory
+        [(type-evidence (type-tag O))]
+        (as CollectorParams {:expected_senders expected-senders})
+        (nefor.graph.store-port collector-input)
+        [(nefor.graph.store-port collector-output)]))
+    (let child-actors
+      (flat-map
+        (fn [[candidate (nefor.graph.Node I O)]]
+          -> (List nefor.graph.Actor)
+          (get candidate "actors"))
+        nodes))
+    (let child-routes
+      (flat-map
+        (fn [[candidate (nefor.graph.Node I O)]]
+          -> (List nefor.graph.StoredRoute)
+          (get candidate "routes"))
+        nodes))
+    (let child-messages
+      (flat-map
+        (fn [[candidate (nefor.graph.Node I O)]]
+          -> (List nefor.graph.Message)
+          (get candidate "messages"))
+        nodes))
+    (let input-routes
+      (map
+        (fn [[candidate (nefor.graph.Node I O)]]
+          -> nefor.graph.StoredRoute
+          (nefor.graph.stored-route
+            (get relay "output") (get candidate "input")))
+        nodes))
+    (let output-routes
+      (map
+        (fn [[candidate (nefor.graph.Node I O)]]
+          -> nefor.graph.StoredRoute
+          (nefor.graph.stored-route
+            (get candidate "output") collector-input))
+        nodes))
+    (nefor.graph.node id "ordinary"
+      (concat (get relay "actors") (concat child-actors [collector]))
+      (concat
+        (get relay "routes")
+        (concat child-routes (concat input-routes output-routes)))
+      (concat (get relay "messages") child-messages)
+      (get relay "input")
+      collector-output)))
+
+;; The supplied compile-time List fixes both producer count and result order.
+;; The output is therefore an ordinary fixed List, not DynamicList.
+(let sequence
+  (fn [I O] [[id String] [nodes (List (nefor.graph.Node I O))]]
+    -> (nefor.graph.Node I (List O))
+    (if (= (count nodes) 0)
+      (sequence-empty id)
+      (sequence-nonempty id nodes))))

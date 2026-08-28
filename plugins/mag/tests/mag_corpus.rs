@@ -466,26 +466,17 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
 (require "nefor.actors")
 (require "nefor.contracts")
 (require "nefor.graph")
-(let ignore-exhausted (fn [[value (nefor.contracts.Exhausted nefor.contracts.Task)]] -> Artifact
-  (artifact {})))
 (let start (nefor.graph.source "start" (type-tag nefor.contracts.Task)
               (as nefor.contracts.Task {:prompt "retry"})))
 (let gate (nefor.actors.retry-gate
              (as nefor.actors.RetryGateConfig {:id "retry" :max-retries 3})
              (type-tag nefor.contracts.Task)))
-(let gate-node (as (nefor.graph.Node nefor.contracts.Task
-                      (nefor.contracts.Continue nefor.contracts.Task))
-                  {:id (get gate "id") :role "ordinary"
-                   :actors (get gate "actors") :routes (get gate "routes")
-                   :messages (get gate "messages") :input (get gate "input")
-                   :output (get gate "first")}))
-(let result (nefor.graph.output-for "result" gate-node))
-(nefor.artifact.compile-program
+(let result (nefor.graph.output-for "result" gate))
+(nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
-        [(nefor.graph.edge start gate-node)
-         (nefor.graph.edge gate-node result)]))
-    [(nefor.graph.rule "exhausted-observer" (get gate "second") "ignore-exhausted")])"#,
+        [(nefor.graph.edge start gate)
+         (nefor.graph.edge gate result)])))"#,
     )
     .expect("write retry gate graph regression");
     let retry_gate = load(
@@ -501,6 +492,75 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         retry_gate.get("kind").and_then(Value::as_str),
         Some("mag.loaded"),
         "the typed RetryGate graph must compile against runtime contracts: {retry_gate:#?}"
+    );
+
+    fs::write(
+        temp_root.join("node-sequence.mag"),
+        r#"(require "nefor.artifact")
+(require "nefor.graph")
+(require "nefor.node")
+(let start (nefor.graph.source "start" (type-tag String) "shared"))
+(let first (nefor.graph.identity "first" (type-tag String)))
+(let second (nefor.graph.identity "second" (type-tag String)))
+(let workers (nefor.node.sequence "workers" [first second]))
+(let result (nefor.graph.output-for "result" workers))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph
+      [(nefor.graph.edge start workers)
+       (nefor.graph.edge workers result)])))"#,
+    )
+    .expect("write node sequence regression");
+    let node_sequence = load(
+        &mut reader,
+        &mut stdin,
+        "node-sequence",
+        &temp_root,
+        Path::new("node-sequence.mag"),
+        &module_roots,
+    )
+    .await;
+    assert_eq!(
+        node_sequence.get("kind").and_then(Value::as_str),
+        Some("mag.loaded"),
+        "the node-oriented fixed sequence must compile against runtime contracts: {node_sequence:#?}"
+    );
+
+    fs::write(
+        temp_root.join("node-choice.mag"),
+        r#"(require "nefor.artifact")
+(require "nefor.graph")
+(require "nefor.node")
+(type Left {:value String})
+(type Right {:value Int})
+(type Choice (| Left Right))
+(let start
+  (nefor.graph.source "start" (type-tag Choice)
+    (as Choice (as Left {:value "left"}))))
+(let left (nefor.graph.identity "left" (type-tag Left)))
+(let right (nefor.graph.identity "right" (type-tag Right)))
+(let selected (nefor.node.choose "selected" left right))
+(let result (nefor.graph.output-for "result" selected))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph
+      [(nefor.graph.edge start selected)
+       (nefor.graph.edge selected result)])))"#,
+    )
+    .expect("write node choice regression");
+    let node_choice = load(
+        &mut reader,
+        &mut stdin,
+        "node-choice",
+        &temp_root,
+        Path::new("node-choice.mag"),
+        &module_roots,
+    )
+    .await;
+    assert_eq!(
+        node_choice.get("kind").and_then(Value::as_str),
+        Some("mag.loaded"),
+        "ordinary sum-output node choice must compile against runtime contracts: {node_choice:#?}"
     );
 
     // A library fragment may expose a useful subset of an actor's

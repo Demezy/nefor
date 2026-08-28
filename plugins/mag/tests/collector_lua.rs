@@ -74,3 +74,24 @@ fn collector_rejects_bad_topology_and_arrivals_and_clears_on_kill() {
         .exec()
         .unwrap();
 }
+
+#[test]
+fn empty_sequence_emits_the_fixed_empty_list_after_input() {
+    harness()
+        .load(
+            r#"
+            local factory = require("factories.sequence-empty")
+            local emitted = {}
+            local actor = assert(factory.construct("empty", {},
+              function(message) emitted[#emitted + 1] = message end))
+            local completion = actor.deliver({ messages = {{ message = { value = "trigger" } }} })
+            assert(completion.status == "ok")
+            assert(#emitted == 2) -- ready + the empty list
+            assert(emitted[2].kind == "nefor.node.SequenceOutput")
+            assert(type(emitted[2].value) == "table" and #emitted[2].value == 0)
+            assert(type(emitted[2].semantic_value) == "table" and #emitted[2].semantic_value == 0)
+            "#,
+        )
+        .exec()
+        .unwrap();
+}

@@ -46,22 +46,6 @@
                    :max-corrections Int})
 (type ApprovalConfig {:id String :prompt String})
 (type RetryGateConfig {:id String :max-retries Int})
-(type BranchNode [I A B]
-  {:id String
-   :actors (List nefor.graph.Actor)
-   :routes (List nefor.graph.StoredRoute)
-   :messages (List nefor.graph.Message)
-   :input (nefor.graph.Port I)
-   :first (nefor.graph.Port A)
-   :second (nefor.graph.Port B)})
-
-(let branch-node-delta (fn [I A B]
-  [[fragment (BranchNode I A B)]] -> nefor.graph.Delta
-  (as nefor.graph.Delta
-    {:actors (get fragment "actors")
-     :routes (get fragment "routes")
-     :messages (get fragment "messages")
-     :kills []})))
 
 (let task-source (fn [[id String] [prompt String]]
   -> (nefor.graph.Node Unit nefor.contracts.Task)
@@ -190,9 +174,11 @@
   (nefor.graph.port (get result "actor") type (get result "wire"))))
 
 (let retry-gate (fn [T] [[config RetryGateConfig] [type (TypeTag T)]]
-  -> (BranchNode T (nefor.contracts.Continue T) (nefor.contracts.Exhausted T))
+  -> (nefor.graph.Node T
+       (| (nefor.contracts.Continue T) (nefor.contracts.Exhausted T)))
   (let id (get config "id"))
   (let actor-id (str id ".retry-gate"))
+  (let result-id (str id ".result"))
   (let input (nefor.graph.port actor-id type "nefor.retry.Input"))
   (let continued (nefor.graph.port actor-id
                     (type-tag (nefor.contracts.Continue T))
@@ -200,25 +186,30 @@
   (let exhausted (nefor.graph.port actor-id
                     (type-tag (nefor.contracts.Exhausted T))
                     "nefor.retry.Exhausted"))
-  (as (BranchNode T (nefor.contracts.Continue T) (nefor.contracts.Exhausted T))
-      {:id id
-       :actors [(nefor.graph.actor actor-id retry-gate-factory
-                  [(type-evidence type)]
-                  (as RetryGateParams
-                    {:max_retries (get config "max-retries")})
-                  (nefor.graph.store-port input)
-                  [(nefor.graph.store-port continued)
-                   (nefor.graph.store-port exhausted)])]
-       :routes (as (List nefor.graph.StoredRoute) [])
-       :messages (as (List nefor.graph.Message) [])
-       :input input
-       :first continued
-       :second exhausted})))
+  (let result
+    (nefor.graph.identity result-id
+      (type-tag
+        (| (nefor.contracts.Continue T) (nefor.contracts.Exhausted T)))))
+  (nefor.graph.node id "ordinary"
+    [(nefor.graph.actor actor-id retry-gate-factory
+       [(type-evidence type)]
+       (as RetryGateParams {:max_retries (get config "max-retries")})
+       (nefor.graph.store-port input)
+       [(nefor.graph.store-port continued)
+        (nefor.graph.store-port exhausted)])
+     (first (get result "actors"))]
+    [(nefor.graph.stored-route continued (get result "input"))
+     (nefor.graph.stored-route exhausted (get result "input"))]
+    (as (List nefor.graph.Message) [])
+    input
+    (get result "output"))))
 
 (let approval-gate (fn [[config ApprovalConfig]]
-  -> (BranchNode nefor.contracts.TextAnswer nefor.contracts.Approved nefor.contracts.Rejected)
+  -> (nefor.graph.Node nefor.contracts.TextAnswer
+       (| nefor.contracts.Approved nefor.contracts.Rejected))
   (let id (get config "id"))
   (let actor-id (str id ".human"))
+  (let result-id (str id ".result"))
   (let input (nefor.graph.port actor-id
                 (type-tag nefor.contracts.TextAnswer)
                 "generic-provider.TextAnswer"))
@@ -228,14 +219,18 @@
   (let rejected (nefor.graph.port actor-id
                    (type-tag nefor.contracts.Rejected)
                    "human.Rejected"))
-  (as (BranchNode nefor.contracts.TextAnswer nefor.contracts.Approved nefor.contracts.Rejected)
-     {:id id :actors [(nefor.graph.actor actor-id human-factory []
-                (as HumanParams {:prompt (get config "prompt")})
-                (nefor.graph.store-port input)
-                [(nefor.graph.store-port approved)
-                 (nefor.graph.store-port rejected)])]
-     :routes (as (List nefor.graph.StoredRoute) [])
-     :messages []
-     :input input
-     :first approved
-     :second rejected})))
+  (let result
+    (nefor.graph.identity result-id
+      (type-tag (| nefor.contracts.Approved nefor.contracts.Rejected))))
+  (nefor.graph.node id "ordinary"
+    [(nefor.graph.actor actor-id human-factory []
+       (as HumanParams {:prompt (get config "prompt")})
+       (nefor.graph.store-port input)
+       [(nefor.graph.store-port approved)
+        (nefor.graph.store-port rejected)])
+     (first (get result "actors"))]
+    [(nefor.graph.stored-route approved (get result "input"))
+     (nefor.graph.stored-route rejected (get result "input"))]
+    (as (List nefor.graph.Message) [])
+    input
+    (get result "output"))))
