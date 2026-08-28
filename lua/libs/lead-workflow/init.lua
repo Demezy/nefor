@@ -230,12 +230,15 @@ local state = {
   kernel_factories = {},
 
   -- `mag` tool invocations awaiting their `mag.load` reply, keyed by the load
-  -- request id. Both compile and execute go through this handshake: `mag.load`
-  -- is sent, the `mag.loaded` reply (carrying the modification + the registry)
-  -- resolves it (resume_pending_load) — compile renders the preview, execute
-  -- validates and sends `mag.execute`. A `mag.error` reply fails the firing
-  -- with the compiler message. One entry per in-flight handshake.
+  -- request id. Compile, execute, and apply go through this handshake:
+  -- `mag.load` is sent, then the lowered artifact is previewed, submitted as a
+  -- fresh run, or submitted as a delta to one live run.
   pending_mag_load = {},
+
+  -- Compiled apply invocations awaiting the kernel's correlated `mag.applied`
+  -- acknowledgment. Compilation and application are separate failure
+  -- boundaries, so a firing moves here only after a valid delta was loaded.
+  pending_mag_apply = {},
 
   -- Invocations awaiting the short terminal-result grace deadline, keyed by
   -- exact run_id. Timeout emits the unchanged async acknowledgment;
@@ -258,6 +261,7 @@ local SOURCE_NAME = "lead-workflow"
 local register_active_run
 local submit_loaded_run
 local invalidate_pending_mag_loads
+local invalidate_pending_mag_applies
 local graph_status
 local await_run
 local terminate_graph
@@ -1618,6 +1622,7 @@ end
 
 local function terminate_active_graph(session_id)
   invalidate_pending_mag_loads(nil)
+  invalidate_pending_mag_applies(nil)
   for run_id in pairs(state.completion_grace_waiters) do
     cancel_completion_grace(run_id)
   end
@@ -1735,12 +1740,67 @@ local function lead_workflow_tool_schemas()
     },
     {
       name        = "mag",
-      display = (function() local c = display_contract("mag compile", display_field("file", "args", "file", "path"), { display_field("action", "args", "action", "scalar", { omit = "missing" }) }, "content", nil, { display_field("status", "result", "status", "status", { omit = "missing" }), display_field("preview", "result", "preview", "text", { omit = "missing", max_lines = 80, max_bytes = 8000 }), display_field("source path", "result", "source_path", "path", { omit = "missing" }), display_field("output path", "result", "output_path", "path", { omit = "missing" }) }, "delayed"); c.variant = { select = { source = "args", path = "action", default = "compile" }, cases = { write = display_contract("mag write", display_field("file", "args", "file", "path"), {}, "receipt", "MAG source written", { display_field("source path", "result", "source_path", "path", { omit = "missing" }) }, "delayed"), execute = display_contract("mag execute", display_field("file", "args", "file", "path"), {}, "receipt", "MAG run submitted", { display_field("status", "result", "status", "status", { omit = "missing" }), display_field("run", "result", "run_id", "scalar", { omit = "missing" }), display_field("output path", "result", "output_path", "path", { omit = "missing" }) }, "delayed") } }; return c end)(),
+      display = (function()
+        local contract = display_contract(
+          "mag compile",
+          display_field("file", "args", "file", "path"),
+          { display_field("action", "args", "action", "scalar", { omit = "missing" }) },
+          "content",
+          nil,
+          {
+            display_field("status", "result", "status", "status", { omit = "missing" }),
+            display_field("preview", "result", "preview", "text",
+              { omit = "missing", max_lines = 80, max_bytes = 8000 }),
+            display_field("source path", "result", "source_path", "path", { omit = "missing" }),
+            display_field("output path", "result", "output_path", "path", { omit = "missing" }),
+          },
+          "delayed")
+        contract.variant = {
+          select = { source = "args", path = "action", default = "compile" },
+          cases = {
+            write = display_contract(
+              "mag write",
+              display_field("file", "args", "file", "path"),
+              {},
+              "receipt",
+              "MAG source written",
+              { display_field("source path", "result", "source_path", "path", { omit = "missing" }) },
+              "delayed"),
+            execute = display_contract(
+              "mag execute",
+              display_field("file", "args", "file", "path"),
+              {},
+              "receipt",
+              "MAG run submitted",
+              {
+                display_field("status", "result", "status", "status", { omit = "missing" }),
+                display_field("run", "result", "run_id", "scalar", { omit = "missing" }),
+                display_field("output path", "result", "output_path", "path", { omit = "missing" }),
+              },
+              "delayed"),
+            apply = display_contract(
+              "mag apply",
+              display_field("file", "args", "file", "path"),
+              { display_field("run", "args", "run_id", "scalar") },
+              "receipt",
+              "MAG modification applied",
+              {
+                display_field("status", "result", "status", "status", { omit = "missing" }),
+                display_field("run", "result", "run_id", "scalar", { omit = "missing" }),
+              },
+              "delayed"),
+          },
+        }
+        return contract
+      end)(),
       description =
-        "Write, compile, and execute MAG programs on the actor kernel. " ..
+        "Write, compile, execute, and apply MAG programs on the actor kernel. " ..
         "Use action='write' to create/update a .mag file in the workspace. " ..
         "Use action='compile' (default) to compile and preview the actor " ..
-        "modification. Use action='execute' to compile, validate, and submit a run. " ..
+        "modification. Use action='execute' to compile, validate, and submit a fresh run. " ..
+        "Use action='apply' with run_id to compile a Delta artifact and atomically " ..
+        "apply its spawns, messages, and kills to that live run. Apply cannot add " ..
+        "rules or replace the result boundary. " ..
         "Execution waits briefly for that exact run's canonical terminal result. A quick " ..
         "success or failure returns directly; otherwise the existing asynchronous " ..
         "acknowledgment with a stable run_id is returned and completion arrives later " ..
@@ -1750,17 +1810,19 @@ local function lead_workflow_tool_schemas()
         "backgrounding. Background only when a process intentionally needs a " ..
         "separately retained lifecycle. Graph and agent semantics live in " ..
         "namespaced MAG libraries. " ..
-        "A program requires nefor.actors, nefor.graph, nefor.contracts, and " ..
+        "A fresh-run program requires nefor.actors, nefor.graph, nefor.contracts, and " ..
         "nefor.artifact; construct source, agent, and output nodes, connect " ..
         "them through one flat edge list in a Graph -> Graph function, then " ..
         "pass that function to nefor.artifact.compile. Compile applies it to " ..
-        "empty-graph for a fresh run. Use the agent constructor shown " ..
+        "empty-graph. A delta program instead ends in nefor.artifact.delta and " ..
+        "defines only spawns, messages, and kills. Use the agent constructor shown " ..
         "by the injected canonical contract. " ..
         "Pass compiler-checked semantic type witnesses separately from runtime " ..
         "wire tags; use (type-tag nefor.contracts.Task), wire \"task\", and " ..
         "an output such as (type-tag nefor.contracts.TextAnswer). Exactly one " ..
-        "concrete output<T> identity node marks the result boundary. Graph " ..
-        "operations are pure, retrieve no stored graph, and never mutate a live run. Agent loops are unbounded; " ..
+        "concrete output<T> identity node marks a fresh run's result boundary. " ..
+        "Authored graph transformations remain pure and retrieve no live state; " ..
+        "only explicit apply submits their compiled Delta to the named run. Agent loops are unbounded; " ..
         "stop early via interrupt/kill. The ambient reasoner model plus core and Nefor five-minute guides are " ..
         "the canonical complete examples: use literal (require \"...\") forms and " ..
         "never copy historical session files or use removed import/bare-helper syntax. " ..
@@ -1771,8 +1833,8 @@ local function lead_workflow_tool_schemas()
         properties = {
           action = {
             type        = "string",
-            enum        = { "write", "compile", "execute" },
-            description = "write: create/update a .mag file. compile: compile and preview (default). execute: compile and submit.",
+            enum        = { "write", "compile", "execute", "apply" },
+            description = "write: create/update a .mag file. compile: compile and preview (default). execute: compile and start a fresh run. apply: compile a delta and apply it to run_id.",
           },
           file = {
             type        = "string",
@@ -1781,6 +1843,10 @@ local function lead_workflow_tool_schemas()
           content = {
             type        = "string",
             description = "File content (required for action=write).",
+          },
+          run_id = {
+            type        = "string",
+            description = "Live run to modify (required for action=apply).",
           },
         },
         required = { "file" },
@@ -1813,21 +1879,23 @@ end
 -- workspace path and library shapes are ambient (agentic-loop injects them
 -- into the lead's system prompt each turn), so there is no discovery tool.
 
--- Compile/execute both run a synchronous load handshake against the mag
+-- Compile/execute/apply all run a synchronous load handshake against the mag
 -- plugin: `mag.load` is sent, the `mag.loaded` reply carries the lowered
 -- modification {actors, messages, kills, rules}, the hash, and the kernel
--- registry's factory names. resume_pending_load then either renders the
--- compile preview or validates and sends `mag.execute`. A `mag.error` reply
--- (compile failure) fails the firing with the compiler message
+-- registry's factory names. resume_pending_load then renders the compile
+-- preview, submits a fresh `mag.execute`, or submits a live-run `mag.apply`.
+-- A `mag.error` reply (compile failure) fails the firing with the compiler message
 -- (fail_pending_load). Lifecycle events (mag.run_started, actor spawn/ready,
 -- mag.run_complete) stream on the bus; the terminal mag.run_result (carrying
 -- the sink's output PATH) closes the run and relays a fresh model turn in
 -- receive_msg.
 local function begin_mag_load(firing_id, action, args, ws, provenance)
   local graph_name = args.file:gsub("%.mag$", ""):gsub("/", "-"):sub(1, 20)
-  local run_id = action == "execute" and run_registry:mint_run_id()
-    or ("mag-load-" .. envelope.uuid_lite())
-  local load_id = run_id .. "-load"
+  local run_id
+  if action == "execute" then run_id = run_registry:mint_run_id()
+  elseif action == "apply" then run_id = args.run_id
+  else run_id = "mag-load-" .. envelope.uuid_lite() end
+  local load_id = "mag-load-" .. envelope.uuid_lite()
 
   state.pending_mag_load[load_id] = {
     action     = action,
@@ -1835,7 +1903,7 @@ local function begin_mag_load(firing_id, action, args, ws, provenance)
     file       = args.file,
     run_id     = run_id,
     run_name   = graph_name,
-    invocation_kind = "execute",
+    invocation_kind = action,
     invocation_label = args.file,
     session_id = provenance.session_id,
     dispatcher_id = provenance.dispatcher_id,
@@ -1861,6 +1929,17 @@ invalidate_pending_mag_loads = function(firing_id)
   for load_id, pending in pairs(state.pending_mag_load) do
     if firing_id == nil or pending.firing_id == firing_id then
       state.pending_mag_load[load_id] = nil
+      hit = true
+    end
+  end
+  return hit
+end
+
+invalidate_pending_mag_applies = function(firing_id)
+  local hit = false
+  for request_id, pending in pairs(state.pending_mag_apply) do
+    if firing_id == nil or pending.firing_id == firing_id then
+      state.pending_mag_apply[request_id] = nil
       hit = true
     end
   end
@@ -1986,17 +2065,97 @@ submit_loaded_run = function(pending, body, error_prefix)
   return true
 end
 
--- Resume a pending compile/execute once its `mag.load` reply arrives. The
+local function submit_loaded_apply(pending, body)
+  local modification = type(body.artifact) == "table" and body.artifact or nil
+  if type(modification) ~= "table" then
+    emit_tool_result_err(pending.firing_id,
+      "mag apply: mag.loaded reply carried no graph artifact")
+    return false
+  end
+  if modification.result ~= nil then
+    emit_tool_result_err(pending.firing_id,
+      "mag apply: a delta cannot define or replace the result boundary")
+    return false
+  end
+  if type(modification.rules) == "table" and #modification.rules > 0 then
+    emit_tool_result_err(pending.firing_id,
+      "mag apply: rules are immutable initial subscriptions")
+    return false
+  end
+  local actors = modification.actors or {}
+  if not validate_factories(actors, pending.firing_id) then return false end
+  if actors_have_writers(actors) and state.gate_mode == "safe"
+      and not has_approved_plan() then
+    emit_tool_result_err(pending.firing_id,
+      "Modification contains write-capable agents. Submit a plan via write-review " ..
+      "and get approval before applying it.")
+    return false
+  end
+  local overlay, params_err = resolve_agent_params(actors, pending.session_id)
+  if not overlay then
+    emit_tool_result_err(pending.firing_id, "mag apply: " .. params_err)
+    return false
+  end
+  local request_id = "mag-apply-" .. envelope.uuid_lite()
+  state.pending_mag_apply[request_id] = {
+    firing_id = pending.firing_id,
+    run_id = pending.run_id,
+    hash = body.hash,
+  }
+  local apply = {
+    kind = "mag.apply",
+    id = request_id,
+    run_id = pending.run_id,
+    source = "lead-workflow.mag.apply",
+    modification = modification,
+  }
+  if next(overlay) ~= nil then apply.params_overlay = overlay end
+  emit_as(SOURCE_NAME, "mag", apply)
+  return true
+end
+
+local function resolve_pending_apply(body)
+  local request_id = body.in_reply_to
+  local pending = type(request_id) == "string"
+    and state.pending_mag_apply[request_id] or nil
+  if not pending then return false end
+  state.pending_mag_apply[request_id] = nil
+  if body.ok == true then
+    emit_tool_result_ok(pending.firing_id, {
+      status = "applied",
+      run_id = pending.run_id,
+      hash = pending.hash,
+      engine = "mag-kernel",
+      message = "Modification applied atomically to the live MAG run.",
+    })
+  else
+    emit_tool_result_err(pending.firing_id,
+      "mag apply rejected: " .. tostring(body.error or "unknown rejection"))
+  end
+  return true
+end
+
+local function fail_pending_apply(body)
+  local request_id = body.in_reply_to
+  local pending = type(request_id) == "string"
+    and state.pending_mag_apply[request_id] or nil
+  if not pending then return false end
+  state.pending_mag_apply[request_id] = nil
+  emit_tool_result_err(pending.firing_id,
+    "mag apply failed: " .. tostring(body.message or "unknown error"))
+  return true
+end
+
+-- Resume a pending compile/execute/apply once its `mag.load` reply arrives. The
 -- reply's registry has already refreshed state.kernel_factories
 -- (capture_kernel_factories runs first). Compile renders the preview from the
--- modification. Execute validates — factories, write gate, sink, agent params —
--- and only then sends `mag.execute` with the resolved session_id, run_id, and
--- params overlay. Validation failure acks the firing with an error and drops
--- the pending entry — nothing runs.
+-- modification. Execute validates a fresh-run artifact; apply validates a
+-- delta artifact and its named live target. Only then is the request submitted.
+-- Validation failure acks the firing with an error and drops the pending entry.
 --
 -- Agent params resolved lead-side from the configured registry/defaults are
 -- threaded to the actors via `params_overlay` on
--- mag.execute — a per-actor-id param patch the kernel merges before spawn
+-- mag.execute or mag.apply — a per-actor-id param patch the kernel merges before spawn
 -- (actor params are kernel-opaque, so an overlay is legitimate control-plane
 -- input, ir.md). The overlay keys on the namespaced LLM actor ids.
 local function resume_pending_load(body)
@@ -2022,6 +2181,11 @@ local function resume_pending_load(body)
       message = "Program compiled successfully. Review the preview above. " ..
         "Call mag with action='execute' to run it.",
     })
+    return
+  end
+
+  if pending.action == "apply" then
+    submit_loaded_apply(pending, body)
     return
   end
 
@@ -2095,14 +2259,27 @@ local function mag_handler(firing_id, args, metadata)
     return
   end
 
-  if action ~= "compile" and action ~= "execute" then
+  if action ~= "compile" and action ~= "execute" and action ~= "apply" then
     emit_tool_result_err(firing_id,
       "mag: unknown action '" .. tostring(action) ..
-      "' (valid: write, compile, execute)")
+      "' (valid: write, compile, execute, apply)")
     return
   end
 
-  -- Compile and execute both go through the mag plugin's load handshake;
+  if action == "apply" then
+    if type(args.run_id) ~= "string" or args.run_id == "" then
+      emit_tool_result_err(firing_id, "mag apply: requires a non-empty run_id")
+      return
+    end
+    local target = state.active_runs[args.run_id]
+    if type(target) ~= "table" or target.phase == "terminal" then
+      emit_tool_result_err(firing_id,
+        "mag apply: run '" .. args.run_id .. "' is not live")
+      return
+    end
+  end
+
+  -- Compile, execute, and apply all go through the mag plugin's load handshake;
   -- the mag.loaded reply resolves them (resume_pending_load).
   -- File-based MAG execution is detached for every caller. Non-root authority
   -- is recorded against the kernel-stamped actor that made this invocation.
@@ -2208,6 +2385,7 @@ local function receive_msg(entry)
     cancel_completion_grace_by_firing(body.id)
     mag_eval.cancel(body.id)
     invalidate_pending_mag_loads(body.id)
+    invalidate_pending_mag_applies(body.id)
     interrupt_run_by_dispatch_firing(body.id)
     return
   end
@@ -2285,11 +2463,16 @@ local function receive_msg(entry)
     resume_pending_load(body)
     return
   end
+  if kind == "mag.applied" then
+    resolve_pending_apply(body)
+    return
+  end
   -- mag.error may reject either an in-flight load or a submitted execute
   -- before begin_run. The load owners consume their correlations first; a
   -- queued registry entry is settled canonically as a failed run so its grace
   -- timer cannot emit a false executing acknowledgment.
   if kind == "mag.error" then
+    if fail_pending_apply(body) then return end
     if handle_mag_pre_start_error(body) then return end
     fail_pending_load(body)
     return
@@ -2424,6 +2607,7 @@ local M = {
       state.gate_mode = "safe"
       state.kernel_factories = {}
       state.pending_mag_load = {}
+      state.pending_mag_apply = {}
       for run_id in pairs(state.completion_grace_waiters) do
         cancel_completion_grace(run_id)
       end

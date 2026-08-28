@@ -1112,7 +1112,7 @@ async fn handle_apply(
         },
     };
 
-    let modification = match body.get("modification") {
+    let mut modification = match body.get("modification") {
         Some(m @ Value::Object(_)) => m.clone(),
         _ => {
             return send_event(
@@ -1122,6 +1122,18 @@ async fn handle_apply(
             .await
         }
     };
+
+    // Mid-run spawns use the same control-plane-resolved actor parameters as
+    // initial execution. This keeps dynamically added LLM actors independent
+    // of whether they entered through `mag.execute` or `mag.apply`.
+    if let Some(overlay) = body.get("params_overlay").and_then(Value::as_object) {
+        if let Err(error) = apply_params_overlay(&mut modification, overlay) {
+            return send_event(out_tx, error_body(in_reply_to, &error)).await;
+        }
+    }
+    if let Err(error) = preflight_provider_schemas(&modification) {
+        return send_event(out_tx, error_body(in_reply_to, &error)).await;
+    }
 
     // Audit every accepted apply with its declared source (docs/ir.md: the
     // modification log is the run — the plane's mid-run ops are part of it).

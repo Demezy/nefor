@@ -57,10 +57,12 @@ is the abstraction's primary value: a complicated reasoner graph becomes one
 typed node that a larger graph can reuse.
 
 Because graphs are ordinary MAG values, MAG functions can also express rewrite
-rules. A function may receive a graph, remove edges containing one reasoner,
-add a replacement with the same boundary, and return the rewritten graph. This
-is a consequence of representing graph construction as typed data, rather than
-the reason the abstraction exists.
+rules while constructing a topology. A function may receive a graph, remove
+edges containing one reasoner, add a replacement with the same boundary, and
+return the rewritten graph before execution. This is a consequence of
+representing graph construction as typed data, rather than the reason the
+abstraction exists. It is distinct from applying an operational `Delta` to a
+live run, where existing actor identities and their routes remain immutable.
 
 Before mechanical calculators, a bank could employ people whose role was to
 turn account figures into calculated results. Those human calculator nodes were

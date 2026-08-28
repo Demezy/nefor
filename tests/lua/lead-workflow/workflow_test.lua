@@ -131,6 +131,19 @@ do
   assert_true(mag_schema.description:find("A quick success or failure returns directly", 1, true) ~= nil
       and mag_schema.description:find("Do not narrate waiting after a terminal result", 1, true) ~= nil,
     "mag execute schema explains both grace outcomes")
+  local actions = {}
+  for _, action in ipairs(mag_schema.parameters.properties.action.enum or {}) do
+    actions[action] = true
+  end
+  assert_true(actions.apply == true,
+    "the MAG tool advertises live-run delta application")
+  assert_true(type(mag_schema.parameters.properties.run_id) == "table",
+    "the MAG tool advertises the apply target run id")
+  assert_true(mag_schema.description:find("nefor.artifact.delta", 1, true) ~= nil
+      and mag_schema.description:find("spawns, messages, and kills", 1, true) ~= nil,
+    "the MAG tool distinguishes delta artifacts from fresh-run programs")
+  assert_eq(mag_schema.display.variant.cases.apply.compact.label, "mag apply",
+    "mag apply has semantic display metadata")
   assert_true(mag_eval_schema ~= nil, "the mag-eval tool schema is advertised")
   assert_true(await_schema ~= nil, "the await-run schema is advertised")
   assert_true(graph_status_schema ~= nil, "the graph-status schema is advertised")
@@ -967,6 +980,165 @@ do
   assert_true(err.body.error:find("compilation failed", 1, true) ~= nil
               and err.body.error:find("terminal binding", 1, true) ~= nil,
     "compile failure carries the compiler message; got " .. json.encode(_test.calls()))
+end
+
+-- mag apply compiles a Delta artifact, resolves params for newly spawned
+-- actors, and waits for the kernel's correlated atomic-application ack.
+do
+  fresh()
+  write_mag_file("firing-mag-write-apply", "live-delta.mag", "(artifact nil)")
+  local run_id = "mag-run-live-apply"
+  lw._internals.register_active_run(run_id, {}, "terminal", "dispatch-live",
+    "live", sessions.current_id())
+  _test.calls_clear()
+
+  invoke_tool("firing-mag-apply", "mag", {
+    action = "apply",
+    file = "live-delta.mag",
+    run_id = run_id,
+  })
+  local load = find_call(decode_calls(), function(c)
+    return c.body.kind == "mag.load" and c.target == "mag"
+  end)
+  assert_true(load ~= nil, "mag apply compiles through mag.load")
+  assert_eq(tool_result("firing-mag-apply"), nil,
+    "mag apply does not settle before compilation and kernel acknowledgement")
+
+  local delta = {
+    actors = {
+      {
+        id = "patch.llm",
+        factory = "nefor.factory.llm",
+        type_arguments = {},
+        params = { profile = "standard", system = "Continue the live run." },
+        routes = {},
+      },
+    },
+    messages = {},
+    kills = {},
+    rules = {},
+    types = {},
+  }
+  feed("mag", {
+    kind = "mag.loaded",
+    in_reply_to = load.body.id,
+    hash = "sha256:delta",
+    factories = KERNEL_FACTORIES,
+    factory_contracts = factory_contracts(KERNEL_FACTORIES),
+    artifact = delta,
+  })
+
+  local apply = find_call(decode_calls(), function(c)
+    return c.body.kind == "mag.apply" and c.target == "mag"
+  end)
+  assert_true(apply ~= nil, "a valid delta is submitted as mag.apply")
+  assert_eq(apply.body.run_id, run_id, "mag apply targets the explicitly named live run")
+  assert_eq(apply.body.source, "lead-workflow.mag.apply",
+    "mag apply declares its control-plane source")
+  assert_eq(apply.body.modification.actors[1].id, "patch.llm",
+    "mag apply submits the compiler-produced actors")
+  assert_eq(#apply.body.modification.messages, 0,
+    "mag apply submits the compiler-produced messages")
+  assert_eq(#apply.body.modification.kills, 0,
+    "mag apply submits the compiler-produced kills")
+  local overlay = apply.body.params_overlay["patch.llm"]
+  assert_eq(overlay.provider, starter_profiles.standard.provider,
+    "apply resolves the new actor's provider profile")
+  assert_eq(overlay.model, starter_profiles.standard.model,
+    "apply resolves the new actor's model profile")
+  assert_eq(tool_result("firing-mag-apply"), nil,
+    "mag apply remains pending until the kernel acknowledgement")
+
+  feed("mag", {
+    kind = "mag.applied",
+    in_reply_to = apply.body.id,
+    ok = true,
+  })
+  local reply = tool_result("firing-mag-apply")
+  assert_true(reply ~= nil and reply.body.output ~= nil,
+    "the correlated mag.applied acknowledgement settles the tool")
+  assert_eq(reply.body.output.status, "applied", "mag apply reports applied status")
+  assert_eq(reply.body.output.run_id, run_id, "mag apply preserves the target run id")
+  assert_eq(reply.body.output.hash, "sha256:delta", "mag apply preserves the compiled hash")
+end
+
+-- Apply requires a live target and rejects fresh-run-only artifact fields
+-- before anything reaches the kernel.
+do
+  fresh()
+  write_mag_file("firing-mag-write-apply-invalid", "invalid-delta.mag", "(artifact nil)")
+  _test.calls_clear()
+  invoke_tool("firing-mag-apply-no-run", "mag", {
+    action = "apply",
+    file = "invalid-delta.mag",
+  })
+  local missing = tool_result("firing-mag-apply-no-run")
+  assert_true(missing ~= nil and missing.body.error:find("requires a non-empty run_id", 1, true) ~= nil,
+    "mag apply rejects a missing target before compilation")
+  assert_eq(find_call(decode_calls(), function(c) return c.body.kind == "mag.load" end), nil,
+    "missing apply target emits no compiler request")
+
+  local run_id = "mag-run-live-invalid-apply"
+  lw._internals.register_active_run(run_id, {}, "terminal", "dispatch-live-invalid",
+    "live-invalid", sessions.current_id())
+  _test.calls_clear()
+  invoke_tool("firing-mag-apply-result", "mag", {
+    action = "apply",
+    file = "invalid-delta.mag",
+    run_id = run_id,
+  })
+  local load = find_call(decode_calls(), function(c) return c.body.kind == "mag.load" end)
+  feed("mag", {
+    kind = "mag.loaded",
+    in_reply_to = load.body.id,
+    hash = "sha256:not-a-delta",
+    factories = KERNEL_FACTORIES,
+    factory_contracts = factory_contracts(KERNEL_FACTORIES),
+    artifact = {
+      actors = {}, messages = {}, kills = {}, rules = {},
+      result = { from = { actor = "existing", type = "Result", wire = "Result" } },
+    },
+  })
+  local invalid = tool_result("firing-mag-apply-result")
+  assert_true(invalid ~= nil
+      and invalid.body.error:find("cannot define or replace the result boundary", 1, true) ~= nil,
+    "mag apply rejects a fresh-run result boundary")
+  assert_eq(find_call(decode_calls(), function(c) return c.body.kind == "mag.apply" end), nil,
+    "invalid delta never reaches the kernel")
+end
+
+-- A kernel rejection settles the exact pending apply rather than leaving the
+-- tool invocation hanging.
+do
+  fresh()
+  write_mag_file("firing-mag-write-apply-reject", "rejected-delta.mag", "(artifact nil)")
+  local run_id = "mag-run-live-rejected-apply"
+  lw._internals.register_active_run(run_id, {}, "terminal", "dispatch-live-rejected",
+    "live-rejected", sessions.current_id())
+  _test.calls_clear()
+  invoke_tool("firing-mag-apply-reject", "mag", {
+    action = "apply", file = "rejected-delta.mag", run_id = run_id,
+  })
+  local load = find_call(decode_calls(), function(c) return c.body.kind == "mag.load" end)
+  feed("mag", {
+    kind = "mag.loaded",
+    in_reply_to = load.body.id,
+    hash = "sha256:rejected-delta",
+    factories = KERNEL_FACTORIES,
+    factory_contracts = factory_contracts(KERNEL_FACTORIES),
+    artifact = { actors = {}, messages = {}, kills = {}, rules = {}, types = {} },
+  })
+  local apply = find_call(decode_calls(), function(c) return c.body.kind == "mag.apply" end)
+  feed("mag", {
+    kind = "mag.applied",
+    in_reply_to = apply.body.id,
+    ok = false,
+    error = "actor id was already used",
+  })
+  local rejected = tool_result("firing-mag-apply-reject")
+  assert_true(rejected ~= nil
+      and rejected.body.error:find("actor id was already used", 1, true) ~= nil,
+    "kernel apply rejection is returned to the invoking lead")
 end
 
 local function has_relayed_lead_turn()
