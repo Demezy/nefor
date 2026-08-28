@@ -4,83 +4,64 @@
 (require "nefor.contracts")
 (require "nefor.dynamic")
 (require "nefor.graph")
+(require "nefor.node")
 
 (type Task {:task String :description String :dependent_tasks (List String)})
 (type WorkerResult {:task String :description String})
 (type Summary {:content String})
-(type IndexedTask {:index Int :value Task})
 
-(let indexed-task (fn [[index Int] [task Task]] -> IndexedTask
-  (as IndexedTask {:index index :value task})))
-(let worker-id (fn [[entry IndexedTask]] -> String (str "expand.worker." (get entry "index"))))
-(let worker (fn [[entry IndexedTask]] -> (nefor.graph.Node Task (| WorkerResult nefor.contracts.AgentError))
-  (let task (get entry "value"))
-  (let id (worker-id entry))
-  (let agent (agents.with-tools agents.mock id
-                (str "Complete this task: " (get task "description")) []
-                (type-tag Task) (type-tag WorkerResult) 2))
-  agent))
+;; One runtime occurrence becomes one ordinary worker node. The task is known
+;; when this resident function runs, so it can shape both identity and prompt.
+(let expand-task
+  (fn [[entry (nefor.dynamic.Indexed Task)]] -> Artifact
+    (let task (get entry "value"))
+    (let worker
+      (agents.with-tools agents.mock
+        (str "expand.worker." (get entry "index"))
+        (str "Complete this task: " (get task "description"))
+        [] (type-tag Unit) (type-tag WorkerResult) 2))
+    (nefor.dynamic.expand "expand" entry worker)))
 
-(let add-worker (fn [[change nefor.graph.Delta] [entry IndexedTask]] -> nefor.graph.Delta
-  (let fragment (worker entry))
-  (let with-fragment (nefor.graph.merge-delta change (nefor.graph.node-delta fragment)))
-  (nefor.graph.delta-message-front with-fragment
-    (get fragment "input") (get entry "value"))))
-
-
-(let planner-agent (agents.with-tools agents.mock "planner"
-  "Return the task plan." []
-  (type-tag nefor.contracts.Task) (type-tag (List Task)) 2))
-(let planner-success
-  (nefor.actors.result-arm planner-agent (type-tag (List Task))))
-(let planner-error-port
-  (nefor.actors.result-arm planner-agent
+(let start
+  (nefor.actors.task-source "task" "Plan this request"))
+(let planner
+  (agents.dynamic-with-tools agents.mock "planner"
+    "Return the ordered task plan." []
+    (type-tag nefor.contracts.Task) (type-tag Task) 2))
+(let workers
+  (nefor.dynamic.traverse "expand" expand-task
+    (type-tag Task)
+    (type-tag (| WorkerResult nefor.contracts.AgentError))))
+(let planner-error
+  (nefor.graph.identity "planner-error"
     (type-tag nefor.contracts.AgentError)))
-(let prompt (nefor.dynamic.collected-prompt "summary-input" (type-tag (| WorkerResult nefor.contracts.AgentError))))
-(let summarizer (agents.with-tools agents.mock "summarizer"
-  "Summarize the ordered worker results." []
-  (type-tag nefor.contracts.ProviderInput) (type-tag Summary) 2))
-(let result (nefor.graph.output "result"
-  (type-tag (| Summary nefor.contracts.AgentError))))
-(let summary-input (get prompt "input"))
-(let expand (fn [[tasks (List Task)]] -> Artifact
-  (let indexed (indexed-map indexed-task tasks))
-  (let fragments (map worker indexed))
-  (let outputs
-    (map (fn [[fragment (nefor.graph.Node Task
-                         (| WorkerResult nefor.contracts.AgentError))]]
-           -> (nefor.graph.Port (| WorkerResult nefor.contracts.AgentError))
-           (get fragment "output"))
-         fragments))
-  (let collection
-    (nefor.dynamic.collect-all "expand.collector" outputs
-      (type-tag (| WorkerResult nefor.contracts.AgentError))))
-  (let workers
-    (fold add-worker (get collection "change") indexed))
-  (nefor.artifact.delta
-    (nefor.graph.delta-route workers (get collection "output") summary-input))))
+(let run-plan
+  (nefor.node.choose "run-plan" workers planner-error))
 
-(let planner-error (fn [[error nefor.contracts.AgentError]] -> Artifact
-    (nefor.artifact.delta
-      (nefor.graph.delta-message (nefor.graph.delta
-      (as (List nefor.graph.Actor) []) (as (List nefor.graph.StoredRoute) [])
-      (as (List nefor.graph.Message) []) (as (List String) []))
-      (get result "input")
-      (as (| Summary nefor.contracts.AgentError) error)))))
+;; Dynamic cardinality ends at an effect-aware context node. It waits for the
+;; explicit completion event and sends one ordered provider turn downstream;
+;; no runtime-sized MAG List value is invented.
+(let summary-context
+  (nefor.dynamic.context "summary-input"
+    (type-tag (| WorkerResult nefor.contracts.AgentError))))
+(let summarizer
+  (agents.with-tools agents.mock "summarizer"
+    "Summarize the ordered worker results." []
+    (type-tag nefor.contracts.ProviderInput) (type-tag Summary) 2))
+(let summarize
+  (nefor.node.>>> summary-context summarizer))
+(let run-error
+  (nefor.graph.identity "run-error"
+    (type-tag nefor.contracts.AgentError)))
+(let finish
+  (nefor.node.choose "finish" summarize run-error))
 
-(let initial
-  (nefor.graph.delta-route
-    (nefor.graph.delta-route
-      (nefor.graph.merge-delta (nefor.graph.node-delta planner-agent)
-        (nefor.graph.merge-delta (nefor.graph.node-delta prompt)
-          (nefor.graph.merge-delta (nefor.graph.node-delta summarizer)
-            (nefor.graph.node-delta result))))
-      (get summarizer "output") (get result "input"))
-    (get prompt "output") (get summarizer "input")))
+(let planned (nefor.node.>>> start planner))
+(let ran (nefor.node.>>> planned run-plan))
+(let workflow (nefor.node.>>> ran finish))
+(let result (nefor.graph.output-for "result" workflow))
 
-(artifact (nefor.graph.lower-resident
-    (nefor.graph.delta-message initial (get planner-agent "input")
-      (as nefor.contracts.Task {:prompt "Plan this request"}))
-    [(nefor.graph.rule "expand" planner-success "expand")
-     (nefor.graph.rule "planner-error" planner-error-port "planner-error")]
-    (get result "output")))
+(artifact
+  (nefor.artifact.compile
+    (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+      (nefor.graph.add-edges graph [(nefor.graph.edge workflow result)]))))

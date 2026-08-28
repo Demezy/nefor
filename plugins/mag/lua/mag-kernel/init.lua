@@ -39,8 +39,6 @@ local dynamic_input = require("factories.dynamic-input")
 local dynamic_index = require("factories.dynamic-index")
 local dynamic_output = require("factories.dynamic-output")
 local dynamic_context = require("factories.dynamic-context")
-local collect_item = require("factories.collect-item")
-local collected_prompt = require("factories.collected-prompt")
 local retry_gate = require("factories.retry-gate")
 
 -- Shared per-node output persistence (lua/libs/output-persistence). The mag
@@ -101,8 +99,6 @@ local function build_registry()
   seed(dynamic_index)
   seed(dynamic_output)
   seed(dynamic_context)
-  seed(collect_item)
-  seed(collected_prompt)
   seed(retry_gate)
   seed(run_tool)
   seed(tool_result)
@@ -658,6 +654,7 @@ return {
     ctx.rules = mod.rules or {}
     ctx.rule_ids = seen_rules
     ctx.router:set_result_boundary(boundary)
+    ctx.router:register_type_declarations(mod.types)
     local modification = {}
     for key, value in pairs(mod) do
       if key ~= "result" and key ~= "rules" then
@@ -686,6 +683,7 @@ return {
       return { ok = false, error = "a delta cannot define or replace the result boundary" }
     end
     if type(mod) == "table" and type(mod.types) == "table" then
+      ctx.router:register_type_declarations(mod.types)
       for _, spec in ipairs(mod.actors or {}) do
         spec.semantic_strict = true
       end

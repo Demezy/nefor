@@ -543,7 +543,7 @@ fn dynamic_structured_output_emits_indexed_items_and_explicit_completion() {
           messages = {{ role = "user", content = "split the work" }}
         }}}})
         actor.deliver({ kind = "reply", result = {
-          text = [[[{"task":"first"},{"task":"second"}]]]
+          text = [=[{"value":[{"task":"first"},{"task":"second"}]}]=]
         }})
 
         local first = emitted[#emitted - 3]

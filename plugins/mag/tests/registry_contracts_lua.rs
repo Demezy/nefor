@@ -243,6 +243,40 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
       assert(reg:register({declaration={name="consumer",type_variables={"T"},
         semantic={input=v("T"),output=p("Unit"),inputs={{wire="Same",type=v("T")}},outputs={{wire="Done",type=p("Unit")}}},params={},inputs={value="Same"},outputs={"Done"}},
         construct=function() return {} end}))
+
+      local unit_id=nefor.semantic_type.id(p("Unit"))
+      local string_id=nefor.semantic_type.id(p("String"))
+      local int_id=nefor.semantic_type.id(p("Int"))
+      local string_or_unit={kind="union",items={p("Unit"),p("String")}}
+      local string_or_unit_id=nefor.semantic_type.id(string_or_unit)
+      local function typed_route(source_type,route_source,destination_type,route_destination)
+        local route_source_id=nefor.semantic_type.id(route_source)
+        local route_destination_id=nefor.semantic_type.id(route_destination)
+        return reg:validate_modification({
+          types={
+            [unit_id]=p("Unit"),[string_id]=p("String"),[int_id]=p("Int"),
+            [string_or_unit_id]=string_or_unit,
+          },
+          actors={
+            {id="source",factory="producer",type_arguments={source_type},
+              input={type=p("Unit"),type_id=unit_id,wire="Start"},
+              outputs={{type=source_type,type_id=nefor.semantic_type.id(source_type),wire="Same"}},
+              routes={Same={{actor="dest",wire="Same",source_type_id=route_source_id,
+                destination_type_id=route_destination_id}}}},
+            {id="dest",factory="consumer",type_arguments={destination_type},
+              input={type=destination_type,type_id=nefor.semantic_type.id(destination_type),wire="Same"},
+              outputs={{type=p("Unit"),type_id=unit_id,wire="Done"}},routes={}},
+          },
+        })
+      end
+      local narrowed_arm=typed_route(string_or_unit,p("String"),p("String"),p("String"))
+      assert(narrowed_arm.ok,table.concat(narrowed_arm.errors or {},"; "))
+      local widened_destination=typed_route(p("Unit"),p("Unit"),string_or_unit,string_or_unit)
+      assert(widened_destination.ok,table.concat(widened_destination.errors or {},"; "))
+      local foreign_arm=typed_route(string_or_unit,p("Int"),p("Int"),p("Int"))
+      assert(not foreign_arm.ok)
+      assert(table.concat(foreign_arm.errors or {},"; "):find("incompatible with endpoints"))
+
       local mismatched=reg:validate_modification({actors={
         {id="source",factory="producer",type_arguments={p("String")},input={type=p("Unit"),wire="Start"},
           outputs={{type=p("String"),wire="Same"}},routes={["Same"]={{actor="dest",wire="Same"}}}},

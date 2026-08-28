@@ -14,11 +14,13 @@ states the composition model used here.
 
 Read the chapters in order:
 
-1. [MAG's Place Inside Nefor](<01. MAG's Place Inside Nefor.md>)
-2. [Graphs as Library Data](<02. Graphs as Library Data.md>)
-3. [Hierarchical Composition](<03. Hierarchical Composition.md>)
-4. [Development Workflows](<04. Development Workflows.md>)
-5. [Lowering and Execution](<05. Lowering and Execution.md>)
+1. [Nefor MAG in Five Minutes](<00. Nefor MAG in Five Minutes.md>)
+2. [MAG's Place Inside Nefor](<01. MAG's Place Inside Nefor.md>)
+3. [Graphs as Library Data](<02. Graphs as Library Data.md>)
+4. [Hierarchical Composition](<03. Hierarchical Composition.md>)
+5. [Development Workflows](<04. Development Workflows.md>)
+6. [Lowering and Execution](<05. Lowering and Execution.md>)
 
-For the complete Nefor library model compressed into commented MAG source, read
-[Nefor MAG in Five Minutes](<00. Nefor MAG in Five Minutes.md>).
+The first chapter is sufficient for authoring most workflows. Later chapters
+explain the representation, live graph changes, and lowering boundary when that
+additional control is needed.

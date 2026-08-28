@@ -19,13 +19,21 @@
   (fn [[left String] [operator String] [right String]] -> String
     (str left (str operator right))))
 
+;; Sequential composition preserves an initial source boundary on the left.
+;; The composite still has exactly that source's Unit input and initial message;
+;; everything to its right is ordinary downstream work.
+(let sequential-role
+  (fn [A B C]
+    [[left (nefor.graph.Node A B)] [right (nefor.graph.Node B C)]] -> String
+    (if (= (get left "role") "source") "source" "ordinary")))
+
 (let compose
   (fn [A B C]
     [[left (nefor.graph.Node A B)] [right (nefor.graph.Node B C)]]
     -> (nefor.graph.Node A C)
     (nefor.graph.node-with-rules
       (composite-id (get left "id") ">>>" (get right "id"))
-      "ordinary"
+      (sequential-role left right)
       (concat (get left "actors") (get right "actors"))
       (concat
         (concat (get left "routes") (get right "routes"))
@@ -68,7 +76,7 @@
      [right (nefor.graph.Node Unit B)]]
     -> (nefor.graph.Node I B)
     (let bridge (discard (str id ".discard") (type-tag A)))
-    (nefor.graph.node-with-rules id "ordinary"
+    (nefor.graph.node-with-rules id (sequential-role left bridge)
       (concat (get left "actors")
         (concat (get bridge "actors") (get right "actors")))
       (concat

@@ -12,7 +12,7 @@ The book then has two parts:
   and artifacts.
 - [MAG inside Nefor](<02. nefor/README.md>) is a live application of the language. It
   shows how Nefor's MAG libraries construct typed graphs, compose high-level
-  nodes, and produce recipes for the actor runtime.
+  nodes, and produce artifacts for the actor runtime.
 
 Nefor is what we use MAG for today, not a boundary on what MAG can be used for.
 Future applications can sit beside it without changing the core language path.

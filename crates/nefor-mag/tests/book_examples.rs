@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
-use nefor_mag::types::MagType;
-use nefor_mag::{eval_fn, load_with_inputs, load_with_inputs_and_module_roots, validate_fn};
+use nefor_mag::{load_with_inputs, load_with_inputs_and_module_roots};
 use serde_json::{json, Value};
 
 fn book_root() -> PathBuf {
@@ -67,72 +66,28 @@ fn nefor_mag_in_five_minutes_program_is_executable() {
     )
     .unwrap_or_else(|error| panic!("Nefor MAG in Five Minutes failed: {error}"));
 
-    for function in [
-        "run-build",
-        "route-build-result",
-        "revise",
-        "finish-development",
-        "expand-swarm",
+    let actors = program.artifact["actors"].as_array().expect("guide actors");
+    for factory in [
+        "nefor.factory.worktree-create",
+        "nefor.factory.shell-script",
+        "nefor.factory.discard",
+        "nefor.factory.dynamic-input",
+        "nefor.factory.dynamic-output",
+        "nefor.factory.dynamic-context",
     ] {
-        validate_fn(&program, function, 1, &MagType::Artifact)
-            .unwrap_or_else(|error| panic!("resident function {function} is invalid: {error}"));
+        assert!(
+            actors.iter().any(|actor| actor["factory"] == factory),
+            "guide must exercise {factory}"
+        );
     }
+    let rules = program.artifact["rules"].as_array().expect("guide rules");
+    assert!(rules.iter().any(|rule| rule["fn"] == "expand-followup"));
 
-    let build_params = actor_params(&program.artifact, "build");
-    let exited_type = build_params["exited_type"]
-        .as_str()
-        .expect("build exited constructor id");
-    let signaled_type = build_params["signaled_type"]
-        .as_str()
-        .expect("build signaled constructor id");
+    let build_params = actor_params(&program.artifact, "development.build");
+    assert_eq!(build_params["script"], "cargo build");
+    assert_eq!(build_params["cwd"], "tmp/mag-book-worktree");
 
-    let passed = eval_fn(
-        &program,
-        "route-build-result",
-        process_exit_result(exited_type, 0, "compiled", ""),
-    )
-    .expect("evaluate successful build route");
-    let passed_value = assert_delta_message(&passed, "reviewer.entry", "main.BuildPassed");
-    assert_eq!(passed_value["stdout"], "compiled");
-
-    let failed = eval_fn(
-        &program,
-        "route-build-result",
-        process_exit_result(exited_type, 101, "", "compile error"),
-    )
-    .expect("evaluate failed build route");
-    let failed_value = assert_delta_message(&failed, "builder.entry", "main.BuildFailed");
-    assert_eq!(failed_value["stderr"], "compile error");
-    assert_eq!(failed_value["termination"]["value"]["code"], 101);
-
-    let signaled = eval_fn(
-        &program,
-        "route-build-result",
-        process_signal_result(signaled_type, 9, "", "terminated"),
-    )
-    .expect("evaluate signaled build route");
-    let signaled_value = assert_delta_message(&signaled, "builder.entry", "main.BuildFailed");
-    assert_eq!(signaled_value["termination"]["value"]["signal"], 9);
-
-    eval_fn(&program, "run-build", json!("implementation complete"))
-        .expect("evaluate builder-to-build mapper");
-    eval_fn(&program, "revise", json!({"feedback": "fix the error"}))
-        .expect("evaluate reviewer feedback mapper");
-    eval_fn(
-        &program,
-        "finish-development",
-        json!({"summary": "approved"}),
-    )
-    .expect("evaluate approval mapper");
-    eval_fn(&program, "expand-swarm", json!([])).expect("evaluate empty dynamic swarm");
-    eval_fn(
-        &program,
-        "expand-swarm",
-        json!([{"title": "inspect", "instructions": "Inspect the implementation."}]),
-    )
-    .expect("evaluate one-worker dynamic swarm");
-
-    let builder_routes = routes_to(&program.artifact, "builder-context");
+    let builder_routes = routes_to(&program.artifact, "development.input.output");
     assert_eq!(
         builder_routes.len(),
         2,
@@ -152,33 +107,11 @@ fn nefor_mag_in_five_minutes_program_is_executable() {
         vec![0, 1],
         "builder product occurrences are distinct"
     );
-    let context_route = routes_to(&program.artifact, "builder.entry");
+    let context_route = routes_to(&program.artifact, "development.builder.entry");
     assert_eq!(context_route.len(), 1, "one complete context feeds builder");
     assert_eq!(context_route[0]["product_position"], -1);
 
     std::fs::remove_dir_all(workspace).expect("remove guide test workspace");
-}
-
-fn process_exit_result(constructor: &str, code: i64, stdout: &str, stderr: &str) -> Value {
-    json!({
-        "stdout": stdout,
-        "stderr": stderr,
-        "termination": {
-            "type": constructor,
-            "value": {"code": code}
-        }
-    })
-}
-
-fn process_signal_result(constructor: &str, signal: i64, stdout: &str, stderr: &str) -> Value {
-    json!({
-        "stdout": stdout,
-        "stderr": stderr,
-        "termination": {
-            "type": constructor,
-            "value": {"signal": signal}
-        }
-    })
 }
 
 fn actor_params<'a>(artifact: &'a Value, actor: &str) -> &'a Value {
@@ -190,22 +123,6 @@ fn actor_params<'a>(artifact: &'a Value, actor: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("actor {actor}"))
         .get("params")
         .expect("actor params")
-}
-
-fn assert_delta_message<'a>(artifact: &'a Value, actor: &str, semantic_type: &str) -> &'a Value {
-    let messages = artifact["messages"].as_array().expect("delta messages");
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["to"], actor);
-    assert_eq!(messages[0]["semantic_type"]["name"], semantic_type);
-    assert!(messages[0]["semantic_type_id"]
-        .as_str()
-        .is_some_and(|id| id.starts_with("sha256:")));
-    let value = &messages[0]["content"]["value"];
-    if value.get("type").is_some() {
-        &value["value"]
-    } else {
-        value
-    }
 }
 
 fn routes_to<'a>(artifact: &'a Value, actor: &str) -> Vec<&'a Value> {

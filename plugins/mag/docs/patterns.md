@@ -1,98 +1,62 @@
-# Patterns — canonical shapes for MAG programs
+# Composition semantics for MAG-authored graphs
 
-## Planner → workers → collector → static result
+These are the runtime meanings behind Nefor's node combinators. They are not
+workflow recipes: task-specific code chooses whichever composition preserves
+the distinctions that matter.
 
-A typed result selector exposes the planner's `List<Task>` and `AgentError`
-ports to separate resident rules. The success rule uses `indexed-map` to pair the actual task list with deterministic
-positions, maps those values into real structured-agent nodes, then returns one
-atomic delta containing those workers, typed task messages, and a
-`nefor.dynamic.collect-all` fragment built from their typed output ports. The
-supplied port order defines the output `List<T>` order even when workers finish
-out of order. The error rule routes the complete `AgentError` to the static
-outcome and spawns nothing. For `[]`, `collect-all` produces the ordinary empty
-list identity immediately. The shipped
-program is `examples/nefor-agent/agentic-loop/dynamic-tasks.mag` and its real provider E2Es
-cover zero, invalid, and reverse worker completion.
+## Fixed and dynamic multiplicity
 
-Every shipped pattern here has a clean expression in routes or input contracts.
-If a program needs one of these behaviors, use the listed shape — inventing a
-workaround (sentinel messages, polling actors, hand-rolled wait nodes) means
-the type system can no longer see what the program does. Dynamic expansion uses
-typed resident MAG rule functions returning raw `Delta` artifacts; actors
-still receive no graph authority.
+`nefor.node.sequence` accepts a compile-time `List (Node I O)` and returns
+`Node I (List O)`. The supplied node order defines result order even when
+actors finish out of order. The empty list is the ordinary list identity and
+produces `[]` after its input activation.
 
-This is the canonical catalog; a lead-facing distillation ships with the
-stdlib so these patterns are available inside session workspaces.
+`nefor.dynamic.DynamicList O` is a different, runtime effect. A producer emits
+indexed occurrences plus explicit completion. `dynamic.traverse` constructs
+one ordinary worker node per occurrence, and `dynamic.context` waits for
+completion before presenting one ordered provider turn. No runtime-sized MAG
+`List` value or conversion between the two universes exists. The shipped
+`examples/nefor-agent/agentic-loop/dynamic-tasks.mag` exercises zero, invalid,
+and reverse-completion cases.
 
-## Ordering without data (dependency edge)
+## Products and sums
 
-"A must not start before C finishes", where A does not consume C's output.
+A product input such as `(A + B)` fires only after every occurrence arrives.
+Slots bind to sender edges, so `(Finding + Finding)` from two producers keeps
+the occurrences distinct. `fanout` and `parallel` construct common product
+shapes.
 
-**Shape:** the edge `C -> A` carrying `mag.Unit`. A's input contract gains a
-`+ mag.Unit` component. The kernel emits the Unit when C completes — C's
-factory never knows the edge exists.
+A sum input such as `(A | B)` fires on either constructor. `choose` applies one
+node to each arm. When two paths carry the same payload type but different
+meanings, distinct nominal types such as `Approved` and `NeedChanges` keep that
+reason visible to validation.
 
-**Not:** a flag in params, a custom "done" message from C's prompt, or a
-polling actor. Dependency is an edge in the one language, informationless by
-type.
+## Ordering without data
 
-## All-of join
+The kernel emits `mag.Unit` when an actor completes successfully. A Unit edge
+therefore expresses sequencing without pretending that the downstream node
+consumes the upstream result. `nefor.node.*>` is the standard keep-right
+composition: it discards the left value, waits for successful completion, and
+runs a `Node Unit O`.
 
-"Fire when both A and B have delivered."
+## Errors as values
 
-**Shape:** the join actor declares a product input `(FindingsA + FindingsB)`.
-Slots bind to sender edges, so even `(Findings + Findings)` from two
-explorers — or `(Unit + Unit)` from two dependencies — never conflate.
+Agent results include `AgentError`; process nodes return `ProcessResult` with a
+typed exit-or-signal termination. These are semantic values. A workflow may
+route them, retry them, continue with partial evidence, or make them its final
+business result.
 
-**Not:** an accumulator actor with counting logic in its prompt or params.
-Firing is the contract; the kernel assembles the activation.
+The bounded retry gate is an ordinary node whose output distinguishes
+`Continue T` from `Exhausted T`. Unhandled factory failures instead escalate to
+`mag.run_failed`: execution escaped the typed business model. `kill` retires an
+actor and voids late outputs; it is not a routeable semantic error.
 
-## Any-of / first delivery wins
+## Cycles and absence
 
-"Proceed on whichever source answers first."
+Cycles are ordinary graph topology. Their termination must be visible in typed
+exits or in a finite runtime actor such as the retry gate; an unrestricted
+feedback edge may never terminate.
 
-**Shape:** union input `(A | B)` — whichever arrives activates alone.
-
-## Cycle (the agentic loop)
-
-Cycles are legal as-is and unbounded. Every cycle exits through a typed
-variant — the agent's result union routes `O | AgentError` out of the loop — so
-the typed exit is the terminator. There is no loop-budget mechanism: a run
-that never reaches its exit is stopped via the control plane's
-kill/interrupt. Never encode "give up after N tries" in a prompt.
-
-## Fire on failure / repair
-
-"If the build fails, route the evidence to a fixer."
-
-**Shape:** factory/completion failures are typed outputs when an implementation returns
-a failure tag (for example the shell capability's `mag.CommandFailed`). Route that failure
-type to the repair actor; compose produce → check → repair as an ordinary cycle.
-Unhandled failures escalate to `mag.run_failed`. `kill` removes actors and voids
-late outputs; it is not a general routeable failure output.
-
-This is errors-as-values in the ordinary functional sense. `AgentError` is a
-semantic value in an agent's declared result sum and can be routed, collected,
-retried, or accepted as partial evidence according to the workflow. A
-`mag.run_failed` event means execution escaped that typed business model—for
-example, an actor could not be constructed or an unhandled runtime failure
-ended the run.
-
-**Not:** parsing error text out of a success-shaped output.
-
-## Same type, two meanings
-
-"Send X to A on the happy path, X to B as a fallback."
-
-Routes are keyed by type, so two destinations for "different reasons" need
-the reason in the type: declare distinct nominal variants (for example
-`Approved` and `Rejected` records) and expose their union
-and route each variant. The distinction becomes visible to validation
-instead of living in a prompt convention.
-
-## Absence and timeouts
-
-There is no "fire when X did _not_ happen." Express absence positively: a
-timeout is an actor whose failure output routes to the fallback; a missed
-precondition is a failure route. Negative predicates over graph state do not
-exist by design.
+There is no implicit "fire when X did not happen." Absence becomes positive
+data produced by a timeout, failure, or another actor whose result can be
+composed normally.

@@ -191,6 +191,7 @@ function M.new(opts)
     generations = {}, -- id -> emitter generation currently authorized to speak
     dynamic_streams = {}, -- actor/wire -> ordered DynamicList protocol state
     published_arrivals = {}, -- arrival id -> true once its payload became a bus fact
+    type_declarations = {}, -- stable id -> immutable artifact descriptor
     result_boundary = nil, -- compiled StoredPort; structural, never a factory
     arrival_seq = 0,
   }, M)
@@ -199,6 +200,12 @@ end
 
 function M:set_result_boundary(boundary)
   self.result_boundary = boundary
+end
+
+function M:register_type_declarations(declarations)
+  for id, descriptor in pairs(declarations or {}) do
+    self.type_declarations[id] = descriptor
+  end
 end
 
 -- Register the constructed instance for an id. activate binds through here
@@ -620,6 +627,7 @@ function M:descriptor_for_id(actor_id, type_id)
   end
   local input = actor and actor.input
   if input and input.type_id == type_id then return input.type end
+  if self.type_declarations[type_id] then return self.type_declarations[type_id] end
   error(string.format("actor '%s' has no descriptor for semantic id '%s'",
     tostring(actor_id), tostring(type_id)))
 end

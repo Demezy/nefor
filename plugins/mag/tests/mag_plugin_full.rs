@@ -122,18 +122,23 @@ pub mod kernel {
 
             let dynamic = nefor_mag::eval_fn(
                 &loaded,
-                "expand-swarm",
-                serde_json::json!([
-                    {"title": "inspect", "instructions": "Inspect the implementation."}
-                ]),
+                "expand-followup",
+                serde_json::json!({
+                    "collection": "test",
+                    "index": 0,
+                    "value": {
+                        "title": "inspect",
+                        "instructions": "Inspect the implementation."
+                    }
+                }),
             )
-            .expect("evaluate guide dynamic swarm");
+            .expect("evaluate guide dynamic worker expansion");
             let applied = host
                 .apply("mag-book-contracts", &dynamic)
                 .expect("apply dynamic guide modification");
             assert!(
                 applied.ok,
-                "dynamic guide host validation failed: {:?}",
+                "dynamic guide worker validation failed: {:?}",
                 applied.error
             );
 

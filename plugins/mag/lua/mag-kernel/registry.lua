@@ -587,12 +587,15 @@ function registry:validate_modification(modification, resolve, existing_specs)
                   end
                 end
                 if declarations ~= nil then
-                  if not source_endpoint or
-                      destination.source_type_id ~= source_endpoint.type_id or
-                      type(dest_spec.input) ~= "table" or
-                      destination.destination_type_id ~= dest_spec.input.type_id then
+                  local route_source = declarations[destination.source_type_id]
+                  local route_destination = declarations[destination.destination_type_id]
+                  if not source_endpoint or type(dest_spec.input) ~= "table" or
+                      not route_source or not route_destination or
+                      not accepts_semantic(source_endpoint.type, route_source) or
+                      not accepts_semantic(dest_spec.input.type, route_destination) or
+                      not accepts_semantic(route_destination, route_source) then
                     table.insert(errors, string.format(
-                      "wiring %q -%s-> %q: route semantic identities differ from endpoints",
+                      "wiring %q -%s-> %q: route semantic descriptors are incompatible with endpoints",
                       tostring(spec.id), tag, tostring(dest_id)))
                   end
                 end

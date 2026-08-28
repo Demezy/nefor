@@ -89,7 +89,7 @@ Use the exact `run_id` returned by a fresh `mag apply` or lead `mag-eval`. Call 
 
 Dynamic expansion is validated before its change is applied. Keep each rule's subscribed port and function result typed, return the proper delta artifact, and make the delta atomic.
 
-For `nefor.dynamic.collect-all`, expected sender ids are derived from the supplied output ports. Unexpected senders, duplicate delivery, or an incomplete drain fail rather than silently reorder results. An empty port list produces `[]` immediately.
+For `nefor.node.sequence`, expected sender ids are derived from the supplied nodes. Unexpected senders, duplicate delivery, or an incomplete drain fail rather than silently reorder results. An empty node list produces `[]` after its input activation.
 
 ## Worktree errors
 

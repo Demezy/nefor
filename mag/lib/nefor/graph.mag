@@ -405,6 +405,31 @@
             false)
           false)))
       false)))
+(let composite-source? (fn [[candidate StoredNode]] -> Bool
+  (let input (get candidate "input"))
+  (let matching
+    (filter (fn [[actor Actor]] -> Bool
+              (if (= (get actor "factory") source-factory)
+                (= (get actor "input") input)
+                false))
+            (get candidate "actors")))
+  (if (= (count matching) 1)
+    ((fn [] -> Bool
+      (let boundary (first matching))
+      (let outputs (get boundary "outputs"))
+      (if (= (count outputs) 1)
+        ((fn [] -> Bool
+          (let source-output (first outputs))
+          (if (one-type-argument? boundary (get source-output "type"))
+            (if (= (get candidate "messages")
+                   [(stored-message input {:kind "mag.Unit"})])
+              (if (source-params-valid? (get boundary "params"))
+                (source-value-valid? boundary source-output)
+                false)
+              false)
+            false)))
+        false)))
+    false)))
 (let concrete-output? (fn [[candidate StoredNode]] -> Bool
   (let id (get candidate "id"))
   (let actors (get candidate "actors"))
@@ -440,7 +465,7 @@
       false)))
 (let boundary-valid? (fn [[candidate StoredNode]] -> Bool
   (if (role? candidate "source")
-    (concrete-source? candidate)
+    (if (concrete-source? candidate) true (composite-source? candidate))
     (if (role? candidate "output")
       (concrete-output? candidate)
       (if (role? candidate "ordinary")

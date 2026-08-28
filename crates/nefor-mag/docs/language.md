@@ -206,7 +206,7 @@ Most workflows should be fully static. When a runtime result determines how many
 (nefor.artifact.compile-program topology rules)
 ```
 
-A rule subscribes to a typed port created with `nefor.graph.rule`; its named pure MAG function returns a delta artifact. Use public helpers in `nefor.dynamic` for typed worker collection and the empty-list branch. Rules are program metadata, not graph edges, and do not give agents authority to alter the graph. See [MAG runtime patterns](../../../plugins/mag/docs/patterns.md).
+A rule subscribes to a typed port created with `nefor.graph.rule`; its named pure MAG function returns a delta artifact. Runtime-sized worker expansion is exposed as the node-oriented `DynamicList`/`dynamic.traverse` boundary; fixed worker lists use `nefor.node.sequence`. Rules are program metadata, not graph edges, and do not give agents authority to alter the graph. See [MAG composition semantics](../../../plugins/mag/docs/patterns.md).
 
 ## Worktrees
 

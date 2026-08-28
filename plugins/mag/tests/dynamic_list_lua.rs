@@ -6,10 +6,15 @@ fn harness() -> Lua {
     let package: Table = lua.globals().get("package").unwrap();
     let current: String = package.get("path").unwrap();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lua/mag-kernel");
+    let shared = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lua");
     package
         .set(
             "path",
-            format!("{0}/?.lua;{0}/?/init.lua;{current}", root.display()),
+            format!(
+                "{0}/?.lua;{0}/?/init.lua;{1}/?.lua;{1}/?/init.lua;{current}",
+                root.display(),
+                shared.display()
+            ),
         )
         .unwrap();
     lua

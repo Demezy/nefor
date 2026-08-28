@@ -117,41 +117,40 @@ There are no compiler forms named `agent`, `bash`, `graph`, `subgraph`, or
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
+(require "nefor.node")
 
-(let start (nefor.graph.source "task"
-        (type-tag nefor.contracts.Task)
-        (as nefor.contracts.Task {:prompt "<initial task text>"})))
+(let start (nefor.actors.task-source "task" "<initial task text>"))
 (let worker (agents.with-tools agents.standard "worker"
         "Answer the task."
         ["read_file" "mag-eval"]
         (type-tag nefor.contracts.Task)
         (type-tag nefor.contracts.TextAnswer)
         2))
-(let result (nefor.graph.output "result"
-        (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+(let workflow (nefor.node.>>> start worker))
+(let result (nefor.graph.output-for "result" workflow))
 (let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
         (nefor.graph.add-edges graph
-          [(nefor.graph.edge start worker)
-           (nefor.graph.edge worker result)])))
+          [(nefor.graph.edge workflow result)])))
 (nefor.artifact.compile topology)
 ```
 
-`nefor.actors.agent` returns a typed `nefor.graph.Node<I, O>`. Its semantic
-input/output types are compiler-created `TypeTag` witnesses. The library derives
-runtime protocol wires from those types; MAG programs never author them. A graph
-is an immutable semantic set of typed edges. Edge
-endpoints introduce or reuse nodes; there is no add-node operation. Construct
-one flat edge list with `nefor.graph.graph`, and transform a graph with the pure
-functions `add-edges` and `remove-edges`. They return new graphs, collapse
-duplicate additions, and ignore absent removals; the original graph is never
-mutated.
+`nefor.actors.agent` and every other workflow constructor return typed
+`nefor.graph.Node<I, O>` values. Compose them first with `nefor.node.>>>`, `*>`,
+`fanout`, `parallel`, `choose`, and `sequence`; an arbitrarily large composite
+still has one typed node boundary. `List (Node I O)` and `sequence` describe a
+fixed compile-time constellation. When runtime data determines cardinality,
+use the distinct `DynamicList` boundary with `nefor.dynamic.traverse`; do not
+manufacture port collectors or runtime-sized MAG lists.
+
+Semantic types are compiler-created `TypeTag` witnesses. The libraries derive
+runtime protocol wires and ports from those types; ordinary MAG programs do not
+author them. Use the port, delta, and `Graph -> Graph` surfaces only when the
+node combinators cannot express the required live modification.
 
 Only `source<T>` may have no incoming edge. Exactly one concrete `output<T>`
 identity node must be terminal, so the semantic result boundary is explicit as
-an edge into that node. Every ordinary node must be source-reachable and able
-to reach the output. Fan-out, fan-in, and cycles are ordinary edges. `replace`,
-`update`, `fork`, and `join` are not graph primitives. Use vectors, `map`, and
-`concat` to build one flat `List<Edge>` for larger graphs. The value passed to
+an edge from the composed workflow into that node. Every ordinary node must be
+source-reachable and able to reach the output. The value passed to
 `nefor.artifact.compile` must be a `Graph -> Graph` function. For each run,
 `compile` applies it to `empty-graph`, validates the complete returned graph,
 and returns a raw graph-modification `Artifact`. Edit or compose

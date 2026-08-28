@@ -606,13 +606,13 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
     let artifact = &loaded["artifact"];
     assert_eq!(
         artifact.pointer("/messages/0/to").and_then(Value::as_str),
-        Some("planner.entry")
+        Some("task")
     );
     assert_eq!(
         artifact
             .pointer("/messages/0/content/kind")
             .and_then(Value::as_str),
-        Some("nefor.agent.Input")
+        Some("mag.Unit")
     );
     send_event(
         &mut stdin,
@@ -640,7 +640,7 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         &mut stdin,
         completed(
             "mock-provider",
-            &first_id,
+            &second_id,
             json!({"text":r#"{"task":"a.collect","description":"done second"}"#}),
         ),
     )
@@ -649,7 +649,7 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         &mut stdin,
         completed(
             "mock-provider",
-            &second_id,
+            &first_id,
             json!({"text":r#"{"task":"a","description":"done first"}"#}),
         ),
     )
@@ -680,12 +680,20 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         .find_map(|fact| {
             (fact.get("actor_id").and_then(Value::as_str) == Some("summarizer.llm")
                 && fact.get("kind").and_then(Value::as_str) == Some("content_chunk_appended"))
-            .then(|| fact.pointer("/chunk/data").and_then(Value::as_array))
+            .then(|| {
+                let data = fact.pointer("/chunk/data")?;
+                data.as_array()
+                    .or_else(|| data.get("value").and_then(Value::as_array))
+            })
             .flatten()
         })
         .expect("ordered worker results are canonical summarizer input");
-    assert_eq!(ordered[0]["task"], "a");
-    assert_eq!(ordered[1]["task"], "a.collect");
+    // The dynamic item type is a sum, so each ordered value retains its
+    // constructor evidence instead of erasing WorkerResult vs AgentError.
+    assert!(ordered[0]["type"].as_str().is_some());
+    assert!(ordered[1]["type"].as_str().is_some());
+    assert_eq!(ordered[0]["value"]["task"], "a");
+    assert_eq!(ordered[1]["value"]["task"], "a.collect");
     send_event(
         &mut stdin,
         completed(
@@ -871,7 +879,7 @@ async fn dynamic_tasks_invalid_planner_spawns_nothing_and_returns_typed_error() 
         let event = next_event(&mut reader, "invalid terminal result").await;
         if let Some(id) = event.get("id").and_then(Value::as_str) {
             assert!(
-                !id.starts_with("expand.worker") && id != "expand.collector",
+                !id.starts_with("expand.worker"),
                 "invalid branch spawned dynamic actor {id}"
             );
         }

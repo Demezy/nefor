@@ -358,7 +358,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
 
     // The first Lisp fence in the Nefor MAG guide is the canonical progressive
-    // agent/SDLC/swarm program injected into every lead turn. Compile that exact
+    // agent/SDLC/dynamic-workflow program available to every lead. Compile that exact
     // text rather than maintaining a test-side approximation that can drift
     // from the documentation agents actually see.
     let guide_path = root.join("mag/book/02. nefor/00. Nefor MAG in Five Minutes.md");
@@ -369,7 +369,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         .and_then(|(_, rest)| rest.split_once("\n```").map(|(source, _)| source))
         .expect("the Nefor MAG guide contains a complete canonical Lisp fence");
     assert!(
-        canonical.contains("(nefor.actors.task-source \"development-task\" task)"),
+        canonical.contains("(nefor.actors.task-source \"development-task\""),
         "the canonical example must use the public Task source helper"
     );
     assert!(
@@ -377,12 +377,12 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "the first Lisp fence must construct agents through the public helper"
     );
     assert!(
-        canonical.contains("(nefor.worktree.create \"development-worktree\""),
-        "the canonical example must feed a real worktree into its SDLC"
+        canonical.contains("(nefor.worktree.create (str id \".worktree\")"),
+        "the canonical example must construct its worktree inside the reusable SDLC function"
     );
     assert!(
-        canonical.contains("(let expand-swarm"),
-        "the canonical example must derive its dynamic swarm at runtime"
+        canonical.contains("(nefor.dynamic.traverse \"followups\" expand-followup"),
+        "the canonical example must derive dynamic workers through a node boundary"
     );
     fs::write(temp_root.join("canonical-agent.mag"), canonical)
         .expect("write exact canonical agent regression");
@@ -966,6 +966,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
                   :actors (as (List nefor.graph.Actor) [actor])
                   :routes (as (List nefor.graph.StoredRoute) [])
                   :messages (as (List nefor.graph.Message) [])
+                  :rules (as (List nefor.graph.Rule) [])
                   :input input
                   :output output}))
 (let start (nefor.graph.source "start" (type-tag Unit) nil))
@@ -1024,6 +1025,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
                   :actors (as (List nefor.graph.Actor) [actor])
                   :routes (as (List nefor.graph.StoredRoute) [])
                   :messages (as (List nefor.graph.Message) [])
+                  :rules (as (List nefor.graph.Rule) [])
                   :input input
                   :output output}))
 (let start (nefor.graph.source "start" (type-tag Unit) nil))
@@ -1082,6 +1084,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
                   :actors (as (List nefor.graph.Actor) [actor])
                   :routes (as (List nefor.graph.StoredRoute) [])
                   :messages (as (List nefor.graph.Message) [])
+                  :rules (as (List nefor.graph.Rule) [])
                   :input input
                   :output output}))
 (let start (nefor.graph.source "start" (type-tag Unit) nil))

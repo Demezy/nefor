@@ -105,9 +105,9 @@ For a one-off pipeline, keep it inside the command node:
 (nefor.shell.script "search" (as nefor.shell.ShellScriptParams {:script "rg -n TODO src/ | sort" :cwd "." :timeout (nefor.contracts.no-timeout)}))
 ```
 
-Multi-node pipelines are full `.mag` programs: construct `source`, `process.exec`
-or `shell.script`, and `output` nodes, place their edges in one flat list, then pass
-a `Graph -> Graph` function to `nefor.artifact.compile`. Each compilation
+Multi-node pipelines are full `.mag` programs: compose typed nodes through
+`nefor.node`, connect the resulting boundary to an output, then pass a
+`Graph -> Graph` function to `nefor.artifact.compile`. Each compilation
 applies that function to `empty-graph` and validates the result for a fresh
 run; it does not retrieve or mutate a stored graph.
 

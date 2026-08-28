@@ -1,4 +1,3 @@
-(require "core.validated")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
@@ -10,88 +9,22 @@
 (type Indexed [T] {:collection String :index Int :value T})
 (type DynamicCount {:collection String :count Int})
 
-(let collector-factory "nefor.factory.collector")
-(let collect-item-factory "nefor.factory.collect-item")
-(let collected-prompt-factory "nefor.factory.collected-prompt")
 (let dynamic-input-factory "nefor.factory.dynamic-input")
 (let dynamic-output-factory "nefor.factory.dynamic-output")
 (let dynamic-index-factory "nefor.factory.dynamic-index")
 (let dynamic-context-factory "nefor.factory.dynamic-context")
-(type CollectorParams {:expected_senders (List String)})
 (type DynamicParams {})
 (type DynamicIndexParams {:collection String :index Int})
 (type DynamicContextParams {:item_schema TypeSchema})
-(type Collection [T] {:change nefor.graph.Delta
-                      :output (nefor.graph.Port (List T))})
-
-;; Closed, deterministic typed fan-in. The supplied port order defines the
-;; result order; producer identities and routes are derived from those ports.
-;; The empty collection is the ordinary List identity and is represented by a
-;; source node that immediately produces [].
-(let collect-all (fn [T] [[id String]
-                           [producers (List (nefor.graph.Port T))]
-                           [item-type (TypeTag T)]]
-  -> (Collection T)
-  (if (= (count producers) 0)
-    ((fn [] -> (Collection T)
-      (let source (nefor.graph.source id (type-tag (List T)) (as (List T) [])))
-      (as (Collection T)
-        {:change (nefor.graph.node-delta source)
-         :output (get source "output")})))
-    ((fn [] -> (Collection T)
-      (let input (nefor.graph.port id item-type "nefor.dynamic.Item"))
-      (let output
-        (nefor.graph.port id (type-tag (List T)) "nefor.dynamic.Collected"))
-      (let expected-senders
-        (map (fn [[producer (nefor.graph.Port T)]] -> String
-               (get producer "actor"))
-             producers))
-      (let collector
-        (nefor.graph.actor id collector-factory [(type-evidence item-type)]
-          (as CollectorParams {:expected_senders expected-senders})
-          (nefor.graph.store-port input)
-          [(nefor.graph.store-port output)]))
-      (let routes
-        (map (fn [[producer (nefor.graph.Port T)]] -> nefor.graph.StoredRoute
-               (nefor.graph.stored-route producer input))
-             producers))
-      (as (Collection T)
-        {:change (nefor.graph.delta [collector] routes
-                   (as (List nefor.graph.Message) [])
-                   (as (List String) []))
-         :output output}))))))
-
-(let collect-item (fn [T] [[id String] [type (TypeTag T)]]
-  -> (nefor.graph.Node T T)
-  (let input (nefor.graph.port id type "nefor.dynamic.CollectInput"))
-  (let output (nefor.graph.port id type "nefor.dynamic.Item"))
-  (as (nefor.graph.Node T T)
-      {:id id :role "ordinary" :actors [(nefor.graph.actor id collect-item-factory
-                  [(type-evidence type)]
-                  (as DynamicParams {}) (nefor.graph.store-port input)
-                  [(nefor.graph.store-port output)])]
-       :routes [] :messages [] :rules [] :input input :output output})))
-
-(let collected-prompt (fn [T] [[id String] [type (TypeTag T)]]
-  -> (nefor.graph.Node (List T) nefor.contracts.ProviderInput)
-  (let input (nefor.graph.port id (type-tag (List T)) "nefor.dynamic.Collected"))
-  (let output (nefor.graph.port id (type-tag nefor.contracts.ProviderInput) "generic-provider.ProviderOut"))
-  (as (nefor.graph.Node (List T) nefor.contracts.ProviderInput)
-      {:id id :role "ordinary" :actors [(nefor.graph.actor id collected-prompt-factory
-                  [(type-evidence type)]
-                  (as DynamicParams {}) (nefor.graph.store-port input)
-                  [(nefor.graph.store-port output)])]
-       :routes [] :messages [] :rules [] :input input :output output})))
-
 (let indexed-result
-  (fn [T] [[id String] [entry (Indexed T)]]
-    -> (nefor.graph.Node T (Indexed T))
-    (let input (nefor.graph.port id (type-tag T) "nefor.dynamic.IndexInput"))
+  (fn [T O] [[id String] [entry (Indexed T)] [output-type (TypeTag O)]]
+    -> (nefor.graph.Node O (Indexed O))
+    (let input (nefor.graph.port id output-type "nefor.dynamic.IndexInput"))
     (let output
-      (nefor.graph.port id (type-tag (Indexed T)) "nefor.dynamic.Indexed"))
+      (nefor.graph.port id (type-tag (Indexed O)) "nefor.dynamic.Indexed"))
     (nefor.graph.node id "ordinary"
       [(nefor.graph.actor id dynamic-index-factory
-         [(type-evidence (type-tag T))]
+         [(type-evidence output-type)]
          (as DynamicIndexParams
            {:collection (get entry "collection") :index (get entry "index")})
          (nefor.graph.store-port input)
@@ -129,7 +62,9 @@
     -> Artifact
     (let indexed
       (indexed-result
-        (str traversal-id (str ".result." (get entry "index"))) entry))
+        (str traversal-id (str ".result." (get entry "index")))
+        entry
+        (type-tag O)))
     (let output-input
       (nefor.graph.port (str traversal-id ".output")
         (type-tag (| (Indexed O) DynamicCount))
