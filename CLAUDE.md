@@ -15,7 +15,7 @@ Agent harness substrate. Pure string-bus engine + separate-process plugins (NCP 
 - `plugins/mag/` — MAG runtime: actor kernel executing compiled `.mag` programs as in-memory actor constellations — the only execution path. See its `docs/`. Ships its own kernel Lua tree at `plugins/mag/lua/mag-kernel/` (actor fold, factories, routing, run contexts, observer stream), loaded by the plugin's embedded VM and resolved off `--lua-root`'s parent; `--kernel <path>` overrides it.
 - `plugins/basic-tools/` — `read_file` / `write_file` / `bash` built-ins.
 - `plugins/git-worktree/` — stateless Git worktree capability provider. `git_worktree_create` is fresh-only; `git_worktree_open` validates explicit reuse. MAG wraps both as typed graph nodes and never removes successful worktrees.
-- `plugins/mock-plugin/` — scriptable NCP actor for integration tests. Local Ollama works through `openai-provider` directly with `static_token = "ollama-local"`.
+- `plugins/mock-plugin/` — scriptable NCP actor for deterministic integration tests. Repository-owned tests never invoke live providers.
 - `tools/fake-engine/` — harness that impersonates the engine for plugin-side tests.
 - `examples/nefor-agent/init.lua` — default composition. Sets `package.path`, bootstraps the shared Lua tree via `nefor-pm`, defines the global `dispatch` hook (delegates to `core.ncp.dispatch`), and spawns every actor via `actor.spawn` (sessions, agentic-loop, providers, mag kernel, tool-gate, lead-workflow, chat).
 - `lua/core/` — shipped library: NCP (handshake, broadcast-minus-sender, replay-on-attach, errors), actor runtime, history replay. JSON via the engine-provided `nefor.json`.
@@ -77,7 +77,6 @@ If no `init.lua` is found, the engine prints a friendly error pointing at the RE
 - `just check` — formatting, documentation, the focused fast confidence set, and verification-lane completeness; the ordinary scoped pre-commit check.
 - `just test` / `just test-default` — every bounded default deterministic target, including the registered non-Cargo default checks. Bare workspace Cargo exposes the same Rust target membership.
 - `just test-full` / `just test-all` — every deterministic default and full target plus the registered non-Cargo full checks. Full Cargo targets require their package's `full-tests` feature and remain absent from bare Cargo.
-- `just test-live provider|clipboard` — the only repository-owned entry points into the separately guarded live-test Cargo graph. Root `--workspace --all-features` cannot reach it.
 - `just lint` — workspace-wide Clippy with `-D warnings`; use targeted package Clippy for scoped Rust changes.
 - `just fmt` — rustfmt.
 - `just build` — release build into `target/release/`.

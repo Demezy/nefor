@@ -1,9 +1,7 @@
 {
-  "live_manifest": "tests/live/Cargo.toml",
   "aggregates": {
     "default": "test-default",
-    "full": "test-full",
-    "live": "test-live"
+    "full": "test-full"
   },
   "cargo_full": {
     "harness_packages": [

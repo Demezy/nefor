@@ -83,44 +83,6 @@ test-provider:
 prepare-mag-e2e:
     cargo run --quiet -p nefor-cargo-test-harness -- --prepare-mag-e2e
 
-# Explicit live checks from the Cargo graph excluded from the root workspace.
-test-live target:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    repo="{{justfile_directory()}}"
-    manifest="$repo/tests/live/Cargo.toml"
-    case "{{target}}" in
-      provider)
-        env_file="$repo/.env"
-        if [ ! -f "$env_file" ]; then
-          echo "live provider test requires $env_file; copy .env.example and fill every value" >&2
-          exit 2
-        fi
-        set -a
-        source "$env_file"
-        set +a
-        required=(NEFOR_LIVE_OPENAI_BASE_URL NEFOR_LIVE_OPENAI_API_KEY NEFOR_LIVE_OPENAI_MODEL)
-        for name in "${required[@]}"; do
-          if [ -z "${!name:-}" ]; then
-            echo "live provider test requires non-empty $name in $env_file" >&2
-            exit 2
-          fi
-        done
-        echo "=== TEST LANE: live provider (explicit capability) ==="
-        NEFOR_LIVE_TEST_CAPABILITY=explicit CARGO_TARGET_DIR="$repo/target" \
-          cargo test --manifest-path "$manifest" --locked --test openai_compatible
-        ;;
-      clipboard)
-        echo "=== TEST LANE: live GUI clipboard (explicit capability) ==="
-        NEFOR_LIVE_TEST_CAPABILITY=explicit CARGO_TARGET_DIR="$repo/target" \
-          cargo test --manifest-path "$manifest" --locked --test tui_clipboard -- --test-threads=1
-        ;;
-      *)
-        echo "usage: just test-live provider|clipboard" >&2
-        exit 2
-        ;;
-    esac
-
 # TUI rendering, layout, input, scrolling, and widget unit tests.
 test-tui:
     cargo test -p nefor-tui --lib

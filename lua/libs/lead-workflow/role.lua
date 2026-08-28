@@ -6,12 +6,8 @@
 --   * LEAD_SYSTEM_PROMPT   — the root lead's full system prompt.
 --   * WORKER_SYSTEM_PROMPT — a delegated agent's full system prompt.
 --
--- These are final files: the loom prompt compiler (agentic-kit) composes
--- profile fragments + the role overlay + any provider-conditional preamble
--- (the Qwen/Ollama reasoning-hygiene mitigation that used to live here as a
--- Lua string literal) into each file. This loader does NO text composition —
--- it loads and returns. Downstream configs that ship their own prompt files
--- (the starter) fold any provider preamble into those files directly.
+-- Prompt content is configuration-owned. This loader reads each file and
+-- adds only Nefor's canonical bounded-context instruction.
 --
 -- The lead's tool surface is NOT here: it is authored inside the
 -- turn-program (`:tools` in agentic-loop/lead-turn.mag).

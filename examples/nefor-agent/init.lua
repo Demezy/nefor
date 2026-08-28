@@ -117,9 +117,7 @@ require("libs.generic-tool").declare()
 -- The actor runtime queues incoming envelopes during boot, so spawning
 -- the orchestrator before the plugins it coordinates is safe even if a
 -- plugin's `ready` arrives early.
--- Build runtime context: cwd, workspace index, agentic-kit paths.
--- Appended to the lead system prompt so the agent knows where it's
--- operating and what projects are available.
+-- Appended to the lead system prompt so the agent knows where it is operating.
 local function build_runtime_context()
   local parts = {}
 

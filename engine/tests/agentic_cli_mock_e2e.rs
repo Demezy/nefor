@@ -1,14 +1,13 @@
 //! End-to-end tests for the agentic-cli plugin against the mock provider.
 //!
 //! Spawns the real `nefor` engine binary as a subprocess against
-//! `cli-config/`, with `NEFOR_CONFIG=test` so no live LLM is needed.
+//! `cli-config/`, whose provider is always the deterministic mock.
 //! Each scenario covers one path through the agentic_workflow + agentic_cli
 //! surface: single-shot text/json/stream-json formats, REPL multi-turn,
 //! `--help`, and the `--yolo` placeholder flag.
 //!
-//! These run in the explicit full deterministic lane. They close the gap
-//! `stage1_e2e.rs` left open: that test still requires live Ollama; this
-//! one validates the same wire end-to-end with the deterministic mock.
+//! These run in the explicit full deterministic lane and validate the wire
+//! end-to-end without depending on an external provider.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -139,7 +138,6 @@ fn base_command(xdg: &Path) -> Command {
         .arg(repo_root().join("cli-config"))
         .arg("plugin")
         .arg("agentic-cli")
-        .env("NEFOR_CONFIG", "test")
         .env("NEFOR_EXECUTABLE_ROOT", target_debug(""))
         .env("NEFOR_TEST_BIN_DIR", target_debug(""))
         // Disable the mock provider's 80 tok/s pacing under tests so

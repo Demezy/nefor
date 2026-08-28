@@ -10,16 +10,13 @@ if [ "$#" -eq 0 ]; then
   scratch="$(mktemp -d "$repo/tmp/test-lanes.XXXXXX")"
   trap 'rm -rf "$scratch"' EXIT
   root_metadata="$scratch/root.json"
-  live_metadata="$scratch/live.json"
   cargo metadata --no-deps --format-version 1 --manifest-path "$repo/Cargo.toml" >"$root_metadata"
-  cargo metadata --no-deps --format-version 1 --manifest-path "$repo/$(jq -r .live_manifest "$registry")" >"$live_metadata"
-elif { [ "$#" -eq 3 ] || [ "$#" -eq 4 ]; } && [ "$1" = "--metadata" ]; then
+elif { [ "$#" -eq 2 ] || [ "$#" -eq 3 ]; } && [ "$1" = "--metadata" ]; then
   fixture_mode=1
   root_metadata="$2"
-  live_metadata="$3"
-  if [ "$#" -eq 4 ]; then registry="$4"; fi
+  if [ "$#" -eq 3 ]; then registry="$3"; fi
 else
-  echo "usage: tools/check-test-lanes.sh [--metadata ROOT_JSON LIVE_JSON [REGISTRY_JSON]]" >&2
+  echo "usage: tools/check-test-lanes.sh [--metadata ROOT_JSON [REGISTRY_JSON]]" >&2
   exit 2
 fi
 
@@ -70,22 +67,9 @@ planned_full_packages="$(jq -c '
 [ "$planned_full_packages" = "$metadata_full_packages" ] || fail "Cargo full execution packages do not exactly match metadata: planned=$planned_full_packages metadata=$metadata_full_packages"
 
 jq -e '
-  ([.packages[].id] | sort) == (.workspace_members | sort)
-  and ((.workspace_default_members | sort) == (.workspace_members | sort))
-  and (.workspace_members | length == 1)
-' "$live_metadata" >/dev/null || fail "missing or inconsistent live inventory"
-
-jq -e '
-  [.packages[].targets[] | select(.test or .doctest)] as $targets
-  | ($targets | length > 0)
-  and ([$targets[] | select((.["required-features"] // []) != [])] | length == 0)
-' "$live_metadata" >/dev/null || fail "feature-gated or empty live target graph"
-
-jq -e '
-  (.live_manifest | type == "string")
-  and (.aggregates.default == "test-default")
+  (.aggregates.default == "test-default")
   and (.aggregates.full == "test-full")
-  and (.aggregates.live == "test-live")
+  and ((.aggregates | keys | sort) == ["default", "full"])
   and (.non_cargo | map(.lane) | all(. == "default" or . == "full"))
   and ((.non_cargo | map(.recipe) | length) == (.non_cargo | map(.recipe) | unique | length))
 ' "$registry" >/dev/null || fail "invalid checked command registry"
@@ -137,5 +121,4 @@ fi
 
 default_count="$(jq '[.packages[].targets[] | select(.test or .doctest) | select((.["required-features"] // []) == [])] | length' "$root_metadata")"
 full_count="$(jq '[.packages[].targets[] | select(.test or .doctest) | select((.["required-features"] // []) == ["full-tests"])] | length' "$root_metadata")"
-live_count="$(jq '[.packages[].targets[] | select(.test or .doctest)] | length' "$live_metadata")"
-echo "test-lane inventory complete: default=$default_count full=$full_count live=$live_count"
+echo "test-lane inventory complete: default=$default_count full=$full_count"

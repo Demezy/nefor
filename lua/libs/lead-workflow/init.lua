@@ -441,28 +441,11 @@ local function data_root()
   return home .. "/.local/share/nefor"
 end
 
-local function read_agentic_kit_path(key)
-  local config_dir = os.getenv("NEFOR_CONFIG_DIR") or "."
-  local fh = io.open(config_dir .. "/agentic-kit.json", "r")
-  if not fh then return nil end
-  local raw = fh:read("*a")
-  fh:close()
-  local ok, decoded = pcall(json.decode, raw)
-  if ok and type(decoded) == "table" and type(decoded[key]) == "string" then
-    return decoded[key]
-  end
-  return raw:match('"' .. key .. '"%s*:%s*"([^"]+)"')
-end
-
 local function review_hook_path()
   local override = os.getenv("NEFOR_REVIEW_HOOK")
   if override ~= nil and override ~= "" then return override end
-  local kit = read_agentic_kit_path("agentic_kit")
-  if type(kit) == "string" and kit ~= "" then
-    return kit .. "/agents/nefor/scripts/review-hook.sh"
-  end
   local config_dir = os.getenv("NEFOR_CONFIG_DIR") or "."
-  return config_dir .. "/../scripts/review-hook.sh"
+  return config_dir .. "/scripts/review-hook.sh"
 end
 
 local function mkdir_p(path)

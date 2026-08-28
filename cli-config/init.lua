@@ -8,7 +8,6 @@
 --
 -- Run:
 --   ./target/debug/nefor --config cli-config/ plugin agentic-cli "your prompt"
---   NEFOR_CONFIG=test ./target/debug/nefor --config cli-config/ plugin agentic-cli "..."
 
 local CONFIG_ROOT = NEFOR_CONFIG_DIR or "."
 
@@ -79,7 +78,7 @@ local cfg = require("config").active
 local MAG_PACKAGE_ROOT = pm.root("nefor-mag")
 local MAG_MODULE_ROOTS = {
   MAG_PACKAGE_ROOT .. "/lib",
-  STARTER_ROOT .. "/mag/" .. (cfg.plugins.spawn_mock and "test" or "prod"),
+  STARTER_ROOT .. "/mag/lib",
 }
 
 local ncp      = require("core.ncp")
@@ -171,40 +170,16 @@ local PROVIDER_NAME  = cfg.provider.name
 local PROVIDER_MODEL = cfg.provider.model
 
 local provider = require("libs.compositors.provider")
-if cfg.plugins.spawn_mock then
-  -- mock-plugin uses the same wire protocol as the openai-provider
-  -- binary, so the provider actor spec works as-is.
-  actor.spawn(provider.spawn_spec(
-    PROVIDER_NAME,
-    {
-      require("config").bin("mock-plugin"),
-      "--script", STARTER_ROOT .. "/" .. cfg.provider.mock_script,
-    },
-    { agentic_loop = agentic_loop, conversations = conversation_reader }
-  ))
-else
-  local provider_command = {
-    require("config").bin("openai-provider"),
-    "--name",     PROVIDER_NAME,
-    "--base-url", cfg.provider.base_url,
-  }
-  if PROVIDER_MODEL then
-    table.insert(provider_command, "--model")
-    table.insert(provider_command, PROVIDER_MODEL)
-  end
-  for _, a in ipairs(cfg.provider.extra_args or {}) do
-    table.insert(provider_command, a)
-  end
-  actor.spawn(provider.spawn_spec(
-    PROVIDER_NAME,
-    provider_command,
-    {
-      static_token = cfg.provider.static_token,
-      agentic_loop = agentic_loop,
-      conversations = conversation_reader,
-    }
-  ))
-end
+-- mock-plugin implements the same wire contract as provider plugins, so the
+-- complete CLI flow remains deterministic while exercising the real boundary.
+actor.spawn(provider.spawn_spec(
+  PROVIDER_NAME,
+  {
+    require("config").bin("mock-plugin"),
+    "--script", STARTER_ROOT .. "/" .. cfg.provider.mock_script,
+  },
+  { agentic_loop = agentic_loop, conversations = conversation_reader }
+))
 
 -- mag: the MAG actor-kernel runtime — the lead's turn-programs execute
 -- here (agentic-loop spawns one per user message). Mirrors the starter

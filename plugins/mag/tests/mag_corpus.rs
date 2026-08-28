@@ -241,16 +241,12 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     let starter = root.join("examples/nefor-agent");
     let lib_root = root.join("mag/lib");
     let config_lib_root = starter.join("mag/lib");
-    let prod_lib_root = starter.join("mag/prod");
-    let test_lib_root = starter.join("mag/test");
     let module_roots = vec![lib_root.clone(), config_lib_root.clone()];
     let fixture_root = starter.join("mag/tests");
     let book_root = root.join("mag/examples");
     let all_mag = mag_files(&root);
     let libraries = mag_files(&lib_root);
     let config_libraries = mag_files(&config_lib_root);
-    let prod_libraries = mag_files(&prod_lib_root);
-    let test_libraries = mag_files(&test_lib_root);
     let fixtures = mag_files(&fixture_root);
     let book_examples = mag_files(&book_root);
     let entrypoints = all_mag
@@ -259,8 +255,6 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
             path.starts_with(&starter)
                 && !path.starts_with(&lib_root)
                 && !path.starts_with(&config_lib_root)
-                && !path.starts_with(&prod_lib_root)
-                && !path.starts_with(&test_lib_root)
                 && !path.starts_with(&fixture_root)
         })
         .cloned()
@@ -271,8 +265,6 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         .filter(|path| {
             !libraries.contains(path)
                 && !config_libraries.contains(path)
-                && !prod_libraries.contains(path)
-                && !test_libraries.contains(path)
                 && !fixtures.contains(path)
                 && !book_examples.contains(path)
                 && !entrypoints.contains(path)
@@ -335,23 +327,20 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     });
     handshake(&mut reader, &mut stdin).await;
 
-    for (name, variant_root) in [("prod", &prod_lib_root), ("test", &test_lib_root)] {
-        let variant_roots = vec![lib_root.clone(), variant_root.clone()];
-        let variant = load(
-            &mut reader,
-            &mut stdin,
-            &format!("corpus-cli-{name}"),
-            &starter,
-            Path::new("agentic-loop/lead-turn.mag"),
-            &variant_roots,
-        )
-        .await;
-        assert_eq!(
-            variant.get("kind").and_then(Value::as_str),
-            Some("mag.loaded"),
-            "built-in CLI {name} model config failed to compile: {variant:#?}"
-        );
-    }
+    let configured_entrypoint = load(
+        &mut reader,
+        &mut stdin,
+        "corpus-configured-entrypoint",
+        &starter,
+        Path::new("agentic-loop/lead-turn.mag"),
+        &module_roots,
+    )
+    .await;
+    assert_eq!(
+        configured_entrypoint.get("kind").and_then(Value::as_str),
+        Some("mag.loaded"),
+        "configured lead model module failed to compile: {configured_entrypoint:#?}"
+    );
 
     let library_result = load(
         &mut reader,
