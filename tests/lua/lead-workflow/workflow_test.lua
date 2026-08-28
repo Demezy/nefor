@@ -685,10 +685,10 @@ do
   fresh()
   write_mag_file("roots-default-write", "roots-default.mag", READ_ONLY_MAG)
   local workspace = require("libs.mag-workspace").workspace_dir(sessions.current_id())
-  assert_true(nefor.fs.exists(workspace .. "/lib"),
-    "session workspace keeps a writable local module directory")
-  assert_true(not nefor.fs.exists(workspace .. "/lib/nefor/actors.mag"),
-    "canonical MAG libraries are not copied into the session")
+  assert_true(nefor.fs.exists(workspace),
+    "session workspace keeps a writable source directory")
+  assert_true(not nefor.fs.exists(workspace .. "/lib"),
+    "session workspace does not create a redundant local library directory")
   assert_true(not nefor.fs.exists(workspace .. "/book/README.md"),
     "the MAG Book is not copied into the session")
   _test.calls_clear()
@@ -697,8 +697,8 @@ do
   assert_true(default_load ~= nil, "default mag execution emits mag.load")
   assert_eq(#default_load.body.module_roots, 1,
     "omitted dependency roots preserve the single workspace root")
-  assert_true(default_load.body.module_roots[1]:match("/lib$") ~= nil,
-    "the default root is ws/lib")
+  assert_eq(default_load.body.module_roots[1], workspace,
+    "the default root is the writable source workspace")
 
   fresh()
   local configured = { "/deps/standard", "/deps/extra" }
@@ -712,8 +712,8 @@ do
     "normal mag defensively copies configured dependency roots")
   assert_eq(normal_load.body.module_roots[2], "/deps/extra",
     "normal mag preserves dependency order")
-  assert_true(normal_load.body.module_roots[3]:match("/lib$") ~= nil,
-    "normal mag places the workspace-local root last")
+  assert_true(normal_load.body.module_roots[3]:match("/mag$") ~= nil,
+    "normal mag places the workspace source root last")
 
   -- Mutating an emitted envelope cannot corrupt the roots held for the next
   -- eval: init.lua and mag-eval each own defensive copies.
@@ -728,8 +728,8 @@ do
     "mag-eval receives its own defensive root copy")
   assert_eq(eval_load.body.module_roots[2], "/deps/extra",
     "mag-eval preserves dependency order")
-  assert_true(eval_load.body.module_roots[3]:match("/lib$") ~= nil,
-    "mag-eval places the workspace-local root last")
+  assert_true(eval_load.body.module_roots[3]:match("/mag$") ~= nil,
+    "mag-eval places the workspace source root last")
 
   fresh()
   invoke_tool("roots-eval-reset", "mag-eval", { intent = "Evaluate expression",

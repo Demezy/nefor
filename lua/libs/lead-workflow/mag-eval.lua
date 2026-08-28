@@ -86,7 +86,7 @@ end
 
 local function module_roots_for(ws)
   local roots = copy_roots(dependency_module_roots)
-  roots[#roots + 1] = ws .. "/lib"
+  roots[#roots + 1] = ws
   return roots
 end
 

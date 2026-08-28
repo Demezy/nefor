@@ -37,10 +37,11 @@ Editing a graph function describes a different future run. It does not retrieve 
 
 ## Workspace lifecycle
 
-Each session gets a writable MAG workspace under its session data, including an
-empty `lib/` for optional session-local modules. Canonical and configuration-owned
-libraries remain in their materialized package roots; the composition supplies
-those roots explicitly to every compilation. Nothing is copied into the session.
+Each session gets a writable MAG workspace under its session data. Additional
+session-local source modules may live directly in that workspace. Canonical and
+configuration-owned libraries remain in their materialized package roots; the
+composition supplies those roots explicitly to every compilation. Nothing is
+copied into the session.
 
 Paths passed to the lead `mag` tool are relative to that workspace. Literal
 module imports such as `(require "nefor.graph")` resolve through the configured
@@ -65,7 +66,7 @@ The `mag` binary validates a program without starting Nefor:
 ```sh
 mag compile workflow.mag \
   --source-dir ./mag \
-  --module-root ./mag/lib \
+  --module-root ./mag \
   --input factory_contracts=./factory-contracts.json
 ```
 

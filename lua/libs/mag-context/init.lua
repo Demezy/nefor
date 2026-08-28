@@ -125,7 +125,7 @@ function Context:compose(base_system, opts)
   for _, package in ipairs(self.module_roots) do packages[#packages + 1] = package end
   if opts.workspace ~= nil then
     nonempty(opts.workspace, "mag-context workspace")
-    packages[#packages + 1] = { name = "session", path = opts.workspace .. "/lib" }
+    packages[#packages + 1] = { name = "session", path = opts.workspace }
   end
   for _, package in ipairs(validated_packages(opts.module_roots or {},
       "mag-context compose module_roots")) do
@@ -138,7 +138,7 @@ function Context:compose(base_system, opts)
 
   if opts.workspace ~= nil then
     parts[#parts + 1] = "# MAG workspace\n\nWritable source directory: `" .. opts.workspace ..
-      "`\n\nPrograms may add session-local modules under `lib/`; configured package roots remain immutable."
+      "`\n\nAdditional source modules may live in this workspace; configured package roots remain immutable."
   end
 
   for _, section in ipairs(self.trailing_sections) do append_nonempty(parts, section) end

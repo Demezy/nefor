@@ -1,8 +1,7 @@
 -- lua/libs/mag-workspace/init.lua — MAG workspace management and preview formatting.
 --
 -- Provides two things:
---   1. Workspace lifecycle: init an empty per-session MAG source directory
---      with an optional writable lib/ for session-local modules.
+--   1. Workspace lifecycle: init an empty per-session MAG source directory.
 --   2. Preview formatting: render a graph modification (the shape the
 --      mag plugin replies with on `mag.loaded`) into a human-readable
 --      string the lead can inspect before executing.
@@ -52,7 +51,7 @@ function M.init_workspace(session_id, _config_dir)
   local ws = M.workspace_dir(session_id)
   if not ws then return nil, "no data root available" end
 
-  if not mkdir_p(ws .. "/lib") then
+  if not mkdir_p(ws) then
     return nil, "failed to create workspace: " .. ws
   end
 

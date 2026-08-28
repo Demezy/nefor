@@ -166,7 +166,8 @@ inventing profile strings. Read-only investigators normally receive
 
 Paths passed to `mag` are relative to the writable session workspace. Canonical
 and configuration-owned modules stay in the package roots listed in the ambient
-MAG context; `lib/` is available only for optional session-local modules.
+MAG context. Additional source modules may live directly in the workspace;
+reusable libraries belong in configured package roots.
 
 ## Approval and boundaries
 
