@@ -95,3 +95,60 @@ fn empty_sequence_emits_the_fixed_empty_list_after_input() {
         .exec()
         .unwrap();
 }
+
+#[test]
+fn product_split_projects_a_whole_product_in_order() {
+    harness()
+        .load(
+            r#"
+            local factory = require("factories.product-split")
+            local emitted = {}
+            local actor = assert(factory.construct("split", {},
+              function(message) emitted[#emitted + 1] = message end))
+            local completion = actor.deliver({
+              shape = "product",
+              whole = true,
+              messages = {{
+                message = { value = { "left", 42 } },
+                arrival = { declared_type = { kind = "product", items = {
+                  { kind = "primitive", name = "String" },
+                  { kind = "primitive", name = "Int" },
+                } } },
+              }},
+            })
+            assert(completion.status == "ok")
+            assert(#emitted == 3) -- ready + two ordered projections
+            assert(emitted[2].kind == "nefor.node.ProductLeft")
+            assert(emitted[2].value == "left")
+            assert(emitted[3].kind == "nefor.node.ProductRight")
+            assert(emitted[3].value == 42)
+            "#,
+        )
+        .exec()
+        .unwrap();
+}
+
+#[test]
+fn product_join_uses_declared_sender_order() {
+    harness()
+        .load(
+            r#"
+            local factory = require("factories.product-join")
+            local emitted = {}
+            local actor = assert(factory.construct("join", {
+              expected_senders = { "left", "right" },
+            }, function(message) emitted[#emitted + 1] = message end))
+            local completion = actor.deliver({ shape = "product", messages = {
+              { from = "right", message = { value = 42 } },
+              { from = "left", message = { value = "first" } },
+            } })
+            assert(completion.status == "ok")
+            assert(#emitted == 2)
+            assert(emitted[2].kind == "nefor.node.ProductOutput")
+            assert(emitted[2].value[1] == "first")
+            assert(emitted[2].value[2] == 42)
+            "#,
+        )
+        .exec()
+        .unwrap();
+}

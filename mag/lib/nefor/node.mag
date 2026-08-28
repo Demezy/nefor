@@ -5,9 +5,13 @@
 
 (let sequence-empty-factory "nefor.factory.sequence-empty")
 (let collector-factory "nefor.factory.collector")
+(let product-split-factory "nefor.factory.product-split")
+(let product-join-factory "nefor.factory.product-join")
 
 (type SequenceEmptyParams {})
 (type CollectorParams {:expected_senders (List String)})
+(type ProductSplitParams {})
+(type ProductJoinParams {:expected_senders (List String)})
 
 (let composite-id
   (fn [[left String] [operator String] [right String]] -> String
@@ -36,6 +40,119 @@
     [[left (nefor.graph.Node A B)] [right (nefor.graph.Node B C)]]
     -> (nefor.graph.Node A C)
     (compose left right)))
+
+;; Run two nodes from the same input. The product boundary records that both
+;; results are required; its ordinary firing semantics waits for both child
+;; outputs and preserves left-to-right order.
+(let fanout
+  (fn [I A B]
+    [[id String]
+     [left (nefor.graph.Node I A)]
+     [right (nefor.graph.Node I B)]]
+    -> (nefor.graph.Node I (+ A B))
+    (let input
+      (nefor.graph.identity (str id ".input") (type-tag I)))
+    (let output-id (str id ".output"))
+    (let output-input
+      (nefor.graph.port output-id (type-tag (+ A B))
+        "nefor.node.ProductInput"))
+    (let output-port
+      (nefor.graph.port output-id (type-tag (+ A B))
+        "nefor.node.ProductOutput"))
+    (let output
+      (nefor.graph.actor output-id product-join-factory
+        [(type-evidence (type-tag A)) (type-evidence (type-tag B))]
+        (as ProductJoinParams
+          {:expected_senders
+            [(get (get left "output") "actor")
+             (get (get right "output") "actor")]})
+        (nefor.graph.store-port output-input)
+        [(nefor.graph.store-port output-port)]))
+    (nefor.graph.node id "ordinary"
+      (concat
+        (get input "actors")
+        (concat
+          (get left "actors")
+          (concat (get right "actors") [output])))
+      (concat
+        (concat
+          (get input "routes")
+          (concat
+            (get left "routes")
+            (get right "routes")))
+        [(nefor.graph.stored-route (get input "output") (get left "input"))
+         (nefor.graph.stored-route (get input "output") (get right "input"))
+         (nefor.graph.stored-route (get left "output") output-input)
+         (nefor.graph.stored-route (get right "output") output-input)])
+      (concat
+        (get input "messages")
+        (concat
+          (get left "messages")
+          (get right "messages")))
+      (get input "input")
+      output-port)))
+
+;; Apply two nodes independently to the ordered components of a product. A
+;; small runtime splitter is necessary because an edge carries the whole
+;; product value; merely viewing one port under a component type would lose
+;; the corresponding runtime projection.
+(let parallel
+  (fn [A B C D]
+    [[id String]
+     [left (nefor.graph.Node A B)]
+     [right (nefor.graph.Node C D)]]
+    -> (nefor.graph.Node (+ A C) (+ B D))
+    (let splitter-id (str id ".input"))
+    (let splitter-input
+      (nefor.graph.port splitter-id (type-tag (+ A C))
+        "nefor.node.ProductInput"))
+    (let splitter-left
+      (nefor.graph.port splitter-id (type-tag A)
+        "nefor.node.ProductLeft"))
+    (let splitter-right
+      (nefor.graph.port splitter-id (type-tag C)
+        "nefor.node.ProductRight"))
+    (let splitter
+      (nefor.graph.actor splitter-id product-split-factory
+        [(type-evidence (type-tag A)) (type-evidence (type-tag C))]
+        (as ProductSplitParams {})
+        (nefor.graph.store-port splitter-input)
+        [(nefor.graph.store-port splitter-left)
+         (nefor.graph.store-port splitter-right)]))
+    (let output-id (str id ".output"))
+    (let output-input
+      (nefor.graph.port output-id (type-tag (+ B D))
+        "nefor.node.ProductInput"))
+    (let output-port
+      (nefor.graph.port output-id (type-tag (+ B D))
+        "nefor.node.ProductOutput"))
+    (let output
+      (nefor.graph.actor output-id product-join-factory
+        [(type-evidence (type-tag B)) (type-evidence (type-tag D))]
+        (as ProductJoinParams
+          {:expected_senders
+            [(get (get left "output") "actor")
+             (get (get right "output") "actor")]})
+        (nefor.graph.store-port output-input)
+        [(nefor.graph.store-port output-port)]))
+    (nefor.graph.node id "ordinary"
+      (concat [splitter]
+        (concat
+          (get left "actors")
+          (concat (get right "actors") [output])))
+      (concat
+        (concat
+          (get left "routes")
+          (get right "routes"))
+        [(nefor.graph.stored-route splitter-left (get left "input"))
+         (nefor.graph.stored-route splitter-right (get right "input"))
+         (nefor.graph.stored-route (get left "output") output-input)
+         (nefor.graph.stored-route (get right "output") output-input)])
+      (concat
+        (get left "messages")
+        (get right "messages"))
+      splitter-input
+      output-port)))
 
 ;; A typed view of one arm of a node's sum boundary. It denotes the same
 ;; runtime actor and wire; the route validator proves that the selected arm is

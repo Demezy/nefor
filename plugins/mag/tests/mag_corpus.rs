@@ -527,6 +527,42 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
 
     fs::write(
+        temp_root.join("node-products.mag"),
+        r#"(require "nefor.artifact")
+(require "nefor.graph")
+(require "nefor.node")
+(let start (nefor.graph.source "start" (type-tag String) "shared"))
+(let fork-left (nefor.graph.identity "fork-left" (type-tag String)))
+(let fork-right (nefor.graph.identity "fork-right" (type-tag String)))
+(let map-left (nefor.graph.identity "map-left" (type-tag String)))
+(let map-right (nefor.graph.identity "map-right" (type-tag String)))
+(let forked (nefor.node.fanout "forked" fork-left fork-right))
+(let mapped (nefor.node.parallel "mapped" map-left map-right))
+(let workflow (nefor.node.compose forked mapped))
+(let result (nefor.graph.output-for "result" workflow))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph
+      [(nefor.graph.edge start workflow)
+       (nefor.graph.edge workflow result)])))"#,
+    )
+    .expect("write node product combinator regression");
+    let node_products = load(
+        &mut reader,
+        &mut stdin,
+        "node-products",
+        &temp_root,
+        Path::new("node-products.mag"),
+        &module_roots,
+    )
+    .await;
+    assert_eq!(
+        node_products.get("kind").and_then(Value::as_str),
+        Some("mag.loaded"),
+        "fanout and parallel must compile as ordinary product nodes: {node_products:#?}"
+    );
+
+    fs::write(
         temp_root.join("node-choice.mag"),
         r#"(require "nefor.artifact")
 (require "nefor.graph")
