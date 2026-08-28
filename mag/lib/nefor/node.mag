@@ -21,7 +21,7 @@
   (fn [A B C]
     [[left (nefor.graph.Node A B)] [right (nefor.graph.Node B C)]]
     -> (nefor.graph.Node A C)
-    (nefor.graph.node
+    (nefor.graph.node-with-rules
       (composite-id (get left "id") ">>>" (get right "id"))
       "ordinary"
       (concat (get left "actors") (get right "actors"))
@@ -30,6 +30,7 @@
         [(nefor.graph.stored-route
            (get left "output") (get right "input"))])
       (concat (get left "messages") (get right "messages"))
+      (concat (get left "rules") (get right "rules"))
       (get left "input")
       (get right "output"))))
 
@@ -68,7 +69,7 @@
              (get (get right "output") "actor")]})
         (nefor.graph.store-port output-input)
         [(nefor.graph.store-port output-port)]))
-    (nefor.graph.node id "ordinary"
+    (nefor.graph.node-with-rules id "ordinary"
       (concat
         (get input "actors")
         (concat
@@ -89,6 +90,9 @@
         (concat
           (get left "messages")
           (get right "messages")))
+      (concat
+        (get input "rules")
+        (concat (get left "rules") (get right "rules")))
       (get input "input")
       output-port)))
 
@@ -135,7 +139,7 @@
              (get (get right "output") "actor")]})
         (nefor.graph.store-port output-input)
         [(nefor.graph.store-port output-port)]))
-    (nefor.graph.node id "ordinary"
+    (nefor.graph.node-with-rules id "ordinary"
       (concat [splitter]
         (concat
           (get left "actors")
@@ -151,6 +155,7 @@
       (concat
         (get left "messages")
         (get right "messages"))
+      (concat (get left "rules") (get right "rules"))
       splitter-input
       output-port)))
 
@@ -188,7 +193,7 @@
         (get (get input "output") "actor")
         (type-tag B)
         (get (get input "output") "wire")))
-    (nefor.graph.node id "ordinary"
+    (nefor.graph.node-with-rules id "ordinary"
       (concat
         (get input "actors")
         (concat
@@ -209,6 +214,11 @@
         (concat
           (get left "messages")
           (concat (get right "messages") (get output "messages"))))
+      (concat
+        (get input "rules")
+        (concat
+          (get left "rules")
+          (concat (get right "rules") (get output "rules"))))
       (get input "input")
       (get output "output"))))
 
@@ -226,9 +236,10 @@
         (as SequenceEmptyParams {})
         (nefor.graph.store-port input)
         [(nefor.graph.store-port output)]))
-    (nefor.graph.node id "ordinary" [actor]
+    (nefor.graph.node-with-rules id "ordinary" [actor]
       (as (List nefor.graph.StoredRoute) [])
       (as (List nefor.graph.Message) [])
+      (as (List nefor.graph.Rule) [])
       input output)))
 
 (let sequence-nonempty
@@ -271,6 +282,12 @@
           -> (List nefor.graph.Message)
           (get candidate "messages"))
         nodes))
+    (let child-rules
+      (flat-map
+        (fn [[candidate (nefor.graph.Node I O)]]
+          -> (List nefor.graph.Rule)
+          (get candidate "rules"))
+        nodes))
     (let input-routes
       (map
         (fn [[candidate (nefor.graph.Node I O)]]
@@ -285,12 +302,13 @@
           (nefor.graph.stored-route
             (get candidate "output") collector-input))
         nodes))
-    (nefor.graph.node id "ordinary"
+    (nefor.graph.node-with-rules id "ordinary"
       (concat (get relay "actors") (concat child-actors [collector]))
       (concat
         (get relay "routes")
         (concat child-routes (concat input-routes output-routes)))
       (concat (get relay "messages") child-messages)
+      (concat (get relay "rules") child-rules)
       (get relay "input")
       collector-output)))
 

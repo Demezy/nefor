@@ -25,6 +25,7 @@
                   :actors (List Actor)
                   :routes (List StoredRoute)
                   :messages (List Message)
+                  :rules (List Rule)
                   :input StoredPort
                   :output StoredPort})
 (type Node [I O] {:id String
@@ -32,6 +33,7 @@
                   :actors (List Actor)
                   :routes (List StoredRoute)
                   :messages (List Message)
+                  :rules (List Rule)
                   :input (Port I)
                   :output (Port O)})
 (type Edge {:from StoredNode :to StoredNode :route StoredRoute})
@@ -109,12 +111,30 @@
                      [routes (List StoredRoute)] [messages (List Message)]
                      [input (Port I)] [output (Port O)]] -> (Node I O)
   (as (Node I O) {:id id :role role :actors actors :routes routes
-                  :messages messages :input input :output output})))
+                  :messages messages :rules [] :input input :output output})))
+
+(let node-with-rules
+  (fn [I O] [[id String] [role String] [actors (List Actor)]
+             [routes (List StoredRoute)] [messages (List Message)]
+             [rules (List Rule)] [input (Port I)] [output (Port O)]]
+    -> (Node I O)
+    (as (Node I O) {:id id :role role :actors actors :routes routes
+                    :messages messages :rules rules
+                    :input input :output output})))
+
+(let with-rule
+  (fn [I O] [[value (Node I O)] [subscription Rule]] -> (Node I O)
+    (node-with-rules
+      (get value "id") (get value "role")
+      (get value "actors") (get value "routes") (get value "messages")
+      (concat (get value "rules") [subscription])
+      (get value "input") (get value "output"))))
 
 (let store-node (fn [I O] [[value (Node I O)]] -> StoredNode
   (as StoredNode {:id (get value "id") :role (get value "role")
                   :actors (get value "actors") :routes (get value "routes")
                   :messages (get value "messages")
+                  :rules (get value "rules")
                   :input (store-port (get value "input"))
                   :output (store-port (get value "output"))})))
 
@@ -222,8 +242,12 @@
   (graph (filter (fn [[candidate Edge]] -> Bool
                    (not (edge-in? removed candidate)))
                  (get value "edges")))))
+(let graph-rules (fn [[value Graph]] -> (List Rule)
+  (flat-map (fn [[candidate StoredNode]] -> (List Rule)
+              (get candidate "rules"))
+            (graph-nodes value))))
 (let program (fn [[value Graph] [rules (List Rule)]] -> Program
-  (as Program {:graph value :rules rules})))
+  (as Program {:graph value :rules (concat (graph-rules value) rules)})))
 
 (let nodes-from-edge (fn [[value Edge]] -> (List StoredNode)
   [(get value "from") (get value "to")]))
@@ -558,6 +582,7 @@
 (let validate-with-rules (fn [[value Graph] [rules (List Rule)]
                               [contracts (List FactoryContract)]]
   -> (core.validated.Validated String Graph)
+  (let all-rules (concat (graph-rules value) rules))
   (let nodes (graph-nodes value))
     (let actors (graph-actors value))
     (let bad-shapes (filter (fn [[candidate StoredNode]] -> Bool
@@ -578,7 +603,7 @@
     (let bad-input-coverage (filter (fn [[candidate Actor]] -> Bool
                                 (not (actor-input-coverage-valid? value candidate))) actors))
     (let bad-output-coverage (filter (fn [[candidate Actor]] -> Bool
-                                 (not (actor-outputs-coverage-valid? value rules candidate))) actors))
+                                 (not (actor-outputs-coverage-valid? value all-rules candidate))) actors))
     (let bad-routes (filter (fn [[candidate StoredRoute]] -> Bool
                         (not (route-valid? actors candidate))) (graph-routes value)))
     (as (core.validated.Validated String Graph)

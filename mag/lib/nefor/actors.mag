@@ -157,6 +157,7 @@
               (nefor.graph.stored-route run-out result-in)
               (nefor.graph.stored-route result-out llm-in)]
      :messages []
+     :rules []
      :input entry-in
      :output result})))
 

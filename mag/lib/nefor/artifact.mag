@@ -30,8 +30,7 @@
     [(core.validated.Valid nefor.graph.Graph) valid
       (artifact
         (nefor.graph.lower-program
-          (as nefor.graph.Program
-            {:graph (get valid "value") :rules rules})))]
+          (nefor.graph.program (get valid "value") rules)))]
     [(core.validated.Invalid String) invalid
       (fail invalid)])))
 

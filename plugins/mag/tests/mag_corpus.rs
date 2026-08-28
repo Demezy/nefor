@@ -563,6 +563,42 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
 
     fs::write(
+        temp_root.join("node-owned-rule.mag"),
+        r#"(require "nefor.artifact")
+(require "nefor.graph")
+(let start (nefor.graph.source "start" (type-tag String) "watched"))
+(let base (nefor.graph.identity "watched" (type-tag String)))
+(let observe
+  (fn [[value String]] -> Artifact
+    (nefor.artifact.delta
+      (nefor.graph.delta [] [] [] []))))
+(let watched
+  (nefor.graph.with-rule base
+    (nefor.graph.rule "observe" (get base "output") "observe")))
+(let result (nefor.graph.output-for "result" watched))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph
+      [(nefor.graph.edge start watched)
+       (nefor.graph.edge watched result)])))"#,
+    )
+    .expect("write node-owned rule regression");
+    let node_owned_rule = load(
+        &mut reader,
+        &mut stdin,
+        "node-owned-rule",
+        &temp_root,
+        Path::new("node-owned-rule.mag"),
+        &module_roots,
+    )
+    .await;
+    assert_eq!(
+        node_owned_rule.get("kind").and_then(Value::as_str),
+        Some("mag.loaded"),
+        "a composite node's resident rules must survive graph compilation: {node_owned_rule:#?}"
+    );
+
+    fs::write(
         temp_root.join("node-choice.mag"),
         r#"(require "nefor.artifact")
 (require "nefor.graph")

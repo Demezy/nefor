@@ -56,7 +56,7 @@
                   [(type-evidence type)]
                   (as DynamicParams {}) (nefor.graph.store-port input)
                   [(nefor.graph.store-port output)])]
-       :routes [] :messages [] :input input :output output})))
+       :routes [] :messages [] :rules [] :input input :output output})))
 
 (let collected-prompt (fn [T] [[id String] [type (TypeTag T)]]
   -> (nefor.graph.Node (List T) nefor.contracts.ProviderInput)
@@ -67,4 +67,4 @@
                   [(type-evidence type)]
                   (as DynamicParams {}) (nefor.graph.store-port input)
                   [(nefor.graph.store-port output)])]
-       :routes [] :messages [] :input input :output output})))
+       :routes [] :messages [] :rules [] :input input :output output})))

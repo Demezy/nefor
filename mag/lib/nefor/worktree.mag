@@ -27,6 +27,7 @@
                   [(nefor.graph.store-port output)])]
        :routes (as (List nefor.graph.StoredRoute) [])
        :messages []
+       :rules []
        :input input
        :output output})))
 
@@ -39,5 +40,6 @@
                   [(nefor.graph.store-port output)])]
        :routes (as (List nefor.graph.StoredRoute) [])
        :messages []
+       :rules []
        :input input
        :output output})))
