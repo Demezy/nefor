@@ -775,7 +775,7 @@
              :routes (concat (get change "routes")
                              [(stored-route (get from "output") (get to "input"))])
              :messages (get change "messages") :kills (get change "kills")})))
-(let delta-route (fn [T] [[change Delta] [from (Port T)] [to (Port T)]] -> Delta
+(let delta-route (fn [A B] [[change Delta] [from (Port A)] [to (Port B)]] -> Delta
   (as Delta {:actors (get change "actors")
              :routes (concat (get change "routes") [(stored-route from to)])
              :messages (get change "messages") :kills (get change "kills")})))

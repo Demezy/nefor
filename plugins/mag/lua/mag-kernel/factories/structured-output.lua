@@ -36,6 +36,7 @@ M.declaration = {
     max_corrections = "number",
     conversation_id = "string?",
     turn_id = "string?", submission_ids = "table?", input_cause = "string?",
+    dynamic_item_type = "string?", dynamic_item_descriptor = "table?",
   },
   inputs = { provider_input = "generic-provider.ProviderOut" },
   outputs = { "generic-tool.ToolCalls", RESULT },
@@ -135,7 +136,19 @@ function M.construct(id, params, emit, deps)
       "structured-output '%s': compiler result constructor ids are required",
       tostring(id))
   end
+  if (params.dynamic_item_type == nil) ~= (params.dynamic_item_descriptor == nil) then
+    return nil, string.format(
+      "structured-output '%s': dynamic item type and descriptor must be supplied together",
+      tostring(id))
+  end
+  if params.dynamic_item_type ~= nil and
+      (type(params.dynamic_item_type) ~= "string"
+        or type(params.dynamic_item_descriptor) ~= "table") then
+    return nil, string.format(
+      "structured-output '%s': invalid dynamic item type metadata", tostring(id))
+  end
   local corrections = 0
+  local dynamic_sequence = 0
   local last_output = nefor.json.decode("null")
   local provider_schema = nefor.typed_json.provider_schema(params.schema)
   local provider_params = {}
@@ -147,6 +160,37 @@ function M.construct(id, params, emit, deps)
       result = last_output,
       value = value,
       semantic_type_id = type_id,
+    })
+  end
+  local function finish_dynamic(state, values)
+    dynamic_sequence = dynamic_sequence + 1
+    local collection = id .. "@" .. tostring(dynamic_sequence)
+    local messages = {}
+    local item_descriptor = params.dynamic_item_descriptor
+    for index, item in ipairs(values) do
+      local semantic_value = item
+      local value = item
+      if type(item_descriptor) == "table" and item_descriptor.kind == "union"
+          and type(item) == "table" and item.type ~= nil and item.value ~= nil then
+        value = item.value
+      end
+      messages[#messages + 1] = {
+        kind = RESULT,
+        semantic_type_id = params.output_type,
+        value = value,
+        semantic_value = semantic_value,
+        dynamic = { kind = "item", collection = collection, index = index - 1 },
+      }
+    end
+    messages[#messages + 1] = {
+      kind = RESULT,
+      semantic_type_id = params.output_type,
+      dynamic = { kind = "complete", collection = collection, count = #values },
+    }
+    state:finish_many(messages, {
+      result = last_output,
+      semantic_type_id = params.output_type,
+      dynamic_count = #values,
     })
   end
   local function finish_error(state, reason_type, reason)
@@ -174,6 +218,18 @@ function M.construct(id, params, emit, deps)
       end
       if validation.ok then
         local value = validation.value
+        if params.dynamic_item_type ~= nil then
+          if type(value) ~= "table" then
+            finish_error(state, params.validation_error_type, { violations = {{
+              path = "$", code = "invalid_dynamic_list", expected = "list",
+              actual = type(value), message = "dynamic structured output must be a list",
+            }} })
+            return
+          end
+          state:append({ role = "assistant", content = text })
+          finish_dynamic(state, value)
+          return
+        end
         local selected = params.output_type
         if root_union(params.schema) then
           selected = value.type

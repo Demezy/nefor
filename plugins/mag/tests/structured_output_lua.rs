@@ -513,3 +513,63 @@ fn fresh_activation_resets_attempts_but_tool_continuation_does_not() {
     .exec()
     .unwrap();
 }
+
+#[test]
+fn dynamic_structured_output_emits_indexed_items_and_explicit_completion() {
+    let lua = harness();
+    lua.load(
+        r#"
+        local factory = require("factories.structured-output")
+        local emitted = {}
+        local actor = assert(factory.construct("planner", {
+          provider = "mock-provider",
+          schema = { version = 1, root = { kind = "list", item = {
+            kind = "record", fields = {{ name = "task", schema = { kind = "string" } }}
+          }}},
+          max_corrections = 0,
+          output_type = "dynamic-list-tag",
+          error_type = "agent-error-tag",
+          provider_error_type = "provider-error-tag",
+          validation_error_type = "validation-error-tag",
+          dynamic_item_type = "task-tag",
+          dynamic_item_descriptor = { kind = "record", fields = {
+            { name = "task", type = { kind = "primitive", name = "String" } }
+          }}
+        }, function(message) emitted[#emitted + 1] = message end,
+          { conversation = { id = "planner:conversation", turn_id = "planner:turn",
+            emit = function(_) end } }))
+
+        actor.deliver({ messages = {{ tag = "generic-provider.ProviderOut", message = {
+          messages = {{ role = "user", content = "split the work" }}
+        }}}})
+        actor.deliver({ kind = "reply", result = {
+          text = [[[{"task":"first"},{"task":"second"}]]]
+        }})
+
+        local first = emitted[#emitted - 3]
+        local second = emitted[#emitted - 2]
+        local complete = emitted[#emitted - 1]
+        assert(first.kind == "nefor.agent.Result")
+        assert(first.semantic_type_id == "dynamic-list-tag")
+        assert(first.value.task == "first")
+        assert(first.dynamic.kind == "item" and first.dynamic.index == 0)
+        assert(second.value.task == "second" and second.dynamic.index == 1)
+        assert(complete.dynamic.kind == "complete" and complete.dynamic.count == 2)
+        assert(first.dynamic.collection == second.dynamic.collection)
+        assert(second.dynamic.collection == complete.dynamic.collection)
+        assert(emitted[#emitted].kind == "mag.complete")
+
+        local malformed = factory.construct("malformed", {
+          schema = { version = 1, root = { kind = "list", item = { kind = "string" } } },
+          max_corrections = 0,
+          output_type = "dynamic-list-tag", error_type = "agent-error-tag",
+          provider_error_type = "provider-error-tag",
+          validation_error_type = "validation-error-tag",
+          dynamic_item_type = "item-tag"
+        }, function() end, { conversation = { emit = function() end } })
+        assert(malformed == nil)
+        "#,
+    )
+    .exec()
+    .unwrap();
+}

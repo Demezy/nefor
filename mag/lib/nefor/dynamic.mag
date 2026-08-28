@@ -1,12 +1,24 @@
 (require "core.validated")
+(require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
+
+;; DynamicList is a node-boundary runtime effect, not a MAG List value. Its
+;; empty nominal body is only descriptor data; the kernel accepts the effect solely
+;; through the indexed item/completion protocol used by the factories below.
+(type DynamicList [T] {})
+(type Indexed [T] {:collection String :index Int :value T})
+(type DynamicCount {:collection String :count Int})
 
 (let collector-factory "nefor.factory.collector")
 (let collect-item-factory "nefor.factory.collect-item")
 (let collected-prompt-factory "nefor.factory.collected-prompt")
+(let dynamic-input-factory "nefor.factory.dynamic-input")
+(let dynamic-output-factory "nefor.factory.dynamic-output")
+(let dynamic-index-factory "nefor.factory.dynamic-index")
 (type CollectorParams {:expected_senders (List String)})
 (type DynamicParams {})
+(type DynamicIndexParams {:collection String :index Int})
 (type Collection [T] {:change nefor.graph.Delta
                       :output (nefor.graph.Port (List T))})
 
@@ -68,3 +80,94 @@
                   (as DynamicParams {}) (nefor.graph.store-port input)
                   [(nefor.graph.store-port output)])]
        :routes [] :messages [] :rules [] :input input :output output})))
+
+(let indexed-result
+  (fn [T] [[id String] [entry (Indexed T)]]
+    -> (nefor.graph.Node T (Indexed T))
+    (let input (nefor.graph.port id (type-tag T) "nefor.dynamic.IndexInput"))
+    (let output
+      (nefor.graph.port id (type-tag (Indexed T)) "nefor.dynamic.Indexed"))
+    (nefor.graph.node id "ordinary"
+      [(nefor.graph.actor id dynamic-index-factory
+         [(type-evidence (type-tag T))]
+         (as DynamicIndexParams
+           {:collection (get entry "collection") :index (get entry "index")})
+         (nefor.graph.store-port input)
+         [(nefor.graph.store-port output)])]
+      [] [] input output)))
+
+;; A resident expansion function calls this with the worker node it selected
+;; for one indexed occurrence. The helper starts that Node Unit O, preserves
+;; the occurrence index on its result, and connects it to the traversal's
+;; already-resident output boundary.
+(let expand
+  (fn [T O]
+    [[traversal-id String]
+     [entry (Indexed T)]
+     [worker (nefor.graph.Node Unit O)]]
+    -> Artifact
+    (let indexed
+      (indexed-result
+        (str traversal-id (str ".result." (get entry "index"))) entry))
+    (let output-input
+      (nefor.graph.port (str traversal-id ".output")
+        (type-tag (| (Indexed O) DynamicCount))
+        "nefor.dynamic.Collect"))
+    (let change
+      (nefor.graph.merge-delta
+        (nefor.graph.node-delta worker)
+        (nefor.graph.node-delta indexed)))
+    (let connected
+      (nefor.graph.delta-route
+        (nefor.graph.delta-route change
+          (get worker "output") (get indexed "input"))
+        (get indexed "output") output-input))
+    (nefor.artifact.delta
+      (nefor.graph.delta-message-front connected (get worker "input") nil))))
+
+;; Runtime traversal. `expand-entry` must be a let-bound unary function from
+;; Indexed T to Artifact, normally a one-line call to `expand` around a worker
+;; constructor. Its binding identity remains resident; no closure is serialized
+;; into the graph artifact.
+(let traverse
+  (fn [T O]
+    [[id String]
+     [expand-entry (Fn (Indexed T) Artifact)]
+     [input-type (TypeTag T)]
+     [output-type (TypeTag O)]]
+    -> (nefor.graph.Node (DynamicList T) (DynamicList O))
+    (let input-id (str id ".input"))
+    (let output-id (str id ".output"))
+    (let input
+      (nefor.graph.port input-id (type-tag (DynamicList T))
+        "nefor.dynamic.Input"))
+    (let indexed
+      (nefor.graph.port input-id (type-tag (Indexed T))
+        "nefor.dynamic.Indexed"))
+    (let completed
+      (nefor.graph.port input-id (type-tag DynamicCount)
+        "nefor.dynamic.Complete"))
+    (let collect
+      (nefor.graph.port output-id (type-tag (| (Indexed O) DynamicCount))
+        "nefor.dynamic.Collect"))
+    (let output
+      (nefor.graph.port output-id (type-tag (DynamicList O))
+        "nefor.dynamic.Output"))
+    (let input-actor
+      (nefor.graph.actor input-id dynamic-input-factory
+        [(type-evidence input-type)] (as DynamicParams {})
+        (nefor.graph.store-port input)
+        [(nefor.graph.store-port indexed)
+         (nefor.graph.store-port completed)]))
+    (let output-actor
+      (nefor.graph.actor output-id dynamic-output-factory
+        [(type-evidence output-type)] (as DynamicParams {})
+        (nefor.graph.store-port collect)
+        [(nefor.graph.store-port output)]))
+    (nefor.graph.node-with-rules id "ordinary"
+      [input-actor output-actor]
+      [(nefor.graph.stored-route completed collect)]
+      []
+      [(nefor.graph.rule (str id ".expand") indexed
+         (function-name expand-entry))]
+      input output)))

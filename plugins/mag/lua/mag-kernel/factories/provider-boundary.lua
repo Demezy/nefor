@@ -283,6 +283,13 @@ function M.construct(id, params, emit, options)
       semantic_type_id = message.semantic_type_id,
     }))
   end
+  function state:finish_many(messages, terminal_detail)
+    for _, message in ipairs(messages or {}) do self:emit(message) end
+    self:emit({ kind = kinds.complete })
+    turn_active = false
+    awaiting_continuation = false
+    facts:complete_turn(merge_terminal(terminal_detail or {}))
+  end
   function state:fail(detail)
     interrupt_stream("provider_failed")
     self:emit({ kind = kinds.failed, failure = kinds.Failed, value = { error = detail } })

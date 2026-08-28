@@ -1,0 +1,49 @@
+(require "agents")
+(require "nefor.actors")
+(require "nefor.contracts")
+(require "nefor.dynamic")
+(require "nefor.graph")
+(require "nefor.node")
+
+(type WorkItem {:task String})
+(type WorkResult {:summary String})
+
+;; Resident expansion receives one runtime occurrence. It constructs an
+;; ordinary worker node; `expand` supplies Unit, preserves the occurrence
+;; index, and returns the graph delta the resident rule applies.
+(let expand-work
+  (fn [[entry (nefor.dynamic.Indexed WorkItem)]] -> Artifact
+    (let index (get entry "index"))
+    (let worker
+      (agents.with-tools agents.mock
+        (str "worker." index)
+        (str "Complete this work item: " (get (get entry "value") "task"))
+        [] (type-tag Unit) (type-tag WorkResult) 1))
+    (nefor.dynamic.expand "workers" entry worker)))
+
+(let task
+  (nefor.actors.task-source "task" "Split this request into independent work."))
+(let planner
+  (agents.dynamic-with-tools agents.mock "planner"
+    "Return the ordered work items as JSON." []
+    (type-tag nefor.contracts.Task) (type-tag WorkItem) 1))
+(let workers
+  (nefor.dynamic.traverse "workers" expand-work
+    (type-tag WorkItem)
+    (type-tag (| WorkResult nefor.contracts.AgentError))))
+(let preserve-planner-error
+  (nefor.graph.identity "planner-error"
+    (type-tag nefor.contracts.AgentError)))
+(let run-plan
+  (nefor.node.choose "run-plan" workers preserve-planner-error))
+
+;; The top-level graph is still assembled entirely from ordinary nodes:
+;; source >>> planner >>> typed choice (dynamic work or preserved error).
+(let planned (nefor.node.>>> task planner))
+(let workflow (nefor.node.>>> planned run-plan))
+(let result (nefor.graph.output-for "result" workflow))
+(let topology
+  (nefor.graph.add-edges nefor.graph.empty-graph
+    [(nefor.graph.edge workflow result)]))
+
+(artifact (nefor.graph.lower topology))

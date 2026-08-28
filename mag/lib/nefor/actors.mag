@@ -1,5 +1,6 @@
 (require "nefor.graph")
 (require "nefor.contracts")
+(require "nefor.dynamic")
 
 (let adapter-factory "nefor.factory.adapter")
 (let llm-factory "nefor.factory.llm")
@@ -32,6 +33,19 @@
                               :provider_error_type SemanticTypeId
                               :validation_error_type SemanticTypeId
                               :max_corrections Int})
+(type DynamicStructuredOutputParams {:model String
+                                     :provider String
+                                     :reasoning_effort String
+                                     :system String
+                                     :tools (List String)
+                                     :schema TypeSchema
+                                     :output_type SemanticTypeId
+                                     :error_type SemanticTypeId
+                                     :provider_error_type SemanticTypeId
+                                     :validation_error_type SemanticTypeId
+                                     :max_corrections Int
+                                     :dynamic_item_type SemanticTypeId
+                                     :dynamic_item_descriptor TypeDescriptor})
 (type RunToolParams {:tools (List String)
                      :da-policy nefor.contracts.DaPolicy})
 (type ToolResultParams {})
@@ -57,9 +71,11 @@
 ;; The stable result wire carries the selected constructor identity. Ordinary
 ;; edges route compatible arms directly; `result-arm` creates a typed resident
 ;; subscription on that same actor/wire without inserting a selector actor.
-(let agent (fn [M I O] [[resolve-model (Fn M ResolvedModel)]
+(let agent-with-schema (fn [M I O] [[resolve-model (Fn M ResolvedModel)]
                 [config (AgentConfig M)] [input-type (TypeTag I)]
-                [output-type (TypeTag O)]]
+                [output-type (TypeTag O)] [schema TypeSchema]
+                [dynamic Bool] [dynamic-item-type SemanticTypeId]
+                [dynamic-item-descriptor TypeDescriptor]]
   -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
   (let id (get config "id"))
   (let resolved-model (resolve-model (get config "model")))
@@ -107,8 +123,10 @@
            {:seed "provider-in" :schema (type-schema input-type)})
          (nefor.graph.store-port entry-in)
          [(nefor.graph.store-port entry-out)])
-       (if (= (type-id (type-evidence output-type))
-              (type-id (type-evidence (type-tag nefor.contracts.TextAnswer))))
+       (if (if (not dynamic)
+             (= (type-id (type-evidence output-type))
+                (type-id (type-evidence (type-tag nefor.contracts.TextAnswer))))
+             false)
          (nefor.graph.actor llm-id llm-factory []
            (as LlmParams {:model (get resolved-model "model")
             :provider (get resolved-model "provider")
@@ -125,12 +143,31 @@
             (nefor.graph.store-port result)])
          (nefor.graph.actor llm-id structured-output-factory
            [(type-evidence output-type)]
-           (as StructuredOutputParams {:model (get resolved-model "model")
+           (if dynamic
+             (as DynamicStructuredOutputParams
+               {:model (get resolved-model "model")
+                :provider (get resolved-model "provider")
+                :reasoning_effort (get resolved-model "reasoning-effort")
+                :system (get config "system")
+                :tools (or (get config "tools") (as (List String) []))
+                :schema schema
+                :output_type (type-id (type-evidence output-type))
+                :error_type
+                  (type-id (type-evidence (type-tag nefor.contracts.AgentError)))
+                :provider_error_type
+                  (type-id (type-evidence (type-tag nefor.contracts.ProviderError)))
+                :validation_error_type
+                  (type-id
+                    (type-evidence (type-tag nefor.contracts.OutputValidationError)))
+                :max_corrections (get config "max-corrections")
+                :dynamic_item_type dynamic-item-type
+                :dynamic_item_descriptor dynamic-item-descriptor})
+             (as StructuredOutputParams {:model (get resolved-model "model")
             :provider (get resolved-model "provider")
             :reasoning_effort (get resolved-model "reasoning-effort")
             :system (get config "system")
             :tools (or (get config "tools") (as (List String) []))
-            :schema (type-schema output-type)
+            :schema schema
             :output_type (type-id (type-evidence output-type))
             :error_type
               (type-id (type-evidence (type-tag nefor.contracts.AgentError)))
@@ -139,7 +176,7 @@
             :validation_error_type
               (type-id
                 (type-evidence (type-tag nefor.contracts.OutputValidationError)))
-            :max_corrections (get config "max-corrections")})
+            :max_corrections (get config "max-corrections")}))
            (nefor.graph.store-port llm-in)
            [(nefor.graph.store-port tool-calls)
             (nefor.graph.store-port result)]))
@@ -160,6 +197,24 @@
      :rules []
      :input entry-in
      :output result})))
+
+(let agent (fn [M I O] [[resolve-model (Fn M ResolvedModel)]
+                [config (AgentConfig M)] [input-type (TypeTag I)]
+                [output-type (TypeTag O)]]
+  -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
+  (agent-with-schema resolve-model config input-type output-type
+    (type-schema output-type) false
+    (type-id (type-evidence output-type)) (type-evidence output-type))))
+
+(let dynamic-agent (fn [M I O] [[resolve-model (Fn M ResolvedModel)]
+                        [config (AgentConfig M)] [input-type (TypeTag I)]
+                        [item-type (TypeTag O)]]
+  -> (nefor.graph.Node I
+       (| (nefor.dynamic.DynamicList O) nefor.contracts.AgentError))
+  (agent-with-schema resolve-model config input-type
+    (type-tag (nefor.dynamic.DynamicList O))
+    (type-schema (type-tag (List O))) true
+    (type-id (type-evidence item-type)) (type-evidence item-type))))
 
 ;; Base toolset shorthands for common delegated-agent capability profiles.
 ;; Explicit custom :tools lists remain the right shape for narrower

@@ -125,6 +125,17 @@ local EVT_EMISSION_IGNORED = "mag.emission_ignored"
 local EVT_APPROVAL_REQUEST = kinds.approval_request
 local EVT_APPROVAL_CANCEL = kinds.approval_cancel
 
+local DYNAMIC_LIST = "nefor.dynamic.DynamicList"
+
+local function dynamic_item_type(descriptor)
+  if type(descriptor) == "table" and descriptor.kind == "named"
+      and descriptor.name == DYNAMIC_LIST and type(descriptor.arguments) == "table"
+      and #descriptor.arguments == 1 then
+    return descriptor.arguments[1]
+  end
+  return nil
+end
+
 local function noop() end
 
 function M.new(opts)
@@ -178,6 +189,7 @@ function M.new(opts)
     busy = {}, -- id -> busy-since stamp while an activation window is open
     signaling = {}, -- id -> true while a signal handler (kill/drain) is running
     generations = {}, -- id -> emitter generation currently authorized to speak
+    dynamic_streams = {}, -- actor/wire -> ordered DynamicList protocol state
     published_arrivals = {}, -- arrival id -> true once its payload became a bus fact
     result_boundary = nil, -- compiled StoredPort; structural, never a factory
     arrival_seq = 0,
@@ -334,7 +346,11 @@ function M:on_emit(id, message, generation)
     observed.constructor_id = arrival.constructor_id
     observed.arrival_id = arrival.arrival_id
     local boundary = self.result_boundary
-    if boundary and boundary.actor == id and boundary.wire == kind then
+    local dynamic_protocol = type(arrival.payload) == "table" and arrival.payload.dynamic
+    local dynamic_complete = type(dynamic_protocol) == "table"
+      and dynamic_protocol.kind == "complete"
+    if boundary and boundary.actor == id and boundary.wire == kind
+        and (dynamic_item_type(arrival.type) == nil or dynamic_complete) then
       local host = nefor and nefor.semantic_type
       if type(boundary.type_id) == "string" and type(boundary.type) == "table" and
           (type(host) ~= "table" or type(host.accepts) ~= "function"
@@ -422,25 +438,84 @@ function M:factory_arrival(id, wire, payload)
     actual_type_id = selected
     constructor_id = selected
   end
+  local dynamic_item = dynamic_item_type(actual_type)
   if actor.semantic_strict then
     local host = nefor and nefor.semantic_type
-    if payload.value == nil or type(host) ~= "table"
+    if dynamic_item ~= nil then
+      local protocol = payload.dynamic
+      if type(protocol) ~= "table" or type(protocol.collection) ~= "string"
+          or (protocol.kind ~= "item" and protocol.kind ~= "complete") then
+        return nil, string.format(
+          "actor '%s' emitted an invalid DynamicList protocol event on '%s'",
+          tostring(id), tostring(wire))
+      end
+      if protocol.kind == "item" then
+        if type(protocol.index) ~= "number" or protocol.index < 0
+            or protocol.index % 1 ~= 0 or payload.value == nil
+            or type(host) ~= "table" or type(host.validate_value) ~= "function" then
+          return nil, string.format(
+            "actor '%s' emitted an invalid DynamicList item on '%s'",
+            tostring(id), tostring(wire))
+        end
+        local semantic_value = payload.semantic_value
+        if semantic_value == nil then semantic_value = payload.value end
+        local validation = host.validate_value(dynamic_item, semantic_value)
+        if not validation.ok then
+          return nil, string.format(
+            "actor '%s' emitted a malformed DynamicList item on '%s'",
+            tostring(id), tostring(wire))
+        end
+      end
+      local stream_key = tostring(id) .. "\0" .. tostring(wire)
+      local stream = self.dynamic_streams[stream_key]
+      if stream == nil then
+        stream = { collection = protocol.collection, next_index = 0 }
+        self.dynamic_streams[stream_key] = stream
+      end
+      if protocol.collection ~= stream.collection then
+        return nil, string.format(
+          "actor '%s' changed DynamicList collection on '%s'",
+          tostring(id), tostring(wire))
+      end
+      if stream.completed then
+        return nil, string.format(
+          "actor '%s' emitted after DynamicList completion on '%s'",
+          tostring(id), tostring(wire))
+      end
+      if protocol.kind == "item" then
+        if protocol.index ~= stream.next_index then
+          return nil, string.format(
+            "actor '%s' emitted a noncontiguous DynamicList item on '%s'",
+            tostring(id), tostring(wire))
+        end
+        stream.next_index = stream.next_index + 1
+      elseif type(protocol.count) ~= "number" or protocol.count < 0
+          or protocol.count % 1 ~= 0 or protocol.count ~= stream.next_index then
+        return nil, string.format(
+          "actor '%s' emitted an invalid DynamicList completion on '%s'",
+          tostring(id), tostring(wire))
+      else
+        stream.completed = true
+      end
+    elseif payload.value == nil or type(host) ~= "table"
         or type(host.validate_value) ~= "function" then
       return nil, string.format(
         "actor '%s' emitted no canonical semantic value on '%s'",
         tostring(id), tostring(wire))
     end
-    local semantic_value = payload.semantic_value
-    if semantic_value == nil then semantic_value = payload.value end
-    local validation = host.validate_value(actual_type, semantic_value)
-    if not validation.ok then
-      local violation = (validation.violations or {})[1]
-      local detail = violation and
-        (tostring(violation.path) .. ": " .. tostring(violation.message))
-        or ((validation.error or {}).message or "semantic value does not conform")
-      return nil, string.format(
-        "actor '%s' emitted malformed semantic value on '%s': %s",
-        tostring(id), tostring(wire), tostring(detail))
+    if dynamic_item == nil then
+      local semantic_value = payload.semantic_value
+      if semantic_value == nil then semantic_value = payload.value end
+      local validation = host.validate_value(actual_type, semantic_value)
+      if not validation.ok then
+        local violation = (validation.violations or {})[1]
+        local detail = violation and
+          (tostring(violation.path) .. ": " .. tostring(violation.message))
+          or ((validation.error or {}).message or "semantic value does not conform")
+        return nil, string.format(
+          "actor '%s' emitted malformed semantic value on '%s': %s",
+          tostring(id), tostring(wire), tostring(detail))
+      end
     end
   end
   local routed_payload = payload
@@ -452,7 +527,7 @@ function M:factory_arrival(id, wire, payload)
     -- Provider turns and tool-call handles carry correlation data which is not
     -- part of their semantic value but is required by the next runtime actor.
     -- Keep those explicit channels while dropping raw result metadata.
-    for _, field in ipairs({ "messages", "calls" }) do
+    for _, field in ipairs({ "messages", "calls", "dynamic" }) do
       if payload[field] ~= nil then routed_payload[field] = payload[field] end
     end
     if payload.semantic_value ~= nil then
