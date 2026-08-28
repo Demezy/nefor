@@ -3041,6 +3041,15 @@ fn compatible_in(
             }
             _ => Err(format!("expected {expected}, got {actual}")),
         },
+        MagType::Product(expected_items) => match actual {
+            MagType::Product(actual_items) if actual_items.len() == expected_items.len() => {
+                for (actual_item, expected_item) in actual_items.iter().zip(expected_items) {
+                    compatible_in(env, actual_item, expected_item, subst, bindable)?;
+                }
+                Ok(())
+            }
+            _ => Err(format!("expected {expected}, got {actual}")),
+        },
         MagType::Function(ep, er) => match actual {
             MagType::Function(ap, ar) if ap.len() == ep.len() => {
                 for (a, e) in ap.iter().zip(ep) {
@@ -3172,5 +3181,18 @@ mod builtin_signature_tests {
         ] {
             assert!(collides_with_builtin(&env, name, &candidate), "{name}");
         }
+    }
+
+    #[test]
+    fn generic_product_components_are_inferred_positionally() {
+        let env = Env::new_with_stdlib();
+        let actual = MagType::Product(vec![MagType::String, MagType::String]);
+        let expected = MagType::Product(vec![MagType::Var("A".into()), MagType::Var("B".into())]);
+        let bindable = HashSet::from(["A".into(), "B".into()]);
+        let mut substitution = HashMap::new();
+        compatible_in(&env, &actual, &expected, &mut substitution, Some(&bindable))
+            .expect("a product should infer each generic occurrence");
+        assert_eq!(substitution.get("A"), Some(&MagType::String));
+        assert_eq!(substitution.get("B"), Some(&MagType::String));
     }
 }
