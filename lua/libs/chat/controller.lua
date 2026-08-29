@@ -1837,16 +1837,7 @@ local function route_keys_and_popups(msg, state)
   if state.popup and state.popup.variant == "model_picker"
      and kind:sub(1, 4) == "key." then
     local p = state.popup
-    local q_lc = (p.query or ""):lower()
-    local flat_rows = {}
-    for _, prov in ipairs(p.providers or {}) do
-      for _, m in ipairs(prov.models or {}) do
-        local s = tostring(m):lower()
-        if q_lc == "" or s:find(q_lc, 1, true) ~= nil then
-          flat_rows[#flat_rows + 1] = { provider = prov.name, model = m }
-        end
-      end
-    end
+    local flat_rows = popups.model_picker_rows(p)
     local result = W.picker.handle({
       state   = { cursor = p.cursor or 1, query = p.query or "" },
       entries = function() return flat_rows end,
@@ -1858,8 +1849,16 @@ local function route_keys_and_popups(msg, state)
           shallow_merge(state, { popup = NIL_SENTINEL }),
           result.selected.provider, result.selected.model)
       end
+      local next_popup = shallow_merge(p, result.state)
+      if result.state.cursor ~= nil then
+        local next_rows = popups.model_picker_rows(next_popup)
+        local row = next_rows[result.state.cursor]
+        if row ~= nil then
+          tui.scroll_reveal("popup_model_picker", row.visual_start, row.visual_end)
+        end
+      end
       return shallow_merge(state, {
-        popup = shallow_merge(p, result.state),
+        popup = next_popup,
       }), {}
     end
   end

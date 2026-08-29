@@ -166,6 +166,49 @@ function M.model_picker_filter(models, query)
   return out
 end
 
+-- Build the model picker's selectable row model together with each row's
+-- painted range inside the popup scrollable. Padding contributes the first
+-- row, followed by the fixed search and divider rows; provider headers,
+-- placeholders, and section gaps then advance the same cursor the view uses.
+-- Keyboard navigation consumes these ranges so it never has to reconstruct
+-- render geometry from a flat model index.
+function M.model_picker_rows(popup)
+  local p = popup or {}
+  local providers = p.providers or {}
+  local query_lc = (p.query or ""):lower()
+  local rows = {}
+  local sections = {}
+  local visual_y = 3
+
+  local function matches_query(model_name)
+    if query_lc == "" then return true end
+    return tostring(model_name):lower():find(query_lc, 1, true) ~= nil
+  end
+
+  for pi, prov in ipairs(providers) do
+    if pi > 1 then visual_y = visual_y + 1 end
+    visual_y = visual_y + 1 -- provider header
+
+    local filtered = {}
+    for _, model in ipairs(prov.models or {}) do
+      if matches_query(model) then
+        filtered[#filtered + 1] = model
+        rows[#rows + 1] = {
+          provider = prov.name,
+          model = model,
+          visual_start = visual_y,
+          visual_end = visual_y + 1,
+        }
+        visual_y = visual_y + 1
+      end
+    end
+    sections[pi] = filtered
+    if #filtered == 0 then visual_y = visual_y + 1 end -- placeholder
+  end
+
+  return rows, sections
+end
+
 local function awaiting_count(awaiting)
   if awaiting == nil then return 0 end
   local n = 0
@@ -242,26 +285,7 @@ function M.model_picker(state)
   local p = state.popup
   local providers = p.providers or {}
   local query_lc = (p.query or ""):lower()
-
-  local function matches_query(model_name)
-    if query_lc == "" then return true end
-    return tostring(model_name):lower():find(query_lc, 1, true) ~= nil
-  end
-
-  -- First pass: build the flat list of selectable rows so we can
-  -- clamp the cursor and map cursor→provider/model on Enter.
-  local flat_rows = {}
-  local section_models = {}  -- per-provider filtered model lists, parallel to providers[]
-  for pi, prov in ipairs(providers) do
-    local filtered = {}
-    for _, m in ipairs(prov.models or {}) do
-      if matches_query(m) then
-        filtered[#filtered + 1] = m
-        flat_rows[#flat_rows + 1] = { provider = prov.name, model = m }
-      end
-    end
-    section_models[pi] = filtered
-  end
+  local flat_rows, section_models = M.model_picker_rows(p)
 
   local cursor = p.cursor or 1
   if cursor < 1 then cursor = 1 end

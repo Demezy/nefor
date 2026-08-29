@@ -6615,6 +6615,65 @@ fn model_picker_typing_filters_query() {
     );
 }
 
+#[test]
+fn model_picker_arrow_navigation_keeps_cursor_visible() {
+    let mut engine = Engine::new(80, 18).expect("engine");
+    load_chat_scenario(&mut engine);
+    let _ = render_str(&mut engine);
+
+    dispatch_event(
+        &mut engine,
+        json!({ "kind": "chat.auth.status", "provider": "ollama", "status": "connected" }),
+    );
+    for ch in "/model".chars() {
+        engine.handle_key(key(&ch.to_string())).expect("type");
+    }
+    engine.handle_key(key("enter")).expect("enter");
+    let models: Vec<String> = (1..=20).map(|i| format!("model-{i:02}")).collect();
+    dispatch_event(
+        &mut engine,
+        json!({
+            "kind": "chat.models.listed",
+            "provider": "ollama",
+            "models": models,
+        }),
+    );
+    let _ = render_str(&mut engine);
+
+    for _ in 0..12 {
+        engine.handle_key(key("down")).expect("down");
+        let _ = render_str(&mut engine);
+    }
+
+    let down_offset: u16 = engine
+        .lua()
+        .load(r#"return tui.scroll_position("popup_model_picker").offset"#)
+        .eval()
+        .expect("model picker scroll position");
+    let snapshot = render_snapshot(&mut engine);
+    assert!(
+        down_offset > 0 && snapshot.contains("model-13"),
+        "down-arrow navigation should scroll the selected model into view: \
+         offset={down_offset}, snapshot={snapshot:?}"
+    );
+
+    for _ in 0..12 {
+        engine.handle_key(key("up")).expect("up");
+        let _ = render_str(&mut engine);
+    }
+    let popup_offset: u16 = engine
+        .lua()
+        .load(r#"return tui.scroll_position("popup_model_picker").offset"#)
+        .eval()
+        .expect("model picker scroll position");
+    let snapshot = render_snapshot(&mut engine);
+    assert!(
+        popup_offset < down_offset && snapshot.contains("model-01"),
+        "up-arrow navigation should scroll the selected model back into view: \
+         offset={popup_offset}, snapshot={snapshot:?}"
+    );
+}
+
 // ============================================================
 // /resume slash + session picker
 // ============================================================
