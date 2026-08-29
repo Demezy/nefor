@@ -1,6 +1,7 @@
 ;; Shipped typed-agent example: the terminal value is either TaskDescription
 ;; or AgentError after the configured correction budget is exhausted.
 (require "agents")
+(require "nefor.agents")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
@@ -12,7 +13,7 @@
 (let start (nefor.graph.source "typed-task-input"
               (type-tag nefor.contracts.Task)
               (as nefor.contracts.Task {:prompt "Describe the build task"})))
-(let worker (agents.with-tools agents.mock "typed-task"
+(let worker (nefor.agents.with-tools agents.resolve-model agents.mock "typed-task"
         "Describe the requested task."
         (as (List String) [])
         (type-tag nefor.contracts.Task)

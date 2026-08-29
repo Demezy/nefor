@@ -114,13 +114,14 @@ There are no compiler forms named `agent`, `bash`, `graph`, `subgraph`, or
 
 ```lisp
 (require "agents")
+(require "nefor.agents")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
 (require "nefor.node")
 
 (let start (nefor.actors.task-source "task" "<initial task text>"))
-(let worker (agents.with-tools agents.standard "worker"
+(let worker (nefor.agents.with-tools agents.resolve-model agents.standard "worker"
         "Answer the task."
         ["read_file" "mag-eval"]
         (type-tag nefor.contracts.Task)
@@ -138,7 +139,8 @@ There are no compiler forms named `agent`, `bash`, `graph`, `subgraph`, or
 `nefor.graph.Node<I, O>` values. Compose them first with `nefor.node.>>>`, `*>`,
 `fanout`, `parallel`, `choose`, and `sequence`; an arbitrarily large composite
 still has one typed node boundary. `List (Node I O)` and `sequence` describe a
-fixed compile-time constellation. When runtime data determines cardinality,
+fixed compile-time constellation and preserve each node's complete output type,
+including `AgentError` alternatives. When runtime data determines cardinality,
 use the distinct `DynamicList` boundary with `nefor.dynamic.traverse`; do not
 manufacture port collectors or runtime-sized MAG lists.
 

@@ -11,6 +11,7 @@ Load modules only with literal requires:
 ```lisp
 (require "nefor.actors")
 (require "agents")
+(require "nefor.agents")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
@@ -76,7 +77,7 @@ used for different semantic types but not twice for the same type.
 (let start (nefor.graph.source "task"
         (type-tag nefor.contracts.Task)
         (as nefor.contracts.Task {:prompt "Inspect the repository."})))
-(let worker (agents.with-tools agents.standard "worker"
+(let worker (nefor.agents.with-tools agents.resolve-model agents.standard "worker"
         "Inspect the repository and report the result."
         nefor.actors.read-only-tools
         (type-tag nefor.contracts.Task)

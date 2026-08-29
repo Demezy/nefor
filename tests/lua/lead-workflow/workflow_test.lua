@@ -201,12 +201,13 @@ end
 -- the lead writes to disk.
 local READ_ONLY_MAG = [=[
 (require "agents")
+(require "nefor.agents")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
 
 (let start (nefor.actors.task-source "worker-task" "Answer the task."))
-(let worker (agents.with-tools agents.standard "worker" "Answer the task."
+(let worker (nefor.agents.with-tools agents.resolve-model agents.standard "worker" "Answer the task."
   ["read_file"]
   (type-tag nefor.contracts.Task)
   (type-tag nefor.contracts.TextAnswer)
@@ -221,12 +222,13 @@ local READ_ONLY_MAG = [=[
 
 local WRITER_MAG = [=[
 (require "agents")
+(require "nefor.agents")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
 
 (let start (nefor.actors.task-source "build-task" "Implement feature X."))
-(let build (agents.with-tools agents.fast "build" "Implement feature X."
+(let build (nefor.agents.with-tools agents.resolve-model agents.fast "build" "Implement feature X."
   ["read_file" "write_file"]
   (type-tag nefor.contracts.Task)
   (type-tag nefor.contracts.TextAnswer)

@@ -1,5 +1,6 @@
 (require "agents")
 (require "nefor.actors")
+(require "nefor.agents")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.dynamic")
@@ -16,7 +17,7 @@
   (fn [[entry (nefor.dynamic.Indexed Task)]] -> Artifact
     (let task (get entry "value"))
     (let worker
-      (agents.with-tools agents.mock
+      (nefor.agents.with-tools agents.resolve-model agents.mock
         (str "expand.worker." (get entry "index"))
         (str "Complete this task: " (get task "description"))
         [] (type-tag Unit) (type-tag WorkerResult) 2))
@@ -25,7 +26,7 @@
 (let start
   (nefor.actors.task-source "task" "Plan this request"))
 (let planner
-  (agents.dynamic-with-tools agents.mock "planner"
+  (nefor.agents.dynamic-with-tools agents.resolve-model agents.mock "planner"
     "Return the ordered task plan." []
     (type-tag nefor.contracts.Task) (type-tag Task) 2))
 (let workers
@@ -45,7 +46,7 @@
   (nefor.dynamic.context "summary-input"
     (type-tag (| WorkerResult nefor.contracts.AgentError))))
 (let summarizer
-  (agents.with-tools agents.mock "summarizer"
+  (nefor.agents.with-tools agents.resolve-model agents.mock "summarizer"
     "Summarize the ordered worker results." []
     (type-tag nefor.contracts.ProviderInput) (type-tag Summary) 2))
 (let summarize

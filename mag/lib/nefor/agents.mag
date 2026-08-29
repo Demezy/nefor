@@ -1,0 +1,48 @@
+(require "nefor.actors")
+(require "nefor.contracts")
+(require "nefor.dynamic")
+(require "nefor.graph")
+
+;; Reusable agent constructors stay generic over the configuration-owned model
+;; vocabulary. A consumer supplies only its typed resolver, selected model, and
+;; tools; Nefor owns the graph construction once.
+(let with-tools
+  (fn [M I O] [[resolve-model (Fn M nefor.actors.ResolvedModel)]
+                [model M]
+                [id String]
+                [system String]
+                [tools (List String)]
+                [input-type (TypeTag I)]
+                [output-type (TypeTag O)]
+                [max-corrections Int]]
+    -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
+    (nefor.actors.agent resolve-model
+      (as (nefor.actors.AgentConfig M)
+        {:id id
+         :model model
+         :system system
+         :tools tools
+         :da-policy (nefor.contracts.no-da-policy)
+         :max-corrections max-corrections})
+      input-type output-type)))
+
+(let dynamic-with-tools
+  (fn [M I O] [[resolve-model (Fn M nefor.actors.ResolvedModel)]
+                [model M]
+                [id String]
+                [system String]
+                [tools (List String)]
+                [input-type (TypeTag I)]
+                [item-type (TypeTag O)]
+                [max-corrections Int]]
+    -> (nefor.graph.Node I
+         (| (nefor.dynamic.DynamicList O) nefor.contracts.AgentError))
+    (nefor.actors.dynamic-agent resolve-model
+      (as (nefor.actors.AgentConfig M)
+        {:id id
+         :model model
+         :system system
+         :tools tools
+         :da-policy (nefor.contracts.no-da-policy)
+         :max-corrections max-corrections})
+      input-type item-type)))

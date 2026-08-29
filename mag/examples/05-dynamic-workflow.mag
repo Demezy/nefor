@@ -1,5 +1,6 @@
 (require "agents")
 (require "nefor.actors")
+(require "nefor.agents")
 (require "nefor.contracts")
 (require "nefor.dynamic")
 (require "nefor.graph")
@@ -16,7 +17,7 @@
   (fn [[entry (nefor.dynamic.Indexed WorkItem)]] -> Artifact
     (let index (get entry "index"))
     (let worker
-      (agents.with-tools agents.mock
+      (nefor.agents.with-tools agents.resolve-model agents.mock
         (str "worker." index)
         (str "Complete this work item: " (get (get entry "value") "task"))
         [] (type-tag Unit) (type-tag WorkResult) 1))
@@ -25,7 +26,7 @@
 (let task
   (nefor.actors.task-source "task" "Split this request into independent work."))
 (let planner
-  (agents.dynamic-with-tools agents.mock "planner"
+  (nefor.agents.dynamic-with-tools agents.resolve-model agents.mock "planner"
     "Return the ordered work items as JSON." []
     (type-tag nefor.contracts.Task) (type-tag WorkItem) 1))
 (let workers
@@ -41,7 +42,7 @@
   (nefor.dynamic.context "result-context"
     (type-tag (| WorkResult nefor.contracts.AgentError))))
 (let integrator
-  (agents.with-tools agents.mock "integrator"
+  (nefor.agents.with-tools agents.resolve-model agents.mock "integrator"
     "Integrate all ordered worker results into one summary." []
     (type-tag nefor.contracts.ProviderInput) (type-tag FinalSummary) 1))
 (let integrate

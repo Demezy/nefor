@@ -3,6 +3,7 @@
 ;; config-owned agents module; the runtime composes ambient system context.
 
 (require "agents")
+(require "nefor.agents")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
@@ -10,7 +11,7 @@
 (let start (nefor.graph.source "lead-task"
              (type-tag nefor.contracts.Task)
              (as nefor.contracts.Task {:prompt "<initial task text>"})))
-(let lead (agents.with-tools agents.standard "lead" ""
+(let lead (nefor.agents.with-tools agents.resolve-model agents.standard "lead" ""
          ["read_file"
                  "read_image"
                  "instructions"

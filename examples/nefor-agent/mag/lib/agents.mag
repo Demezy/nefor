@@ -1,6 +1,4 @@
 (require "nefor.actors")
-(require "nefor.contracts")
-(require "nefor.graph")
 
 ;; This example configuration owns the finite model vocabulary. Nefor only
 ;; asks for a typed resolver and receives concrete execution parameters.
@@ -21,31 +19,3 @@
       (as nefor.actors.ResolvedModel
         {:provider "mock-provider" :model "mock-model"
          :reasoning-effort "medium"})])))
-
-(let with-tools (fn [I O] [[model Model] [id String] [system String]
-                            [tools (List String)]
-                            [input-type (TypeTag I)] [output-type (TypeTag O)]
-                            [max-corrections Int]]
-  -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
-  (nefor.actors.agent resolve-model
-    (as (nefor.actors.AgentConfig Model)
-      {:id id :model model :system system :tools tools
-       :da-policy (nefor.contracts.no-da-policy)
-       :max-corrections max-corrections})
-    input-type output-type)))
-
-;; A structured-output agent can declare runtime multiplicity without turning
-;; it into a compile-time MAG List. Downstream traversal stays node-oriented.
-(let dynamic-with-tools
-  (fn [I O] [[model Model] [id String] [system String]
-             [tools (List String)]
-             [input-type (TypeTag I)] [item-type (TypeTag O)]
-             [max-corrections Int]]
-    -> (nefor.graph.Node I
-         (| (nefor.dynamic.DynamicList O) nefor.contracts.AgentError))
-    (nefor.actors.dynamic-agent resolve-model
-      (as (nefor.actors.AgentConfig Model)
-        {:id id :model model :system system :tools tools
-         :da-policy (nefor.contracts.no-da-policy)
-         :max-corrections max-corrections})
-      input-type item-type)))
