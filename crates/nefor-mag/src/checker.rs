@@ -1311,6 +1311,10 @@ fn compile_block_in(
         .iter()
         .map(|(name, initializer)| (*name, *initializer, env.allocate_binding_id(name, None)))
         .collect::<Vec<_>>();
+    let declared_names = allocated
+        .iter()
+        .map(|(name, _, _)| *name)
+        .collect::<HashSet<_>>();
 
     let mut current = CheckedScope::new();
     let scoped_type_vars = visible_type_variables(outer);
@@ -1355,7 +1359,10 @@ fn compile_block_in(
                     )?;
                     progressed = true;
                 }
-                Err(MagError::Unresolved(_)) => next.push((name, initializer, id)),
+                Err(MagError::Unresolved(symbol)) if declared_names.contains(symbol.as_str()) => {
+                    next.push((name, initializer, id));
+                }
+                Err(error @ MagError::Unresolved(_)) => return Err(error),
                 Err(error) => return Err(error),
             }
         }

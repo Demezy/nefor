@@ -156,6 +156,24 @@ fn direct_let_schedules_forward_values_and_rejects_strict_cycles() {
 }
 
 #[test]
+fn strict_binding_reports_unknown_symbol_instead_of_recursive_peers() {
+    let root = workspace("direct-let-unknown");
+    let error = compile(
+        r#"
+          (let answer missing)
+          (let rendered (str "answer: " answer))
+          (artifact rendered)
+        "#,
+        &root,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("unresolved symbol: missing"), "{error}");
+    assert!(!error.contains("recursive strict bindings"), "{error}");
+}
+
+#[test]
 fn recursive_activations_have_distinct_local_binding_slots() {
     let root = workspace("recursive-local-slots");
     let artifact = compile(
