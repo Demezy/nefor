@@ -18,20 +18,29 @@ fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let baseline = value_after(&args, "--baseline");
     let output_path = value_after(&args, "--output");
+    let comparison_path = value_after(&args, "--comparison-output");
+    let gate = args.iter().any(|arg| arg == "--gate");
     for arg in &args {
-        if !matches!(arg.as_str(), "--bench" | "--baseline" | "--output")
-            && !args.windows(2).any(|pair| {
-                pair[1] == *arg && matches!(pair[0].as_str(), "--baseline" | "--output")
-            })
-        {
+        if !matches!(
+            arg.as_str(),
+            "--bench" | "--baseline" | "--output" | "--comparison-output" | "--gate"
+        ) && !args.windows(2).any(|pair| {
+            pair[1] == *arg
+                && matches!(
+                    pair[0].as_str(),
+                    "--baseline" | "--output" | "--comparison-output"
+                )
+        }) {
             panic!("unknown benchmark argument: {arg}");
         }
     }
 
     let scratch = fresh_scratch(&root);
     let contracts = load_runtime_contracts(&root.join("plugins/mag/lua/mag-kernel/init.lua"));
-    let timed = timed_cases(&root, &scratch, &contracts);
-    let oracle_fixtures = oracle_cases(&root, &scratch, &contracts);
+    let mut timed = timed_cases(&root, &scratch, &contracts);
+    let mut oracle_fixtures = oracle_cases(&root, &scratch, &contracts);
+    refresh_fixture_fingerprints(&mut timed);
+    refresh_fixture_fingerprints(&mut oracle_fixtures);
     let definition_hash = definition_hash(&timed, &oracle_fixtures);
     let cases = timed
         .iter()
@@ -46,7 +55,7 @@ fn main() {
         cases,
         oracles,
     };
-    if let Some(path) = baseline {
+    let comparison = baseline.map(|path| {
         let baseline_path = if Path::new(&path).is_absolute() {
             PathBuf::from(&path)
         } else {
@@ -57,21 +66,45 @@ fn main() {
                 panic!("read baseline {}: {error}", baseline_path.display())
             }))
             .unwrap_or_else(|error| panic!("parse baseline {path}: {error}"));
-        compare(&baseline, &report)
-            .unwrap_or_else(|error| panic!("baseline comparison failed: {error}"));
+        compare_reports(&baseline, &report, gate)
+    });
+    if gate && comparison.is_none() {
+        panic!("--gate requires --baseline");
+    }
+    if comparison.is_some() && comparison_path.is_none() {
+        panic!("comparison requires --comparison-output so the verdict is persistent");
+    }
+    if let (Some(comparison), Some(path)) = (&comparison, comparison_path) {
+        write_json(&root, &path, comparison, "comparison artifact");
     }
     let encoded = serde_json::to_string_pretty(&report).expect("serialize report");
     if let Some(path) = output_path {
-        let path = root.join(path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create report directory");
-        }
-        fs::write(&path, format!("{encoded}\n")).expect("write report");
-        eprintln!("wrote {}", path.display());
+        write_json(&root, &path, &report, "benchmark report");
     } else {
         println!("{encoded}");
     }
     fs::remove_dir_all(&scratch).ok();
+    if gate
+        && comparison
+            .as_ref()
+            .is_some_and(|artifact| !artifact.overall.passed)
+    {
+        std::process::exit(2);
+    }
+}
+
+fn write_json(root: &Path, path: &str, value: &impl serde::Serialize, label: &str) {
+    let path = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
+    } else {
+        root.join(path)
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create artifact directory");
+    }
+    let encoded = serde_json::to_string_pretty(value).expect("serialize artifact");
+    fs::write(&path, format!("{encoded}\n")).expect("write artifact");
+    eprintln!("wrote {label} {}", path.display());
 }
 
 fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
@@ -175,10 +208,8 @@ fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
         entry: "agentic-loop/lead-turn.mag".into(),
         module_roots: nefor_roots,
         inputs: nefor_inputs,
-        source_fingerprint: fingerprint(
-            &fs::read(root.join("examples/nefor-agent/agentic-loop/lead-turn.mag"))
-                .expect("read lead turn"),
-        ),
+        fixture_fingerprint: String::new(),
+        fixture_files: vec![PathBuf::from("agentic-loop/lead-turn.mag")],
         expected_error: None,
         policy: "timed".into(),
         expected_artifact: None,
@@ -238,7 +269,7 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
     ));
     out.push(fixture(scratch, "untaken-branch-does-not-demand-local", "oracle", "oracle", None, "(let run (fn [] -> Artifact (if false (artifact (remove-at [1] 9)) (artifact {:ok true}))))\n(run)", core.clone(), json!({}), None, "demanded-runtime", Some(json!({"ok": true})), vec![]));
 
-    let unused_module = fixture(
+    let mut unused_module = fixture(
         scratch,
         "unused-required-module-static-error",
         "oracle",
@@ -252,12 +283,12 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
         None,
         vec![],
     );
-    write_module(&unused_module, "broken.mag", "(let broken missing)");
+    write_module(&mut unused_module, "broken.mag", "(let broken missing)");
     out.push(unused_module);
 
-    out.push(fixture(scratch, "artifact-dead-named-resident-function-remains-callable", "oracle", "oracle", None, "(let hidden (fn [[value Int]] -> Artifact (artifact {:value value})))\n(artifact {:loaded true})", core.clone(), json!({}), None, "resident", Some(json!({"loaded": true})), vec![probe("hidden", json!(7))]));
-    out.push(fixture(scratch, "resident-function-reads-captured-top-level-peer", "oracle", "oracle", None, "(let peer 41)\n(let read-peer (fn [[value Int]] -> Artifact (artifact {:peer peer :value value})))\n(artifact {:loaded true})", core.clone(), json!({}), None, "resident", Some(json!({"loaded": true})), vec![probe("read-peer", json!(1))]));
-    let module_export = fixture(
+    out.push(fixture(scratch, "artifact-dead-named-resident-function-remains-callable", "oracle", "oracle", None, "(let hidden (fn [[value Int]] -> Artifact (artifact {:value value})))\n(artifact {:loaded true})", core.clone(), json!({}), None, "resident", Some(json!({"loaded": true})), vec![probe_success("hidden", json!(7), json!({"value": 7})), probe_error("hidden", json!("wrong"), "type")]));
+    out.push(fixture(scratch, "resident-function-reads-captured-top-level-peer", "oracle", "oracle", None, "(let peer 41)\n(let read-peer (fn [[value Int]] -> Artifact (artifact {:peer peer :value value})))\n(artifact {:loaded true})", core.clone(), json!({}), None, "resident", Some(json!({"loaded": true})), vec![probe_success("read-peer", json!(1), json!({"peer": 41, "value": 1}))]));
+    let mut module_export = fixture(
         scratch,
         "required-module-export-remains-available",
         "oracle",
@@ -269,16 +300,100 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
         None,
         "module",
         Some(json!({"loaded": true})),
-        vec![probe("library.run", json!(3))],
+        vec![probe_success("library.run", json!(3), json!({"module": 3}))],
     );
     write_module(
-        &module_export,
+        &mut module_export,
         "library.mag",
         "(let run (fn [[value Int]] -> Artifact (artifact {:module value})))",
     );
     out.push(module_export);
 
-    out.push(fixture(scratch, "evidence-artifact-identity", "oracle", "oracle", None, "(type Choice {:label String})\n(type Selected (| Choice Int))\n(let value (as Selected (as Choice {:label \"yes\"})))\n(artifact {:descriptor (type-evidence (type-tag Choice)) :schema (type-schema (type-tag Choice)) :semantic_id (type-id (type-evidence (type-tag Choice))) :selected value})", core, json!({}), None, "static", None, vec![]));
+    let mut files = fixture(
+        scratch,
+        "read-and-read-json",
+        "oracle",
+        "oracle",
+        None,
+        "(let text (read \"message.txt\"))\n(let data (read-json \"manifest.json\"))\n(artifact {:text text :items (get data \"items\")})",
+        core.clone(),
+        json!({}),
+        None,
+        "file-input",
+        Some(json!({"text":"hello\n","items":["second","first"]})),
+        vec![],
+    );
+    write_fixture_file(&mut files, "message.txt", b"hello\n");
+    write_fixture_file(
+        &mut files,
+        "manifest.json",
+        br#"{"items":["second","first"]}"#,
+    );
+    out.push(files);
+
+    out.push(fixture(scratch, "nested-host-input", "oracle", "oracle", None,
+        "(type Config {:steps (List {:enabled Bool :label String})})\n(artifact (host-input \"config\" (type-tag Config)))",
+        core.clone(), json!({"config":{"steps":[{"enabled":true,"label":"build"}]}}), None, "host-input",
+        Some(json!({"steps":[{"enabled":true,"label":"build"}]})), vec![]));
+    out.push(fixture(
+        scratch,
+        "missing-host-input",
+        "oracle",
+        "oracle",
+        None,
+        "(artifact (host-input \"count\" (type-tag Int)))",
+        core.clone(),
+        json!({}),
+        Some("type"),
+        "host-input",
+        None,
+        vec![],
+    ));
+    out.push(fixture(scratch, "wrong-nested-host-input", "oracle", "oracle", None,
+        "(type Config {:steps (List {:enabled Bool :label String})})\n(artifact (host-input \"config\" (type-tag Config)))",
+        core.clone(), json!({"config":{"steps":[{"enabled":"yes","label":"build"}]}}), Some("type"), "host-input", None, vec![]));
+
+    out.push(fixture(scratch, "function-local-closure-capture", "oracle", "oracle", None,
+        "(let run (fn [[value Int]] -> Artifact (let captured value) (let emit (fn [[suffix String]] -> Artifact (artifact {:captured captured :suffix suffix}))) (emit \"ok\")))\n(run 6)",
+        core.clone(), json!({}), None, "closure", Some(json!({"captured":6,"suffix":"ok"})), vec![]));
+    out.push(fixture(scratch, "closures-in-strict-values", "oracle", "oracle", None,
+        "(let handlers {:even (fn [[items (List Int)]] -> Bool (if (= (count items) 0) true ((get handlers \"odd\") (remove-at items 0)))) :odd (fn [[items (List Int)]] -> Bool (if (= (count items) 0) false ((get handlers \"even\") (remove-at items 0))))})\n(artifact ((get handlers \"even\") [1 2]))",
+        core.clone(), json!({}), None, "closure", Some(json!(true)), vec![]));
+
+    let mut nominal = fixture(scratch, "same-shaped-module-nominals", "oracle", "oracle", None,
+        "(require \"left.types\")\n(require \"right.types\")\n(let accept-left (fn [[value left.types.Payload]] -> left.types.Payload value))\n(artifact (accept-left (as right.types.Payload {:value 1})))",
+        core.clone(), json!({}), Some("type"), "nominal", None, vec![]);
+    write_module(
+        &mut nominal,
+        "left/types.mag",
+        "(type Payload {:value Int})",
+    );
+    write_module(
+        &mut nominal,
+        "right/types.mag",
+        "(type Payload {:value Int})",
+    );
+    out.push(nominal);
+
+    let mut ordering = fixture(scratch, "deterministic-derived-ordering", "oracle", "oracle", None,
+        "(require \"ordered.values\")\n(let manifest (read-json \"order.json\"))\n(artifact {:collection (map (fn [[entry {:rank String :label String}]] -> String (get entry \"label\")) (sort-by (fn [[entry {:rank String :label String}]] -> String (get entry \"rank\")) [{:rank \"2\" :label \"b\"} {:rank \"1\" :label \"a\"}])) :module ordered.values.items :file (get manifest \"items\")})",
+        core.clone(), json!({}), None, "ordering",
+        Some(json!({"collection":["a","b"],"module":["module-z","module-a"],"file":["file-2","file-1"]})), vec![]);
+    write_module(
+        &mut ordering,
+        "ordered/values.mag",
+        "(let items [\"module-z\" \"module-a\"])",
+    );
+    write_fixture_file(
+        &mut ordering,
+        "order.json",
+        br#"{"items":["file-2","file-1"]}"#,
+    );
+    out.push(ordering);
+
+    let type_descriptor = json!({"kind":"named","name":"main.Choice","arguments":[],"body":{"kind":"record","fields":[{"name":"label","type":{"kind":"primitive","name":"String"}}]}});
+    let type_schema = json!({"version":1,"root":{"kind":"named","name":"main.Choice","body":{"kind":"record","fields":[{"name":"label","schema":{"kind":"string"}}]}}});
+    out.push(fixture(scratch, "evidence-artifact-identity", "oracle", "oracle", None, "(type Choice {:label String})\n(type Selected (| Choice Int))\n(let value (as Selected (as Choice {:label \"yes\"})))\n(artifact {:descriptor (type-evidence (type-tag Choice)) :schema (type-schema (type-tag Choice)) :semantic_id (type-id (type-evidence (type-tag Choice))) :selected value})", core.clone(), json!({}), None, "static", Some(json!({"descriptor":type_descriptor,"schema":type_schema,"semantic_id":"sha256:604d7d96efdd1a0250532974cc8fd2729a659f6d2f67fc25e28d06b32d97dd10","selected":{"type":"sha256:604d7d96efdd1a0250532974cc8fd2729a659f6d2f67fc25e28d06b32d97dd10","value":{"label":"yes"}}})), vec![]));
 
     out.push(fixture(
         scratch,
@@ -377,145 +492,12 @@ fn invalid_conflict_graph() -> String {
     source
 }
 
-fn compare(baseline: &Report, candidate: &Report) -> Result<(), String> {
-    if baseline.schema_version != candidate.schema_version {
-        return Err("report schema differs".into());
-    }
-    let b = &baseline.metadata;
-    let c = &candidate.metadata;
-    for (label, same) in [
-        ("package version", b.package_version == c.package_version),
-        ("target", b.target == c.target),
-        ("OS", b.os == c.os),
-        ("architecture", b.arch == c.arch),
-        ("profile", b.profile == c.profile),
-        ("samples", b.samples_per_case == c.samples_per_case),
-        ("warmups", b.warmup_iterations == c.warmup_iterations),
-        (
-            "case definitions",
-            b.case_definition_hash == c.case_definition_hash,
-        ),
-        (
-            "size replacements",
-            b.size_replacements == c.size_replacements,
-        ),
-    ] {
-        if !same {
-            return Err(format!("incompatible {label}"));
-        }
-    }
-    if baseline.cases.len() != candidate.cases.len() {
-        return Err("case count differs".into());
-    }
-    eprintln!("case\tmedian ratio\tp90 ratio\tcounter deltas");
-    for (before, after) in baseline.cases.iter().zip(&candidate.cases) {
-        if before.name != after.name || before.fixture_fingerprint != after.fixture_fingerprint {
-            return Err(format!("case definition differs at {}", before.name));
-        }
-        if before.outcome != after.outcome
-            || before.expected_error != after.expected_error
-            || before.artifact_hash != after.artifact_hash
-        {
-            return Err(format!("semantic mismatch in timed case {}", before.name));
-        }
-        let median = ratio(after.distribution_ns.median, before.distribution_ns.median);
-        let p90 = ratio(after.distribution_ns.p90, before.distribution_ns.p90);
-        let deltas = counter_deltas(before.counters.as_ref(), after.counters.as_ref());
-        eprintln!(
-            "{}\t{median:.3}\t{p90:.3}\t{}",
-            before.name,
-            serde_json::to_string(&deltas).expect("counter deltas")
-        );
-    }
-    if baseline.oracles.len() != candidate.oracles.len() {
-        return Err("oracle count differs".into());
-    }
-    for (before, after) in baseline.oracles.iter().zip(&candidate.oracles) {
-        if before.name != after.name || before.policy != after.policy {
-            return Err(format!("oracle definition differs at {}", before.name));
-        }
-        if !semantic_accepts(before, after) {
-            return Err(format!("semantic mismatch at {}", before.name));
-        }
-    }
-    Ok(())
-}
-fn semantic_accepts(before: &OracleObservation, after: &OracleObservation) -> bool {
-    if before.observation == after.observation {
-        return true;
-    }
-    matches!((&before.observation, &after.observation),
-        (SemanticOutcome::Error { .. }, SemanticOutcome::Success { artifact_json, .. })
-        if before.policy == "dead_local_may_elide" && before.expected_artifact.as_ref() == Some(artifact_json))
-}
-fn ratio(after: u64, before: u64) -> f64 {
-    if before == 0 {
-        0.0
-    } else {
-        after as f64 / before as f64
-    }
-}
-fn counter_deltas(
-    before: Option<&nefor_mag::profile::OperationCounters>,
-    after: Option<&nefor_mag::profile::OperationCounters>,
-) -> serde_json::Map<String, Value> {
-    let (Some(before), Some(after)) = (before, after) else {
-        return serde_json::Map::new();
-    };
-    let before = serde_json::to_value(before).expect("counter json");
-    let after = serde_json::to_value(after).expect("counter json");
-    let mut deltas = serde_json::Map::new();
-    collect_counter_deltas("", &before, &after, &mut deltas);
-    deltas
-}
-fn collect_counter_deltas(
-    prefix: &str,
-    before: &Value,
-    after: &Value,
-    deltas: &mut serde_json::Map<String, Value>,
-) {
-    match (before, after) {
-        (Value::Number(before), Value::Number(after)) => {
-            let old = before.as_u64().unwrap_or(0) as i128;
-            let new = after.as_u64().unwrap_or(0) as i128;
-            deltas.insert(prefix.into(), json!(new - old));
-        }
-        (Value::Object(before), Value::Object(after)) => {
-            let keys = before
-                .keys()
-                .chain(after.keys())
-                .collect::<std::collections::BTreeSet<_>>();
-            for key in keys {
-                let path = if prefix.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{prefix}.{key}")
-                };
-                collect_counter_deltas(
-                    &path,
-                    before.get(key).unwrap_or(&Value::Null),
-                    after.get(key).unwrap_or(&Value::Null),
-                    deltas,
-                );
-            }
-        }
-        (Value::Null, Value::Number(after)) => {
-            deltas.insert(prefix.into(), json!(after.as_u64().unwrap_or(0) as i128));
-        }
-        (Value::Number(before), Value::Null) => {
-            deltas.insert(
-                prefix.into(),
-                json!(-(before.as_u64().unwrap_or(0) as i128)),
-            );
-        }
-        _ => {}
-    }
-}
-
 fn metadata(root: &Path, samples: usize, warmups: usize, case_definition_hash: String) -> Metadata {
     Metadata {
         git_commit: command_output(root, &["git", "rev-parse", "HEAD"]),
         git_dirty: !command_output(root, &["git", "status", "--porcelain"]).is_empty(),
+        git_tree: command_output(root, &["git", "rev-parse", "HEAD^{tree}"]),
+        git_diff_digest: dirty_diff_digest(root),
         package_version: env!("CARGO_PKG_VERSION").into(),
         rustc: command_output(root, &["rustc", "-Vv"]),
         target: rustc_host(root),
@@ -527,6 +509,7 @@ fn metadata(root: &Path, samples: usize, warmups: usize, case_definition_hash: S
         profile: "bench (optimized)".into(),
         samples_per_case: samples,
         warmup_iterations: warmups,
+        quantile_policy: "nearest-rank empirical quantile: rank = ceil(p*n), one-based; n=3 p90 is max, n=30 p90 is rank 27".into(),
         case_definition_hash,
         size_replacements: std::collections::BTreeMap::from([(
             "nefor-linear requested 16 (expression nesting limit)".into(),
@@ -534,6 +517,19 @@ fn metadata(root: &Path, samples: usize, warmups: usize, case_definition_hash: S
         )]),
     }
 }
+fn dirty_diff_digest(root: &Path) -> Option<String> {
+    let status = command_output(root, &["git", "status", "--porcelain"]);
+    if status.is_empty() {
+        return None;
+    }
+    let output = Command::new("git")
+        .args(["diff", "--binary", "HEAD"])
+        .current_dir(root)
+        .output()
+        .expect("git diff for candidate identity");
+    Some(fingerprint(&output.stdout))
+}
+
 fn definition_hash(cases: &[Fixture], oracles: &[Fixture]) -> String {
     fingerprint(
         cases
@@ -546,7 +542,7 @@ fn definition_hash(cases: &[Fixture], oracles: &[Fixture]) -> String {
                     case.family,
                     case.stage,
                     case.size.map_or_else(|| "none".into(), |v| v.to_string()),
-                    case.source_fingerprint
+                    case.fixture_fingerprint
                 )
                 .into_bytes()
             })
