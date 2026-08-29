@@ -1474,6 +1474,11 @@ fn compile_block_in(
             checked_expressions.push(checked);
         }
     }
+    env.profile_counters(|counters| {
+        counters.checked_bindings = counters
+            .checked_bindings
+            .saturating_add(bindings.len() as u64);
+    });
     Ok(CheckedBlock {
         frame_layout: bindings.iter().map(|binding| binding.id).collect(),
         bindings,
@@ -1660,6 +1665,9 @@ fn compile_expr(
         compatible_static(env, &checked.ty, expected, &mut HashMap::new())
             .map_err(MagError::Type)?;
     }
+    env.profile_counters(|counters| {
+        counters.checked_expressions = counters.checked_expressions.saturating_add(1);
+    });
     Ok(checked)
 }
 

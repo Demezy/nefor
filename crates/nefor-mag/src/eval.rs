@@ -233,7 +233,13 @@ fn eval_checked_block(env: &mut Env, block: &CheckedBlock) -> Result<Value, MagE
 
 fn force_binding(env: &mut Env, id: crate::ast::BindingId) -> Result<Value, MagError> {
     let handle = env.binding_handle(id)?;
-    let _force = enter_force(env, &handle)?;
+    let _force = match enter_force(env, &handle) {
+        Ok(force) => force,
+        Err(error) => {
+            Env::profile_force_cycle(&handle);
+            return Err(error);
+        }
+    };
     match Env::begin_handle_force(&handle)? {
         BindingForce::Ready(value) => Ok(value),
         BindingForce::Initialize {
@@ -1005,6 +1011,10 @@ fn runtime_sum_alias(
 }
 
 fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError> {
+    env.profile_counters(|counters| {
+        counters.runtime_value_validation_visits =
+            counters.runtime_value_validation_visits.saturating_add(1);
+    });
     if let Value::Typed(_, evidence) = value {
         if evidence == ty {
             return Ok(());
@@ -1121,6 +1131,8 @@ fn apply_with_signature(
         counters.function_calls = counters.function_calls.saturating_add(1);
         if matches!(f, Value::BuiltinFn(_)) {
             counters.builtin_calls = counters.builtin_calls.saturating_add(1);
+        } else if matches!(f, Value::Fn(_)) {
+            counters.user_function_calls = counters.user_function_calls.saturating_add(1);
         }
     });
     match f {
@@ -1228,7 +1240,53 @@ pub(crate) fn apply_value(env: &Env, function: &Value, args: &[Value]) -> Result
     apply(env, function, args)
 }
 
+fn collection_len(value: &Value) -> Option<u64> {
+    match raw(value) {
+        Value::List(values) | Value::Vector(values) | Value::Product(values) => {
+            Some(values.len() as u64)
+        }
+        Value::Map(values) => Some(values.len() as u64),
+        _ => None,
+    }
+}
+
 fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
+    let input_items = match name {
+        "concat" => args.iter().filter_map(collection_len).sum(),
+        "remove-at" | "descriptor-table" => args.first().and_then(collection_len).unwrap_or(0),
+        "descriptor-input-assignments" => args.get(1).and_then(collection_len).unwrap_or(0),
+        "fold" => args.get(2).and_then(collection_len).unwrap_or(0),
+        "map" | "indexed-map" | "filter" | "flat-map" | "sort-by" => {
+            args.get(1).and_then(collection_len).unwrap_or(0)
+        }
+        _ => 0,
+    };
+    env.profile_counters(|counters| {
+        *counters
+            .builtin_calls_by_name
+            .entry(name.to_owned())
+            .or_default() += 1;
+        if input_items > 0
+            || matches!(
+                name,
+                "concat"
+                    | "remove-at"
+                    | "descriptor-table"
+                    | "descriptor-input-assignments"
+                    | "fold"
+                    | "map"
+                    | "indexed-map"
+                    | "filter"
+                    | "flat-map"
+                    | "sort-by"
+            )
+        {
+            *counters
+                .builtin_input_items_by_name
+                .entry(name.to_owned())
+                .or_default() += input_items;
+        }
+    });
     match name {
         "artifact" => {
             arity(args, 1)?;
@@ -1382,7 +1440,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
         }
         "=" => {
             arity(args, 2)?;
-            Ok(Value::Bool(equal(&args[0], &args[1])))
+            Ok(Value::Bool(equal(env, &args[0], &args[1])))
         }
         "fail" => {
             arity(args, 1)?;
@@ -1877,7 +1935,10 @@ fn strip_margin(value: &str) -> String {
         })
         .collect()
 }
-pub(crate) fn equal(a: &Value, b: &Value) -> bool {
+pub(crate) fn equal(env: &Env, a: &Value, b: &Value) -> bool {
+    env.profile_counters(|counters| {
+        counters.value_equality_visits = counters.value_equality_visits.saturating_add(1);
+    });
     match (raw(a), raw(b)) {
         (Value::Unit, Value::Unit) => true,
         (Value::Str(a), Value::Str(b)) => a == b,
@@ -1894,12 +1955,12 @@ pub(crate) fn equal(a: &Value, b: &Value) -> bool {
             a.len() == b.len()
                 && a.iter()
                     .zip(b.iter())
-                    .all(|(left, right)| equal(left, right))
+                    .all(|(left, right)| equal(env, left, right))
         }
         (Value::Map(a), Value::Map(b)) => {
             a.len() == b.len()
                 && a.iter()
-                    .all(|(key, value)| b.get(key).is_some_and(|other| equal(value, other)))
+                    .all(|(key, value)| b.get(key).is_some_and(|other| equal(env, value, other)))
         }
         (Value::Type(a), Value::Type(b)) => a == b,
         (Value::TypeTag(a), Value::TypeTag(b)) => a == b,
@@ -1907,7 +1968,7 @@ pub(crate) fn equal(a: &Value, b: &Value) -> bool {
         (Value::TypeDescriptor(a), Value::TypeDescriptor(b)) => a == b,
         (Value::TypeSchema(a), Value::TypeSchema(b)) => a == b,
         (Value::SemanticTypeId(a), Value::SemanticTypeId(b)) => a == b,
-        (Value::PackedValue(a), Value::PackedValue(b)) => equal(a, b),
+        (Value::PackedValue(a), Value::PackedValue(b)) => equal(env, a, b),
         (Value::JsonValue(a), Value::JsonValue(b)) => a == b,
         (Value::HostInputs(a), Value::HostInputs(b)) => a == b,
         (Value::Artifact(a), Value::Artifact(b)) => a == b,

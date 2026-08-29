@@ -1,289 +1,612 @@
+mod bench_support;
+
+use bench_support::*;
 use mlua::{Lua, LuaSerdeExt, Table, Value as LuaValue};
-use nefor_mag::profile::CompileProfile;
-use serde::Serialize;
-use serde_json::{json, Value as JsonValue};
-use std::collections::BTreeMap;
+use serde_json::{json, Value};
 use std::fs;
-use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_SAMPLES: usize = 30;
-const WARMUP: usize = 3;
-
-#[derive(Serialize)]
-struct Report {
-    schema_version: u8,
-    metadata: Metadata,
-    cases: Vec<CaseReport>,
-}
-
-#[derive(Serialize)]
-struct Metadata {
-    git_commit: String,
-    git_dirty: bool,
-    package_version: &'static str,
-    rustc: String,
-    target: String,
-    os: &'static str,
-    arch: &'static str,
-    logical_cpus: usize,
-    profile: &'static str,
-    samples_per_case: usize,
-    warmup_iterations: usize,
-}
-
-#[derive(Serialize)]
-struct CaseReport {
-    name: String,
-    outcome: &'static str,
-    expected_error: Option<&'static str>,
-    input_bytes: usize,
-    artifact_hash: Option<String>,
-    wall_ns: Vec<u64>,
-    distribution_ns: Distribution,
-    counters: Option<nefor_mag::profile::OperationCounters>,
-    phase_median_ns: Option<nefor_mag::profile::PhaseDurations>,
-}
-
-#[derive(Default, Serialize)]
-struct Distribution {
-    min: u64,
-    median: u64,
-    mean: u64,
-    p90: u64,
-    p95: u64,
-    max: u64,
-}
-
-struct Case {
-    name: String,
-    source_dir: PathBuf,
-    entry: String,
-    module_roots: Vec<PathBuf>,
-    inputs: serde_json::Value,
-    input_bytes: usize,
-    expected_error: Option<ExpectedError>,
-}
-
-#[derive(Clone, Copy)]
-enum ExpectedError {
-    CallDepthBudget,
-}
-
-impl ExpectedError {
-    fn category(self) -> &'static str {
-        match self {
-            Self::CallDepthBudget => "call_depth_budget",
-        }
-    }
-
-    fn matches(self, error: &nefor_mag::error::MagError) -> bool {
-        matches!(
-            (self, error),
-            (Self::CallDepthBudget, nefor_mag::error::MagError::Budget(message))
-                if message == "function call depth limit reached"
-        )
-    }
-}
+const DEFAULT_WARMUPS: usize = 3;
 
 fn main() {
     let root = workspace_root();
-    let samples = match std::env::var("MAG_BENCH_SAMPLES") {
-        Ok(value) => value
-            .parse::<std::num::NonZeroUsize>()
-            .unwrap_or_else(|_| panic!("MAG_BENCH_SAMPLES must be a positive integer: {value:?}"))
-            .get(),
-        Err(std::env::VarError::NotPresent) => DEFAULT_SAMPLES,
-        Err(error) => panic!("cannot read MAG_BENCH_SAMPLES: {error}"),
-    };
-    let scratch = fresh_scratch();
-    let cases = cases(&root, &scratch);
-    let reports = cases
-        .iter()
-        .map(|case| run_case(case, samples))
-        .collect::<Vec<_>>();
-    fs::remove_dir_all(&scratch).ok();
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&Report {
-            schema_version: 1,
-            metadata: metadata(&root, samples),
-            cases: reports,
-        })
-        .expect("serialize benchmark report")
-    );
-}
-
-fn run_case(case: &Case, samples: usize) -> CaseReport {
-    for _ in 0..WARMUP {
-        assert_outcome(case, compile_unprofiled(case));
-    }
-    let mut wall_ns = Vec::with_capacity(samples);
-    let mut profiles = Vec::with_capacity(samples);
-    let mut expected_hash = None;
-    for _ in 0..samples {
-        let started = Instant::now();
-        let result = compile_unprofiled(case);
-        wall_ns.push(nanos(started.elapsed()));
-        if let Some(program) = assert_outcome(case, result) {
-            check_artifact(case, &mut expected_hash, &program);
-            black_box(program.artifact);
-
-            let (profiled, profile) = compile_profiled(case)
-                .unwrap_or_else(|error| panic!("{} profiled compile failed: {error}", case.name));
-            check_artifact(case, &mut expected_hash, &profiled);
-            profiles.push(profile);
-            black_box(profiled.artifact);
+    let samples = positive_env("MAG_BENCH_SAMPLES", DEFAULT_SAMPLES);
+    let warmups = positive_env("MAG_BENCH_WARMUPS", DEFAULT_WARMUPS);
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let baseline = value_after(&args, "--baseline");
+    let output_path = value_after(&args, "--output");
+    for arg in &args {
+        if !matches!(arg.as_str(), "--bench" | "--baseline" | "--output")
+            && !args.windows(2).any(|pair| {
+                pair[1] == *arg && matches!(pair[0].as_str(), "--baseline" | "--output")
+            })
+        {
+            panic!("unknown benchmark argument: {arg}");
         }
     }
-    let counters = profiles.first().map(|profile| profile.counters.clone());
-    if let Some(expected) = &counters {
-        assert!(profiles.iter().all(|profile| &profile.counters == expected));
-    }
-    CaseReport {
-        name: case.name.clone(),
-        outcome: if case.expected_error.is_none() {
-            "success"
+
+    let scratch = fresh_scratch(&root);
+    let contracts = load_runtime_contracts(&root.join("plugins/mag/lua/mag-kernel/init.lua"));
+    let timed = timed_cases(&root, &scratch, &contracts);
+    let oracle_fixtures = oracle_cases(&root, &scratch, &contracts);
+    let definition_hash = definition_hash(&timed, &oracle_fixtures);
+    let cases = timed
+        .iter()
+        .map(|case| run_case(case, samples, warmups))
+        .collect::<Vec<_>>();
+    let oracles = oracle_fixtures.iter().map(observe).collect::<Vec<_>>();
+    let report = Report {
+        schema_version: SCHEMA_VERSION,
+        metadata: metadata(&root, samples, warmups, definition_hash),
+        counter_semantics: counter_semantics(),
+        recommendation: recommendation(&cases),
+        cases,
+        oracles,
+    };
+    if let Some(path) = baseline {
+        let baseline_path = if Path::new(&path).is_absolute() {
+            PathBuf::from(&path)
         } else {
-            "expected_failure"
-        },
-        expected_error: case.expected_error.map(ExpectedError::category),
-        input_bytes: case.input_bytes,
-        artifact_hash: expected_hash,
-        distribution_ns: distribution(&wall_ns),
-        phase_median_ns: phase_medians(&profiles),
-        counters,
-        wall_ns,
+            root.join(&path)
+        };
+        let baseline: Report =
+            serde_json::from_slice(&fs::read(&baseline_path).unwrap_or_else(|error| {
+                panic!("read baseline {}: {error}", baseline_path.display())
+            }))
+            .unwrap_or_else(|error| panic!("parse baseline {path}: {error}"));
+        compare(&baseline, &report)
+            .unwrap_or_else(|error| panic!("baseline comparison failed: {error}"));
     }
-}
-
-fn assert_outcome(
-    case: &Case,
-    result: Result<nefor_mag::LoadedProgram, nefor_mag::error::MagError>,
-) -> Option<nefor_mag::LoadedProgram> {
-    match (case.expected_error, result) {
-        (None, Ok(program)) => Some(program),
-        (Some(expected), Err(error)) if expected.matches(&error) => None,
-        (None, Err(error)) => panic!("{} failed: {error}", case.name),
-        (Some(expected), Err(error)) => panic!(
-            "{} failed with {error}, expected {}",
-            case.name,
-            expected.category()
-        ),
-        (Some(expected), Ok(_)) => panic!(
-            "{} unexpectedly succeeded; expected {}",
-            case.name,
-            expected.category()
-        ),
-    }
-}
-
-fn check_artifact(
-    case: &Case,
-    expected_hash: &mut Option<String>,
-    program: &nefor_mag::LoadedProgram,
-) {
-    if let Some(expected) = expected_hash {
-        assert_eq!(expected, &program.hash, "{} artifact changed", case.name);
+    let encoded = serde_json::to_string_pretty(&report).expect("serialize report");
+    if let Some(path) = output_path {
+        let path = root.join(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create report directory");
+        }
+        fs::write(&path, format!("{encoded}\n")).expect("write report");
+        eprintln!("wrote {}", path.display());
     } else {
-        *expected_hash = Some(program.hash.clone());
+        println!("{encoded}");
     }
+    fs::remove_dir_all(&scratch).ok();
 }
 
-fn compile_unprofiled(case: &Case) -> Result<nefor_mag::LoadedProgram, nefor_mag::error::MagError> {
-    let program = nefor_mag::load_with_inputs_and_module_roots(
-        &case.source_dir,
-        &case.entry,
-        case.inputs.clone(),
-        &case.module_roots,
-    )?;
-    Ok(program)
-}
-
-fn compile_profiled(
-    case: &Case,
-) -> Result<(nefor_mag::LoadedProgram, CompileProfile), nefor_mag::error::MagError> {
-    let profiler = nefor_mag::profile::CompileProfiler::new();
-    let program = nefor_mag::load_with_profiler(
-        &case.source_dir,
-        &case.entry,
-        case.inputs.clone(),
-        &case.module_roots,
-        &profiler,
-    )?;
-    Ok((program, profiler.snapshot()))
-}
-
-fn cases(root: &Path, scratch: &Path) -> Vec<Case> {
-    let mut cases = Vec::new();
-    cases.push(write_case(
+fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
+    let core_roots = vec![];
+    let nefor_roots = vec![
+        root.join("mag/lib"),
+        root.join("examples/nefor-agent/mag/lib"),
+    ];
+    let nefor_inputs = json!({"factory_contracts": contracts});
+    let mut cases = vec![fixture(
         scratch,
         "trivial",
+        "trivial",
+        "compile",
+        None,
         "(artifact {})",
-        vec![scratch.into()],
+        core_roots.clone(),
         json!({}),
         None,
-    ));
-
-    let lead = root.join("examples/nefor-agent/agentic-loop/lead-turn.mag");
-    let contracts = load_runtime_contracts(&root.join("plugins/mag/lua/mag-kernel/init.lua"));
-    cases.push(Case {
-        name: "shipped-lead-turn".into(),
-        source_dir: root.join("examples/nefor-agent"),
-        entry: "agentic-loop/lead-turn.mag".into(),
-        module_roots: vec![
-            root.join("mag/lib"),
-            root.join("examples/nefor-agent/mag/lib"),
-        ],
-        inputs: json!({"factory_contracts": contracts.clone()}),
-        input_bytes: fs::metadata(lead).map(|m| m.len() as usize).unwrap_or(0),
-        expected_error: None,
-    });
-
-    for size in [2, 4, 8] {
-        let source = linear_graph(size);
-        cases.push(write_case(
-            scratch,
-            &format!("linear-{size}"),
-            &source,
-            vec![
-                scratch.into(),
-                root.join("mag/lib"),
-                root.join("examples/nefor-agent/mag/lib"),
-            ],
-            json!({"factory_contracts": contracts.clone()}),
-            None,
-        ));
+        "timed",
+        None,
+        vec![],
+    )];
+    for size in [16, 64, 256] {
+        for (family, source) in [
+            ("core-dead-locals", core_dead_locals(size)),
+            ("core-generic-calls", core_generic_calls(size)),
+            ("core-concat-growth", core_concat_growth(size)),
+            ("core-artifact-control", core_artifact_control(size)),
+        ] {
+            cases.push(fixture(
+                scratch,
+                &format!("{family}-{size}"),
+                family,
+                "compile",
+                Some(size),
+                &source,
+                core_roots.clone(),
+                json!({}),
+                None,
+                "timed",
+                None,
+                vec![],
+            ));
+        }
+    }
+    for size in [2, 8, 12] {
+        for stage in ["build", "validate", "lower", "compile"] {
+            let source = linear_graph(size, stage);
+            let name = if stage == "compile" {
+                format!("linear-{size}")
+            } else {
+                format!("nefor-linear-{stage}-{size}")
+            };
+            cases.push(fixture(
+                scratch,
+                &name,
+                "nefor-linear",
+                stage,
+                Some(size),
+                &source,
+                nefor_roots.clone(),
+                nefor_inputs.clone(),
+                None,
+                "timed",
+                None,
+                vec![],
+            ));
+        }
     }
     for size in [2, 8, 16] {
-        let source = product_fan_in(size);
-        cases.push(write_case(
-            scratch,
-            &format!("product-fan-in-{size}"),
-            &source,
-            vec![
-                scratch.into(),
-                root.join("mag/lib"),
-                root.join("examples/nefor-agent/mag/lib"),
-            ],
-            json!({"factory_contracts": contracts.clone()}),
-            None,
-        ));
+        for stage in ["build", "lower", "compile"] {
+            let source = fan_in_graph(size, stage);
+            let name = if stage == "compile" {
+                format!("product-fan-in-{size}")
+            } else {
+                format!("nefor-fan-in-{stage}-{size}")
+            };
+            cases.push(fixture(
+                scratch,
+                &name,
+                "nefor-fan-in",
+                stage,
+                Some(size),
+                &source,
+                nefor_roots.clone(),
+                nefor_inputs.clone(),
+                None,
+                "timed",
+                None,
+                vec![],
+            ));
+        }
     }
-    cases.push(write_case(
-        scratch,
-        "capacity-call-depth",
-        &recursive_limit(),
-        vec![scratch.into()],
-        json!({}),
-        Some(ExpectedError::CallDepthBudget),
-    ));
+    cases.push(Fixture {
+        name: "shipped-lead-turn".into(),
+        family: "production".into(),
+        stage: "compile".into(),
+        size: None,
+        source_dir: root.join("examples/nefor-agent"),
+        entry: "agentic-loop/lead-turn.mag".into(),
+        module_roots: nefor_roots,
+        inputs: nefor_inputs,
+        source_fingerprint: fingerprint(
+            &fs::read(root.join("examples/nefor-agent/agentic-loop/lead-turn.mag"))
+                .expect("read lead turn"),
+        ),
+        expected_error: None,
+        policy: "timed".into(),
+        expected_artifact: None,
+        probes: vec![],
+    });
     cases
 }
 
-fn load_runtime_contracts(path: &Path) -> JsonValue {
+fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
+    let core = vec![];
+    let nefor = vec![
+        root.join("mag/lib"),
+        root.join("examples/nefor-agent/mag/lib"),
+    ];
+    let inputs = json!({"factory_contracts": contracts});
+    let mut out = Vec::new();
+    let errors = [
+        ("dead-binding-unresolved-symbol", "(let run (fn [] -> Artifact (let dead missing) (artifact {})))\n(run)", "unresolved", "static"),
+        ("dead-function-body-return-type-error", "(let run (fn [] -> Int \"wrong\"))\n(artifact {})", "type", "static"),
+        ("dead-strict-inference-cycle", "(let a b)\n(let b a)\n(artifact {})", "type", "static"),
+        ("unused-required-module-resolution-error", "(require \"missing.module\")\n(artifact {})", "evaluation", "module"),
+        ("demanded-local-partial-builtin", "(let run (fn [] -> Artifact (let bad (remove-at [1] 9)) (artifact bad)))\n(run)", "evaluation", "demanded-runtime"),
+        ("dead-local-recursion-budget", "(let loop (fn [[n Int]] -> Int (loop n)))\n(let run (fn [] -> Artifact (let dead (loop 0)) (artifact {:ok true})))\n(run)", "budget", "dead_local_may_elide"),
+        ("demanded-local-recursion-budget", "(let loop (fn [[n Int]] -> Int (loop n)))\n(let run (fn [] -> Artifact (let dead (loop 0)) (artifact dead)))\n(run)", "budget", "demanded-runtime"),
+        ("top-level-dead-partial-builtin-remains-eager", "(let dead (remove-at [1] 9))\n(artifact {:ok true})", "evaluation", "demanded-runtime"),
+    ];
+    for (name, source, class, policy) in errors {
+        let expected = (policy == "dead_local_may_elide").then(|| json!({"ok": true}));
+        out.push(fixture(
+            scratch,
+            name,
+            "oracle",
+            "oracle",
+            None,
+            source,
+            core.clone(),
+            json!({}),
+            Some(class),
+            policy,
+            expected,
+            vec![],
+        ));
+    }
+    out.push(fixture(
+        scratch,
+        "dead-local-partial-builtin",
+        "oracle",
+        "oracle",
+        None,
+        "(let run (fn [] -> Artifact (let bad (remove-at [1] 9)) (artifact {:ok true})))\n(run)",
+        core.clone(),
+        json!({}),
+        Some("evaluation"),
+        "dead_local_may_elide",
+        Some(json!({"ok": true})),
+        vec![],
+    ));
+    out.push(fixture(scratch, "untaken-branch-does-not-demand-local", "oracle", "oracle", None, "(let run (fn [] -> Artifact (if false (artifact (remove-at [1] 9)) (artifact {:ok true}))))\n(run)", core.clone(), json!({}), None, "demanded-runtime", Some(json!({"ok": true})), vec![]));
+
+    let unused_module = fixture(
+        scratch,
+        "unused-required-module-static-error",
+        "oracle",
+        "oracle",
+        None,
+        "(require \"broken\")\n(artifact {})",
+        core.clone(),
+        json!({}),
+        Some("unresolved"),
+        "module",
+        None,
+        vec![],
+    );
+    write_module(&unused_module, "broken.mag", "(let broken missing)");
+    out.push(unused_module);
+
+    out.push(fixture(scratch, "artifact-dead-named-resident-function-remains-callable", "oracle", "oracle", None, "(let hidden (fn [[value Int]] -> Artifact (artifact {:value value})))\n(artifact {:loaded true})", core.clone(), json!({}), None, "resident", Some(json!({"loaded": true})), vec![probe("hidden", json!(7))]));
+    out.push(fixture(scratch, "resident-function-reads-captured-top-level-peer", "oracle", "oracle", None, "(let peer 41)\n(let read-peer (fn [[value Int]] -> Artifact (artifact {:peer peer :value value})))\n(artifact {:loaded true})", core.clone(), json!({}), None, "resident", Some(json!({"loaded": true})), vec![probe("read-peer", json!(1))]));
+    let module_export = fixture(
+        scratch,
+        "required-module-export-remains-available",
+        "oracle",
+        "oracle",
+        None,
+        "(require \"library\")\n(artifact {:loaded true})",
+        core.clone(),
+        json!({}),
+        None,
+        "module",
+        Some(json!({"loaded": true})),
+        vec![probe("library.run", json!(3))],
+    );
+    write_module(
+        &module_export,
+        "library.mag",
+        "(let run (fn [[value Int]] -> Artifact (artifact {:module value})))",
+    );
+    out.push(module_export);
+
+    out.push(fixture(scratch, "evidence-artifact-identity", "oracle", "oracle", None, "(type Choice {:label String})\n(type Selected (| Choice Int))\n(let value (as Selected (as Choice {:label \"yes\"})))\n(artifact {:descriptor (type-evidence (type-tag Choice)) :schema (type-schema (type-tag Choice)) :semantic_id (type-id (type-evidence (type-tag Choice))) :selected value})", core, json!({}), None, "static", None, vec![]));
+
+    out.push(fixture(
+        scratch,
+        "graph-conflicting-node-definition",
+        "oracle",
+        "oracle",
+        None,
+        &invalid_conflict_graph(),
+        nefor.clone(),
+        inputs.clone(),
+        Some("evaluation"),
+        "graph-validation",
+        None,
+        vec![],
+    ));
+    out.push(fixture(scratch, "graph-validation-priority", "oracle", "oracle", None, "(require \"nefor.artifact\")\n(require \"nefor.graph\")\n(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph graph))\n(nefor.artifact.compile topology)", nefor, inputs, Some("evaluation"), "graph-validation", None, vec![]));
+    out
+}
+
+fn core_dead_locals(size: usize) -> String {
+    let mut source = String::from("(let work (fn [[x Int]] -> Int (count (map (fn [[v Int]] -> Int v) [1 2 3 4]))))\n(let run (fn [] -> Artifact\n");
+    for index in 0..size {
+        source.push_str(&format!("  (let dead{index} (work {index}))\n"));
+    }
+    source.push_str("  (artifact {:ok true})))\n(run)");
+    source
+}
+fn core_generic_calls(size: usize) -> String {
+    let values = (0..size)
+        .map(|i| format!("{{:value {i}}}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("(let identity (fn [T] [[value T]] -> T value))\n(let values [{values}])\n(let copied (map (fn [[value {{:value Int}}]] -> {{:value Int}} (identity value)) values))\n(artifact {{:count (count copied)}})")
+}
+fn core_concat_growth(size: usize) -> String {
+    let values = (0..size)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("(let values [{values}])\n(let grown (fold (fn [[out (List Int)] [value Int]] -> (List Int) (concat out [value])) (as (List Int) []) values))\n(artifact {{:count (count grown)}})")
+}
+fn core_artifact_control(size: usize) -> String {
+    let values = (0..size)
+        .map(|i| format!("{{:index {i} :label \"item-{i}\"}}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("(artifact {{:items [{values}]}})")
+}
+
+fn graph_prelude() -> String {
+    "(require \"core.validated\")\n(require \"nefor.artifact\")\n(require \"nefor.contracts\")\n(require \"nefor.graph\")\n(let contracts (host-input \"factory_contracts\" (type-tag (List nefor.graph.FactoryContract))))\n(let pass (fn [[id String]] -> (nefor.graph.Node Int Int) (let input (nefor.graph.port id (type-tag Int) \"nefor.graph.Value\")) (let output (nefor.graph.port id (type-tag Int) \"nefor.graph.Value\")) (let actor (nefor.graph.actor id \"nefor.factory.output\" [(type-evidence (type-tag Int))] (as nefor.graph.OutputParams {}) (nefor.graph.store-port input) [(nefor.graph.store-port output)])) (nefor.graph.node id \"ordinary\" [actor] (as (List nefor.graph.StoredRoute) []) (as (List nefor.graph.Message) []) input output)))\n".into()
+}
+fn linear_graph(size: usize, stage: &str) -> String {
+    let mut source = graph_prelude();
+    source.push_str("(let start (nefor.graph.source \"start\" (type-tag Int) 1))\n");
+    for index in 0..size {
+        source.push_str(&format!("(let n{index} (pass \"n{index}\"))\n"));
+    }
+    source.push_str("(let out (nefor.graph.output \"out\" (type-tag Int)))\n(let topology (nefor.graph.add-edges nefor.graph.empty-graph [");
+    source.push_str("(nefor.graph.edge start n0) ");
+    for index in 0..size - 1 {
+        source.push_str(&format!("(nefor.graph.edge n{index} n{}) ", index + 1));
+    }
+    source.push_str(&format!("(nefor.graph.edge n{} out)]))\n", size - 1));
+    source.push_str(&stage_artifact(stage));
+    source
+}
+fn fan_in_graph(size: usize, stage: &str) -> String {
+    let mut source = graph_prelude();
+    for index in 0..size {
+        source.push_str(&format!(
+            "(let s{index} (nefor.graph.source \"s{index}\" (type-tag Int) {index}))\n"
+        ));
+    }
+    let types = (0..size).map(|_| "Int").collect::<Vec<_>>().join(" ");
+    source.push_str(&format!("(let out (nefor.graph.output \"out\" (type-tag (+ {types}))))\n(let topology (nefor.graph.add-edges nefor.graph.empty-graph ["));
+    for index in 0..size {
+        source.push_str(&format!("(nefor.graph.edge s{index} out) "));
+    }
+    source.push_str("]))\n");
+    source.push_str(&stage_artifact(stage));
+    source
+}
+fn stage_artifact(stage: &str) -> String {
+    match stage {
+        "build" => "(artifact {:edges (count (get topology \"edges\"))})".into(),
+        "validate" => "(let checked (nefor.graph.validate topology contracts))\n(match checked [(core.validated.Valid nefor.graph.Graph) accepted (artifact {:edges (count (get (get accepted \"value\") \"edges\"))})] [(core.validated.Invalid String) rejected (fail (get rejected \"errors\"))])".into(),
+        "lower" => "(let lowered (nefor.graph.lower topology))\n(let forced (canonical lowered))\n(artifact {:actors (count (get lowered \"actors\")) :messages (count (get lowered \"messages\")) :forced (not (= forced \"\"))})".into(),
+        "compile" => "(let topology-fn (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph (nefor.graph.add-edges graph (get topology \"edges\"))))\n(nefor.artifact.compile topology-fn)".into(),
+        _ => unreachable!(),
+    }
+}
+fn invalid_conflict_graph() -> String {
+    let mut source = graph_prelude();
+    source.push_str("(let start (nefor.graph.source \"start\" (type-tag Int) 1))\n(let left (pass \"same\"))\n(let right-input (nefor.graph.port \"same\" (type-tag Int) \"nefor.graph.Value\"))\n(let right-output (nefor.graph.port \"same\" (type-tag Int) \"different\"))\n(let right-actor (nefor.graph.actor \"same\" \"nefor.factory.output\" [(type-evidence (type-tag Int))] (as nefor.graph.OutputParams {}) (nefor.graph.store-port right-input) [(nefor.graph.store-port right-output)]))\n(let right (nefor.graph.node \"same\" \"ordinary\" [right-actor] (as (List nefor.graph.StoredRoute) []) (as (List nefor.graph.Message) []) right-input right-output))\n(let out (nefor.graph.output \"out\" (type-tag Int)))\n(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph (nefor.graph.add-edges graph [(nefor.graph.edge start left) (nefor.graph.edge start right) (nefor.graph.edge left out)])))\n(nefor.artifact.compile topology)");
+    source
+}
+
+fn compare(baseline: &Report, candidate: &Report) -> Result<(), String> {
+    if baseline.schema_version != candidate.schema_version {
+        return Err("report schema differs".into());
+    }
+    let b = &baseline.metadata;
+    let c = &candidate.metadata;
+    for (label, same) in [
+        ("package version", b.package_version == c.package_version),
+        ("target", b.target == c.target),
+        ("OS", b.os == c.os),
+        ("architecture", b.arch == c.arch),
+        ("profile", b.profile == c.profile),
+        ("samples", b.samples_per_case == c.samples_per_case),
+        ("warmups", b.warmup_iterations == c.warmup_iterations),
+        (
+            "case definitions",
+            b.case_definition_hash == c.case_definition_hash,
+        ),
+        (
+            "size replacements",
+            b.size_replacements == c.size_replacements,
+        ),
+    ] {
+        if !same {
+            return Err(format!("incompatible {label}"));
+        }
+    }
+    if baseline.cases.len() != candidate.cases.len() {
+        return Err("case count differs".into());
+    }
+    eprintln!("case\tmedian ratio\tp90 ratio\tcounter deltas");
+    for (before, after) in baseline.cases.iter().zip(&candidate.cases) {
+        if before.name != after.name || before.fixture_fingerprint != after.fixture_fingerprint {
+            return Err(format!("case definition differs at {}", before.name));
+        }
+        if before.outcome != after.outcome
+            || before.expected_error != after.expected_error
+            || before.artifact_hash != after.artifact_hash
+        {
+            return Err(format!("semantic mismatch in timed case {}", before.name));
+        }
+        let median = ratio(after.distribution_ns.median, before.distribution_ns.median);
+        let p90 = ratio(after.distribution_ns.p90, before.distribution_ns.p90);
+        let deltas = counter_deltas(before.counters.as_ref(), after.counters.as_ref());
+        eprintln!(
+            "{}\t{median:.3}\t{p90:.3}\t{}",
+            before.name,
+            serde_json::to_string(&deltas).expect("counter deltas")
+        );
+    }
+    if baseline.oracles.len() != candidate.oracles.len() {
+        return Err("oracle count differs".into());
+    }
+    for (before, after) in baseline.oracles.iter().zip(&candidate.oracles) {
+        if before.name != after.name || before.policy != after.policy {
+            return Err(format!("oracle definition differs at {}", before.name));
+        }
+        if !semantic_accepts(before, after) {
+            return Err(format!("semantic mismatch at {}", before.name));
+        }
+    }
+    Ok(())
+}
+fn semantic_accepts(before: &OracleObservation, after: &OracleObservation) -> bool {
+    if before.observation == after.observation {
+        return true;
+    }
+    matches!((&before.observation, &after.observation),
+        (SemanticOutcome::Error { .. }, SemanticOutcome::Success { artifact_json, .. })
+        if before.policy == "dead_local_may_elide" && before.expected_artifact.as_ref() == Some(artifact_json))
+}
+fn ratio(after: u64, before: u64) -> f64 {
+    if before == 0 {
+        0.0
+    } else {
+        after as f64 / before as f64
+    }
+}
+fn counter_deltas(
+    before: Option<&nefor_mag::profile::OperationCounters>,
+    after: Option<&nefor_mag::profile::OperationCounters>,
+) -> serde_json::Map<String, Value> {
+    let (Some(before), Some(after)) = (before, after) else {
+        return serde_json::Map::new();
+    };
+    let before = serde_json::to_value(before).expect("counter json");
+    let after = serde_json::to_value(after).expect("counter json");
+    let mut deltas = serde_json::Map::new();
+    collect_counter_deltas("", &before, &after, &mut deltas);
+    deltas
+}
+fn collect_counter_deltas(
+    prefix: &str,
+    before: &Value,
+    after: &Value,
+    deltas: &mut serde_json::Map<String, Value>,
+) {
+    match (before, after) {
+        (Value::Number(before), Value::Number(after)) => {
+            let old = before.as_u64().unwrap_or(0) as i128;
+            let new = after.as_u64().unwrap_or(0) as i128;
+            deltas.insert(prefix.into(), json!(new - old));
+        }
+        (Value::Object(before), Value::Object(after)) => {
+            let keys = before
+                .keys()
+                .chain(after.keys())
+                .collect::<std::collections::BTreeSet<_>>();
+            for key in keys {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                collect_counter_deltas(
+                    &path,
+                    before.get(key).unwrap_or(&Value::Null),
+                    after.get(key).unwrap_or(&Value::Null),
+                    deltas,
+                );
+            }
+        }
+        (Value::Null, Value::Number(after)) => {
+            deltas.insert(prefix.into(), json!(after.as_u64().unwrap_or(0) as i128));
+        }
+        (Value::Number(before), Value::Null) => {
+            deltas.insert(
+                prefix.into(),
+                json!(-(before.as_u64().unwrap_or(0) as i128)),
+            );
+        }
+        _ => {}
+    }
+}
+
+fn metadata(root: &Path, samples: usize, warmups: usize, case_definition_hash: String) -> Metadata {
+    Metadata {
+        git_commit: command_output(root, &["git", "rev-parse", "HEAD"]),
+        git_dirty: !command_output(root, &["git", "status", "--porcelain"]).is_empty(),
+        package_version: env!("CARGO_PKG_VERSION").into(),
+        rustc: command_output(root, &["rustc", "-Vv"]),
+        target: rustc_host(root),
+        os: std::env::consts::OS.into(),
+        arch: std::env::consts::ARCH.into(),
+        logical_cpus: std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1),
+        profile: "bench (optimized)".into(),
+        samples_per_case: samples,
+        warmup_iterations: warmups,
+        case_definition_hash,
+        size_replacements: std::collections::BTreeMap::from([(
+            "nefor-linear requested 16 (expression nesting limit)".into(),
+            12,
+        )]),
+    }
+}
+fn definition_hash(cases: &[Fixture], oracles: &[Fixture]) -> String {
+    fingerprint(
+        cases
+            .iter()
+            .chain(oracles)
+            .flat_map(|case| {
+                format!(
+                    "{}:{}:{}:{}:{}\n",
+                    case.name,
+                    case.family,
+                    case.stage,
+                    case.size.map_or_else(|| "none".into(), |v| v.to_string()),
+                    case.source_fingerprint
+                )
+                .into_bytes()
+            })
+            .collect::<Vec<_>>()
+            .as_slice(),
+    )
+}
+fn positive_env(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            value
+                .parse::<std::num::NonZeroUsize>()
+                .unwrap_or_else(|_| panic!("{name} must be positive"))
+                .get()
+        })
+        .unwrap_or(default)
+}
+fn value_after(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|arg| arg == flag).map(|index| {
+        args.get(index + 1)
+            .unwrap_or_else(|| panic!("{flag} requires a path"))
+            .clone()
+    })
+}
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root")
+}
+fn fresh_scratch(root: &Path) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let path = root
+        .join("tmp/mag-optimization-cycle-1")
+        .join(format!("scratch-{nonce}"));
+    fs::create_dir_all(&path).expect("create scratch");
+    path
+}
+fn rustc_host(root: &Path) -> String {
+    command_output(root, &["rustc", "-Vv"])
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .unwrap_or("unknown")
+        .to_owned()
+}
+fn command_output(root: &Path, args: &[&str]) -> String {
+    Command::new(args[0])
+        .args(&args[1..])
+        .current_dir(root)
+        .output()
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        .unwrap_or_default()
+}
+
+fn load_runtime_contracts(path: &Path) -> Value {
     let source = fs::read_to_string(path).expect("read shipped MAG registry");
     let lua = Lua::new();
     install_runtime_registry_host(&lua);
@@ -307,193 +630,36 @@ fn load_runtime_contracts(path: &Path) -> JsonValue {
         .load(&source)
         .set_name(path.display().to_string())
         .eval()
-        .expect("load shipped MAG registry");
+        .expect("load registry");
     let contracts: mlua::Function = registry
         .get("registry_contracts")
-        .expect("registry_contracts export");
+        .expect("registry_contracts");
     let value: LuaValue = contracts
         .call(lua.array_metatable())
         .expect("read registry contracts");
     lua.from_value(value).expect("serialize registry contracts")
 }
-
 fn install_runtime_registry_host(lua: &Lua) {
-    let nefor = lua.create_table().expect("create registry host");
+    let nefor = lua.create_table().expect("host");
     nefor
         .set(
             "log",
-            lua.create_function(|_, _: String| Ok(()))
-                .expect("create registry log binding"),
+            lua.create_function(|_, _: String| Ok(())).expect("log"),
         )
-        .expect("install registry log binding");
-    let semantic = lua.create_table().expect("create semantic host");
+        .expect("install log");
+    let semantic = lua.create_table().expect("semantic");
     semantic
         .set(
             "id",
             lua.create_function(|lua, descriptor: LuaValue| {
-                let descriptor: JsonValue = lua.from_value(descriptor)?;
+                let descriptor: Value = lua.from_value(descriptor)?;
                 let descriptor = nefor_mag::json::concrete_type_from_json(&descriptor)
                     .map_err(|error| mlua::Error::runtime(error.to_string()))?;
                 Ok(descriptor.stable_id().to_string())
             })
-            .expect("create semantic id binding"),
+            .expect("id"),
         )
-        .expect("install semantic id binding");
-    nefor
-        .set("semantic_type", semantic)
-        .expect("install semantic host");
-    lua.globals()
-        .set("nefor", nefor)
-        .expect("install registry host");
-}
-
-fn write_case(
-    scratch: &Path,
-    name: &str,
-    source: &str,
-    module_roots: Vec<PathBuf>,
-    inputs: serde_json::Value,
-    expected_error: Option<ExpectedError>,
-) -> Case {
-    let entry = format!("{name}.mag");
-    fs::write(scratch.join(&entry), source).expect("write benchmark case");
-    Case {
-        name: name.into(),
-        source_dir: scratch.into(),
-        entry,
-        module_roots,
-        inputs,
-        input_bytes: source.len(),
-        expected_error,
-    }
-}
-
-fn linear_graph(size: usize) -> String {
-    let mut source = String::from(
-        "(require \"nefor.artifact\")\n(require \"nefor.contracts\")\n(require \"nefor.graph\")\n(let pass (fn [[id String]] -> (nefor.graph.Node Int Int) (let input (nefor.graph.port id (type-tag Int) \"nefor.graph.Value\")) (let output (nefor.graph.port id (type-tag Int) \"nefor.graph.Value\")) (let actor (nefor.graph.actor id \"nefor.factory.output\" [(type-evidence (type-tag Int))] (as nefor.graph.OutputParams {}) (nefor.graph.store-port input) [(nefor.graph.store-port output)])) (nefor.graph.node id \"ordinary\" [actor] (as (List nefor.graph.StoredRoute) []) (as (List nefor.graph.Message) []) input output)))\n(let start (nefor.graph.source \"start\" (type-tag Int) 1))\n",
-    );
-    for index in 0..size {
-        source.push_str(&format!("(let n{index} (pass \"n{index}\"))\n"));
-    }
-    source.push_str("(let out (nefor.graph.output \"out\" (type-tag Int)))\n(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph (nefor.graph.add-edges graph [");
-    if size == 0 {
-        source.push_str("(nefor.graph.edge start out)");
-    } else {
-        source.push_str("(nefor.graph.edge start n0) ");
-        for index in 0..size - 1 {
-            source.push_str(&format!("(nefor.graph.edge n{index} n{}) ", index + 1));
-        }
-        source.push_str(&format!("(nefor.graph.edge n{} out)", size - 1));
-    }
-    source.push_str("])))\n(nefor.artifact.compile topology)");
-    source
-}
-
-fn product_fan_in(size: usize) -> String {
-    let types = (0..size).map(|_| "Int").collect::<Vec<_>>().join(" ");
-    let mut source = String::from("(require \"nefor.artifact\")\n(require \"nefor.graph\")\n");
-    for index in 0..size {
-        source.push_str(&format!(
-            "(let s{index} (nefor.graph.source \"s{index}\" (type-tag Int) {index}))\n"
-        ));
-    }
-    source.push_str(&format!("(let out (nefor.graph.output \"out\" (type-tag (+ {types}))))\n(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph (nefor.graph.add-edges graph ["));
-    for index in 0..size {
-        source.push_str(&format!("(nefor.graph.edge s{index} out) "));
-    }
-    source.push_str("])))\n(nefor.artifact.compile topology)");
-    source
-}
-
-fn recursive_limit() -> String {
-    "(let loop (fn [[n Int]] -> Artifact (loop n)))\n(loop 1)".into()
-}
-
-fn distribution(samples: &[u64]) -> Distribution {
-    let mut sorted = samples.to_vec();
-    sorted.sort_unstable();
-    Distribution {
-        min: sorted.first().copied().unwrap_or(0),
-        median: percentile(&sorted, 50),
-        mean: (sorted.iter().map(|&v| u128::from(v)).sum::<u128>() / sorted.len().max(1) as u128)
-            as u64,
-        p90: percentile(&sorted, 90),
-        p95: percentile(&sorted, 95),
-        max: sorted.last().copied().unwrap_or(0),
-    }
-}
-
-fn phase_medians(profiles: &[CompileProfile]) -> Option<nefor_mag::profile::PhaseDurations> {
-    let serialized = profiles
-        .iter()
-        .map(|p| serde_json::to_value(&p.phases).expect("phase json"))
-        .collect::<Vec<_>>();
-    let keys = serialized
-        .first()?
-        .as_object()?
-        .keys()
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut result = BTreeMap::new();
-    for key in keys {
-        let mut values = serialized
-            .iter()
-            .map(|p| p[&key].as_u64().unwrap_or(0))
-            .collect::<Vec<_>>();
-        values.sort_unstable();
-        result.insert(key, percentile(&values, 50));
-    }
-    serde_json::from_value(serde_json::to_value(result).ok()?).ok()
-}
-
-fn percentile(sorted: &[u64], percentile: usize) -> u64 {
-    sorted
-        .get((sorted.len().saturating_sub(1) * percentile) / 100)
-        .copied()
-        .unwrap_or(0)
-}
-
-fn nanos(duration: Duration) -> u64 {
-    duration.as_nanos().min(u128::from(u64::MAX)) as u64
-}
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .expect("workspace root")
-}
-fn fresh_scratch() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("nefor-mag-bench-{nonce}"));
-    fs::create_dir_all(&path).expect("benchmark scratch");
-    path
-}
-fn output(root: &Path, args: &[&str]) -> String {
-    Command::new(args[0])
-        .args(&args[1..])
-        .current_dir(root)
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .unwrap_or_default()
-}
-fn metadata(root: &Path, samples: usize) -> Metadata {
-    Metadata {
-        git_commit: output(root, &["git", "rev-parse", "HEAD"]),
-        git_dirty: !output(root, &["git", "status", "--porcelain"]).is_empty(),
-        package_version: env!("CARGO_PKG_VERSION"),
-        rustc: output(root, &["rustc", "-Vv"]),
-        target: option_env!("TARGET").unwrap_or("unknown").into(),
-        os: std::env::consts::OS,
-        arch: std::env::consts::ARCH,
-        logical_cpus: std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1),
-        profile: "bench (optimized)",
-        samples_per_case: samples,
-        warmup_iterations: WARMUP,
-    }
+        .expect("install id");
+    nefor.set("semantic_type", semantic).expect("semantic host");
+    lua.globals().set("nefor", nefor).expect("registry host");
 }

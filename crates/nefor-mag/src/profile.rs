@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,8 +28,22 @@ pub struct PhaseDurations {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OperationCounters {
     pub evaluator_steps: u64,
+    pub checked_bindings: u64,
+    pub checked_expressions: u64,
+    pub binding_slots_declared: u64,
+    pub binding_force_initializations: u64,
+    pub binding_force_ready_hits: u64,
+    pub binding_force_cycles: u64,
     pub function_calls: u64,
+    pub user_function_calls: u64,
     pub builtin_calls: u64,
+    pub concrete_type_resolution_requests: u64,
+    pub runtime_value_validation_visits: u64,
+    /// Calls partitioned by canonical builtin name.
+    pub builtin_calls_by_name: BTreeMap<String, u64>,
+    /// Collection/descriptor items traversed or copied by selected builtins.
+    pub builtin_input_items_by_name: BTreeMap<String, u64>,
+    pub value_equality_visits: u64,
     pub environment_snapshots: u64,
     pub environment_snapshot_bindings: u64,
     pub module_requests: u64,

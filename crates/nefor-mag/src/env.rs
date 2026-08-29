@@ -153,6 +153,7 @@ pub struct BindingHandle {
     pub id: BindingId,
     pub frame: Scope,
     state: Weak<Mutex<CompilationState>>,
+    profiler: Option<CompileProfiler>,
 }
 
 #[derive(Debug, Clone)]
@@ -418,6 +419,10 @@ impl Env {
         frame
             .slots
             .insert(id, BindingSlot::Uninitialized(initializer));
+        drop(state);
+        self.profile_counters(|counters| {
+            counters.binding_slots_declared = counters.binding_slots_declared.saturating_add(1);
+        });
         Ok(())
     }
     pub fn define_ready(&mut self, id: BindingId, name: &str, value: Value) {
@@ -467,6 +472,7 @@ impl Env {
                     id,
                     frame: *scope,
                     state: Arc::downgrade(&self.state),
+                    profiler: self.profiler.clone(),
                 })
             })
             .filter(|handle| seen.insert(handle.id))
@@ -490,7 +496,16 @@ impl Env {
             id,
             frame,
             state: Arc::downgrade(&self.state),
+            profiler: self.profiler.clone(),
         })
+    }
+
+    pub(crate) fn profile_force_cycle(handle: &BindingHandle) {
+        if let Some(profiler) = &handle.profiler {
+            profiler.update_counters(|counters| {
+                counters.binding_force_cycles = counters.binding_force_cycles.saturating_add(1);
+            });
+        }
     }
     pub fn begin_binding_force(&self, id: BindingId) -> Result<BindingForce, MagError> {
         Self::begin_handle_force(&self.binding_handle(id)?)
@@ -506,8 +521,22 @@ impl Env {
             .get_mut(&handle.frame)
             .ok_or_else(|| MagError::Eval("binding frame was reclaimed".into()))?;
         match frame.slots.get_mut(&handle.id) {
-            Some(BindingSlot::Ready(value)) => Ok(BindingForce::Ready(value.clone())),
+            Some(BindingSlot::Ready(value)) => {
+                if let Some(profiler) = &handle.profiler {
+                    profiler.update_counters(|counters| {
+                        counters.binding_force_ready_hits =
+                            counters.binding_force_ready_hits.saturating_add(1)
+                    });
+                }
+                Ok(BindingForce::Ready(value.clone()))
+            }
             Some(slot @ BindingSlot::Uninitialized(_)) => {
+                if let Some(profiler) = &handle.profiler {
+                    profiler.update_counters(|counters| {
+                        counters.binding_force_initializations =
+                            counters.binding_force_initializations.saturating_add(1)
+                    });
+                }
                 let BindingSlot::Uninitialized(initializer) =
                     std::mem::replace(slot, BindingSlot::Initializing)
                 else {
@@ -518,10 +547,18 @@ impl Env {
                     initializer,
                 })
             }
-            Some(BindingSlot::Initializing) => Err(MagError::Eval(format!(
-                "binding initialization cycle at binding#{}",
-                handle.id.0
-            ))),
+            Some(BindingSlot::Initializing) => {
+                if let Some(profiler) = &handle.profiler {
+                    profiler.update_counters(|counters| {
+                        counters.binding_force_cycles =
+                            counters.binding_force_cycles.saturating_add(1)
+                    });
+                }
+                Err(MagError::Eval(format!(
+                    "binding initialization cycle at binding#{}",
+                    handle.id.0
+                )))
+            }
             None => Err(MagError::Unresolved(format!("binding#{}", handle.id.0))),
         }
     }
@@ -534,6 +571,7 @@ impl Env {
                 id,
                 frame,
                 state: Arc::downgrade(&self.state),
+                profiler: self.profiler.clone(),
             },
             value,
         )
@@ -811,7 +849,7 @@ impl Env {
                     && !self
                         .lookup_candidates(&name)
                         .iter()
-                        .any(|existing| crate::eval::equal(existing, &value))
+                        .any(|existing| crate::eval::equal(self, existing, &value))
                 {
                     self.define(&name, value);
                 }
@@ -1039,7 +1077,7 @@ impl Env {
                 if !self
                     .lookup_candidates(&qualified)
                     .iter()
-                    .any(|existing| crate::eval::equal(existing, &value))
+                    .any(|existing| crate::eval::equal(self, existing, &value))
                 {
                     self.define(&qualified, value);
                 }

@@ -105,6 +105,10 @@ impl fmt::Display for SemanticTypeId {
 
 impl ConcreteType {
     pub fn resolve(env: &Env, ty: &MagType) -> Result<Self, MagError> {
+        env.profile_counters(|counters| {
+            counters.concrete_type_resolution_requests =
+                counters.concrete_type_resolution_requests.saturating_add(1);
+        });
         resolve(env, ty, &mut HashSet::new())
     }
 
