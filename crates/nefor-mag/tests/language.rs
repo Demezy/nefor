@@ -33,6 +33,32 @@ fn artifact_is_the_only_top_level_output() {
 }
 
 #[test]
+fn raw_multiline_strings_support_scala_style_margins() {
+    let root = workspace("raw-multiline-strings");
+    let artifact = compile(
+        r#"
+          (let script
+            (strip-margin """|set -e
+                              |echo 'export PATH="$HOME/.local/bin:$PATH"'
+                              |find . \( -name '*.mag' -o -name '*.md' \)"""))
+          (artifact
+            {:script script
+             :single-line (replace script "\n" " ")})
+        "#,
+        &root,
+    )
+    .unwrap();
+
+    assert_eq!(
+        artifact,
+        json!({
+            "script": "set -e\necho 'export PATH=\"$HOME/.local/bin:$PATH\"'\nfind . \\( -name '*.mag' -o -name '*.md' \\)",
+            "single-line": "set -e echo 'export PATH=\"$HOME/.local/bin:$PATH\"' find . \\( -name '*.mag' -o -name '*.md' \\)"
+        })
+    );
+}
+
+#[test]
 fn rust_compilation_returns_the_artifact_directly() {
     let root = workspace("compilation-artifact");
     assert_eq!(
@@ -1528,6 +1554,50 @@ fn canonical_and_sort_by_are_typed_deterministic_builtins() {
         .unwrap_err()
         .to_string();
     assert!(bad_arity.contains("expected 1, got 2"), "{bad_arity}");
+}
+
+#[test]
+fn fallible_nodes_compose_with_kleisli_semantics() {
+    let root = workspace("node-kleisli-composition");
+    let mag_lib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
+    fs::write(
+        root.join("main.mag"),
+        r#"
+          (require "nefor.graph")
+          (require "nefor.node")
+
+          (type Success {:value Int})
+          (type Failure {:message String})
+
+          (let success
+            (nefor.graph.identity "success" (type-tag Success)))
+          (let failure
+            (nefor.graph.identity "failure" (type-tag Failure)))
+          (let fallible
+            (nefor.node.choose "fallible" success failure))
+          (let continuation
+            (nefor.graph.identity "continuation" (type-tag Success)))
+          (let composed (nefor.node.>=> fallible continuation))
+
+          (artifact composed)
+        "#,
+    )
+    .unwrap();
+
+    let program = load_with_inputs_and_module_roots(
+        &root,
+        "main.mag",
+        json!({}),
+        std::slice::from_ref(&mag_lib),
+    )
+    .unwrap();
+
+    assert_eq!(program.artifact["id"], "fallible>=>continuation");
+    assert!(program.artifact["actors"]
+        .as_array()
+        .is_some_and(|actors| actors
+            .iter()
+            .any(|actor| actor["id"] == "fallible>=>continuation.error")));
 }
 
 #[test]

@@ -55,6 +55,35 @@ pub mod kernel {
             modification
         }
 
+        fn actor_params<'a>(artifact: &'a JsonValue, actor: &str) -> &'a JsonValue {
+            artifact["actors"]
+                .as_array()
+                .expect("initial actors")
+                .iter()
+                .find(|candidate| candidate["id"] == actor)
+                .unwrap_or_else(|| panic!("actor {actor}"))
+                .get("params")
+                .expect("actor params")
+        }
+
+        fn routes_to<'a>(artifact: &'a JsonValue, actor: &str) -> Vec<&'a JsonValue> {
+            artifact["actors"]
+                .as_array()
+                .expect("initial actors")
+                .iter()
+                .flat_map(|source| {
+                    source["routes"]
+                        .as_object()
+                        .expect("actor route map")
+                        .values()
+                        .flat_map(|destinations| {
+                            destinations.as_array().expect("route destinations")
+                        })
+                })
+                .filter(|destination| destination["actor"] == actor)
+                .collect()
+        }
+
         fn compile_mag_eval_expression(host: &LuaHost, name: &str, expression: &str) -> JsonValue {
             let source = format!(
                 r#"(require "nefor.artifact")
@@ -105,6 +134,51 @@ pub mod kernel {
             .expect("compile Nefor guide with runtime contracts");
             let initial = crate::artifact_modification(&loaded.artifact)
                 .expect("normalize guide initial modification");
+
+            let actors = initial["actors"].as_array().expect("guide actors");
+            for factory in [
+                "nefor.factory.worktree-create",
+                "nefor.factory.shell-script",
+                "nefor.factory.discard",
+                "nefor.factory.dynamic-input",
+                "nefor.factory.dynamic-output",
+                "nefor.factory.dynamic-context",
+            ] {
+                assert!(
+                    actors.iter().any(|actor| actor["factory"] == factory),
+                    "guide must exercise {factory}"
+                );
+            }
+            let rules = initial["rules"].as_array().expect("guide rules");
+            assert!(rules.iter().any(|rule| rule["fn"] == "expand-followup"));
+
+            let build_params = actor_params(&initial, "development.build");
+            assert_eq!(build_params["script"], "cargo build");
+            assert_eq!(build_params["cwd"], "tmp/mag-book-worktree");
+
+            let builder_routes = routes_to(&initial, "development.input.output");
+            assert_eq!(
+                builder_routes.len(),
+                2,
+                "task and worktree both feed builder"
+            );
+            let mut positions = builder_routes
+                .iter()
+                .map(|route| {
+                    route["product_position"]
+                        .as_i64()
+                        .expect("product position")
+                })
+                .collect::<Vec<_>>();
+            positions.sort_unstable();
+            assert_eq!(
+                positions,
+                vec![0, 1],
+                "builder product occurrences are distinct"
+            );
+            let context_route = routes_to(&initial, "development.builder.entry");
+            assert_eq!(context_route.len(), 1, "one complete context feeds builder");
+            assert_eq!(context_route[0]["product_position"], -1);
 
             assert!(
                 host.begin_run("mag-book-contracts", "mag-book-contracts", None)

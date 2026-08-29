@@ -206,15 +206,24 @@ pub fn check_call(
             got: args.len(),
         });
     }
+    let actual_types = args
+        .iter()
+        .map(|value| {
+            value_type(value).ok_or_else(|| {
+                MagError::Type(format!(
+                    "cannot pass {} as a typed argument",
+                    value.type_name()
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let mut subst = HashMap::new();
-    for (value, expected) in args.iter().zip(&function.param_types) {
-        let actual = value_type(value).ok_or_else(|| {
-            MagError::Type(format!(
-                "cannot pass {} as a typed argument",
-                value.type_name()
-            ))
-        })?;
-        compatible(env, &actual, expected, &mut subst).map_err(MagError::Type)?;
+    let mut order = (0..function.param_types.len()).collect::<Vec<_>>();
+    order.sort_by_key(|index| contains_union(&function.param_types[*index]));
+    for index in order {
+        let actual = &actual_types[index];
+        let expected = substitute(&function.param_types[index], &subst);
+        compatible(env, &actual, &expected, &mut subst).map_err(MagError::Type)?;
     }
     Ok((substitute(&function.return_type, &subst), subst))
 }
@@ -224,17 +233,28 @@ pub fn check_resolved_call(
     function: &crate::ast::FnValue,
     resolved: &MagType,
 ) -> Result<(MagType, HashMap<String, MagType>), MagError> {
-    let declared = MagType::Function(
-        function.param_types.clone(),
-        Box::new(function.return_type.clone()),
-    );
-    let MagType::Function(_, result) = resolved else {
+    let MagType::Function(resolved_params, result) = resolved else {
         return Err(MagError::Type(format!(
             "checked call target must be a function, got {resolved}"
         )));
     };
+    if resolved_params.len() != function.param_types.len() {
+        return Err(MagError::Type(format!(
+            "checked call arity changed from {} to {}",
+            function.param_types.len(),
+            resolved_params.len()
+        )));
+    }
     let mut substitution = HashMap::new();
-    compatible(env, resolved, &declared, &mut substitution).map_err(MagError::Type)?;
+    let mut order = (0..function.param_types.len()).collect::<Vec<_>>();
+    order.sort_by_key(|index| contains_union(&function.param_types[*index]));
+    for index in order {
+        let expected = substitute(&function.param_types[index], &substitution);
+        compatible(env, &resolved_params[index], &expected, &mut substitution)
+            .map_err(MagError::Type)?;
+    }
+    let expected_result = substitute(&function.return_type, &substitution);
+    compatible(env, result, &expected_result, &mut substitution).map_err(MagError::Type)?;
     Ok((result.as_ref().clone(), substitution))
 }
 
@@ -435,8 +455,12 @@ fn infer_form(env: &Env, locals: &mut Locals, items: &[Expr]) -> Result<MagType,
                         return None;
                     }
                     let mut substitution = HashMap::new();
-                    for (actual, expected) in argument_types.iter().zip(params) {
-                        compatible(env, actual, expected, &mut substitution).ok()?;
+                    let mut order = (0..params.len()).collect::<Vec<_>>();
+                    order.sort_by_key(|index| contains_union(&params[*index]));
+                    for index in order {
+                        let actual = &argument_types[index];
+                        let expected = substitute(&params[index], &substitution);
+                        compatible(env, actual, &expected, &mut substitution).ok()?;
                     }
                     Some((*concrete, substitute(result, &substitution)))
                 })
@@ -476,9 +500,16 @@ fn infer_form(env: &Env, locals: &mut Locals, items: &[Expr]) -> Result<MagType,
         )));
     }
     let mut subst = HashMap::new();
-    for (arg, expected) in items[1..].iter().zip(&params) {
-        let actual = infer(env, locals, arg)?;
-        compatible(env, &actual, expected, &mut subst).map_err(MagError::Type)?;
+    let argument_types = items[1..]
+        .iter()
+        .map(|argument| infer(env, locals, argument))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut order = (0..params.len()).collect::<Vec<_>>();
+    order.sort_by_key(|index| contains_union(&params[*index]));
+    for index in order {
+        let actual = &argument_types[index];
+        let expected = substitute(&params[index], &subst);
+        compatible(env, &actual, &expected, &mut subst).map_err(MagError::Type)?;
     }
     Ok(substitute(&result, &subst))
 }
@@ -913,6 +944,22 @@ fn infer_builtin(
             let _ = infer(env, locals, &args[0])?;
             Ok(MagType::Artifact)
         }
+        "strip-margin" => {
+            exact(1)?;
+            let value = infer(env, locals, &args[0])?;
+            compatible(env, &value, &MagType::String, &mut HashMap::new())
+                .map_err(MagError::Type)?;
+            Ok(MagType::String)
+        }
+        "replace" => {
+            exact(3)?;
+            for argument in args {
+                let value = infer(env, locals, argument)?;
+                compatible(env, &value, &MagType::String, &mut HashMap::new())
+                    .map_err(MagError::Type)?;
+            }
+            Ok(MagType::String)
+        }
         "concat" => {
             exact(2)?;
             let a = infer(env, locals, &args[0])?;
@@ -1045,6 +1092,8 @@ const TYPE_BINDER_SCOPE_KEY: &str = "\0type-binders";
 
 pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "str",
+    "strip-margin",
+    "replace",
     "map",
     "indexed-map",
     "filter",
@@ -1105,6 +1154,11 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
                 _ => None,
             })
             .unwrap_or_default(),
+        "strip-margin" => vec![function(vec![MagType::String], MagType::String)],
+        "replace" => vec![function(
+            vec![MagType::String, MagType::String, MagType::String],
+            MagType::String,
+        )],
         "count" => vec![
             function(vec![list(var("item"))], MagType::Int),
             function(vec![MagType::String], MagType::Int),
@@ -2302,14 +2356,22 @@ fn compile_call_args(
     bindable: &HashSet<String>,
 ) -> Result<(Vec<CheckedExpr>, HashMap<String, MagType>), MagError> {
     let mut substitution = HashMap::new();
-    let mut args = Vec::with_capacity(params.len());
-    for (expression, parameter) in expressions.iter().zip(params) {
+    let mut args = vec![None; params.len()];
+    let mut order = (0..params.len()).collect::<Vec<_>>();
+    order.sort_by_key(|index| contains_union(&params[*index]));
+    for index in order {
+        let expression = &expressions[index];
+        let parameter = &params[index];
         let parameter = substitute(parameter, &substitution);
         let argument = compile_expr(env, scopes, expression, Some(&parameter))?;
         compatible_with_bindable(env, &argument.ty, &parameter, &mut substitution, bindable)
             .map_err(MagError::Type)?;
-        args.push(argument);
+        args[index] = Some(argument);
     }
+    let args = args
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| MagError::Type("internal error: unchecked call argument".into()))?;
     Ok((args, substitution))
 }
 
@@ -2708,6 +2770,22 @@ fn has_type_variables(ty: &MagType) -> bool {
     !variables.is_empty()
 }
 
+fn contains_union(ty: &MagType) -> bool {
+    match ty {
+        MagType::Union(_) => true,
+        MagType::Named(_, arguments) | MagType::Product(arguments) => {
+            arguments.iter().any(contains_union)
+        }
+        MagType::TypeTag(value) | MagType::List(value) => contains_union(value),
+        MagType::Map(key, value) => contains_union(key) || contains_union(value),
+        MagType::Record(fields) => fields.values().any(contains_union),
+        MagType::Function(parameters, result) => {
+            parameters.iter().any(contains_union) || contains_union(result)
+        }
+        _ => false,
+    }
+}
+
 fn instantiate_candidate(candidate: &CheckedCandidate) -> (MagType, HashSet<String>) {
     let substitutions = candidate
         .generic_binders
@@ -2992,16 +3070,27 @@ fn compatible_in(
     }
     match expected {
         MagType::Union(options) => {
-            let mut matches = options.iter().filter_map(|option| {
+            let original_bindings = subst.len();
+            let matches = options.iter().filter_map(|option| {
                 let mut candidate = subst.clone();
                 compatible_in(env, actual, option, &mut candidate, bindable)
                     .ok()
-                    .map(|_| candidate)
+                    .map(|_| (candidate.len() - original_bindings, candidate))
             });
-            let selected = matches
+            let matches = matches.collect::<Vec<_>>();
+            let specificity = matches
+                .iter()
+                .map(|(new_bindings, _)| *new_bindings)
+                .min()
+                .ok_or_else(|| format!("expected {expected}, got {actual}"))?;
+            let mut best = matches
+                .into_iter()
+                .filter(|(new_bindings, _)| *new_bindings == specificity)
+                .map(|(_, candidate)| candidate);
+            let selected = best
                 .next()
                 .ok_or_else(|| format!("expected {expected}, got {actual}"))?;
-            for candidate in matches {
+            for candidate in best {
                 if candidate != selected {
                     return Err(format!(
                         "ambiguous union match for {actual} against {expected}"

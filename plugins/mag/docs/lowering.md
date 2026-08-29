@@ -102,7 +102,12 @@ the expression itself is concise:
 For a one-off pipeline, keep it inside the command node:
 
 ```lisp
-(nefor.shell.script "search" (as nefor.shell.ShellScriptParams {:script "rg -n TODO src/ | sort" :cwd "." :timeout (nefor.contracts.no-timeout)}))
+(nefor.shell.script "search"
+  (as nefor.shell.ShellScriptParams
+    {:script (strip-margin """|rg -n 'TODO|FIXME' src/ |
+                               |  sort""")
+     :cwd "."
+     :timeout (nefor.contracts.timeout-ms 30000)}))
 ```
 
 Multi-node pipelines are full `.mag` programs: compose typed nodes through

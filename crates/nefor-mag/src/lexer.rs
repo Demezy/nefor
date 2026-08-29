@@ -96,8 +96,13 @@ pub fn tokenize_source(source: &SourceSnapshot) -> Result<Vec<Token>, MagError> 
             }
             '"' => {
                 let start = pos;
-                pos += 1;
-                let value = read_string(input, &mut pos, start, source)?;
+                let value = if input[pos..].starts_with("\"\"\"") {
+                    pos += 3;
+                    read_raw_multiline_string(input, &mut pos, start, source)?
+                } else {
+                    pos += 1;
+                    read_string(input, &mut pos, start, source)?
+                };
                 tokens.push(Token {
                     kind: TokenKind::Str(value),
                     span: ByteSpan::new(start, pos),
@@ -193,6 +198,32 @@ fn read_number(input: &str, pos: &mut usize, negative: bool) -> TokenKind {
         TokenKind::Int(value.parse().unwrap_or(0))
     }
 }
+
+fn read_raw_multiline_string(
+    input: &str,
+    pos: &mut usize,
+    opener: usize,
+    source: &SourceSnapshot,
+) -> Result<String, MagError> {
+    let Some(relative_end) = input[*pos..].find("\"\"\"") else {
+        return Err(MagError::Syntax(Box::new(SyntaxDiagnostic::new(
+            "syntax_lex",
+            "lex",
+            "lexer: unterminated raw multiline string".into(),
+            source,
+            ByteSpan::new(input.len(), input.len()),
+            Some((
+                "raw multiline string opened here".into(),
+                ByteSpan::new(opener, opener + 3),
+            )),
+        ))));
+    };
+    let end = *pos + relative_end;
+    let value = input[*pos..end].to_owned();
+    *pos = end + 3;
+    Ok(value)
+}
+
 fn read_string(
     input: &str,
     pos: &mut usize,
@@ -311,5 +342,21 @@ mod tests {
         };
         assert_eq!(d.span, ByteSpan::new(3, 3));
         assert_eq!(d.source.as_ref(), "\"λ");
+    }
+
+    #[test]
+    fn raw_multiline_strings_preserve_quotes_backslashes_and_newlines() {
+        assert_eq!(
+            kinds("\"\"\"echo \"$HOME\"\nfind . \\( -name '*.mag' \\)\"\"\""),
+            vec![TokenKind::Str(
+                "echo \"$HOME\"\nfind . \\( -name '*.mag' \\)".into()
+            )]
+        );
+
+        let MagError::Syntax(diagnostic) = tokenize("\"\"\"never closed").unwrap_err() else {
+            panic!("syntax")
+        };
+        assert_eq!(diagnostic.span, ByteSpan::new(15, 15));
+        assert_eq!(diagnostic.related.unwrap().span, ByteSpan::new(0, 3));
     }
 }

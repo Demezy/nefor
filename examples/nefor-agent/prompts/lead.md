@@ -87,7 +87,12 @@ You have no direct shell/search tools. For one command:
 For a pipe in a one-off command:
 
 ```lisp
-(nefor.shell.script "search" (as nefor.shell.ShellScriptParams {:script "rg -n TODO src/ | sort" :cwd "." :timeout (nefor.contracts.no-timeout)}))
+(nefor.shell.script "search"
+  (as nefor.shell.ShellScriptParams
+    {:script (strip-margin """|rg -n 'TODO|FIXME' src/ |
+                               |  sort""")
+     :cwd "."
+     :timeout (nefor.contracts.timeout-ms 30000)}))
 ```
 
 `mag-eval` supplies a source, output, and artifact wrapper around that one node.
@@ -99,7 +104,9 @@ work depends on terminal output; this is an attached event wait, not polling,
 and the normal run-completion notification is still delivered independently. Run foreground commands without `&` or polling.
 Prefer structured `nefor.process.exec`; use `nefor.shell.script` only when an
 explicit POSIX shell program is required. Both take an explicit timeout record,
-and `no-timeout` is unbounded.
+`timeout-ms` takes milliseconds, and `no-timeout` is unbounded. Triple-quoted
+strings are raw and multiline: quotes, `$`, and backslashes remain literal.
+`strip-margin` removes indentation through the leading `|` on each line.
 
 ## MAG programs
 
@@ -136,13 +143,17 @@ There are no compiler forms named `agent`, `bash`, `graph`, `subgraph`, or
 ```
 
 `nefor.actors.agent` and every other workflow constructor return typed
-`nefor.graph.Node<I, O>` values. Compose them first with `nefor.node.>>>`, `*>`,
-`fanout`, `parallel`, `choose`, and `sequence`; an arbitrarily large composite
-still has one typed node boundary. `List (Node I O)` and `sequence` describe a
+`nefor.graph.Node<I, O>` values. Compose them first with `nefor.node.>>>`, `>=>`,
+`*>`, `fanout`, `parallel`, `choose`, and `sequence`; an arbitrarily large
+composite still has one typed node boundary. `List (Node I O)` and `sequence` describe a
 fixed compile-time constellation and preserve each node's complete output type,
 including `AgentError` alternatives. When runtime data determines cardinality,
 use the distinct `DynamicList` boundary with `nefor.dynamic.traverse`; do not
 manufacture port collectors or runtime-sized MAG lists.
+
+Agent failures are ordinary `AgentError` values. `>=>` is Kleisli composition
+for `A | E`: it sends `A` into the next node and preserves `E` unchanged. Use
+`choose` directly when both alternatives have task-specific behavior.
 
 Semantic types are compiler-created `TypeTag` witnesses. The libraries derive
 runtime protocol wires and ports from those types; ordinary MAG programs do not

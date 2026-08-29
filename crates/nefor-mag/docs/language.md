@@ -46,6 +46,19 @@ Evaluation selects the arm from constructor evidence retained by MAG, never
 from a user-authored string field. Named and generic aliases of sums are
 unfolded for exhaustiveness.
 
+Ordinary strings interpret `\n`, `\t`, `\\`, and `\"`. Triple-quoted strings
+are raw and may span lines; quotes, `$`, and backslashes inside them have no
+special meaning. `strip-margin` follows Scala's margin convention, removing
+leading whitespace through `|` while preserving line breaks:
+
+```lisp
+(let script
+  (strip-margin """|set -e
+                    |echo 'export PATH="$HOME/.local/bin:$PATH"'
+                    |find . \( -name '*.mag' -o -name '*.md' \)"""))
+(let command (replace script "\n" " "))
+```
+
 ## Bindings and lexical blocks
 
 MAG has one binding form:
@@ -170,7 +183,8 @@ For shell syntax, use explicit POSIX `shell.script`, which lowers to
 (nefor.shell.script
   "bounded-search"
   (as nefor.shell.ShellScriptParams
-    {:script "rg -n TODO src/ | sort"
+    {:script (strip-margin """|rg -n 'TODO|FIXME' src/
+                               |  | sort""")
      :cwd "."
      :timeout (nefor.contracts.timeout-ms 30000)}))
 ```

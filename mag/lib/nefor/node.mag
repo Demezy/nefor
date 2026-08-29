@@ -278,6 +278,30 @@
       (get input "input")
       (get output "output"))))
 
+;; Compose a fallible node with its successful continuation. The error arm is
+;; an ordinary value and passes through unchanged; if the continuation is also
+;; fallible, idempotent sums collapse the repeated error type. This is Kleisli
+;; composition for `A | E` expressed entirely through typed node primitives.
+(let >=>
+  (fn [I A E B]
+    [[left (nefor.graph.Node I (| A E))]
+     [right (nefor.graph.Node A B)]]
+    -> (nefor.graph.Node I (| B E))
+    (let id
+      (composite-id (get left "id") ">=>" (get right "id")))
+    (let preserve-error
+      (nefor.graph.identity (str id ".error") (type-tag E)))
+    (let continue-or-error
+      (choose (str id ".choose") right preserve-error))
+    (let composed (>>> left continue-or-error))
+    (nefor.graph.node-with-rules id (get composed "role")
+      (get composed "actors")
+      (get composed "routes")
+      (get composed "messages")
+      (get composed "rules")
+      (get composed "input")
+      (get composed "output"))))
+
 (let sequence-empty
   (fn [I O] [[id String]] -> (nefor.graph.Node I (List O))
     (let actor-id (str id ".empty"))

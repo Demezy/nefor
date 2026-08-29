@@ -1699,15 +1699,15 @@ local function lead_workflow_tool_schemas()
         "separately retained lifecycle. Graph and agent semantics live in " ..
         "namespaced MAG libraries. " ..
         "A fresh-run program requires nefor.actors, nefor.graph, nefor.contracts, and " ..
-        "nefor.artifact; construct source, agent, and output nodes, connect " ..
-        "them through one flat edge list in a Graph -> Graph function, then " ..
+        "nefor.artifact; construct and compose typed nodes with nefor.node, place " ..
+        "the final composite behind one output edge in a Graph -> Graph function, then " ..
         "pass that function to nefor.artifact.compile. Compile applies it to " ..
         "empty-graph. A delta program instead ends in nefor.artifact.delta and " ..
         "defines only spawns, messages, and kills. Use the agent constructor shown " ..
         "by the injected canonical contract. " ..
-        "Pass compiler-checked semantic type witnesses separately from runtime " ..
-        "wire tags; use (type-tag nefor.contracts.Task), wire \"task\", and " ..
-        "an output such as (type-tag nefor.contracts.TextAnswer). Exactly one " ..
+        "Pass compiler-checked semantic type witnesses such as " ..
+        "(type-tag nefor.contracts.Task) and (type-tag nefor.contracts.TextAnswer); " ..
+        "the libraries derive runtime wires. Exactly one " ..
         "concrete output<T> identity node marks a fresh run's result boundary. " ..
         "Authored graph transformations remain pure and retrieve no live state; " ..
         "only explicit apply submits their compiled Delta to the named run. Agent loops are unbounded; " ..

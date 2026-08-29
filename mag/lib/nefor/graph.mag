@@ -530,18 +530,19 @@
             (get candidate "outputs"))) actors)) 1)))
 (let port-is-input? (fn [[actors (List Actor)] [value StoredPort]] -> Bool
   (= (count (filter (fn [[candidate Actor]] -> Bool
-    (if (= (get candidate "id") (get value "actor"))
-      (= (get candidate "input") value) false)) actors)) 1)))
+    (let input (get candidate "input"))
+    (if (same-port-address? input value)
+      (descriptor-accepts? (get input "type") (get value "type")) false)) actors)) 1)))
 (let route-id (fn [[value StoredRoute]] -> String (get value "id")))
 (let incoming-routes-to (fn [[routes (List StoredRoute)] [input StoredPort]]
   -> (List StoredRoute)
   (sort-by route-id
     (filter (fn [[candidate StoredRoute]] -> Bool
-              (= (get candidate "to") input))
+              (same-port-address? (get candidate "to") input))
             routes))))
 (let messages-to (fn [[messages (List Message)] [input StoredPort]] -> (List Message)
   (filter (fn [[candidate Message]] -> Bool
-            (= (get candidate "to") input))
+            (same-port-address? (get candidate "to") input))
           messages)))
 (let actor-input-source-types (fn [[value Graph] [candidate Actor]]
   -> (List TypeDescriptor)
@@ -629,6 +630,16 @@
                                 (not (actor-input-coverage-valid? value candidate))) actors))
     (let bad-output-coverage (filter (fn [[candidate Actor]] -> Bool
                                  (not (actor-outputs-coverage-valid? value all-rules candidate))) actors))
+    (let input-coverage-errors
+      (map (fn [[candidate Actor]] -> String
+             (str "actor " (get candidate "id")
+                  " input incoming types must be compatible and exactly cover every product occurrence"))
+           bad-input-coverage))
+    (let output-coverage-errors
+      (map (fn [[candidate Actor]] -> String
+             (str "actor " (get candidate "id")
+                  " output alternatives must have an ordinary route, resident subscription, or terminal output path"))
+           bad-output-coverage))
     (let bad-routes (filter (fn [[candidate StoredRoute]] -> Bool
                         (not (route-valid? actors candidate))) (graph-routes value)))
     (as (core.validated.Validated String Graph)
@@ -653,8 +664,8 @@
                             (core.validated.invalid contract-errors))
                           (core.validated.invalid ["every node must have a path to the output node"]))
                         (core.validated.invalid ["every node must be reachable from a source node"]))
-                      (core.validated.invalid ["every actor output alternative must have an ordinary route, resident subscription, or terminal output path"]))
-                    (core.validated.invalid ["actor input incoming types must be compatible and exactly cover every product occurrence"]))
+                      (core.validated.invalid output-coverage-errors))
+                    (core.validated.invalid input-coverage-errors))
                   (core.validated.invalid ["boundary node roles require their concrete source/output factory shape, and ordinary nodes cannot contain initial messages"]))
                 (core.validated.invalid ["only source nodes may have zero incoming edges, and output nodes are terminal"])))))))))
 

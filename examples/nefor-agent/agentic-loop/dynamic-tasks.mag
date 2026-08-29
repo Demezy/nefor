@@ -33,11 +33,6 @@
   (nefor.dynamic.traverse "expand" expand-task
     (type-tag Task)
     (type-tag (| WorkerResult nefor.contracts.AgentError))))
-(let planner-error
-  (nefor.graph.identity "planner-error"
-    (type-tag nefor.contracts.AgentError)))
-(let run-plan
-  (nefor.node.choose "run-plan" workers planner-error))
 
 ;; Dynamic cardinality ends at an effect-aware context node. It waits for the
 ;; explicit completion event and sends one ordered provider turn downstream;
@@ -51,18 +46,12 @@
     (type-tag nefor.contracts.ProviderInput) (type-tag Summary) 2))
 (let summarize
   (nefor.node.>>> summary-context summarizer))
-(let run-error
-  (nefor.graph.identity "run-error"
-    (type-tag nefor.contracts.AgentError)))
-(let finish
-  (nefor.node.choose "finish" summarize run-error))
 
 (let planned (nefor.node.>>> start planner))
-(let ran (nefor.node.>>> planned run-plan))
-(let workflow (nefor.node.>>> ran finish))
+(let ran (nefor.node.>=> planned workers))
+(let workflow (nefor.node.>=> ran summarize))
 (let result (nefor.graph.output-for "result" workflow))
 
-(artifact
-  (nefor.artifact.compile
-    (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-      (nefor.graph.add-edges graph [(nefor.graph.edge workflow result)]))))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph [(nefor.graph.edge workflow result)])))

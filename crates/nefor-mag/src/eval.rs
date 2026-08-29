@@ -1234,6 +1234,26 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
         "str" => Ok(Value::Str(
             args.iter().map(value_string).collect::<Vec<_>>().join(""),
         )),
+        "strip-margin" => {
+            arity(args, 1)?;
+            let value = raw(&args[0])
+                .as_str()
+                .ok_or_else(|| MagError::Type("strip-margin expects a String".into()))?;
+            Ok(Value::Str(strip_margin(value)))
+        }
+        "replace" => {
+            arity(args, 3)?;
+            let value = raw(&args[0])
+                .as_str()
+                .ok_or_else(|| MagError::Type("replace expects a String".into()))?;
+            let from = raw(&args[1])
+                .as_str()
+                .ok_or_else(|| MagError::Type("replace expects a String pattern".into()))?;
+            let to = raw(&args[2])
+                .as_str()
+                .ok_or_else(|| MagError::Type("replace expects a String replacement".into()))?;
+            Ok(Value::Str(value.replace(from, to)))
+        }
         "canonical" => {
             arity(args, 1)?;
             let json = canonical_json(crate::json::value_to_json(env, &args[0])?);
@@ -1828,6 +1848,27 @@ fn value_string(v: &Value) -> String {
         Value::TypeTag(t) => t.to_mag_type().to_string(),
         _ => format!("<{:?}>", v.type_name()),
     }
+}
+
+fn strip_margin(value: &str) -> String {
+    value
+        .split_inclusive('\n')
+        .map(|line| {
+            let margin = line.char_indices().find_map(|(index, character)| {
+                if character == '|' {
+                    Some(Some(index + character.len_utf8()))
+                } else if character.is_whitespace() {
+                    None
+                } else {
+                    Some(None)
+                }
+            });
+            match margin.flatten() {
+                Some(content_start) => &line[content_start..],
+                None => line,
+            }
+        })
+        .collect()
 }
 pub(crate) fn equal(a: &Value, b: &Value) -> bool {
     match (raw(a), raw(b)) {
