@@ -50,6 +50,13 @@ local function provider_error(detail)
   return { message = tostring(detail), detail = option(nil) }
 end
 
+local function record_final_message(state, content)
+  local message = { role = "assistant", content = content or "" }
+  if not state:complete_streamed_message(message) and message.content ~= "" then
+    state:append(message)
+  end
+end
+
 function M.construct(id, params, emit, deps)
   params = params or {}
   deps = deps or {}
@@ -62,14 +69,11 @@ function M.construct(id, params, emit, deps)
     name = "llm",
     steerable = true,
     on_steered_final = function(state, result)
-      local content = boundary.answer_text(result)
-      if type(content) == "string" and content ~= "" then
-        state:append({ role = "assistant", content = content })
-      end
+      record_final_message(state, boundary.answer_text(result))
     end,
     on_final = function(state, result)
       local content = boundary.answer_text(result) or ""
-      if content ~= "" then state:append({ role = "assistant", content = content }) end
+      record_final_message(state, content)
       state:finish({ kind = RESULT, semantic_type_id = params.output_type,
         value = content, result = result }, {
           result = result, value = content, semantic_type_id = params.output_type,

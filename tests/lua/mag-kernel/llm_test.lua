@@ -675,6 +675,67 @@ do
 end
 
 do
+  local instance, msgs, facts = make("reasoning-only.llm", { provider = "p" })
+  instance.deliver(turn({ messages = { { role = "user", content = "go" } } }))
+  instance.handle_observation({ binding = "transcript", value = {
+    kind = "reasoning", text = "waiting for asynchronous work",
+  } })
+
+  local before_reply = #facts
+  instance.handle_observation({ binding = "transcript", value = {
+    kind = "assistant", text = "",
+  } })
+  assert_eq(#facts, before_reply,
+    "an empty intermediate observation does not settle the stream")
+
+  instance.deliver({
+    kind = "reply",
+    ref = find_kind(msgs, "capability.invoke").ref,
+    result = { text = "", finish_reason = "stop" },
+  })
+
+  local assistant_message_id
+  local completed = false
+  for _, fact in ipairs(facts) do
+    if fact.kind == "message_started" and fact.role == "assistant" then
+      assistant_message_id = fact.message_id
+    elseif fact.kind == "message_completed" and fact.message_id == assistant_message_id then
+      completed = true
+    end
+  end
+  assert_true(completed,
+    "the terminal provider reply closes a reasoning-only streamed message")
+  assert_eq(facts[#facts].kind, "turn_completed",
+    "the terminal provider reply closes the reasoning-only turn")
+  local final = find_kind(msgs, "nefor.agent.Result")
+  assert_eq(final.value, "", "the empty terminal answer remains an empty typed result")
+end
+
+do
+  local instance, msgs, facts = make("reasoning-error.llm", { provider = "p" })
+  instance.deliver(turn({ messages = { { role = "user", content = "go" } } }))
+  instance.handle_observation({ binding = "transcript", value = {
+    kind = "reasoning", text = "partial reasoning",
+  } })
+  instance.deliver({
+    kind = "reply",
+    ref = find_kind(msgs, "capability.invoke").ref,
+    error = "provider disconnected",
+  })
+
+  local interrupted = false
+  for _, fact in ipairs(facts) do
+    if fact.kind == "message_interrupted" then interrupted = true end
+  end
+  assert_true(interrupted,
+    "a terminal provider failure interrupts its open streamed message")
+  assert_eq(facts[#facts].kind, "turn_completed",
+    "the typed provider error can settle after interrupting the stream")
+  assert_true(find_kind(msgs, "nefor.agent.Result") ~= nil,
+    "the provider failure remains a typed agent result")
+end
+
+do
   local instance, msgs, facts = make("observed-usage.llm", { provider = "p" })
   instance.deliver(turn({ messages = { { role = "user", content = "go" } } }))
   instance.handle_observation({ binding = "conversation", value = {

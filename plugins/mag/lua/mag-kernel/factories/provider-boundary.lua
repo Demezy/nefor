@@ -266,6 +266,11 @@ function M.construct(id, params, emit, options)
       facts:message(message, completion)
     end
   end
+  function state:complete_streamed_message(message, completion)
+    if streamed_message_id == nil then return false end
+    self:append(message, completion)
+    return true
+  end
   function state:emit(message) emit(sign(message)) end
   function state:is_draining() return draining end
   -- True while a provider round has an open streamed assistant message. A
@@ -355,6 +360,7 @@ function M.construct(id, params, emit, options)
   end
 
   local function emit_failure(detail)
+    interrupt_stream("provider_failed")
     if options.on_error then
       options.on_error(state, detail)
     else
