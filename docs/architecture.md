@@ -64,6 +64,25 @@ the existing `mag.diagnostic` channel, which carries no candidate output.
 
 The provider boundary treats finalized tool arguments as untrusted model output. A call is executable only when its `function.arguments` decodes to a JSON object; empty, malformed, scalar, null, and array values are quarantined. The malformed assistant call is not recorded. Instead, the canonical conversation records a bounded user correction naming the call and diagnostic, then requests another completion. This keeps every reconstructed OpenAI assistant tool call provider-valid across continuation and session replay.
 
+Provider-native continuation state belongs to the assistant response that
+created it. A provider may return an opaque, provider/model-scoped artifact on
+its terminal completion; MAG attaches that artifact to the same canonical
+`message_completed` fact as the assistant text and tool calls. The conversation
+manager persists it and exposes it only through the private model-context
+projection, never through conversation snapshots, display projections, or
+stream deltas. On a compatible later request, the provider replaces that one
+neutral assistant message with its original native output items. A provider or
+model mismatch falls back to the neutral message instead of interpreting a
+foreign artifact.
+
+The ChatGPT provider uses this path for Responses reasoning, message, and
+function-call output items. Encrypted reasoning therefore remains adjacent to
+the call it informed across tool continuations, later turns, and session
+replay, without exposing readable chain of thought. Artifacts are incremental
+per response rather than repeated full-history snapshots. Native compaction
+still replaces its completed history prefix; response artifacts in the neutral
+tail continue from that checkpoint.
+
 ### Model selection
 
 Selecting a model is a request to the provider that owns it, not a fact the

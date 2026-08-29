@@ -691,7 +691,14 @@ fn universal_tool_calls_are_lowered_only_at_provider_boundary() {
 #[test]
 fn chatgpt_direct_completion_lowers_manager_history_without_dropping_run_input() {
     let lua = lua_with_lib();
-    let (kind, input, tail_input, name, arguments): (String, String, String, String, String) = lua
+    let (kind, input, tail_input, name, arguments, encrypted): (
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    ) = lua
         .load(
             r#"
             local chatgpt = require("chatgpt-provider")
@@ -707,6 +714,14 @@ fn chatgpt_direct_completion_lowers_manager_history_without_dropping_run_input()
                             id = "call-1", name = "read_file",
                             arguments = { path = "x" }, status = "call_completed",
                         }},
+                        provider_context = {
+                            provider = "chatgpt",
+                            format = "chatgpt.responses.output_items.v1",
+                            model = "gpt-5.6-sol",
+                            artifact = { items = {{
+                                type = "reasoning", encrypted_content = "sealed",
+                            }} },
+                        },
                     },
                     { role = "user", content = "current input" },
                 },
@@ -717,7 +732,9 @@ fn chatgpt_direct_completion_lowers_manager_history_without_dropping_run_input()
             local call = request.conversation_context.messages[2].tool_calls[1]
             return request.kind, request.conversation_context.messages[3].content,
                    request.conversation_context.tail_messages[1].content,
-                   call["function"].name, call["function"].arguments
+                   call["function"].name, call["function"].arguments,
+                   request.conversation_context.messages[2]
+                     .provider_context.artifact.items[1].encrypted_content
             "#,
         )
         .eval()
@@ -727,6 +744,7 @@ fn chatgpt_direct_completion_lowers_manager_history_without_dropping_run_input()
     assert_eq!(tail_input, "current input");
     assert_eq!(name, "read_file");
     assert_eq!(arguments, r#"{"path":"x"}"#);
+    assert_eq!(encrypted, "sealed");
 }
 
 #[test]

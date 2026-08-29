@@ -184,6 +184,8 @@ function M.new(options)
     emit("message_completed", {
       message_id = message_id,
       completion = completion.completion or {},
+      provider_context = type(completion.provider_context) == "table"
+        and copy(completion.provider_context) or nil,
       model = completion.model,
       duration_ms = completion.duration_ms,
       usage = completion.usage,

@@ -347,7 +347,7 @@ pub struct MessageRestore {
     pub tool_overrides: Option<Vec<crate::catalog::ToolSpec>>,
     pub tool_allowlist: Option<Vec<String>>,
     pub reasoning_effort: Option<ReasoningEffort>,
-    pub history: Vec<Message>,
+    pub history: Vec<HistoryEntry>,
 }
 
 /// Per-slug capability bits learned from the backend's /models
@@ -590,10 +590,7 @@ impl Chats {
                 restore.reasoning_effort,
             )
             .await?;
-        chat.history = repair_tool_call_history(restore.history)
-            .into_iter()
-            .map(HistoryEntry::from)
-            .collect();
+        chat.history = repair_tool_call_history(restore.history);
         let mut g = self.inner.lock().await;
         g.insert(restore.id, chat);
         Ok(())
@@ -731,6 +728,20 @@ impl Chats {
             .collect::<Vec<_>>();
         history.append(&mut chat.history);
         chat.history = history;
+        Ok(())
+    }
+
+    pub async fn append_native_history(
+        &self,
+        id: &ChatId,
+        items: Vec<ResponseItem>,
+    ) -> Result<(), ChatsError> {
+        let mut g = self.inner.lock().await;
+        let chat = g
+            .get_mut(id)
+            .ok_or_else(|| ChatsError::NotFound(id.clone()))?;
+        chat.history
+            .extend(items.into_iter().map(|item| HistoryEntry::Native { item }));
         Ok(())
     }
 
@@ -900,18 +911,28 @@ impl Chats {
 fn has_unanswered_tool_call(history: &[HistoryEntry], tool_call_id: &str) -> bool {
     let mut seen_call = false;
     for entry in history {
-        let HistoryEntry::Message { message } = entry else {
-            continue;
-        };
-        match message {
-            Message::Assistant { tool_calls, .. }
-                if tool_calls.iter().any(|tc| tc.id == tool_call_id) =>
-            {
+        match entry {
+            HistoryEntry::Native {
+                item: ResponseItem::FunctionCall { call_id, .. },
+            } if call_id == tool_call_id => {
                 seen_call = true;
             }
-            Message::Tool {
-                tool_call_id: answered,
-                ..
+            HistoryEntry::Native {
+                item: ResponseItem::FunctionCallOutput { call_id, .. },
+            } if call_id == tool_call_id => {
+                seen_call = false;
+            }
+            HistoryEntry::Message {
+                message: Message::Assistant { tool_calls, .. },
+            } if tool_calls.iter().any(|tc| tc.id == tool_call_id) => {
+                seen_call = true;
+            }
+            HistoryEntry::Message {
+                message:
+                    Message::Tool {
+                        tool_call_id: answered,
+                        ..
+                    },
             } if answered == tool_call_id => {
                 seen_call = false;
             }
@@ -921,24 +942,47 @@ fn has_unanswered_tool_call(history: &[HistoryEntry], tool_call_id: &str) -> boo
     seen_call
 }
 
-fn repair_tool_call_history(history: Vec<Message>) -> Vec<Message> {
+fn repair_tool_call_history(history: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
     let mut repaired = Vec::with_capacity(history.len());
     let mut pending: Vec<String> = Vec::new();
 
-    for message in history {
-        match &message {
-            Message::Assistant { tool_calls, .. } => {
+    for entry in history {
+        match &entry {
+            HistoryEntry::Native {
+                item: ResponseItem::FunctionCall { call_id, .. },
+            } => {
+                pending.push(call_id.clone());
+                repaired.push(entry);
+            }
+            HistoryEntry::Native {
+                item: ResponseItem::FunctionCallOutput { call_id, .. },
+            } => {
+                if let Some(i) = pending.iter().position(|id| id == call_id) {
+                    pending.remove(i);
+                    repaired.push(entry);
+                } else {
+                    tracing::warn!(
+                        tool_call_id = %call_id,
+                        "dropping orphan native function_call_output during chat.restore"
+                    );
+                }
+            }
+            HistoryEntry::Message {
+                message: Message::Assistant { tool_calls, .. },
+            } => {
                 for tc in tool_calls {
                     if !tc.id.is_empty() {
                         pending.push(tc.id.clone());
                     }
                 }
-                repaired.push(message);
+                repaired.push(entry);
             }
-            Message::Tool { tool_call_id, .. } => {
+            HistoryEntry::Message {
+                message: Message::Tool { tool_call_id, .. },
+            } => {
                 if let Some(i) = pending.iter().position(|id| id == tool_call_id) {
                     pending.remove(i);
-                    repaired.push(message);
+                    repaired.push(entry);
                 } else {
                     tracing::warn!(
                         tool_call_id = %tool_call_id,
@@ -946,10 +990,13 @@ fn repair_tool_call_history(history: Vec<Message>) -> Vec<Message> {
                     );
                 }
             }
-            Message::User { .. } | Message::System { .. } => {
+            HistoryEntry::Message {
+                message: Message::User { .. } | Message::System { .. },
+            } => {
                 close_pending_tool_calls(&mut repaired, &mut pending);
-                repaired.push(message);
+                repaired.push(entry);
             }
+            HistoryEntry::Native { .. } => repaired.push(entry),
         }
     }
 
@@ -957,12 +1004,11 @@ fn repair_tool_call_history(history: Vec<Message>) -> Vec<Message> {
     repaired
 }
 
-fn close_pending_tool_calls(repaired: &mut Vec<Message>, pending: &mut Vec<String>) {
+fn close_pending_tool_calls(repaired: &mut Vec<HistoryEntry>, pending: &mut Vec<String>) {
     for id in pending.drain(..) {
-        repaired.push(Message::tool_result(
-            id,
-            "Tool call was interrupted before producing output.",
-        ));
+        repaired.push(
+            Message::tool_result(id, "Tool call was interrupted before producing output.").into(),
+        );
     }
 }
 
@@ -1390,7 +1436,10 @@ mod tests {
                 Message::user("hi"),
                 Message::assistant_with_tool_calls("", calls),
                 Message::user("continue"),
-            ],
+            ]
+            .into_iter()
+            .map(HistoryEntry::from)
+            .collect(),
         })
         .await
         .expect("restore");
@@ -1500,6 +1549,46 @@ mod tests {
         let history = c.snapshot(&id).await.expect("snapshot").history;
         assert!(matches!(history[0], HistoryEntry::Native { .. }));
         assert!(matches!(history[1], HistoryEntry::Message { .. }));
+    }
+
+    #[tokio::test]
+    async fn native_function_call_accepts_following_neutral_tool_result() {
+        let c = Chats::with_default_model(Some("m".into()));
+        let id = ChatId::new("a");
+        c.create(id.clone(), None, None, None, None, None)
+            .await
+            .expect("create");
+        c.append_native_history(
+            &id,
+            vec![
+                ResponseItem::Reasoning {
+                    id: Some("rs_1".into()),
+                    encrypted_content: Some("sealed".into()),
+                    summary: vec![],
+                },
+                ResponseItem::FunctionCall {
+                    id: Some("fc_1".into()),
+                    name: "read".into(),
+                    arguments: "{}".into(),
+                    call_id: "call_1".into(),
+                },
+            ],
+        )
+        .await
+        .expect("append native output");
+        c.push_tool_result(&id, "call_1".into(), "done".into())
+            .await
+            .expect("append tool result");
+
+        let history = c.snapshot(&id).await.expect("snapshot").history;
+        assert_eq!(history.len(), 3);
+        assert!(matches!(history[0], HistoryEntry::Native { .. }));
+        assert!(matches!(history[1], HistoryEntry::Native { .. }));
+        assert!(matches!(
+            &history[2],
+            HistoryEntry::Message { message: Message::Tool { tool_call_id, .. } }
+                if tool_call_id == "call_1"
+        ));
     }
 
     #[tokio::test]

@@ -13,12 +13,9 @@
 //!    tool calls becomes N `ResponseItem::FunctionCall` items (plus an
 //!    optional preceding `Message` item for interleaved prose).
 //!
-//! The translator is *forward-only* — we never reconstruct a
-//! `Vec<Message>` from a `Vec<ResponseItem>` because the model's output
-//! comes back through streaming SSE events, not as a serialized
-//! ResponseItem sequence. (The streamed events are decoded into
-//! `(text, tool_calls)` and the dispatcher reconstructs `Message`s from
-//! that.)
+//! Provider-native output items remain native in history. In particular,
+//! encrypted reasoning items must be replayed verbatim beside the message and
+//! function-call items returned in the same response.
 
 use std::collections::HashSet;
 
@@ -73,6 +70,15 @@ pub fn history_to_input(history: &[HistoryEntry], system_prompt: Option<&str>) -
     for entry in history {
         let msg = match entry {
             HistoryEntry::Native { item } => {
+                match item {
+                    ResponseItem::FunctionCall { call_id, .. } => {
+                        unanswered_tool_calls.insert(call_id.clone());
+                    }
+                    ResponseItem::FunctionCallOutput { call_id, .. } => {
+                        unanswered_tool_calls.remove(call_id);
+                    }
+                    _ => {}
+                }
                 input.push(item.clone());
                 continue;
             }
@@ -530,6 +536,40 @@ mod tests {
             }
             _ => panic!("expected assistant Message"),
         }
+    }
+
+    #[test]
+    fn native_reasoning_and_call_stay_ordered_before_neutral_tool_output() {
+        let history = vec![
+            HistoryEntry::from(Message::user("inspect the project")),
+            HistoryEntry::Native {
+                item: ResponseItem::Reasoning {
+                    id: Some("rs_1".into()),
+                    encrypted_content: Some("sealed-plan".into()),
+                    summary: vec![],
+                },
+            },
+            HistoryEntry::Native {
+                item: ResponseItem::FunctionCall {
+                    id: Some("fc_1".into()),
+                    name: "inspect".into(),
+                    arguments: "{}".into(),
+                    call_id: "call_1".into(),
+                },
+            },
+            HistoryEntry::from(Message::tool_result("call_1".into(), "project details")),
+        ];
+
+        let translated = history_to_input(&history, None);
+        assert!(matches!(
+            &translated.input[..],
+            [
+                ResponseItem::Message { role, .. },
+                ResponseItem::Reasoning { encrypted_content: Some(sealed), .. },
+                ResponseItem::FunctionCall { call_id, .. },
+                ResponseItem::FunctionCallOutput { call_id: output_id, .. },
+            ] if role == "user" && sealed == "sealed-plan" && call_id == "call_1" && output_id == "call_1"
+        ));
     }
 
     #[test]

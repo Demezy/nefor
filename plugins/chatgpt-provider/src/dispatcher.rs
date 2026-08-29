@@ -38,8 +38,8 @@ use crate::responses::request::{
 use crate::responses::stream::ResponseEvent;
 use crate::responses::{ModelEntry, ResponsesClient, ResponsesTurnContext, UsageSnapshot};
 use crate::state::{
-    ChatId, ChatStats, Chats, ChatsError, Message, MessageRestore, ToolCall, ToolCallFunction,
-    TurnToken,
+    ChatId, ChatStats, Chats, ChatsError, HistoryEntry, Message, MessageRestore, ToolCall,
+    ToolCallFunction, TurnToken,
 };
 use crate::translator;
 use nefor_plugin_sdk::TransportError;
@@ -1569,6 +1569,54 @@ fn completion_checkpoint(
         .filter(|items: &Vec<ResponseItem>| !items.is_empty())
 }
 
+const RESPONSE_OUTPUT_CONTEXT_FORMAT: &str = "chatgpt.responses.output_items.v1";
+
+fn message_provider_context_items(
+    message: &Value,
+    provider: &str,
+    model: Option<&str>,
+) -> Result<Option<Vec<ResponseItem>>, String> {
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return Ok(None);
+    }
+    let Some(context) = message.get("provider_context").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    if context.get("provider").and_then(Value::as_str) != Some(provider)
+        || context.get("format").and_then(Value::as_str) != Some(RESPONSE_OUTPUT_CONTEXT_FORMAT)
+    {
+        return Ok(None);
+    }
+    let context_model = context.get("model").and_then(Value::as_str);
+    if context_model.is_some() && context_model != model {
+        return Ok(None);
+    }
+    let items = context
+        .get("artifact")
+        .and_then(|artifact| artifact.get("items"))
+        .cloned()
+        .ok_or_else(|| "compatible provider_context is missing artifact.items".to_owned())?;
+    let items: Vec<ResponseItem> = serde_json::from_value(items)
+        .map_err(|error| format!("compatible provider_context has invalid items: {error}"))?;
+    if items.is_empty() {
+        return Err("compatible provider_context contains no output items".into());
+    }
+    Ok(Some(items))
+}
+
+fn response_output_context(provider: &str, model: &str, items: &[ResponseItem]) -> Value {
+    serde_json::json!({
+        "provider": provider,
+        "format": RESPONSE_OUTPUT_CONTEXT_FORMAT,
+        "model": model,
+        "artifact": {
+            "kind": "responses.output_items",
+            "opaque": true,
+            "items": items,
+        },
+    })
+}
+
 async fn handle_completion_request(
     ctx: &DispatcherContext,
     body: &Map<String, Value>,
@@ -1628,8 +1676,28 @@ async fn handle_completion_request(
     };
     let mut history = Vec::with_capacity(messages.len());
     for message in messages {
+        match message_provider_context_items(
+            message,
+            &ctx.args.provider_name,
+            effective_model.as_deref(),
+        ) {
+            Ok(Some(items)) => {
+                history.extend(items.into_iter().map(|item| HistoryEntry::Native { item }));
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                send_completion_event(ctx, Some(&request_id), "failed", |event| {
+                    event.insert("error".into(), Value::String(error));
+                })
+                .await?;
+                return Ok(());
+            }
+        }
         match parse_provider_message(Some(message)) {
-            Ok(parsed) if parsed.tool_call_failures.is_empty() => history.push(parsed.message),
+            Ok(parsed) if parsed.tool_call_failures.is_empty() => {
+                history.push(parsed.message.into())
+            }
             Ok(_) => {
                 send_completion_event(ctx, Some(&request_id), "failed", |event| {
                     event.insert(
@@ -2005,16 +2073,19 @@ async fn handle_chat_restore(
                     return Ok(());
                 }
             };
-            history.push(parsed.message);
+            history.push(parsed.message.into());
             for failure in &parsed.tool_call_failures {
                 if let Some(id) = &failure.id {
-                    history.push(Message::tool_result(
-                        id.clone(),
-                        format!(
-                            "Failed to parse tool call: {}. Raw: {}",
-                            failure.error, failure.raw
-                        ),
-                    ));
+                    history.push(
+                        Message::tool_result(
+                            id.clone(),
+                            format!(
+                                "Failed to parse tool call: {}. Raw: {}",
+                                failure.error, failure.raw
+                            ),
+                        )
+                        .into(),
+                    );
                 } else {
                     tracing::warn!(
                         error = %failure.error,
@@ -2741,6 +2812,7 @@ fn spawn_turn(
         // (turn.error/chat.error stay the live-surface signals).
         let mut final_error: Option<String> = None;
         let mut final_tool_calls: Vec<ToolCall> = Vec::new();
+        let mut final_native_output: Vec<ResponseItem> = Vec::new();
         let mut interrupted = false;
         let mut errored = false;
         let mut operation_usage: Option<OperationUsage> = None;
@@ -3104,6 +3176,7 @@ fn spawn_turn(
             let mut reasoning_formatter = ReasoningSummaryFormatter::default();
             let mut reasoning_started_at: Option<std::time::Instant> = None;
             let mut tool_buf = ToolCallBuffer::default();
+            let mut iter_native_output = Vec::new();
             let mut iter_finish_reason: Option<String> = None;
             let mut iter_usage: Option<(u64, u64)> = None;
             let mut iter_interrupted = false;
@@ -3253,32 +3326,36 @@ fn spawn_turn(
                                     tool_buf.on_item_added(item_id, call_id, name, arguments);
                                 }
                                 ResponseEvent::OutputItemAdded { .. } => {}
-                                ResponseEvent::OutputItemDone {
-                                    item:
-                                        ResponseItem::FunctionCall {
-                                            id,
-                                            call_id,
-                                            name,
-                                            arguments,
-                                        },
-                                    ..
-                                } => {
-                                    let item_id = id.unwrap_or_else(|| call_id.clone());
-                                    if !tool_buf.by_item_id.contains_key(&item_id) {
-                                        // Single-shot: no Added + no
-                                        // deltas, only Done. Seed and
-                                        // finalize in one step.
-                                        tool_buf.on_item_added(
-                                            item_id,
-                                            call_id,
-                                            name,
-                                            arguments,
-                                        );
-                                    } else {
-                                        tool_buf.on_item_done(Some(&item_id), &arguments);
+                                ResponseEvent::OutputItemDone { item, .. } => {
+                                    if let ResponseItem::FunctionCall {
+                                        id,
+                                        call_id,
+                                        name,
+                                        arguments,
+                                    } = &item
+                                    {
+                                        let item_id =
+                                            id.clone().unwrap_or_else(|| call_id.clone());
+                                        if !tool_buf.by_item_id.contains_key(&item_id) {
+                                            // Single-shot: no Added + no
+                                            // deltas, only Done. Seed and
+                                            // finalize in one step.
+                                            tool_buf.on_item_added(
+                                                item_id,
+                                                call_id.clone(),
+                                                name.clone(),
+                                                arguments.clone(),
+                                            );
+                                        } else {
+                                            tool_buf.on_item_done(Some(&item_id), &arguments);
+                                        }
                                     }
+                                    // `output_item.done` events are emitted in response output
+                                    // order. Preserve that exact sequence: reasoning items only
+                                    // remain useful when replayed beside their sibling message and
+                                    // function-call items.
+                                    iter_native_output.push(item);
                                 }
-                                ResponseEvent::OutputItemDone { .. } => {}
                                 ResponseEvent::Completed { response } => {
                                     iter_finish_reason =
                                         response.get("finish_reason").and_then(|v| v.as_str()).map(str::to_owned);
@@ -3463,6 +3540,22 @@ fn spawn_turn(
                 final_error = Some(err_msg);
                 break;
             }
+            if let Err(error) = provider_tool_names.map_output_to_internal(&mut iter_native_output)
+            {
+                let message = error.to_string();
+                let _ = ctx
+                    .out_tx
+                    .send(PluginOutgoing::event(turn_error_body(
+                        &ctx.args,
+                        Some(&chat_id),
+                        &message,
+                    )))
+                    .await;
+                errored = true;
+                final_finish_reason = Some("error".into());
+                final_error = Some(message);
+                break;
+            }
             if iter_interrupted {
                 if !output_text.is_empty() {
                     let _ = ctx
@@ -3494,19 +3587,36 @@ fn spawn_turn(
                 }
             };
             if !tool_calls.is_empty() {
-                let _ = ctx
-                    .chats
-                    .push_assistant_tool_calls(&chat_id, output_text.clone(), tool_calls.clone())
-                    .await;
+                if iter_native_output.is_empty() {
+                    let _ = ctx
+                        .chats
+                        .push_assistant_tool_calls(
+                            &chat_id,
+                            output_text.clone(),
+                            tool_calls.clone(),
+                        )
+                        .await;
+                } else {
+                    let _ = ctx
+                        .chats
+                        .append_native_history(&chat_id, iter_native_output.clone())
+                        .await;
+                }
 
                 final_text = output_text;
                 final_finish_reason = iter_finish_reason.or(Some("tool_calls".into()));
                 final_tool_calls = tool_calls;
+                final_native_output = iter_native_output;
                 break;
             }
 
             // No tool calls → terminal turn.
-            if !output_text.is_empty() {
+            if !iter_native_output.is_empty() {
+                let _ = ctx
+                    .chats
+                    .append_native_history(&chat_id, iter_native_output.clone())
+                    .await;
+            } else if !output_text.is_empty() {
                 let _ = ctx
                     .chats
                     .push_assistant(&chat_id, output_text.clone())
@@ -3514,6 +3624,7 @@ fn spawn_turn(
             }
             final_text = output_text;
             final_finish_reason = iter_finish_reason.or(Some("stop".into()));
+            final_native_output = iter_native_output;
             break;
         }
 
@@ -3563,7 +3674,7 @@ fn spawn_turn(
                 );
                 let _ = ctx.out_tx.send(PluginOutgoing::event(body)).await;
             }
-            let body = if errored {
+            let mut body = if errored {
                 completion_event_body(
                     &ctx.args,
                     request_id,
@@ -3575,7 +3686,7 @@ fn spawn_turn(
                                 final_error.unwrap_or_else(|| "completion failed".into()),
                             ),
                         ),
-                        ("model", Value::String(active_model)),
+                        ("model", Value::String(active_model.clone())),
                         ("duration_ms", Value::Number(elapsed_ms.into())),
                     ],
                 )
@@ -3593,11 +3704,21 @@ fn spawn_turn(
                                 .map(Value::String)
                                 .unwrap_or(Value::Null),
                         ),
-                        ("model", Value::String(active_model)),
+                        ("model", Value::String(active_model.clone())),
                         ("duration_ms", Value::Number(elapsed_ms.into())),
                     ],
                 )
             };
+            if !errored && !interrupted && !final_native_output.is_empty() {
+                body.insert(
+                    "provider_context".into(),
+                    response_output_context(
+                        &ctx.args.provider_name,
+                        &active_model,
+                        &final_native_output,
+                    ),
+                );
+            }
             let _ = ctx.out_tx.send(PluginOutgoing::event(body)).await;
             ctx.chats.end_turn(&chat_id).await;
             return;
@@ -4697,6 +4818,66 @@ mod tests {
 
         let model_error = r#"{"detail":"The 'gpt-5-codex' model is not supported when using Codex with a ChatGPT account."}"#;
         assert!(!body_signals_reasoning_unsupported(model_error));
+    }
+
+    #[test]
+    fn compatible_message_provider_context_restores_native_output_items() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": "visible summary",
+            "provider_context": response_output_context(
+                "chatgpt",
+                "gpt-5.6-sol",
+                &[
+                    ResponseItem::Reasoning {
+                        id: Some("rs_1".into()),
+                        encrypted_content: Some("sealed-plan".into()),
+                        summary: vec![],
+                    },
+                    ResponseItem::Message {
+                        role: "assistant".into(),
+                        content: vec![],
+                    },
+                ],
+            ),
+        });
+
+        let items = message_provider_context_items(&message, "chatgpt", Some("gpt-5.6-sol"))
+            .expect("valid envelope")
+            .expect("compatible artifact");
+        assert!(matches!(
+            &items[0],
+            ResponseItem::Reasoning { encrypted_content: Some(content), .. }
+                if content == "sealed-plan"
+        ));
+        assert_eq!(items.len(), 2);
+
+        assert!(
+            message_provider_context_items(&message, "other", Some("gpt-5.6-sol"))
+                .expect("provider switch falls back")
+                .is_none()
+        );
+        assert!(
+            message_provider_context_items(&message, "chatgpt", Some("other-model"))
+                .expect("model switch falls back")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn malformed_compatible_provider_context_fails_instead_of_losing_reasoning() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "provider_context": {
+                "provider": "chatgpt",
+                "format": RESPONSE_OUTPUT_CONTEXT_FORMAT,
+                "model": "gpt-5.6-sol",
+                "artifact": { "items": [{"type": "unknown_future_item"}] },
+            },
+        });
+        let error = message_provider_context_items(&message, "chatgpt", Some("gpt-5.6-sol"))
+            .expect_err("compatible corruption must be explicit");
+        assert!(error.contains("invalid items"));
     }
 
     #[tokio::test]

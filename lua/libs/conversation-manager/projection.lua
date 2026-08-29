@@ -17,7 +17,7 @@ local function projected_exchange(exchange)
   }
 end
 
-local function projected_message(conversation, message)
+local function projected_message(conversation, message, include_provider_context)
   local chunks = domain.copy(message.chunks)
   local text = {}
   local reasoning = {}
@@ -45,7 +45,7 @@ local function projected_message(conversation, message)
     display_text = display.structured_text(structured[1]) or ""
   end
   if content == "" and #structured == 1 then content = domain.copy(structured[1]) end
-  return {
+  local projected = {
     id = message.id,
     turn_id = message.turn_id,
     submission_ids = domain.copy(message.submission_ids or {}),
@@ -64,13 +64,17 @@ local function projected_message(conversation, message)
     tool_calls = tool_calls,
     terminal = domain.copy(message.terminal),
   }
+  if include_provider_context then
+    projected.provider_context = domain.copy(message.provider_context)
+  end
+  return projected
 end
 
-local function context_messages(conversation)
+local function context_messages(conversation, include_provider_context)
   local messages = {}
   for _, message in ipairs(conversation.messages) do
     if message.status ~= "open" then
-      local projected = projected_message(conversation, message)
+      local projected = projected_message(conversation, message, include_provider_context)
       messages[#messages + 1] = projected
     end
   end
@@ -120,7 +124,7 @@ end
 
 function M.context(conversation)
   if not conversation then return nil end
-  local all = context_messages(conversation)
+  local all = context_messages(conversation, true)
   local selected = nil
   for index = #conversation.compactions, 1, -1 do
     local candidate = conversation.compactions[index]

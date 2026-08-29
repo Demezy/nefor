@@ -214,7 +214,13 @@ fn provider_tool_call(body: &Map<String, Value>) -> Value {
 
 fn provider_result(body: &Map<String, Value>) -> Map<String, Value> {
     let mut result = Map::new();
-    for key in ["text", "reasoning", "finish_reason", "tool_calls"] {
+    for key in [
+        "text",
+        "reasoning",
+        "finish_reason",
+        "tool_calls",
+        "provider_context",
+    ] {
         if let Some(value) = body.get(key) {
             result.insert(key.into(), value.clone());
         }

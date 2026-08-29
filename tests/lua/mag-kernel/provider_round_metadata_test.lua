@@ -48,6 +48,11 @@ instance.handle_observation({ binding = "conversation", value = {
 instance.deliver({ kind = "reply", ref = find_kind(emitted, "capability.invoke").ref,
   result = {
     text = "checking", finish_reason = "tool_calls",
+    provider_context = {
+      provider = "chatgpt", format = "chatgpt.responses.output_items.v1",
+      model = "gpt-5.6-sol",
+      artifact = { items = { { type = "reasoning", encrypted_content = "sealed" } } },
+    },
     tool_calls = { { id = "call-footer", name = "read_file", arguments = { path = "x" } } },
   } })
 
@@ -61,6 +66,8 @@ assert(tool_completion, "tool-call assistant entry has a terminal completion fac
 assert_eq(tool_completion.model, "round-model", "tool-call completion keeps the provider model")
 assert_eq(tool_completion.duration_ms, 31, "tool-call completion keeps provider duration")
 assert_eq(tool_completion.usage.output_tokens, 7, "tool-call completion normalizes output tokens")
+assert_eq(tool_completion.provider_context.artifact.items[1].encrypted_content, "sealed",
+  "tool-call completion keeps provider-native continuation state")
 
 instance.deliver(turn({ messages = { {
   role = "tool", tool_call_id = "call-footer", name = "read_file", content = "result",

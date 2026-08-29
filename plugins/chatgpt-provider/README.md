@@ -51,6 +51,13 @@ API `InputImage` items for vision-capable models. If the active model cannot
 accept images, the provider returns an explicit model-capability error instead
 of silently dropping the media.
 
+Responses output items are preserved as opaque, provider/model-scoped context
+on their canonical assistant messages. Compatible continuations replay the
+original encrypted reasoning, message, and function-call items before tool
+results; session replay reconstructs the same context. Public conversation and
+display projections keep only the provider-neutral message and never expose the
+encrypted artifact.
+
 ## Run
 
 Spawned by the engine over stdio. Use `chatgpt-provider login` first to

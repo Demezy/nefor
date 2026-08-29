@@ -180,13 +180,23 @@ do
   record(fact("xc", "serialized", "tool_call_completed", { exchange_id = "x", call = { id = "external", name = "read", arguments = { path = "x" } } }))
   record(fact("xr", "serialized", "tool_result_recorded", { exchange_id = "x", result = { text = "data" } }))
   record(fact("retry", "serialized", "retry_started", { retry_id = "retry", message_id = "m", reason = "rate_limit" }))
-  record(fact("mc", "serialized", "message_completed", { message_id = "m" }))
+  record(fact("mc", "serialized", "message_completed", {
+    message_id = "m",
+    provider_context = {
+      provider = "chatgpt",
+      format = "chatgpt.responses.output_items.v1",
+      model = "gpt-5.6-sol",
+      artifact = { items = { { type = "reasoning", encrypted_content = "sealed" } } },
+    },
+  }))
   record(fact("done", "serialized", "conversation_completed", { detail = { usage = 12 } }))
   record(fact("pm", "partial", "message_started", { message_id = "m", role = "assistant" }))
   record(fact("pc", "partial", "content_chunk_appended", { message_id = "m", chunk = { kind = "reasoning", data = "unfinished" } }))
   local encoded = nefor.json.encode(events); local decoded = nefor.json.decode(encoded)
   local replayed = manager.new(); ok(replayed:replay(decoded))
   eq(replayed:list(), live:list(), "serialized replay equals live state deeply")
+  eq(replayed:get("serialized").messages[1].provider_context.artifact.items[1].encrypted_content,
+    "sealed", "serialized replay reconstructs opaque provider context")
 
   local existing = manager.new()
   local bad = domain.copy(decoded); bad[#bad].sequence = 99
@@ -308,6 +318,42 @@ do
   eq(#context.messages, 3, "every disposition remains available as model context")
   eq(context.messages[1].visibility, "diagnostic",
     "the context projection reports each message's disposition")
+end
+
+-- Provider-native continuation state is durable model context, not public
+-- conversation data. Compatible providers receive the opaque artifact after
+-- replay while surfaces and ordinary conversation readers never do.
+do
+  local projection = require("libs.conversation-manager.projection")
+  local store = manager.new(); create(store, "native-context", "lead")
+  append(store, fact("start", "native-context", "message_started", {
+    message_id = "assistant", role = "assistant",
+  }))
+  local provider_context = {
+    provider = "chatgpt",
+    format = "chatgpt.responses.output_items.v1",
+    model = "gpt-5.6-sol",
+    artifact = { items = { { type = "reasoning", encrypted_content = "sealed" } } },
+  }
+  append(store, fact("complete", "native-context", "message_completed", {
+    message_id = "assistant", provider_context = provider_context,
+  }))
+
+  local private_context = projection.context(store:peek("native-context"))
+  eq(private_context.messages[1].provider_context.artifact.items[1].encrypted_content,
+    "sealed", "provider context projection preserves the opaque item")
+  local public = projection.conversation(store:peek("native-context"))
+  eq(public.messages[1].provider_context, nil,
+    "public conversation projection does not expose provider context")
+
+  local invalid = manager.new(); create(invalid, "invalid-native-context", "lead")
+  append(invalid, fact("start-invalid", "invalid-native-context", "message_started", {
+    message_id = "assistant", role = "assistant",
+  }))
+  rejects(invalid, fact("complete-invalid", "invalid-native-context", "message_completed", {
+    message_id = "assistant",
+    provider_context = { provider = "chatgpt", artifact = {} },
+  }), "invalid_provider_context")
 end
 
 print("conversation_manager_domain_test: all assertions passed")

@@ -148,6 +148,32 @@ pub mod bridge {
         }
 
         #[test]
+        fn provider_context_reaches_the_kernel_reply_unchanged() {
+            let mut bridge = CapabilityBridge::new("tool-gate");
+            bridge.translate_emit(provider_invoke("req-1", "chatgpt", json!([])));
+            let context = json!({
+                "provider": "chatgpt",
+                "format": "chatgpt.responses.output_items.v1",
+                "model": "gpt-5.6-sol",
+                "artifact": {"items": [{
+                    "type": "reasoning", "encrypted_content": "sealed"
+                }]}
+            });
+            let done = event(
+                "req-1",
+                "chatgpt",
+                "completed",
+                json!({"text": "", "provider_context": context}),
+            );
+            let result = bridge
+                .take_reply(done["kind"].as_str().unwrap(), &done)
+                .expect("terminal reply")
+                .result
+                .expect("successful result");
+            assert_eq!(result["provider_context"], context);
+        }
+
+        #[test]
         fn error_event_settles_as_kernel_error_and_unknown_is_ignored() {
             let mut bridge = CapabilityBridge::new("tool-gate");
             bridge.translate_emit(provider_invoke("req-1", "provider-a", json!([])));

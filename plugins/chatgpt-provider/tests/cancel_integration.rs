@@ -744,3 +744,156 @@ async fn clean_eof_requires_terminal_event_and_next_submissions_settle() {
     let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
 }
+
+#[tokio::test]
+async fn direct_completion_replays_encrypted_reasoning_before_tool_output() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let (request_tx, mut request_rx) = mpsc::channel::<Value>(2);
+    let server = tokio::spawn(async move {
+        let first_body = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"encrypted_content\":\"sealed-plan\",\"summary\":[]}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"inspect\",\"arguments\":\"{}\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let second_body = concat!(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r2\"}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        for body in [first_body, second_body] {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            request_tx
+                .send(read_request_json(&mut stream).await)
+                .await
+                .expect("capture request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("response");
+        }
+    });
+
+    let args = Arc::new(ServeArgs {
+        provider_name: PROVIDER.into(),
+        base_url: format!("http://{addr}"),
+    });
+    let chats = Arc::new(Chats::with_default_model(None));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let auth = Arc::new(
+        AuthStore::load_from_disk(&dir.path().join("auth.json"))
+            .await
+            .expect("auth store"),
+    );
+    let _ = auth.apply_auth_set("test-token".into()).await;
+    let catalog = Arc::new(ToolCatalog::new());
+    catalog
+        .register_from(
+            "tool-gate",
+            ToolCatalog::parse_tools(&serde_json::json!([{
+                "name": "inspect", "description": "Inspect", "input_schema": {"type": "object"}
+            }])),
+        )
+        .await;
+    let (out_tx, mut out_rx) = mpsc::channel::<PluginOutgoing>(256);
+    let ctx = DispatcherContext::new(
+        args,
+        chats,
+        auth,
+        catalog,
+        Arc::new(ToolBroker::new()),
+        Arc::new(test_responses_client(format!("http://{addr}"))),
+        out_tx,
+    );
+    let (in_tx, in_rx) = mpsc::channel::<Result<Envelope, TransportError>>(64);
+    let loop_handle = tokio::spawn(run_dispatch_loop(ctx, in_rx));
+
+    let user = serde_json::json!({"role":"user","content":"inspect the project"});
+    in_tx
+        .send(Ok(event_env(
+            &kind("completion.request"),
+            &[
+                ("request_id", Value::String("reasoning-1".into())),
+                ("model", Value::String("gpt-5.6-sol".into())),
+                ("tools", serde_json::json!(["inspect"])),
+                ("messages", serde_json::json!([user.clone()])),
+            ],
+        )))
+        .await
+        .expect("first completion");
+    let first = wait_for_completion_event(
+        &mut out_rx,
+        "reasoning-1",
+        "completed",
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("first completion settles");
+    let provider_context = first
+        .get("provider_context")
+        .cloned()
+        .expect("native output artifact");
+    assert_eq!(
+        provider_context["artifact"]["items"][0]["encrypted_content"],
+        "sealed-plan"
+    );
+
+    in_tx
+        .send(Ok(event_env(
+            &kind("completion.request"),
+            &[
+                ("request_id", Value::String("reasoning-2".into())),
+                ("model", Value::String("gpt-5.6-sol".into())),
+                ("tools", serde_json::json!(["inspect"])),
+                (
+                    "messages",
+                    serde_json::json!([
+                        user,
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [{
+                                "id": "call_1",
+                                "name": "inspect",
+                                "arguments": {}
+                            }],
+                            "provider_context": provider_context
+                        },
+                        {"role":"tool","tool_call_id":"call_1","content":"project details"}
+                    ]),
+                ),
+            ],
+        )))
+        .await
+        .expect("second completion");
+    wait_for_completion_event(
+        &mut out_rx,
+        "reasoning-2",
+        "completed",
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("second completion settles");
+
+    let _first_request = request_rx.recv().await.expect("first request");
+    let second_request = request_rx.recv().await.expect("second request");
+    let input = second_request["input"].as_array().expect("Responses input");
+    assert_eq!(input.len(), 4);
+    assert_eq!(input[0]["type"], "message");
+    assert_eq!(input[1]["type"], "reasoning");
+    assert_eq!(input[1]["encrypted_content"], "sealed-plan");
+    assert_eq!(input[2]["type"], "function_call");
+    assert_eq!(input[2]["call_id"], "call_1");
+    assert_eq!(input[3]["type"], "function_call_output");
+    assert_eq!(input[3]["call_id"], "call_1");
+
+    drop(in_tx);
+    server.await.expect("server");
+    let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
+}

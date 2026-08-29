@@ -245,11 +245,19 @@ handlers.message_completed = function(c, event)
       return err("tool_call_incomplete", { exchange_id = exchange.id, message_id = message.id })
     end
   end
+  local provider_context = event.provider_context
+  if provider_context ~= nil
+      and (type(provider_context) ~= "table" or not nonempty(provider_context.provider)
+        or not nonempty(provider_context.format) or type(provider_context.artifact) ~= "table"
+        or (provider_context.model ~= nil and not nonempty(provider_context.model))) then
+    return err("invalid_provider_context", { message_id = message.id })
+  end
   message.status = "completed"
   c.open_messages = c.open_messages - 1
   local turn = message.turn_id and find_turn(c, message.turn_id) or nil
   if turn then turn.open_messages = turn.open_messages - 1 end
   message.completion = copy(event.completion or {})
+  if provider_context ~= nil then message.provider_context = copy(provider_context) end
   message.terminal = {
     model = event.model,
     duration_ms = event.duration_ms,
