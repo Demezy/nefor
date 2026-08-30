@@ -1321,8 +1321,13 @@ local function handle_mag_actor_spawned(msg, state)
   local run_id = msg.run_id
   local id = msg.id
   if type(run_id) ~= "string" or type(id) ~= "string" or id == "" then return state, {} end
-  local next = run_panel.actor_spawned(state, run_id, id, msg.factory, tui.now_ms())
+  local next = run_panel.actor_spawned(state, run_id, id, msg.factory, msg.spec, tui.now_ms())
   return preview_state.spawn(next, run_id, id, msg.factory, msg.spec, tui.now_ms()), {}
+end
+
+local function handle_mag_nodes_declared(msg, state)
+  if state.replay_mode or type(msg.run_id) ~= "string" then return state, {} end
+  return run_panel.nodes_declared(state, msg.run_id, msg.nodes), {}
 end
 
 local function handle_mag_actor_ready(msg, state)
@@ -1763,6 +1768,7 @@ local default_handlers = {
   ["chat.tool.popup_request"]     = handle_tool_popup_request,
   ["tool-gate.mode_changed"]      = handle_gate_mode_changed,
   ["mag.run_started"]             = handle_mag_run_started,
+  ["mag.nodes_declared"]          = handle_mag_nodes_declared,
   ["mag.approval_request"]        = handle_mag_approval_request,
   ["mag.approval_cancel"]         = handle_mag_approval_cancel,
   ["mag.arrival"]                 = handle_mag_arrival,
@@ -2007,8 +2013,8 @@ local function route_keys_and_popups(msg, state)
     if kind == "key.enter" then
       local rows = run_panel.row_model(state, now)
       local row = rows[run_panel.clamp_cursor(state.sidebar_cursor, #rows)]
-      if row ~= nil and row.kind == "group" then
-        return run_panel.toggle_fold(state, row.run_id, row.group.name), {}
+      if row ~= nil and row.kind == "logical_node" then
+        return run_panel.toggle_fold(state, row.run_id, row.logical_node.key), {}
       end
       -- Leaf and run-header Enter are no-ops: view-opening moved to Space.
       return state, {}
@@ -2024,13 +2030,14 @@ local function route_keys_and_popups(msg, state)
             whole_run = true, completed_archive = true },
         }), {}
       end
-      if row.kind == "actor" then
+      if row.kind == "logical_node" then
+        local actor_ids = {}
+        for _, member in ipairs(row.logical_node.members) do
+          actor_ids[#actor_ids + 1] = member.id
+        end
         return shallow_merge(state, {
-          popup = { variant = "node_inspector", run_id = row.run_id, actor_id = row.actor_id },
-        }), {}
-      elseif row.kind == "group" then
-        return shallow_merge(state, {
-          popup = { variant = "node_inspector", run_id = row.run_id, group = row.group.name },
+          popup = { variant = "node_inspector", run_id = row.run_id,
+            node_path = row.logical_node.path, actor_ids = actor_ids },
         }), {}
       elseif row.kind == "run_header" then
         -- Run-header Space observes the WHOLE run merged (every actor

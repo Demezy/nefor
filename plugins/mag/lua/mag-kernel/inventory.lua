@@ -397,12 +397,17 @@ end
 --   { ok = true }                on success
 --   { ok = false, error = "..." } on a rejected modification
 -- A rejection leaves the inventory untouched and the run continues.
-function M.apply(self, mod)
+-- `before_execute`, when supplied, runs after validation and immediately
+-- before the first lifecycle mutation. Observers use this narrow seam to
+-- publish metadata that must precede actor-spawn events without publishing it
+-- for rejected modifications.
+function M.apply(self, mod, before_execute)
   local _spawned, err = validate(self, mod)
   if err then
     self.log.error(string.format("modification rejected: %s", err))
     return { ok = false, error = err }
   end
+  if before_execute then before_execute() end
   local created = execute(self, mod)
   return { ok = true, spawned = created }
 end
@@ -501,8 +506,8 @@ function M.new(opts)
     -- after the router exists, like `deliver`.
     is_constructed = opts.is_constructed,
   }
-  self.apply = function(mod)
-    return M.apply(self, mod)
+  self.apply = function(mod, before_execute)
+    return M.apply(self, mod, before_execute)
   end
   self.clear = function()
     return M.clear(self)

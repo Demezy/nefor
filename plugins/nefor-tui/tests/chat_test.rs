@@ -9103,6 +9103,79 @@ fn groups_default_collapsed_and_enter_toggles_fold() {
 }
 
 #[test]
+fn authored_logical_nodes_render_as_a_recursive_sidebar_tree() {
+    let mut engine = Engine::new(120, 30).expect("engine");
+    load_chat_scenario(&mut engine);
+    let _ = render_str(&mut engine);
+
+    dispatch_event(
+        &mut engine,
+        json!({ "kind": "mag.run_started", "run_id": "nested", "run_name": "spaceship" }),
+    );
+    dispatch_event(
+        &mut engine,
+        json!({
+            "kind": "mag.nodes_declared",
+            "run_id": "nested",
+            "nodes": [
+                { "path": ["camera-stage"], "members": [] },
+                { "path": ["camera-stage", "agent"], "members": [] },
+                { "path": ["camera-stage", "agent", "llm"], "members": ["camera.llm"] },
+                { "path": ["camera-stage", "retry"], "members": ["camera.retry"] },
+                { "path": ["result"], "members": ["workflow.result"] }
+            ]
+        }),
+    );
+    for id in ["camera.llm", "camera.retry", "workflow.result"] {
+        dispatch_event(
+            &mut engine,
+            json!({ "kind": "mag.actor_spawned", "run_id": "nested", "id": id,
+                "factory": "fixture", "spec": { "routes": {} } }),
+        );
+    }
+
+    let collapsed = render_str(&mut engine);
+    assert!(
+        collapsed.contains("camera-stage"),
+        "direct stage missing: {collapsed:?}"
+    );
+    assert!(
+        collapsed.contains("result"),
+        "direct result missing: {collapsed:?}"
+    );
+    assert!(
+        !collapsed.contains("agent"),
+        "nested child must start folded: {collapsed:?}"
+    );
+
+    engine.handle_key(key("tab")).expect("focus sidebar");
+    let _ = render_str(&mut engine);
+    engine.handle_key(key("down")).expect("select stage");
+    engine.handle_key(key("enter")).expect("expand stage");
+    let stage = render_str(&mut engine);
+    assert!(
+        stage.contains("agent") && stage.contains("retry"),
+        "expanding a stage must reveal its local children: {stage:?}"
+    );
+    assert!(
+        !stage.contains("llm"),
+        "the nested agent remains folded: {stage:?}"
+    );
+
+    engine.handle_key(key("down")).expect("select agent");
+    engine.handle_key(key("enter")).expect("expand agent");
+    let agent = render_str(&mut engine);
+    assert!(
+        agent.contains("llm"),
+        "recursive expansion must reveal agent internals: {agent:?}"
+    );
+    assert!(
+        !agent.contains("camera.llm"),
+        "opaque actor ids must not leak into logical labels: {agent:?}"
+    );
+}
+
+#[test]
 fn shift_tab_also_cycles_focus() {
     let mut engine = Engine::new(120, 30).expect("engine");
     load_chat_scenario(&mut engine);

@@ -17,7 +17,9 @@
 --   (f) begin_run under a NEW session_id reaps stale contexts from the
 --       previous session (kill handlers run — the llm's provider-cancel
 --       reaches the bus with its run-scoped chat handle);
---   (g) a duplicate live run_id rejects.
+--   (g) a duplicate live run_id rejects;
+--   (h) logical hierarchy is published before actor lifecycle and invalid
+--       duplicate paths reject without changing the run.
 
 local kernel = require("init")
 
@@ -95,6 +97,7 @@ local function program()
     },
     kills = {},
     rules = {},
+    nodes = { { path = { "agent" }, members = { "agent" } } },
     result = { from = {
       actor = "agent",
       type = "nefor.agent.Result",
@@ -133,6 +136,12 @@ assert_eq(a_invoke.args.chat_id, nil, "run-A carries no legacy chat handle")
 assert_eq(a_invoke.args.conversation_id, "s1/run-A/turns/run-A/actors/agent",
   "run-A carries its actor conversation identity")
 assert_eq(#by_kind(a_wire, "mag.run_started"), 1, "run-A run_started emitted")
+local declarations = by_kind(a_wire, "mag.nodes_declared")
+assert_eq(#declarations, 1, "run-A logical hierarchy is declared")
+assert_eq(declarations[1].nodes[1].path[1], "agent", "logical path is preserved")
+assert_true(declarations[1].observation_seq
+    < by_kind(a_wire, "mag.actor_spawned")[1].observation_seq,
+  "logical hierarchy precedes actor lifecycle")
 assert_eq(by_kind(a_wire, "mag.run_started")[1].run_id, "run-A",
   "run_started carries run_id")
 for _, e in ipairs(by_kind(a_wire, "mag.actor_spawned")) do
@@ -154,6 +163,19 @@ assert_eq(#by_kind(a_wire, "mag.modification_applied"), 1,
   "run-A initial modification applied")
 assert_eq(by_kind(a_wire, "mag.modification_applied")[1].run_id, "run-A",
   "modification_applied carries run_id")
+
+local duplicate_node = kernel.apply("run-A", {
+  actors = {}, messages = {}, kills = {}, rules = {},
+  nodes = { { path = { "agent" }, members = {} } },
+})
+assert_true(not duplicate_node.ok, "a duplicate full logical path rejects")
+assert_true(tostring(duplicate_node.error):find("duplicate logical node path", 1, true) ~= nil,
+  "duplicate path rejection is precise")
+local duplicate_wire = drain_emitted()
+assert_eq(#by_kind(duplicate_wire, "mag.nodes_declared"), 0,
+  "a rejected hierarchy is never published")
+assert_eq(#by_kind(duplicate_wire, "mag.modification_rejected"), 1,
+  "logical validation uses the ordinary rejection event")
 
 -- Second run of the SAME program, mid-first-run.
 local b_wire = launch("run-B", "s1")

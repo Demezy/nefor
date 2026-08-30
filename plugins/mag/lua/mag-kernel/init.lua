@@ -173,6 +173,8 @@ local function new_run_context(meta)
     observation_seq = 0,
     rule_error = nil,
     rule_failed = false,
+    logical_paths = {},
+    logical_actors = {},
   }
 
   -- Injected lifecycle-event sink (observer.lua's EVENTS set, plus routing's
@@ -488,6 +490,99 @@ local function context_of(run_id)
   return nil, string.format("unknown run '%s' (not begun, or already ended)", tostring(run_id))
 end
 
+local function logical_path_key(path)
+  local parts = {}
+  for _, name in ipairs(path) do
+    parts[#parts + 1] = tostring(#name) .. ":" .. name
+  end
+  return table.concat(parts, "/")
+end
+
+local function validate_logical_nodes(ctx, modification)
+  local nodes = modification and modification.nodes
+  if nodes == nil then return true end
+  if type(nodes) ~= "table" then return nil, "nodes must be a list" end
+
+  local actors = {}
+  for _, actor in ipairs(modification.actors or {}) do
+    if type(actor) == "table" and type(actor.id) == "string" then actors[actor.id] = 0 end
+  end
+  local paths = {}
+  for key in pairs(ctx.logical_paths or {}) do paths[key] = true end
+  for index, node in ipairs(nodes) do
+    if type(node) ~= "table" or type(node.path) ~= "table" or #node.path == 0
+        or type(node.members) ~= "table" then
+      return nil, string.format("nodes[%d] needs a non-empty path and members list", index)
+    end
+    for segment_index, name in ipairs(node.path) do
+      if type(name) ~= "string" or name == "" then
+        return nil, string.format("nodes[%d].path[%d] must be a non-empty string",
+          index, segment_index)
+      end
+    end
+    local key = logical_path_key(node.path)
+    if paths[key] then
+      return nil, "duplicate logical node path " .. table.concat(node.path, "/")
+    end
+    paths[key] = true
+    for member_index, actor_id in ipairs(node.members) do
+      if type(actor_id) ~= "string" or actor_id == "" then
+        return nil, string.format("nodes[%d].members[%d] must be a non-empty string",
+          index, member_index)
+      elseif (ctx.logical_actors or {})[actor_id] then
+        return nil, string.format("actor %q already belongs to logical node %s",
+          actor_id, table.concat(ctx.logical_actors[actor_id], "/"))
+      elseif actors[actor_id] == nil then
+        return nil, string.format("logical node %s references unknown actor %q",
+          table.concat(node.path, "/"), tostring(actor_id))
+      end
+      actors[actor_id] = actors[actor_id] + 1
+      if actors[actor_id] > 1 then
+        return nil, string.format("actor %q belongs to more than one logical node", actor_id)
+      end
+    end
+  end
+  for actor_id, owners in pairs(actors) do
+    if owners == 0 then
+      return nil, string.format("actor %q has no logical node", actor_id)
+    end
+  end
+  for _, node in ipairs(nodes) do
+    if #node.path > 1 then
+      local parent = {}
+      for index = 1, #node.path - 1 do parent[index] = node.path[index] end
+      if not paths[logical_path_key(parent)] then
+        return nil, "logical node parent is missing for " .. table.concat(node.path, "/")
+      end
+    end
+  end
+  return true
+end
+
+local function apply_with_logical_nodes(ctx, modification, opts)
+  local valid, validation_error = validate_logical_nodes(ctx, modification)
+  if not valid then
+    local rejected = { ok = false, error = validation_error }
+    return ctx.observer:observe(
+      modification or {}, ctx.observer:snapshot(modification or {}), rejected, opts)
+  end
+  local apply_opts = {}
+  for key, value in pairs(opts or {}) do apply_opts[key] = value end
+  apply_opts.before_execute = function()
+    ctx.observer:nodes_declared(modification.nodes)
+  end
+  local result = ctx.observer:apply(modification, apply_opts)
+  if result.ok then
+    for _, node in ipairs(modification.nodes or {}) do
+      ctx.logical_paths[logical_path_key(node.path)] = true
+      for _, actor_id in ipairs(node.members or {}) do
+        ctx.logical_actors[actor_id] = node.path
+      end
+    end
+  end
+  return result
+end
+
 nefor.log("mag-kernel ready")
 
 return {
@@ -666,7 +761,7 @@ return {
         spec.semantic_strict = true
       end
     end
-    return ctx.observer:apply(modification)
+    return apply_with_logical_nodes(ctx, modification)
   end,
 
   -- Apply one graph modification through a run's fold. Strictly serialized
@@ -688,7 +783,7 @@ return {
         spec.semantic_strict = true
       end
     end
-    return ctx.observer:apply(mod)
+    return apply_with_logical_nodes(ctx, mod)
   end,
 
   take_rule_trigger = function(run_id)

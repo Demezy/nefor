@@ -529,12 +529,14 @@ end
 local function aggregate_inspector(state, p, now_ms)
   local run = (state.runs or {})[p.run_id]
   local predicate, label
-  if p.group then
-    predicate = function(actor_id) return run_panel.group_of(actor_id) == p.group end
-    label = "group · " .. p.group
+  local selected = {}
+  for _, actor_id in ipairs(p.actor_ids or {}) do selected[actor_id] = true end
+  if p.node_path then
+    predicate = function(actor_id) return selected[actor_id] == true end
+    label = "node · " .. table.concat(p.node_path, " / ")
   else label = "run · " .. run_ident_of(run, p.run_id) end
   local items, last_ms, last_kind = preview_state.merged(state, p.run_id, predicate)
-  local group_members = p.group and preview_state.group_members(state, p.run_id, p.group) or {}
+  local group_members = p.actor_ids or {}
   local single_node = #group_members == 1 and preview_state.node(state, p.run_id, group_members[1]) or nil
   local member_parts = {}
   for actor_id, node in pairs((state.node_previews or {})[p.run_id] or {}) do
@@ -543,7 +545,12 @@ local function aggregate_inspector(state, p, now_ms)
     end
   end
   table.sort(member_parts)
-  local is_agent = p.group and preview_state.agent_assignment(state, p.run_id, p.group) or false
+  local agent_group
+  for _, actor_id in ipairs(group_members) do
+    agent_group = agent_group or actor_id:match("^(.*)%.llm$")
+  end
+  local is_agent = agent_group
+    and preview_state.agent_assignment(state, p.run_id, agent_group) or false
   local children, last_actor = {}, nil
   for index, item in ipairs(items) do
     local node = preview_state.node(state, p.run_id, item.actor_id) or {}
@@ -557,12 +564,12 @@ local function aggregate_inspector(state, p, now_ms)
       children[#children + 1] = activity
     end
   end
-  local assignment = p.group and assignment_widget(state, p.run_id, p.group) or nil
+  local assignment = agent_group and assignment_widget(state, p.run_id, agent_group) or nil
   if assignment then table.insert(children, 1, assignment) end
   if single_node and tostring(single_node.factory):gsub("^nefor%.factory%.", "") == "source" then
     children = { preview_view.node(state, p.run_id, group_members[1]) }
   elseif is_agent then
-    local result = preview_state.agent_result(state, p.run_id, p.group)
+    local result = preview_state.agent_result(state, p.run_id, agent_group)
     local result_widget = preview_view.fact("Result", result, state.expanded_details == true)
     if result_widget then children[#children + 1] = result_widget end
   end

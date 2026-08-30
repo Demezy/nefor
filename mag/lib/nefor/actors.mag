@@ -195,6 +195,11 @@
               (nefor.graph.stored-route result-out llm-in)]
      :messages []
      :rules []
+     :nodes [(nefor.graph.logical-node [id] [])
+             (nefor.graph.logical-node [id "entry"] [entry-id])
+             (nefor.graph.logical-node [id "llm"] [llm-id])
+             (nefor.graph.logical-node [id "run-tool"] [run-tool-id])
+             (nefor.graph.logical-node [id "tool-result"] [tool-result-id])]
      :input entry-in
      :output result})))
 
@@ -246,7 +251,7 @@
     (nefor.graph.identity result-id
       (type-tag
         (| (nefor.contracts.Continue T) (nefor.contracts.Exhausted T)))))
-  (nefor.graph.node id "ordinary"
+  (nefor.graph.node-with-rules-and-nodes id "ordinary"
     [(nefor.graph.actor actor-id retry-gate-factory
        [(type-evidence type)]
        (as RetryGateParams {:max_retries (get config "max-retries")})
@@ -257,6 +262,10 @@
     [(nefor.graph.stored-route continued (get result "input"))
      (nefor.graph.stored-route exhausted (get result "input"))]
     (as (List nefor.graph.Message) [])
+    (as (List nefor.graph.Rule) [])
+    [(nefor.graph.logical-node [id] [])
+     (nefor.graph.logical-node [id "gate"] [actor-id])
+     (nefor.graph.logical-node [id "result"] [result-id])]
     input
     (get result "output"))))
 
@@ -278,7 +287,7 @@
   (let result
     (nefor.graph.identity result-id
       (type-tag (| nefor.contracts.Approved nefor.contracts.Rejected))))
-  (nefor.graph.node id "ordinary"
+  (nefor.graph.node-with-rules-and-nodes id "ordinary"
     [(nefor.graph.actor actor-id human-factory []
        (as HumanParams {:prompt (get config "prompt")})
        (nefor.graph.store-port input)
@@ -288,5 +297,9 @@
     [(nefor.graph.stored-route approved (get result "input"))
      (nefor.graph.stored-route rejected (get result "input"))]
     (as (List nefor.graph.Message) [])
+    (as (List nefor.graph.Rule) [])
+    [(nefor.graph.logical-node [id] [])
+     (nefor.graph.logical-node [id "human"] [actor-id])
+     (nefor.graph.logical-node [id "result"] [result-id])]
     input
     (get result "output"))))

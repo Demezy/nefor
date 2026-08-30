@@ -525,6 +525,17 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         Some("mag.loaded"),
         "the node-oriented fixed sequence must compile against runtime contracts: {node_sequence:#?}"
     );
+    let sequence_paths = node_sequence
+        .get("artifact")
+        .and_then(|artifact| artifact.pointer("/nodes"))
+        .and_then(Value::as_array)
+        .expect("sequence logical node paths")
+        .iter()
+        .map(|node| node.get("path").cloned().expect("logical node path"))
+        .collect::<Vec<_>>();
+    assert!(sequence_paths.contains(&json!(["workers"])));
+    assert!(sequence_paths.contains(&json!(["workers", "first"])));
+    assert!(sequence_paths.contains(&json!(["workers", "second"])));
 
     fs::write(
         temp_root.join("node-products.mag"),
@@ -560,6 +571,59 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         node_products.get("kind").and_then(Value::as_str),
         Some("mag.loaded"),
         "fanout and parallel must compile as ordinary product nodes: {node_products:#?}"
+    );
+    let product_paths = node_products
+        .get("artifact")
+        .and_then(|artifact| artifact.pointer("/nodes"))
+        .and_then(Value::as_array)
+        .expect("product logical node paths")
+        .iter()
+        .map(|node| node.get("path").cloned().expect("logical node path"))
+        .collect::<Vec<_>>();
+    assert!(product_paths.contains(&json!(["forked"])));
+    assert!(product_paths.contains(&json!(["mapped"])));
+    assert!(product_paths
+        .iter()
+        .all(|path| path != &json!(["forked>>>mapped"])));
+
+    fs::write(
+        temp_root.join("duplicate-logical-path.mag"),
+        r#"(require "nefor.artifact")
+(require "nefor.graph")
+(require "nefor.node")
+(let start (nefor.graph.source "start" (type-tag String) "shared"))
+(let first (nefor.node.rename "duplicate" (nefor.graph.identity "first" (type-tag String))))
+(let second (nefor.node.rename "duplicate" (nefor.graph.identity "second" (type-tag String))))
+(let workflow (nefor.node.>>> first second))
+(let result (nefor.graph.output-for "result" workflow))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph
+      [(nefor.graph.edge start workflow)
+       (nefor.graph.edge workflow result)])))"#,
+    )
+    .expect("write duplicate logical path regression");
+    let duplicate_path = load(
+        &mut reader,
+        &mut stdin,
+        "duplicate-logical-path",
+        &temp_root,
+        Path::new("duplicate-logical-path.mag"),
+        &module_roots,
+    )
+    .await;
+    assert_eq!(
+        duplicate_path.get("kind").and_then(Value::as_str),
+        Some("mag.error"),
+        "duplicate logical paths must fail while the graph compiles: {duplicate_path:#?}"
+    );
+    assert!(
+        duplicate_path
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(
+                |message| message.contains("logical node paths must be non-empty and unique")
+            )
     );
 
     fs::write(
@@ -967,6 +1031,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
                   :routes (as (List nefor.graph.StoredRoute) [])
                   :messages (as (List nefor.graph.Message) [])
                   :rules (as (List nefor.graph.Rule) [])
+                  :nodes [(nefor.graph.logical-node ["x"] ["x"])]
                   :input input
                   :output output}))
 (let start (nefor.graph.source "start" (type-tag Unit) nil))
@@ -1026,6 +1091,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
                   :routes (as (List nefor.graph.StoredRoute) [])
                   :messages (as (List nefor.graph.Message) [])
                   :rules (as (List nefor.graph.Rule) [])
+                  :nodes [(nefor.graph.logical-node ["x"] ["x"])]
                   :input input
                   :output output}))
 (let start (nefor.graph.source "start" (type-tag Unit) nil))
@@ -1085,6 +1151,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
                   :routes (as (List nefor.graph.StoredRoute) [])
                   :messages (as (List nefor.graph.Message) [])
                   :rules (as (List nefor.graph.Rule) [])
+                  :nodes [(nefor.graph.logical-node ["x"] ["x"])]
                   :input input
                   :output output}))
 (let start (nefor.graph.source "start" (type-tag Unit) nil))

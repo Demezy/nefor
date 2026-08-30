@@ -1,6 +1,8 @@
 -- Differential contract for the controller extraction. The legacy reducer is a
 -- frozen copy of examples/nefor-agent/chat/update.lua immediately before
 -- 30b6eb06; it is test-only evidence, never placed on a production search path.
+-- Its decisions stay frozen, while calls into extracted shared modules track
+-- narrow data-contract renames such as logical-node sidebar rows.
 -- Reducers are called directly rather than through a rendered terminal. Replace
 -- geometry/clipboard boundaries with deterministic no-ops so the comparison
 -- remains pure and observes only returned state/effects.
@@ -219,6 +221,8 @@ sequence("matching stale replay ids", {
 
 sequence("mag lifecycle approval sidebar", {
   { kind = "mag.run_started", _event_source = "mag", run_id = "run-1", run_name = "fixture", scope = "scope-1", principal = "lead" },
+  { kind = "mag.nodes_declared", run_id = "run-1",
+    nodes = { { path = { "actor" }, members = { "actor-1" } } } },
   { kind = "mag.actor_spawned", run_id = "run-1", id = "actor-1", factory = "agent" },
   { kind = "mag.actor_ready", run_id = "run-1", id = "actor-1" },
   { kind = "mag.actor_busy", run_id = "run-1", id = "actor-1" },

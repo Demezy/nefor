@@ -49,7 +49,8 @@ Nefor's MAG library returns a graph modification directly:
   ],
   "messages": [],
   "kills": [],
-  "rules": []
+  "rules": [],
+  "nodes": [{ "path": ["answer"], "members": ["answer"] }]
 }
 ```
 
@@ -101,6 +102,10 @@ the evaluator.
       "on": { "actor": "planner", "wire": "tasks.Valid" },
       "fn": "expand"
     }
+  ],
+  "nodes": [
+    { "path": ["stage"], "members": [] },
+    { "path": ["stage", "agent"], "members": ["agent.llm"] }
   ]
 }
 ```
@@ -125,6 +130,19 @@ the evaluator.
 - `rules` — immutable initial subscriptions. Each names a concrete source
   actor/output port and a unary pure function in the resident MAG snapshot.
   Deltas cannot add subscriptions or replace the result boundary.
+- `nodes` — presentation-only logical hierarchy. Each entry owns a non-empty
+  path of local name segments plus the runtime actor ids directly represented
+  at that level. Parent paths must exist, complete paths are unique within the
+  run, and every actor in a declaring modification has exactly one logical
+  owner. Actor ids remain opaque;
+  dots in them carry no hierarchy semantics. A validated declaration emits
+  `mag.nodes_declared` before any corresponding `mag.actor_spawned` event.
+
+Consumers reconstruct the recursive tree from these flat paths. Siblings use a
+deterministic best-effort linearization of their actor routes for display: an
+acyclic region reads entry-to-exit, while declaration order breaks cyclic or
+otherwise underconstrained ties and leaves feedback edges pointing backward.
+This projection never changes firing, routing, or scheduling.
 
 ## The fold
 
@@ -180,7 +198,7 @@ interaction does not exist: routes and sends resolve within the run's context
 only.
 
 - **Every kernel→control-plane event carries `run_id`** — `mag.run_started`,
-  `mag.actor_spawned/ready/killed`,
+  `mag.nodes_declared`, `mag.actor_spawned/ready/killed`,
   `mag.modification_applied/rejected/noop`, `mag.run_complete`,
   `mag.run_failed` — so consumers key overlapping runs apart.
 - **Wire-id scoping.** Two runs of the same program author identical actor

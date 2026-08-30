@@ -1,6 +1,7 @@
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
+(require "nefor.node")
 
 ;; DynamicList is a node-boundary runtime effect, not a MAG List value. Its
 ;; empty nominal body is only descriptor data; the kernel accepts the effect solely
@@ -53,7 +54,8 @@
 ;; A resident expansion function calls this with the worker node it selected
 ;; for one indexed occurrence. The helper starts that Node Unit O, preserves
 ;; the occurrence index on its result, and connects it to the traversal's
-;; already-resident output boundary.
+;; already-resident output boundary. Each occurrence is one named compound
+;; node whose worker retains any deeper hierarchy of its own.
 (let expand
   (fn [T O]
     [[traversal-id String]
@@ -65,21 +67,22 @@
         (str traversal-id (str ".result." (get entry "index")))
         entry
         (type-tag O)))
+    (let item
+      (nefor.node.named
+        (str traversal-id (str "-" (get entry "index")))
+        (nefor.node.>>>
+          (nefor.node.rename "worker" worker)
+          (nefor.node.rename "result" indexed))))
     (let output-input
       (nefor.graph.port (str traversal-id ".output")
         (type-tag (| (Indexed O) DynamicCount))
         "nefor.dynamic.Collect"))
-    (let change
-      (nefor.graph.merge-delta
-        (nefor.graph.node-delta worker)
-        (nefor.graph.node-delta indexed)))
     (let connected
       (nefor.graph.delta-route
-        (nefor.graph.delta-route change
-          (get worker "output") (get indexed "input"))
-        (get indexed "output") output-input))
+        (nefor.graph.node-delta item)
+        (get item "output") output-input))
     (nefor.artifact.delta
-      (nefor.graph.delta-message-front connected (get worker "input") nil))))
+      (nefor.graph.delta-message-front connected (get item "input") nil))))
 
 ;; Runtime traversal. `expand-entry` must be a let-bound unary function from
 ;; Indexed T to Artifact, normally a one-line call to `expand` around a worker

@@ -39,6 +39,7 @@
        :routes (as (List nefor.graph.StoredRoute) [])
        :messages []
        :rules []
+       :nodes [(nefor.graph.logical-node [name] [name])]
        :input input
        :output output})))
 
@@ -50,6 +51,6 @@
   (let value (script name params))
   (let input
     (nefor.graph.port name (type-tag Unit) "nefor.process.Input"))
-  (nefor.graph.node-with-rules name "ordinary"
+  (nefor.graph.node-with-rules-and-nodes name "ordinary"
     (get value "actors") (get value "routes") (get value "messages")
-    (get value "rules") input (get value "output"))))
+    (get value "rules") (get value "nodes") input (get value "output"))))

@@ -151,6 +151,17 @@ including `AgentError` alternatives. When runtime data determines cardinality,
 use the distinct `DynamicList` boundary with `nefor.dynamic.traverse`; do not
 manufacture port collectors or runtime-sized MAG lists.
 
+Composition and presentation preserve the abstractions in the program.
+`>>>` connects nodes without adding a wrapper, so an ordinary pipeline appears
+directly under the run rather than as a binary staircase. A function that
+constructs a meaningful compound stage can return `nefor.node.named name node`;
+`nefor.node.rename` gives a placed child a concise local label without changing
+its opaque actor ids. These labels form unique paths such as
+`["camera-stage" "agent" "llm"]`. Dots in runtime actor ids do not create path
+levels. Repeated cycles are therefore ordinary node-producing functions whose
+instances remain expandable into their agents, retries, commands, and other
+children.
+
 Agent failures are ordinary `AgentError` values. `>=>` is Kleisli composition
 for `A | E`: it sends `A` into the next node and preserves `E` unchanged. Use
 `choose` directly when both alternatives have task-specific behavior.

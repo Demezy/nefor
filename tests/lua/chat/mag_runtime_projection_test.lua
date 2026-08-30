@@ -55,19 +55,19 @@ state = run_panel.mag_run_started(state, "run", "workflow", "lead", 0)
 state = run_panel.actor_spawned(state, "run", "worker.entry", "entry", 100)
 state = run_panel.actor_ready(state, "run", "worker.entry", 110)
 
-local group = run_panel.build_groups(state.runs.run)[1]
+local group = run_panel.build_nodes(state.runs.run)[1]
 eq(group.status, "pending", "constructed actor stays pending until first activation")
 eq(group.first_start, nil, "spawn queue is not active time")
 
 state = run_panel.actor_busy(state, "run", "worker.entry", 1000)
-group = run_panel.build_groups(state.runs.run)[1]
+group = run_panel.build_nodes(state.runs.run)[1]
 eq(group.status, "running", "busy actor makes its logical node active")
 eq(group.first_start, 1000, "active time begins at first busy transition")
 
 state = run_panel.actor_idle(state, "run", "worker.entry", 1500)
 state = run_panel.actor_busy(state, "run", "worker.entry", 2000)
 state = run_panel.mag_run_complete(state, "run", "success", 2500)
-group = run_panel.build_groups(state.runs.run)[1]
+group = run_panel.build_nodes(state.runs.run)[1]
 eq(group.last_finish, 2500, "completion closes an activation still working")
 eq(group.active_ms, 1000, "logical node excludes the idle gap between yellow intervals")
 
@@ -77,7 +77,7 @@ settled_state = run_panel.actor_spawned(settled_state, "run", "worker.entry", "e
 settled_state = run_panel.actor_busy(settled_state, "run", "worker.entry", 1000)
 settled_state = run_panel.actor_idle(settled_state, "run", "worker.entry", 1500)
 settled_state = run_panel.mag_run_complete(settled_state, "run", "success", 10000)
-group = run_panel.build_groups(settled_state.runs.run)[1]
+group = run_panel.build_nodes(settled_state.runs.run)[1]
 eq(group.last_finish, 1500, "run completion does not add downstream wait time")
 eq(group.active_ms, 500, "logical node excludes downstream wait time")
 
@@ -89,8 +89,47 @@ overlap = run_panel.actor_busy(overlap, "run", "worker.llm", 1000)
 overlap = run_panel.actor_busy(overlap, "run", "worker.run-tool", 1200)
 overlap = run_panel.actor_idle(overlap, "run", "worker.llm", 1500)
 overlap = run_panel.actor_idle(overlap, "run", "worker.run-tool", 1700)
-group = run_panel.build_groups(overlap.runs.run)[1]
+group = run_panel.build_nodes(overlap.runs.run)[1]
 eq(group.active_ms, 700, "overlapping yellow members count as one logical interval")
+
+local hierarchy = { runs = {}, sidebar_folds = {} }
+hierarchy = run_panel.mag_run_started(hierarchy, "nested", "workflow", "lead", 0)
+hierarchy = run_panel.nodes_declared(hierarchy, "nested", {
+  { path = { "camera-stage" }, members = {} },
+  { path = { "camera-stage", "agent" }, members = {} },
+  { path = { "camera-stage", "agent", "llm" }, members = { "camera.llm" } },
+  { path = { "camera-stage", "retry" }, members = { "camera.retry" } },
+  { path = { "result" }, members = { "workflow.result" } },
+})
+hierarchy = run_panel.actor_spawned(hierarchy, "nested", "camera.llm", "llm", {
+  routes = { answer = { { actor = "camera.retry" } } },
+}, 1)
+hierarchy = run_panel.actor_spawned(hierarchy, "nested", "camera.retry", "retry", {
+  routes = {
+    retry = { { actor = "camera.llm" } },
+    done = { { actor = "workflow.result" } },
+  },
+}, 2)
+hierarchy = run_panel.actor_spawned(hierarchy, "nested", "workflow.result", "output", {}, 3)
+local roots = run_panel.build_nodes(hierarchy.runs.nested)
+eq(#roots, 2, "run header exposes direct logical children without a wrapper node")
+eq(roots[1].name, "camera-stage", "best-effort linearization starts at the entry stage")
+eq(roots[2].name, "result", "best-effort linearization ends at the terminal node")
+eq(roots[1].children[1].name, "agent", "a compound stage preserves its agent child")
+eq(roots[1].children[2].name, "retry", "cycle feedback remains after the forward agent step")
+eq(roots[1].children[1].children[1].name, "llm",
+  "recursive hierarchy expands beyond one level")
+
+local stage_key = run_panel.path_key({ "camera-stage" })
+local agent_key = run_panel.path_key({ "camera-stage", "agent" })
+hierarchy.sidebar_folds.nested = { [stage_key] = true, [agent_key] = true }
+local hierarchy_rows = run_panel.row_model(hierarchy, 4)
+eq(#hierarchy_rows, 6, "expanded recursive hierarchy contributes one row per visible node")
+eq(hierarchy_rows[2].logical_node.name, "camera-stage", "first workflow row is the stage")
+eq(hierarchy_rows[3].logical_node.name, "agent", "expansion reveals local child names")
+eq(hierarchy_rows[4].logical_node.name, "llm", "nested expansion reveals the agent internals")
+eq(hierarchy_rows[5].logical_node.name, "retry", "the stage sibling follows the expanded agent")
+eq(hierarchy_rows[6].logical_node.name, "result", "the terminal root remains visible")
 
 local preview = {
   node_previews = {}, mag_arrivals = {}, scope_to_run = {}, capability_owners = {},

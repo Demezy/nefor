@@ -10,12 +10,21 @@ Double `Esc` hard-stops the active lead, drops the engine-side queue, and restor
 
 `Ctrl+B` toggles the sidebar. `Tab` focuses it when it has live rows or the bounded recent-completion inspection target.
 
-Runs are keyed by run ID and can overlap. A run contains a header, groups, and actor rows with pending/running/idle/completed/failed/killed states and elapsed/activity information. Completed runs remain visible briefly (about two seconds); after that, the newest expired completion remains as one bounded inspection target rather than an unbounded run history.
+Runs are keyed by run ID and can overlap. A run header contains the direct
+logical nodes authored by the MAG program. Compound stages expand recursively
+into their child nodes—for example, a stage may reveal an agent and retry, and
+the agent may reveal its LLM and tool loop. Rows carry
+pending/running/idle/completed/failed/killed states and elapsed/activity
+information. The display uses a deterministic best-effort linearization from
+entry toward exit; feedback edges do not change runtime scheduling. Completed
+runs remain visible briefly (about two seconds); after that, the newest expired
+completion remains as one bounded inspection target rather than an unbounded
+run history.
 
 With sidebar focus:
 
-- `Enter` folds/unfolds a group;
-- `Space` opens a read-only chronological inspector for an actor, a merged group, or the whole run;
+- `Enter` folds/unfolds a logical node;
+- `Space` opens a read-only chronological inspector for a node or the whole run;
 - `Ctrl+O` in the inspector reveals additional reasoning/tool payload detail;
 - scroll with arrows, page keys, `Home`, and `End`; `Esc`/`Q` closes;
 - `x` asks to terminate the selected active run; `X` asks to terminate every run, including lead; both require confirmation.

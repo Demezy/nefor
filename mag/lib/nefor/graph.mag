@@ -20,12 +20,14 @@
                :semantic_type_id SemanticTypeId
                :content PackedValue})
 (type Rule {:id String :on StoredPort :fn String})
+(type LogicalNode {:path (List String) :members (List String)})
 (type StoredNode {:id String
                   :role String
                   :actors (List Actor)
                   :routes (List StoredRoute)
                   :messages (List Message)
                   :rules (List Rule)
+                  :nodes (List LogicalNode)
                   :input StoredPort
                   :output StoredPort})
 (type Node [I O] {:id String
@@ -34,6 +36,7 @@
                   :routes (List StoredRoute)
                   :messages (List Message)
                   :rules (List Rule)
+                  :nodes (List LogicalNode)
                   :input (Port I)
                   :output (Port O)})
 (type Edge {:from StoredNode :to StoredNode :route StoredRoute})
@@ -74,6 +77,7 @@
                     :kills (List String)
                     :rules (List LowerRule)
                     :types (Map String TypeDescriptor)
+                    :nodes (List LogicalNode)
                     :result ResultBoundary})
 
 ;; Dynamic rule artifacts remain an operation format over the running actor
@@ -83,12 +87,14 @@
 (type Delta {:actors (List Actor)
              :routes (List StoredRoute)
              :messages (List Message)
+             :nodes (List LogicalNode)
              :kills (List String)})
 (type LowerDelta {:actors (List LowerActor)
                   :messages (List LowerMessage)
                   :kills (List String)
                   :rules (List LowerRule)
-                  :types (Map String TypeDescriptor)})
+                  :types (Map String TypeDescriptor)
+                  :nodes (List LogicalNode)})
 
 (let port (fn [T] [[actor String] [semantic-type (TypeTag T)] [wire-type String]] -> (Port T)
   (as (Port T) {:actor actor :type semantic-type :wire wire-type})))
@@ -107,27 +113,55 @@
              :type_arguments type-arguments
              :params (pack params) :input input :outputs outputs})))
 
+(let actor-ids (fn [[actors (List Actor)]] -> (List String)
+  (map (fn [[candidate Actor]] -> String (get candidate "id")) actors)))
+(let logical-node (fn [[path (List String)] [actors (List String)]] -> LogicalNode
+  (as LogicalNode {:path path :members actors})))
+(let prefix-logical-node (fn [[name String] [value LogicalNode]] -> LogicalNode
+  (logical-node (concat [name] (get value "path")) (get value "members"))))
+(let prefix-logical-nodes
+  (fn [[name String] [values (List LogicalNode)]] -> (List LogicalNode)
+    (map (fn [[value LogicalNode]] -> LogicalNode
+           (prefix-logical-node name value)) values)))
+(let attach-logical-members
+  (fn [[values (List LogicalNode)] [members (List String)]] -> (List LogicalNode)
+    (if (= (count values) 0)
+      []
+      (concat
+        [(logical-node (get (first values) "path")
+           (concat (get (first values) "members") members))]
+        (remove-at values 0)))))
+(let node-with-rules-and-nodes
+  (fn [I O] [[id String] [role String] [actors (List Actor)]
+             [routes (List StoredRoute)] [messages (List Message)]
+             [rules (List Rule)] [nodes (List LogicalNode)]
+             [input (Port I)] [output (Port O)]]
+    -> (Node I O)
+    (as (Node I O) {:id id :role role :actors actors :routes routes
+                    :messages messages :rules rules :nodes nodes
+                    :input input :output output})))
+
 (let node (fn [I O] [[id String] [role String] [actors (List Actor)]
                      [routes (List StoredRoute)] [messages (List Message)]
                      [input (Port I)] [output (Port O)]] -> (Node I O)
-  (as (Node I O) {:id id :role role :actors actors :routes routes
-                  :messages messages :rules [] :input input :output output})))
+  (node-with-rules-and-nodes id role actors routes messages []
+    [(logical-node [id] (actor-ids actors))] input output)))
 
 (let node-with-rules
   (fn [I O] [[id String] [role String] [actors (List Actor)]
              [routes (List StoredRoute)] [messages (List Message)]
              [rules (List Rule)] [input (Port I)] [output (Port O)]]
     -> (Node I O)
-    (as (Node I O) {:id id :role role :actors actors :routes routes
-                    :messages messages :rules rules
-                    :input input :output output})))
+    (node-with-rules-and-nodes id role actors routes messages rules
+      [(logical-node [id] (actor-ids actors))] input output)))
 
 (let with-rule
   (fn [I O] [[value (Node I O)] [subscription Rule]] -> (Node I O)
-    (node-with-rules
+    (node-with-rules-and-nodes
       (get value "id") (get value "role")
       (get value "actors") (get value "routes") (get value "messages")
       (concat (get value "rules") [subscription])
+      (get value "nodes")
       (get value "input") (get value "output"))))
 
 (let store-node (fn [I O] [[value (Node I O)]] -> StoredNode
@@ -135,6 +169,7 @@
                   :actors (get value "actors") :routes (get value "routes")
                   :messages (get value "messages")
                   :rules (get value "rules")
+                  :nodes (get value "nodes")
                   :input (store-port (get value "input"))
                   :output (store-port (get value "output"))})))
 
@@ -288,6 +323,41 @@
   (flat-map (fn [[candidate StoredNode]] -> (List Message)
               (get candidate "messages"))
             (graph-nodes value))))
+(let graph-logical-nodes (fn [[value Graph]] -> (List LogicalNode)
+  (flat-map (fn [[candidate StoredNode]] -> (List LogicalNode)
+              (get candidate "nodes"))
+            (graph-nodes value))))
+(let insert-string
+  (fn [[values (Map String Bool)] [value String]] -> (Map String Bool)
+    (assoc values value true)))
+(let string-set
+  (fn [[values (List String)]] -> (Map String Bool)
+    (fold insert-string (as (Map String Bool) {}) values)))
+(let logical-paths-valid? (fn [[value Graph]] -> Bool
+  (let nodes (graph-logical-nodes value))
+  (let paths
+    (map (fn [[candidate LogicalNode]] -> String
+           (canonical (get candidate "path"))) nodes))
+  (let segments
+    (flat-map (fn [[candidate LogicalNode]] -> (List String)
+                (get candidate "path")) nodes))
+  (let empty-paths
+    (filter (fn [[candidate LogicalNode]] -> Bool
+              (= (count (get candidate "path")) 0)) nodes))
+  (if (= (count empty-paths) 0)
+    (if (= (count (filter (fn [[name String]] -> Bool (= name "")) segments)) 0)
+      (= (count (keys (string-set paths))) (count paths))
+      false)
+    false)))
+(let logical-members-valid? (fn [[value Graph]] -> Bool
+  (let members
+    (flat-map (fn [[candidate LogicalNode]] -> (List String)
+                (get candidate "members"))
+              (graph-logical-nodes value)))
+  (let actors (actor-ids (graph-actors value)))
+  (if (= (count (keys (string-set members))) (count members))
+    (= (string-set members) (string-set actors))
+    false)))
 
 (let incoming-count (fn [[value Graph] [id String]] -> Int
   (count (filter (fn [[candidate Edge]] -> Bool
@@ -647,9 +717,13 @@
         (core.validated.invalid ["graph needs at least one edge"])
         (if (has-node-conflicts? value)
           (core.validated.invalid ["one node id must denote one immutable node definition"])
-          (if (not (actor-ids-valid? value))
-            (core.validated.invalid ["runtime actor ids must be unique across graph nodes"])
-            (if (not (= (count (outputs value)) 1))
+            (if (not (actor-ids-valid? value))
+              (core.validated.invalid ["runtime actor ids must be unique across graph nodes"])
+              (if (not (logical-paths-valid? value))
+                (core.validated.invalid ["logical node paths must be non-empty and unique"])
+                (if (not (logical-members-valid? value))
+                  (core.validated.invalid ["every runtime actor must belong to exactly one logical node"])
+                  (if (not (= (count (outputs value)) 1))
               (core.validated.invalid ["graph needs exactly one concrete output node"])
               (if (= (count bad-shapes) 0)
                 (if (= (count bad-boundaries) 0)
@@ -667,7 +741,7 @@
                       (core.validated.invalid output-coverage-errors))
                     (core.validated.invalid input-coverage-errors))
                   (core.validated.invalid ["boundary node roles require their concrete source/output factory shape, and ordinary nodes cannot contain initial messages"]))
-                (core.validated.invalid ["only source nodes may have zero incoming edges, and output nodes are terminal"])))))))))
+                (core.validated.invalid ["only source nodes may have zero incoming edges, and output nodes are terminal"])))))))))))
 
 (let validate (fn [[value Graph] [contracts (List FactoryContract)]]
   -> (core.validated.Validated String Graph)
@@ -790,6 +864,7 @@
        :kills (as (List String) [])
        :rules (map lower-rule (get value "rules"))
        :types (descriptor-table (program-descriptors topology (get value "rules")))
+       :nodes (graph-logical-nodes topology)
        :result (result-boundary topology)})))
 (let lower (fn [[value Graph]] -> Modification
   (lower-program (program value (as (List Rule) [])))))
@@ -797,31 +872,41 @@
 ;; Resident rule deltas are operational artifacts, not graph values.
 (let delta (fn [[actors (List Actor)] [routes (List StoredRoute)]
                 [messages (List Message)] [kills (List String)]] -> Delta
-  (as Delta {:actors actors :routes routes :messages messages :kills kills})))
+  (as Delta {:actors actors :routes routes :messages messages
+             :nodes (map (fn [[candidate Actor]] -> LogicalNode
+                           (logical-node [(get candidate "id")] [(get candidate "id")]))
+                         actors)
+             :kills kills})))
 (let node-delta (fn [I O] [[value (Node I O)]] -> Delta
   (as Delta {:actors (get value "actors") :routes (get value "routes")
-             :messages (get value "messages") :kills []})))
+             :messages (get value "messages") :nodes (get value "nodes")
+             :kills []})))
 (let merge-delta (fn [[left Delta] [right Delta]] -> Delta
   (as Delta {:actors (concat (get left "actors") (get right "actors"))
              :routes (concat (get left "routes") (get right "routes"))
              :messages (concat (get left "messages") (get right "messages"))
+             :nodes (concat (get left "nodes") (get right "nodes"))
              :kills (concat (get left "kills") (get right "kills"))})))
 (let delta-edge (fn [I T O] [[change Delta] [from (Node I T)] [to (Node T O)]] -> Delta
   (as Delta {:actors (get change "actors")
              :routes (concat (get change "routes")
                              [(stored-route (get from "output") (get to "input"))])
-             :messages (get change "messages") :kills (get change "kills")})))
+             :messages (get change "messages") :nodes (get change "nodes")
+             :kills (get change "kills")})))
 (let delta-route (fn [A B] [[change Delta] [from (Port A)] [to (Port B)]] -> Delta
   (as Delta {:actors (get change "actors")
              :routes (concat (get change "routes") [(stored-route from to)])
-             :messages (get change "messages") :kills (get change "kills")})))
+             :messages (get change "messages") :nodes (get change "nodes")
+             :kills (get change "kills")})))
 (let delta-message (fn [T] [[change Delta] [to (Port T)] [value T]] -> Delta
   (as Delta {:actors (get change "actors") :routes (get change "routes")
              :messages (concat (get change "messages") [(typed-message to value)])
+             :nodes (get change "nodes")
              :kills (get change "kills")})))
 (let delta-message-front (fn [T] [[change Delta] [to (Port T)] [value T]] -> Delta
   (as Delta {:actors (get change "actors") :routes (get change "routes")
              :messages (concat [(typed-message to value)] (get change "messages"))
+             :nodes (get change "nodes")
              :kills (get change "kills")})))
 (let lower-delta (fn [[value Delta]] -> LowerDelta
   (let actors (get value "actors"))
@@ -833,7 +918,8 @@
      :messages (map lower-message (get value "messages"))
      :kills (get value "kills")
      :rules (as (List LowerRule) [])
-     :types (descriptor-table (delta-descriptors value))})))
+     :types (descriptor-table (delta-descriptors value))
+     :nodes (get value "nodes")})))
 
 ;; A resident program may begin with rule-observed exits that only become
 ;; connected after a rule returns its operational delta. Its explicit boundary
@@ -847,4 +933,5 @@
                       :types (descriptor-table
                                (concat (delta-descriptors change)
                                        [(get (store-port result) "type")]))
+                      :nodes (get lowered "nodes")
                       :result (as ResultBoundary {:from (store-port result)})})))

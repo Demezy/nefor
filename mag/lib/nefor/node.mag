@@ -19,6 +19,47 @@
   (fn [[left String] [operator String] [right String]] -> String
     (str left (str operator right))))
 
+(let compound-nodes
+  (fn [[name String] [owned (List nefor.graph.Actor)]
+       [children (List nefor.graph.LogicalNode)]]
+    -> (List nefor.graph.LogicalNode)
+    (concat
+      [(nefor.graph.logical-node [name] (nefor.graph.actor-ids owned))]
+      (nefor.graph.prefix-logical-nodes name children))))
+
+;; Establish one visible abstraction boundary around an existing node. Ordinary
+;; composition stays transparent; named functions use this when their returned
+;; subgraph should appear as one expandable node. The executable node identity
+;; stays unchanged; `name` is only the new logical path segment.
+(let named
+  (fn [I O] [[name String] [value (nefor.graph.Node I O)]]
+    -> (nefor.graph.Node I O)
+    (nefor.graph.node-with-rules-and-nodes (get value "id") (get value "role")
+      (get value "actors") (get value "routes") (get value "messages")
+      (get value "rules")
+      (compound-nodes name [] (get value "nodes"))
+      (get value "input") (get value "output"))))
+
+(let rename-path-root
+  (fn [[name String] [value nefor.graph.LogicalNode]] -> nefor.graph.LogicalNode
+    (nefor.graph.logical-node
+      (concat [name] (remove-at (get value "path") 0))
+      (get value "members"))))
+
+;; Runtime actor ids and logical names are different identities. Constructors
+;; default the logical root to their actor id; `rename` gives a placed node a
+;; concise local name without rewriting any executable actor reference.
+(let rename
+  (fn [I O] [[name String] [value (nefor.graph.Node I O)]]
+    -> (nefor.graph.Node I O)
+    (nefor.graph.node-with-rules-and-nodes (get value "id") (get value "role")
+      (get value "actors") (get value "routes") (get value "messages")
+      (get value "rules")
+      (map (fn [[candidate nefor.graph.LogicalNode]] -> nefor.graph.LogicalNode
+             (rename-path-root name candidate))
+           (get value "nodes"))
+      (get value "input") (get value "output"))))
+
 ;; Sequential composition preserves an initial source boundary on the left.
 ;; The composite still has exactly that source's Unit input and initial message;
 ;; everything to its right is ordinary downstream work.
@@ -31,7 +72,7 @@
   (fn [A B C]
     [[left (nefor.graph.Node A B)] [right (nefor.graph.Node B C)]]
     -> (nefor.graph.Node A C)
-    (nefor.graph.node-with-rules
+    (nefor.graph.node-with-rules-and-nodes
       (composite-id (get left "id") ">>>" (get right "id"))
       (sequential-role left right)
       (concat (get left "actors") (get right "actors"))
@@ -41,6 +82,7 @@
            (get left "output") (get right "input"))])
       (concat (get left "messages") (get right "messages"))
       (concat (get left "rules") (get right "rules"))
+      (concat (get left "nodes") (get right "nodes"))
       (get left "input")
       (get right "output"))))
 
@@ -76,7 +118,7 @@
      [right (nefor.graph.Node Unit B)]]
     -> (nefor.graph.Node I B)
     (let bridge (discard (str id ".discard") (type-tag A)))
-    (nefor.graph.node-with-rules id (sequential-role left bridge)
+    (nefor.graph.node-with-rules-and-nodes id (sequential-role left bridge)
       (concat (get left "actors")
         (concat (get bridge "actors") (get right "actors")))
       (concat
@@ -88,6 +130,8 @@
         (concat (get bridge "messages") (get right "messages")))
       (concat (get left "rules")
         (concat (get bridge "rules") (get right "rules")))
+      (compound-nodes id (get bridge "actors")
+        (concat (get left "nodes") (get right "nodes")))
       (get left "input")
       (get right "output"))))
 (let *>
@@ -125,7 +169,7 @@
              (get (get right "output") "actor")]})
         (nefor.graph.store-port output-input)
         [(nefor.graph.store-port output-port)]))
-    (nefor.graph.node-with-rules id "ordinary"
+    (nefor.graph.node-with-rules-and-nodes id "ordinary"
       (concat
         (get input "actors")
         (concat
@@ -149,6 +193,9 @@
       (concat
         (get input "rules")
         (concat (get left "rules") (get right "rules")))
+      (compound-nodes id
+        (concat (get input "actors") [output])
+        (concat (get left "nodes") (get right "nodes")))
       (get input "input")
       output-port)))
 
@@ -195,7 +242,7 @@
              (get (get right "output") "actor")]})
         (nefor.graph.store-port output-input)
         [(nefor.graph.store-port output-port)]))
-    (nefor.graph.node-with-rules id "ordinary"
+    (nefor.graph.node-with-rules-and-nodes id "ordinary"
       (concat [splitter]
         (concat
           (get left "actors")
@@ -212,6 +259,8 @@
         (get left "messages")
         (get right "messages"))
       (concat (get left "rules") (get right "rules"))
+      (compound-nodes id [splitter output]
+        (concat (get left "nodes") (get right "nodes")))
       splitter-input
       output-port)))
 
@@ -249,7 +298,7 @@
         (get (get input "output") "actor")
         (type-tag B)
         (get (get input "output") "wire")))
-    (nefor.graph.node-with-rules id "ordinary"
+    (nefor.graph.node-with-rules-and-nodes id "ordinary"
       (concat
         (get input "actors")
         (concat
@@ -275,6 +324,9 @@
         (concat
           (get left "rules")
           (concat (get right "rules") (get output "rules"))))
+      (compound-nodes id
+        (concat (get input "actors") (get output "actors"))
+        (concat (get left "nodes") (get right "nodes")))
       (get input "input")
       (get output "output"))))
 
@@ -294,11 +346,20 @@
     (let continue-or-error
       (choose (str id ".choose") right preserve-error))
     (let composed (>>> left continue-or-error))
-    (nefor.graph.node-with-rules id (get composed "role")
+    ;; The error adapter and choose boundary are transparent implementation
+    ;; actors. Attribute them to the continuation's first logical node so all
+    ;; lifecycle state remains inspectable without inventing another wrapper.
+    (let choose-root (first (get continue-or-error "nodes")))
+    (let internal-members
+      (concat (get choose-root "members")
+        (nefor.graph.actor-ids (get preserve-error "actors"))))
+    (nefor.graph.node-with-rules-and-nodes id (get composed "role")
       (get composed "actors")
       (get composed "routes")
       (get composed "messages")
       (get composed "rules")
+      (concat (get left "nodes")
+        (nefor.graph.attach-logical-members (get right "nodes") internal-members))
       (get composed "input")
       (get composed "output"))))
 
@@ -316,10 +377,11 @@
         (as SequenceEmptyParams {})
         (nefor.graph.store-port input)
         [(nefor.graph.store-port output)]))
-    (nefor.graph.node-with-rules id "ordinary" [actor]
+    (nefor.graph.node-with-rules-and-nodes id "ordinary" [actor]
       (as (List nefor.graph.StoredRoute) [])
       (as (List nefor.graph.Message) [])
       (as (List nefor.graph.Rule) [])
+      [(nefor.graph.logical-node [id] [(get actor "id")])]
       input output)))
 
 (let sequence-nonempty
@@ -382,13 +444,20 @@
           (nefor.graph.stored-route
             (get candidate "output") collector-input))
         nodes))
-    (nefor.graph.node-with-rules id "ordinary"
+    (nefor.graph.node-with-rules-and-nodes id "ordinary"
       (concat (get relay "actors") (concat child-actors [collector]))
       (concat
         (get relay "routes")
         (concat child-routes (concat input-routes output-routes)))
       (concat (get relay "messages") child-messages)
       (concat (get relay "rules") child-rules)
+      (compound-nodes id
+        (concat (get relay "actors") [collector])
+        (flat-map
+          (fn [[candidate (nefor.graph.Node I O)]]
+            -> (List nefor.graph.LogicalNode)
+            (get candidate "nodes"))
+          nodes))
       (get relay "input")
       collector-output)))
 

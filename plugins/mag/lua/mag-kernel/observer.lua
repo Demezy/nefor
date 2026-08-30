@@ -19,6 +19,7 @@
 -- ── event-kind set (flagged) ────────────────────────────────────────────────
 -- snake_case, `mag.`-qualified broadcast markers:
 --   mag.run_started            a run/program began (wiring, before the first mod)
+--   mag.nodes_declared         an applied modification's logical node paths
 --   mag.actor_spawned          the fold registered a new id (never-existed→alive)
 --   mag.actor_ready            the instance constructed at its first activation
 --                              and confirmed (routing) — "began work"
@@ -48,6 +49,7 @@ M.__index = M
 
 M.EVENTS = {
   run_started = "mag.run_started",
+  nodes_declared = "mag.nodes_declared",
   actor_spawned = "mag.actor_spawned",
   actor_ready = "mag.actor_ready",
   actor_busy = "mag.actor_busy",
@@ -117,6 +119,11 @@ function M:run_started(meta)
   })
 end
 
+function M:nodes_declared(nodes)
+  if type(nodes) ~= "table" or #nodes == 0 then return end
+  self.emit_event({ kind = EVENTS.nodes_declared, nodes = plain_data.copy(nodes) })
+end
+
 -- Apply one modification through the fold, deriving lifecycle events and one
 -- modification-log entry from the state diff around inventory.apply. Returns the
 -- inventory's own result verbatim ({ ok = true } | { ok = false, error = ... }),
@@ -128,7 +135,7 @@ end
 function M:apply(modification, opts)
   modification = modification or {}
   local pre = self:snapshot(modification)
-  local result = self.inventory.apply(modification)
+  local result = self.inventory.apply(modification, opts and opts.before_execute)
   return self:observe(modification, pre, result, opts)
 end
 

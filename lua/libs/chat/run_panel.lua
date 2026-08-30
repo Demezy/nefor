@@ -1,5 +1,5 @@
 -- Run-panel sidebar widget: renders the active kernel runs as a column
--- of run-headers + grouped actor rows, and owns the pure-state mutators
+-- of run headers and recursively nested logical nodes, and owns the pure-state mutators
 -- (mag_run_started, actor_* transitions, mag_run_complete, prune) the
 -- chat reducer calls.
 
@@ -154,40 +154,99 @@ function M.any_active(runs, now_ms)
   return false
 end
 
--- Elapsed window for an actor row: live-ticking while working (the current
--- activation only) and frozen across terminal state. Idle carries no window — a
--- between-activations actor shows no timer.
-local function node_elapsed_ms(node, now_ms)
-  if node.status == "running" or node.status == "working" then
-    return now_ms - (node.activation_started_at_ms or node.started_at_ms or now_ms)
-  end
-  if TERMINAL_STATUS[node.status] and node.finished_at_ms ~= nil then
-    return node.finished_at_ms - (node.started_at_ms or node.finished_at_ms)
-  end
-  return nil
-end
-
--- ── MAG namespace grouping (display model) ────────────────────────────
---
--- The run panel collapses a run's actors into top-level namespace
--- groups: an actor id's group is its segment up to the first ".". Group
--- rows aggregate member state; per-member states are retained inside each
--- group (a future expand/collapse toggle reads them straight off the same
--- `run.nodes` store). An undotted id (e.g. `sink`) is its own single-
--- member group.
+-- ── MAG logical-node hierarchy (display model) ─────────────────────────
 
 local function group_of(actor_id)
   return actor_id:match("^([^.]+)") or actor_id
 end
--- Exported so the composite agent view (popups.lua) can select a group's
--- members by the same namespace rule the panel groups by.
+-- Raw lifecycle fixtures and hand-authored untyped modifications have no
+-- logical metadata. Keep their old namespace projection as a boundary
+-- fallback; compiled MAG programs never infer hierarchy from actor ids.
 M.group_of = group_of
 
-local function active_groups(nodes)
+local function path_key(path)
+  local parts = {}
+  for _, name in ipairs(path or {}) do
+    parts[#parts + 1] = tostring(#name) .. ":" .. name
+  end
+  return table.concat(parts, "/")
+end
+M.path_key = path_key
+
+local function parent_path(path)
+  local parent = {}
+  for index = 1, #path - 1 do parent[index] = path[index] end
+  return parent
+end
+
+local function fallback_descriptors(nodes)
+  local buckets, order = {}, {}
+  for actor_id, node in pairs(nodes or {}) do
+    local name = group_of(actor_id)
+    local bucket = buckets[name]
+    if bucket == nil then
+      bucket = { name = name, members = {}, entries = {}, min_seq = math.huge }
+      buckets[name] = bucket
+      order[#order + 1] = bucket
+    end
+    bucket.entries[#bucket.entries + 1] = { id = actor_id, node = node }
+    bucket.min_seq = math.min(bucket.min_seq, node.seq or math.huge)
+  end
+  table.sort(order, function(left, right)
+    if left.min_seq ~= right.min_seq then return left.min_seq < right.min_seq end
+    return left.name < right.name
+  end)
+  local descriptors = {}
+  for _, bucket in ipairs(order) do
+    table.sort(bucket.entries, function(left, right)
+      local ls, rs = left.node.seq or math.huge, right.node.seq or math.huge
+      if ls ~= rs then return ls < rs end
+      return left.id < right.id
+    end)
+    if #bucket.entries == 1 and bucket.entries[1].id == bucket.name then
+      descriptors[#descriptors + 1] = { path = { bucket.name }, members = { bucket.name } }
+    else
+      descriptors[#descriptors + 1] = { path = { bucket.name }, members = {} }
+      for _, entry in ipairs(bucket.entries) do
+        descriptors[#descriptors + 1] = {
+          path = { bucket.name, M.member_label(bucket.name, entry.id) },
+          members = { entry.id },
+        }
+      end
+    end
+  end
+  return descriptors
+end
+
+local function descriptors_for(run, nodes)
+  if type(run.logical_nodes) == "table" and #run.logical_nodes > 0 then
+    return run.logical_nodes
+  end
+  return fallback_descriptors(nodes or run.nodes)
+end
+
+local function actor_ancestor_keys(run, nodes)
   local out = {}
-  for id, node in pairs(nodes or {}) do
+  for _, descriptor in ipairs(descriptors_for(run, nodes)) do
+    for _, actor_id in ipairs(descriptor.members or {}) do
+      local keys = out[actor_id] or {}
+      for length = 1, #descriptor.path do
+        local prefix = {}
+        for index = 1, length do prefix[index] = descriptor.path[index] end
+        keys[path_key(prefix)] = true
+      end
+      out[actor_id] = keys
+    end
+  end
+  return out
+end
+
+local function active_groups(run, nodes)
+  local out = {}
+  local ancestors = actor_ancestor_keys(run, nodes)
+  for id, node in pairs(nodes or run.nodes or {}) do
     if node.status == "running" or node.status == "working" then
-      out[group_of(id)] = true
+      for key in pairs(ancestors[id] or {}) do out[key] = true end
     end
   end
   return out
@@ -199,7 +258,7 @@ end
 -- paints as active.
 local function advance_group_activity(prev, nodes, now_ms)
   local current = prev.group_activity or {}
-  local next_activity, groups = {}, active_groups(nodes)
+  local next_activity, groups = {}, active_groups(prev, nodes)
   for name, value in pairs(current) do
     next_activity[name] = { active_ms = value.active_ms or 0,
       active_since_ms = value.active_since_ms }
@@ -218,7 +277,7 @@ local function advance_group_activity(prev, nodes, now_ms)
   return next_activity
 end
 
--- Aggregate actor activity into workflow-node progress. The kernel also calls
+-- Aggregate actor activity into logical-node progress. The kernel also calls
 -- a newly constructed (but never fired) actor `idle`; `settled_at_ms`
 -- distinguishes that ready state from an activation that actually completed.
 -- An actor remains resident after settling, while a later busy event moves its
@@ -249,57 +308,119 @@ local function group_status(members, run_completed)
   return "done"
 end
 
--- Build the ordered group model for a MAG run: a list of groups in stable
--- first-appearance order (each group keyed on the earliest spawn `seq` of
--- its members), every group carrying its member nodes plus an aggregated
--- status and elapsed window.
-local function build_groups(run)
-  local buckets = {}
-  local order = {}
-  for id, node in pairs(run.nodes or {}) do
-    local g = group_of(id)
-    local b = buckets[g]
-    if b == nil then
-      b = { name = g, members = {}, min_seq = math.huge }
-      buckets[g] = b
-      order[#order + 1] = b
-    end
-    b.members[#b.members + 1] = { id = id, node = node }
-    local seq = node.seq or math.huge
-    if seq < b.min_seq then b.min_seq = seq end
+local function linearize(children, run)
+  if #children < 2 then return children end
+  local owner = {}
+  for index, child in ipairs(children) do
+    for _, member in ipairs(child.members) do owner[member.id] = index end
   end
-  local run_completed = run.completed_at_ms ~= nil
-  for _, b in ipairs(order) do
-    table.sort(b.members, function(x, y)
-      local sx, sy = x.node.seq or math.huge, y.node.seq or math.huge
-      if sx ~= sy then return sx < sy end
-      return x.id < y.id
-    end)
-    b.status = group_status(b.members, run_completed)
-    local activity = (run.group_activity or {})[b.name] or {}
-    b.active_ms = activity.active_ms or 0
-    b.active_since_ms = activity.active_since_ms
-    local first_start, last_finish
-    for _, m in ipairs(b.members) do
-      local s = m.node.started_at_ms
-      if s and (first_start == nil or s < first_start) then first_start = s end
-      -- A resident actor is finalized with the whole MAG run, often long
-      -- after its own last activation. Prefer that activation boundary so a
-      -- completed workflow node does not keep accumulating downstream time.
-      local f = m.node.settled_at_ms or m.node.finished_at_ms
-      if f and (last_finish == nil or f > last_finish) then last_finish = f end
+  local edges = {}
+  for index = 1, #children do edges[index] = {} end
+  for actor_id, node in pairs(run.nodes or {}) do
+    local from = owner[actor_id]
+    if from then
+      for _, destinations in pairs(((node.spec or {}).routes) or {}) do
+        for _, destination in ipairs(destinations) do
+          local to = owner[destination.actor]
+          if to and to ~= from then edges[from][to] = true end
+        end
+      end
     end
-    b.first_start, b.last_finish = first_start, last_finish
   end
-  table.sort(order, function(a, b)
-    if a.min_seq ~= b.min_seq then return a.min_seq < b.min_seq end
-    return a.name < b.name
-  end)
-  return order
+
+  local remaining, placed, ordered = {}, {}, {}
+  for index = 1, #children do remaining[index] = true end
+  while #ordered < #children do
+    local zero, reached
+    for candidate = 1, #children do
+      if remaining[candidate] then
+        local incoming = false
+        local from_placed = false
+        for from = 1, #children do
+          if edges[from][candidate] then
+            if remaining[from] then incoming = true elseif placed[from] then from_placed = true end
+          end
+        end
+        if not incoming and zero == nil then zero = candidate end
+        if from_placed and reached == nil then reached = candidate end
+      end
+    end
+    -- A cycle has no zero-incoming member. Continue from the earliest node
+    -- reached by the already-linearized prefix; otherwise declaration order
+    -- supplies the deterministic break. The remaining backward edge is the
+    -- displayed feedback edge.
+    local selected = zero or reached
+    if selected == nil then
+      for index = 1, #children do if remaining[index] then selected = index break end end
+    end
+    remaining[selected], placed[selected] = nil, true
+    ordered[#ordered + 1] = children[selected]
+  end
+  return ordered
 end
--- Exported for the composite view's header (member count / aggregated
--- status / activity window of a whole group or run).
-M.build_groups = build_groups
+
+local function build_nodes(run)
+  local by_key, roots = {}, {}
+  for index, descriptor in ipairs(descriptors_for(run)) do
+    local path = descriptor.path or {}
+    local key = path_key(path)
+    by_key[key] = {
+      name = path[#path], path = path, key = key, own_actors = descriptor.members or {},
+      children = {}, declaration_index = index,
+    }
+  end
+  for _, logical in pairs(by_key) do
+    if #logical.path == 1 then
+      roots[#roots + 1] = logical
+    else
+      local parent = by_key[path_key(parent_path(logical.path))]
+      if parent then parent.children[#parent.children + 1] = logical end
+    end
+  end
+  local function declaration_order(left, right)
+    return left.declaration_index < right.declaration_index
+  end
+  local function finish(logical)
+    table.sort(logical.children, declaration_order)
+    local members, seen = {}, {}
+    for _, actor_id in ipairs(logical.own_actors) do
+      local node = (run.nodes or {})[actor_id]
+      if node and not seen[actor_id] then
+        members[#members + 1], seen[actor_id] = { id = actor_id, node = node }, true
+      end
+    end
+    for _, child in ipairs(logical.children) do
+      finish(child)
+      for _, member in ipairs(child.members) do
+        if not seen[member.id] then
+          members[#members + 1], seen[member.id] = member, true
+        end
+      end
+    end
+    logical.members = members
+    logical.children = linearize(logical.children, run)
+    logical.status = group_status(members, run.completed_at_ms ~= nil)
+    local activity = (run.group_activity or {})[logical.key] or {}
+    logical.active_ms = activity.active_ms or 0
+    logical.active_since_ms = activity.active_since_ms
+    for _, member in ipairs(members) do
+      local started = member.node.started_at_ms
+      if started and (logical.first_start == nil or started < logical.first_start) then
+        logical.first_start = started
+      end
+      local finished = member.node.settled_at_ms or member.node.finished_at_ms
+      if finished and (logical.last_finish == nil or finished > logical.last_finish) then
+        logical.last_finish = finished
+      end
+    end
+  end
+  table.sort(roots, declaration_order)
+  for _, root in ipairs(roots) do finish(root) end
+  return linearize(roots, run)
+end
+-- Exported for projection tests and other views that need the same recursive
+-- logical-node tree.
+M.build_nodes = build_nodes
 
 local function text(content, style, wrap)
   return tui.text { content = content, style = style, wrap = wrap or "none" }
@@ -321,12 +442,12 @@ local function group_elapsed_ms(group, now_ms)
   return nil
 end
 
-local function group_row_widget(group, now_ms, selected)
+local function group_row_widget(group, depth, now_ms, selected)
   local style = selected and CURSOR_ROW_STYLE or NODE_STYLE[group.status] or STYLE.status_dim
   local n = #group.members
   local count = n > 1 and (" (" .. n .. ")") or ""
   return tui.row { gap = 0, children = {
-    text((GLYPHS[group.status] or "·") .. " ", style),
+    text(string.rep("  ", depth) .. (GLYPHS[group.status] or "·") .. " ", style),
     duration_widget(group_elapsed_ms(group, now_ms), style),
     text(" ", style),
     name_widget(group.name, style),
@@ -346,11 +467,11 @@ end
 
 -- Counts GROUPS (not raw actors). Duration is total workflow wall time,
 -- independent of the activity-only timers on group and actor rows.
-local function run_header_widget(run, groups, now_ms, selected)
+local function run_header_widget(run, nodes, now_ms, selected)
   local style = selected and CURSOR_ROW_STYLE or STYLE.footer
   local done = 0
-  for _, group in ipairs(groups) do
-    if TERMINAL_STATUS[group.status] then done = done + 1 end
+  for _, node in ipairs(nodes) do
+    if TERMINAL_STATUS[node.status] then done = done + 1 end
   end
   local extra = {}
   if (run.rejected or 0) > 0 then extra[#extra + 1] = " ✗" .. run.rejected .. " rej" end
@@ -360,7 +481,7 @@ local function run_header_widget(run, groups, now_ms, selected)
     duration_widget(run_elapsed_ms(run, now_ms), style),
     text(" ", style),
     name_widget(run_ident(run), style),
-    text(string.format(" (%d/%d)", done, #groups), style),
+    text(string.format(" (%d/%d)", done, #nodes), style),
     text(table.concat(extra), style),
   } }
 end
@@ -373,16 +494,6 @@ local function member_label(parent_id, actor_id)
   return actor_id
 end
 M.member_label = member_label
-
-local function actor_row_widget(parent_id, actor_id, node, now_ms, selected)
-  local style = selected and CURSOR_ROW_STYLE or NODE_STYLE[node.status] or STYLE.status_dim
-  return tui.row { gap = 0, children = {
-    text("  " .. (GLYPHS[node.status] or "·") .. " ", style),
-    duration_widget(node_elapsed_ms(node, now_ms), style),
-    text(" ", style),
-    name_widget(member_label(parent_id, actor_id), style),
-  } }
-end
 
 local function actor_stale_text(node, stream, now_ms)
   if node.status == "working" and stream ~= nil and stream.last_activity_ms ~= nil then
@@ -401,11 +512,10 @@ end
 -- into the same list to move the cursor and resolve Enter, so the
 -- highlighted row and the row acted on can never drift apart.
 --
--- Per-group stored fold state, DEFAULT COLLAPSED: a group's member
--- actor rows render only while `state.sidebar_folds[run_id][group]` is
--- set (Enter on the group row toggles it — update.lua). Members of a
--- collapsed group are not rows at all, so the cursor skips them by
--- construction. Fold state survives re-renders, focus changes, and run
+-- Per-node stored fold state, DEFAULT COLLAPSED: a node's logical children
+-- render only while `state.sidebar_folds[run_id][path]` is set (Enter on the
+-- node row toggles it — controller.lua). Children of a collapsed node are not
+-- rows, so the cursor skips them by construction. Fold state survives re-renders, focus changes, and run
 -- updates; it resets with run prune / a new session (update.lua).
 -- Runs render in creation order (started_at_ms, run_id tiebreak), not id
 -- order: the turn's main run stays first and ad-hoc eval runs append below
@@ -444,23 +554,24 @@ function M.row_model(state, now_ms)
     if fixture_mode or not is_expired(run, now_ms) then
       if not first_run then visual_y = visual_y + 1 end
       first_run = false
-      local groups = build_groups(run)
-      append({ kind = "run_header", run_id = run_id, run = run, groups = groups }, 1)
+      local nodes = build_nodes(run)
+      append({ kind = "run_header", run_id = run_id, run = run, nodes = nodes }, 1)
       local run_streams = streams[run_id] or {}
       local run_folds = folds[run_id] or {}
-      for _, g in ipairs(groups) do
-        local unfolded = run_folds[g.name] == true
-        append({ kind = "group", run_id = run_id, group = g }, 1)
-        if unfolded then
-          for _, m in ipairs(g.members) do
-            local stream = run_streams[m.id]
-            local stale_text = actor_stale_text(m.node, stream, now_ms)
-            append({
-              kind = "actor", run_id = run_id, parent_id = g.name, actor_id = m.id,
-              node = m.node, stream = stream,
-            }, stale_text ~= nil and 2 or 1)
-          end
+      local function append_logical_node(group, depth)
+        local stale_text
+        if #group.members == 1 then
+          local member = group.members[1]
+          stale_text = actor_stale_text(member.node, run_streams[member.id], now_ms)
         end
+        append({ kind = "logical_node", run_id = run_id, logical_node = group, depth = depth,
+          stale_text = stale_text }, stale_text ~= nil and 2 or 1)
+        if run_folds[group.key] == true then
+          for _, child in ipairs(group.children) do append_logical_node(child, depth + 1) end
+        end
+      end
+      for _, node in ipairs(nodes) do
+        append_logical_node(node, 0)
       end
     end
   end
@@ -502,16 +613,12 @@ local function panel_children(state, now_ms)
         children[#children + 1] = tui.text { content = "", wrap = "none" }
       end
       first_run = false
-      children[#children + 1] = run_header_widget(row.run, row.groups, now_ms, on_cursor)
-    elseif row.kind == "group" then
-      children[#children + 1] = group_row_widget(row.group, now_ms, on_cursor)
-    elseif row.kind == "actor" then
-      local stale_text = actor_stale_text(row.node, row.stream, now_ms)
-      children[#children + 1] = actor_row_widget(
-        row.parent_id, row.actor_id, row.node, now_ms, on_cursor)
-      if stale_text ~= nil then
+      children[#children + 1] = run_header_widget(row.run, row.nodes, now_ms, on_cursor)
+    elseif row.kind == "logical_node" then
+      children[#children + 1] = group_row_widget(row.logical_node, row.depth, now_ms, on_cursor)
+      if row.stale_text ~= nil then
         children[#children + 1] = tui.text {
-          content = stale_text,
+          content = string.rep("  ", row.depth + 2) .. row.stale_text:match("^%s*(.*)$"),
           style   = STYLE.panel_stale,
           wrap    = "none",
         }
@@ -595,13 +702,31 @@ function M.mag_run_started(state, run_id, run_name, principal, now_ms)
     return {
       run_id = run_id, run_name = run_name, principal = principal,
       total_nodes = 0, started_at_ms = now_ms, nodes = {},
+      logical_nodes = {},
       completed_at_ms = nil, status = nil, rejected = 0, noops = 0,
       actor_seq = 0,
     }
   end)
 end
 
-function M.actor_spawned(state, run_id, actor_id, factory, now_ms)
+function M.nodes_declared(state, run_id, declared)
+  if not (state.runs and state.runs[run_id]) or type(declared) ~= "table" then return state end
+  return apply(state, run_id, function(prev)
+    local nodes, seen = {}, {}
+    for _, descriptor in ipairs(prev.logical_nodes or {}) do
+      nodes[#nodes + 1] = descriptor
+      seen[path_key(descriptor.path)] = true
+    end
+    for _, descriptor in ipairs(declared) do
+      local key = path_key(descriptor.path)
+      if not seen[key] then nodes[#nodes + 1], seen[key] = descriptor, true end
+    end
+    return shallow_merge(prev, { logical_nodes = nodes })
+  end)
+end
+
+function M.actor_spawned(state, run_id, actor_id, factory, spec, now_ms)
+  if type(spec) == "number" and now_ms == nil then now_ms, spec = spec, nil end
   if not (state.runs and state.runs[run_id]) then return state end
   return apply(state, run_id, function(prev)
     if prev.nodes and prev.nodes[actor_id] then return prev end
@@ -610,6 +735,7 @@ function M.actor_spawned(state, run_id, actor_id, factory, now_ms)
     local seq = (prev.actor_seq or 0) + 1
     nodes[actor_id] = {
       reasoner = factory or "",
+      spec = spec or {},
       status = "pending",
       spawned_at_ms = now_ms,
       finished_at_ms = nil,

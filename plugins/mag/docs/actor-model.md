@@ -168,6 +168,10 @@ own Lua state.
 
 - `mag.actor_spawned { run_id, id, factory, spec }` owns the immutable actor
   structure once: factory, type arguments, params, input/output endpoints, and routes.
+- `mag.nodes_declared { run_id, nodes }` precedes spawn events for the same
+  validated modification and preserves authored logical node paths for
+  recursive inspectors. It is presentation ownership only: actors never
+  observe it, and dotted actor ids imply no hierarchy.
 - `mag.arrival { run_id, arrival_id, from, edge_id, wire,
 semantic_type_id, semantic_type, constructor_id, value }` owns one complete
   payload. Fan-out reuses the same arrival; it does not copy the value per
