@@ -1828,7 +1828,7 @@ fn collection_builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, Ma
             Ok(Value::Map(std::sync::Arc::new(
                 groups
                     .into_iter()
-                    .map(|(key, values)| (key, Value::List(std::sync::Arc::new(values))))
+                    .map(|(key, values)| (key, Value::Vector(std::sync::Arc::new(values))))
                     .collect(),
             )))
         }

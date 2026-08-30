@@ -1545,6 +1545,8 @@ fn group_by_orders_keys_and_preserves_bucket_source_order() {
             {:keys (keys grouped)
              :a (get grouped "a")
              :b (get grouped "b")
+             :b-concatenated (concat (get grouped "b") ["b3"])
+             :b-equals-list (= (get grouped "b") ["b1" "b2"])
              :empty empty
              :skewed (get skewed "all")
              :interleaved-a (get interleaved "a")
@@ -1560,6 +1562,8 @@ fn group_by_orders_keys_and_preserves_bucket_source_order() {
             "keys": ["a", "b"],
             "a": ["a1"],
             "b": ["b1", "b2"],
+            "b-concatenated": ["b1", "b2", "b3"],
+            "b-equals-list": true,
             "empty": {},
             "skewed": [1, 2, 3, 4, 5, 6, 7, 8],
             "interleaved-a": ["a1", "a2"],

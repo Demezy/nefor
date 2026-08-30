@@ -42,6 +42,15 @@ fn run(name: &str, source: &str, inputs: Value) -> Value {
         .artifact
 }
 
+fn run_error(name: &str, source: &str) -> String {
+    let root = workspace(name);
+    fs::write(root.join("main.mag"), source).unwrap();
+    let mag_lib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
+    load_with_inputs_and_module_roots(&root, "main.mag", json!({}), &[root.clone(), mag_lib])
+        .unwrap_err()
+        .to_string()
+}
+
 #[test]
 fn analysis_preserves_normalized_first_occurrence_and_flattening_order() {
     let artifact = run(
@@ -248,6 +257,55 @@ fn route_assignment_sorts_product_buckets_but_lowers_original_route_order() {
         json!(["emitter", "emitter", "join"])
     );
     assert_eq!(artifact["duplicate-positions"], json!([0, 0, -1]));
+}
+
+#[test]
+fn route_assignment_uses_each_same_address_destination_descriptor() {
+    for (name, product_id, component_id) in [
+        ("product-route-first", "a-product", "z-component"),
+        ("component-route-first", "z-product", "a-component"),
+    ] {
+        let source = format!(
+            r#"
+              (require "nefor.graph")
+
+              (type A {{:value Int}})
+              (type B {{:value String}})
+
+              (let source-a
+                (nefor.graph.port "source-a" (type-tag A) "test.Value"))
+              (let source-b
+                (nefor.graph.port "source-b" (type-tag B) "test.Value"))
+              (let product-input
+                (nefor.graph.port "join" (type-tag (+ A B)) "test.Value"))
+              (let component-input
+                (nefor.graph.port "join" (type-tag B) "test.Value"))
+              (let product-route
+                (as nefor.graph.StoredRoute
+                  {{:id "{product_id}"
+                   :from (nefor.graph.store-port source-a)
+                   :to (nefor.graph.store-port product-input)}}))
+              (let component-route
+                (as nefor.graph.StoredRoute
+                  {{:id "{component_id}"
+                   :from (nefor.graph.store-port source-b)
+                   :to (nefor.graph.store-port component-input)}}))
+              (artifact
+                (nefor.graph.lower-delta
+                  (nefor.graph.delta
+                    (as (List nefor.graph.Actor) [])
+                    [product-route component-route]
+                    (as (List nefor.graph.Message) [])
+                    (as (List String) []))))
+            "#
+        );
+
+        let error = run_error(name, &source);
+        assert!(
+            error.contains("incoming edge types do not completely cover the input"),
+            "{name}: {error}"
+        );
+    }
 }
 
 #[test]
