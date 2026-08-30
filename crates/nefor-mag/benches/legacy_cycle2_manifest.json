@@ -1,0 +1,282 @@
+{
+  "legacy_combined_fingerprint": "sha256:0e2cf14afde86802d519af05e668a615e8f1618733c5fe2777adc3778d9c8431",
+  "cases": [
+    {
+      "name": "trivial",
+      "fixture_fingerprint": "sha256:38ba8f0ce02b72de28bd68adbc86c33f047e6b68cb1313fc0bbe07c92711aced",
+      "artifact_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "core-dead-locals-16",
+      "fixture_fingerprint": "sha256:73378eaf3b286892f2678ad4aab90e27c43dad1cc35daf5a361a9c4f98b8b14b",
+      "artifact_hash": "4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"
+    },
+    {
+      "name": "core-generic-calls-16",
+      "fixture_fingerprint": "sha256:df4b73e299abebca10f68e07d8799875df9eae968ef063bf534d7eba5856e041",
+      "artifact_hash": "13862f084a72fbe80d353527118c5ce361f7edde5713476ca2e774a04952b03a"
+    },
+    {
+      "name": "core-concat-growth-16",
+      "fixture_fingerprint": "sha256:185ee35e5b726deee914b2cd91764f6f53230870abfb0c138db07f52e7b51b82",
+      "artifact_hash": "13862f084a72fbe80d353527118c5ce361f7edde5713476ca2e774a04952b03a"
+    },
+    {
+      "name": "core-artifact-control-16",
+      "fixture_fingerprint": "sha256:052eb0d2436b87a2da0050a9e6f2fa83c50f658d4eeecad44df26aca79bba704",
+      "artifact_hash": "62d7d2bfd61f6a355f091817d48728fdf63cf683e2fc3e4635c1e46371687f95"
+    },
+    {
+      "name": "core-dead-locals-64",
+      "fixture_fingerprint": "sha256:83bfb72028beb4e366857c8386957f598a6e1b1601ae7d7885f71dc82531d4bc",
+      "artifact_hash": "4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"
+    },
+    {
+      "name": "core-generic-calls-64",
+      "fixture_fingerprint": "sha256:19dbb4c2893af2a3aba64076d36097917a9e026aeb6406f2c68a7aa201a224e2",
+      "artifact_hash": "17f04565819e34d088b985a2bbc4fa57df5e17c3f138ea0d81fce741fc4ab064"
+    },
+    {
+      "name": "core-concat-growth-64",
+      "fixture_fingerprint": "sha256:019d96be632f229273ec117890a4b8b91e52ea24aa272e0b8cf0b5ca6c61d07f",
+      "artifact_hash": "17f04565819e34d088b985a2bbc4fa57df5e17c3f138ea0d81fce741fc4ab064"
+    },
+    {
+      "name": "core-artifact-control-64",
+      "fixture_fingerprint": "sha256:bf89a14c698dd3f366112ad57b424cb1a18c6198912a1bf13dbb96d69488fc16",
+      "artifact_hash": "288ab17c305fc2f5c038cc0ac03eeff6f67d9954f56caaecf1a1bcb4da19975e"
+    },
+    {
+      "name": "core-dead-locals-256",
+      "fixture_fingerprint": "sha256:e350a1abbd25ab39a3e1db908a508bf50ca08d585f622542ac386d4b3cca904d",
+      "artifact_hash": "4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"
+    },
+    {
+      "name": "core-generic-calls-256",
+      "fixture_fingerprint": "sha256:86e946d9a8974d5ec75bf4c885007262099d6cfa66cc22d3159e0be6fcfd7ee7",
+      "artifact_hash": "650275519041f72771cce4f5f4f26fd53d606f06227840260bbda5d0ff91ea9e"
+    },
+    {
+      "name": "core-concat-growth-256",
+      "fixture_fingerprint": "sha256:1c720cb4d6fc0ae3c226cf0f49f20c1cde0c82da5edda4aa9a4402772816ce2d",
+      "artifact_hash": "650275519041f72771cce4f5f4f26fd53d606f06227840260bbda5d0ff91ea9e"
+    },
+    {
+      "name": "core-artifact-control-256",
+      "fixture_fingerprint": "sha256:97a2449c650362cb8feb92c5562949c59c9190484716aa657b50c4554986d297",
+      "artifact_hash": "33d3ab9db8c986088744f9c5f57d8d4ae7cfcfd979e5ed3182d34a2790d6c696"
+    },
+    {
+      "name": "nefor-linear-build-2",
+      "fixture_fingerprint": "sha256:80798a795914bc56fadcb058070d9f88dd1c27e0f3a8e21885d5b9493bd2b439",
+      "artifact_hash": "c31eff50cb161158eb3e3c5d8eb4eb98cb50ee30f71e9432dc67213a266364b8"
+    },
+    {
+      "name": "nefor-linear-validate-2",
+      "fixture_fingerprint": "sha256:aea83f5311fe61811513c575c15fda340f23e990f16362d7eb5eb715c560a4e8",
+      "artifact_hash": "c31eff50cb161158eb3e3c5d8eb4eb98cb50ee30f71e9432dc67213a266364b8"
+    },
+    {
+      "name": "nefor-linear-lower-2",
+      "fixture_fingerprint": "sha256:ca924b719777555bea65c6cf3e56a061066eddbc72af3eab43921d4efa9e071f",
+      "artifact_hash": "7ef103dfc4c479cc56518d4afe74649ddcaba911493bb70dfb8371116084640e"
+    },
+    {
+      "name": "linear-2",
+      "fixture_fingerprint": "sha256:b34c9564dec6ac4a8f78a656f60ddc8273c74153a905f474f950ff51f9f77956",
+      "artifact_hash": "352eef1b3ec3990a7bfed425a23c22a2bb92907420406995cd20b44529a75e4e"
+    },
+    {
+      "name": "nefor-linear-build-8",
+      "fixture_fingerprint": "sha256:bb158c4443f78936f1ecb6462045312fd019f819bb93a7937e02a15e4375b1e3",
+      "artifact_hash": "e419bd32ffdee3bce3c217fa359b4750e63e20ae35e56ce3cc939f9192909466"
+    },
+    {
+      "name": "nefor-linear-validate-8",
+      "fixture_fingerprint": "sha256:20fe15ffc7bf0082ab987f89d4f4b47b03c6b494a0caa0c19d3a8e99963c0016",
+      "artifact_hash": "e419bd32ffdee3bce3c217fa359b4750e63e20ae35e56ce3cc939f9192909466"
+    },
+    {
+      "name": "nefor-linear-lower-8",
+      "fixture_fingerprint": "sha256:4ccf8c4b435ee1bbc2e63988e84de781d43b4ec17d1b5b268d3764493f5dcb03",
+      "artifact_hash": "18a1dac924599b99e230cca2d312e99075c5e6ed8d07574e270200c7ec6dcf4a"
+    },
+    {
+      "name": "linear-8",
+      "fixture_fingerprint": "sha256:2b7fd2dde2f7a93d1a2a3eea28dd240e5700919a7f6744a902d944153ef4954f",
+      "artifact_hash": "24b4f4ede721c2811613882c4412a1e24480de2380714388df548740a6dc6bc3"
+    },
+    {
+      "name": "nefor-linear-build-12",
+      "fixture_fingerprint": "sha256:cce6f28c5d6a6928f332f8e130e9b33db45ea57d12c8f66cfb1542adf3e8f53d",
+      "artifact_hash": "e3efc11fa955201efbee46c25872799e011cc873e2fc5bc665b37f57f0d99d58"
+    },
+    {
+      "name": "nefor-linear-validate-12",
+      "fixture_fingerprint": "sha256:5626c1b06eb6fb40bd2678b5e071b0fd9e85ffc88bdbbf9c1dfe6fe18e2ea3ac",
+      "artifact_hash": "e3efc11fa955201efbee46c25872799e011cc873e2fc5bc665b37f57f0d99d58"
+    },
+    {
+      "name": "nefor-linear-lower-12",
+      "fixture_fingerprint": "sha256:3d44792cac78393540a87b6608032db7470e11f0390318075f7044012b1a53b1",
+      "artifact_hash": "eb4eaf9f0cdb08e98356691156be2893a6c0d2ba014cd4c511cda2489158d2ef"
+    },
+    {
+      "name": "linear-12",
+      "fixture_fingerprint": "sha256:5d7ff0c9acd51981638c2d00992fccd212fe3a5d7d46a66e54d95d807da60f36",
+      "artifact_hash": "f24518000e9d64fcea0772b8461bab8742546bc4cdd7916bc46f31d5e37da100"
+    },
+    {
+      "name": "nefor-fan-in-build-2",
+      "fixture_fingerprint": "sha256:5c0bde9e45ad9fa7b6f95b85a36459c162949ddbe174fa69c5ebd535a57efac8",
+      "artifact_hash": "01aee418d7d01b611bbd67251b664eabd6de1a4761abf9a72184c93dd6891590"
+    },
+    {
+      "name": "nefor-fan-in-lower-2",
+      "fixture_fingerprint": "sha256:f9cf6b7b9c361425fd1a9add1c225cefc6c44ec33acdb818bf9bc8cb32a8b2fd",
+      "artifact_hash": "3f013b6dc4858864e5e897a9e265fef3302185123e753559e594cecdea7390ee"
+    },
+    {
+      "name": "product-fan-in-2",
+      "fixture_fingerprint": "sha256:bcd21bb6dcaa60fbd103469ffd2c95f27bb6992b3a332425598c674f2de09a62",
+      "artifact_hash": "747ddab34a14a2152f0b0a8da6ae0865e22b5b25b6b8e2f0e84826869ae4c661"
+    },
+    {
+      "name": "nefor-fan-in-build-8",
+      "fixture_fingerprint": "sha256:2171473d4ab902328290004c3554474e522ab996d3964b307e1d46fb7898098a",
+      "artifact_hash": "3305a801b6ca7b9847411ef83689832e6d376953bc99c35feeb7055b50c055a3"
+    },
+    {
+      "name": "nefor-fan-in-lower-8",
+      "fixture_fingerprint": "sha256:bd6115b482a143d83680a202dfcffc4205ea6905274298f573280dc65d44ac00",
+      "artifact_hash": "414eb80c454db0a396e712e61b319f3e4498fb6490a2c6d0434b0e13f6a3e262"
+    },
+    {
+      "name": "product-fan-in-8",
+      "fixture_fingerprint": "sha256:c7b997cb31392d3466cb515b64745f91b3e380dcb0e7939669c5f19f2897ca00",
+      "artifact_hash": "e2731b94699c889d6b52a0654cc8d1e0e3a1a68a13d69f248ca0b244344bc7aa"
+    },
+    {
+      "name": "nefor-fan-in-build-16",
+      "fixture_fingerprint": "sha256:57769de07a7b958b60aae03381b47959736204b48a90fc3369cf16a3b40334aa",
+      "artifact_hash": "32614da0dc375d7a188fe03d266864c5ed0314e9a390ebd83f77c4e5841b7b44"
+    },
+    {
+      "name": "nefor-fan-in-lower-16",
+      "fixture_fingerprint": "sha256:df3f9b8497d216ac1fea4ffdcba40c01fdd5746de3afc5e349d68c2b2961e81b",
+      "artifact_hash": "9ca32da6696a0d89695b774cd358cdd537a54bf49ad5fb61bacdb32c2cffe496"
+    },
+    {
+      "name": "product-fan-in-16",
+      "fixture_fingerprint": "sha256:b788e9f40e38c0378083297ae31f131913246e7b94edbb7a107ad2876a341b93",
+      "artifact_hash": "aab3efee2f56774dda980b851fd1ea46ea4c1775a5782a01de56f1c446192f26"
+    },
+    {
+      "name": "shipped-lead-turn",
+      "fixture_fingerprint": "sha256:e20e321db7bee5e83f9521d3c81189c5db326ab5cf37685765bd61b5186ae2c8",
+      "artifact_hash": "b19a932d8d42be6b2b2e6d914f75b1866c770654964f4d43ffddc920fc4c9583"
+    }
+  ],
+  "oracles": [
+    {
+      "name": "dead-binding-unresolved-symbol",
+      "artifact_hash": null
+    },
+    {
+      "name": "dead-function-body-return-type-error",
+      "artifact_hash": null
+    },
+    {
+      "name": "dead-strict-inference-cycle",
+      "artifact_hash": null
+    },
+    {
+      "name": "unused-required-module-resolution-error",
+      "artifact_hash": null
+    },
+    {
+      "name": "demanded-local-partial-builtin",
+      "artifact_hash": null
+    },
+    {
+      "name": "dead-local-recursion-budget",
+      "artifact_hash": null
+    },
+    {
+      "name": "demanded-local-recursion-budget",
+      "artifact_hash": null
+    },
+    {
+      "name": "top-level-dead-partial-builtin-remains-eager",
+      "artifact_hash": null
+    },
+    {
+      "name": "dead-local-partial-builtin",
+      "artifact_hash": null
+    },
+    {
+      "name": "untaken-branch-does-not-demand-local",
+      "artifact_hash": "4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"
+    },
+    {
+      "name": "unused-required-module-static-error",
+      "artifact_hash": null
+    },
+    {
+      "name": "artifact-dead-named-resident-function-remains-callable",
+      "artifact_hash": "8b3672675b76c87458b60299026e82b2326cc88ff0f5af408808ee64b19437da"
+    },
+    {
+      "name": "resident-function-reads-captured-top-level-peer",
+      "artifact_hash": "8b3672675b76c87458b60299026e82b2326cc88ff0f5af408808ee64b19437da"
+    },
+    {
+      "name": "required-module-export-remains-available",
+      "artifact_hash": "8b3672675b76c87458b60299026e82b2326cc88ff0f5af408808ee64b19437da"
+    },
+    {
+      "name": "read-and-read-json",
+      "artifact_hash": "0685dd100bd9e3d810070752e01c3a95cbbe5c7c60bf75baa5f5a688188aae50"
+    },
+    {
+      "name": "nested-host-input",
+      "artifact_hash": "683a957494de20817bf3da58beabed83a01c9def56da1f73df31a7ed7f67c7b8"
+    },
+    {
+      "name": "missing-host-input",
+      "artifact_hash": null
+    },
+    {
+      "name": "wrong-nested-host-input",
+      "artifact_hash": null
+    },
+    {
+      "name": "function-local-closure-capture",
+      "artifact_hash": "2674723d16b84e1855972d7fe16ec983bf83ee9a4bb6df38f938aab8c7186833"
+    },
+    {
+      "name": "closures-in-strict-values",
+      "artifact_hash": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b"
+    },
+    {
+      "name": "same-shaped-module-nominals",
+      "artifact_hash": null
+    },
+    {
+      "name": "deterministic-derived-ordering",
+      "artifact_hash": "7b57523521dd9f8478646953c32d1554ab06a602aeb532dd798de9759022abc4"
+    },
+    {
+      "name": "evidence-artifact-identity",
+      "artifact_hash": "6513e10c489110a688d637b2eb4527e119c2e77acabd48d74d599c46de1e7a4b"
+    },
+    {
+      "name": "graph-conflicting-node-definition",
+      "artifact_hash": null
+    },
+    {
+      "name": "graph-validation-priority",
+      "artifact_hash": null
+    }
+  ]
+}

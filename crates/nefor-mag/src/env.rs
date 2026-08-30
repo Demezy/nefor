@@ -1140,10 +1140,16 @@ impl Env {
             })
             .cloned();
         self.profile_counters(|counters| {
+            let name = function.name.as_deref().unwrap_or("<anonymous>").to_owned();
             if cached.is_some() {
                 counters.memoized_call_hits = counters.memoized_call_hits.saturating_add(1);
+                *counters.memoized_call_hits_by_name.entry(name).or_default() += 1;
             } else {
                 counters.memoized_call_misses = counters.memoized_call_misses.saturating_add(1);
+                *counters
+                    .memoized_call_misses_by_name
+                    .entry(name)
+                    .or_default() += 1;
             }
         });
         cached

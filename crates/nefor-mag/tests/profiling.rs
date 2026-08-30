@@ -120,6 +120,69 @@ fn group_by_profiles_one_builtin_call_and_one_callback_per_item() {
 }
 
 #[test]
+fn named_calls_memoization_and_physical_collection_work_are_separate() {
+    let root = temp_dir("profile-exclusive-work");
+    let profile = profile(
+        &root,
+        "(let identity (fn [[value Int]] -> Int value))\n(let first-value (identity 7))\n(let second-value (identity 7))\n(let removed (remove-at [1 2 3] 1))\n(let joined (concat removed [4]))\n(let encoded (canonical {:joined joined}))\n(artifact {:first first-value :second second-value :encoded encoded})",
+    );
+    let counters = profile.counters;
+
+    assert_eq!(
+        counters.user_function_calls_by_name.get("identity"),
+        Some(&2)
+    );
+    assert_eq!(
+        counters.user_function_executions_by_name.get("identity"),
+        Some(&1)
+    );
+    assert_eq!(
+        counters.memoized_call_hits_by_name.get("identity"),
+        Some(&1)
+    );
+    assert_eq!(
+        counters.memoized_call_misses_by_name.get("identity"),
+        Some(&1)
+    );
+    assert_eq!(
+        counters.builtin_cloned_items_by_name.get("remove-at"),
+        Some(&3)
+    );
+    assert_eq!(
+        counters.builtin_shifted_items_by_name.get("remove-at"),
+        Some(&1)
+    );
+    assert_eq!(
+        counters.builtin_copied_items_by_name.get("concat"),
+        Some(&3)
+    );
+    assert!(counters.canonicalization_recursive_visits > 0);
+    assert!(counters.canonicalization_serialized_bytes > 0);
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn descriptor_assignment_and_table_work_are_generic_and_deterministic() {
+    let root = temp_dir("profile-descriptors");
+    let profile = profile(
+        &root,
+        "(let target (type-evidence (type-tag (+ Int Int))))\n(let sources [(type-evidence (type-tag Int)) (type-evidence (type-tag Int))])\n(let assignments (descriptor-input-assignments target sources))\n(let table (descriptor-table [target]))\n(artifact {:assignments assignments :declarations (count table)})",
+    );
+    let counters = profile.counters;
+
+    assert_eq!(counters.descriptor_assignment_sources_examined, 2);
+    assert_eq!(counters.descriptor_assignment_target_product_occurrences, 2);
+    assert!(counters.descriptor_assignment_compatibility_checks >= 2);
+    assert!(counters.descriptor_assignment_search_branches >= 2);
+    assert_eq!(counters.descriptor_assignment_assignments_produced, 2);
+    assert_eq!(counters.descriptor_table_top_level_descriptors, 1);
+    assert_eq!(counters.descriptor_table_recursive_nodes, 3);
+    assert_eq!(counters.descriptor_table_stable_id_invocations, 3);
+    assert!(counters.descriptor_table_hashed_bytes > 0);
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn builtin_item_work_and_recursive_validation_are_exact_for_tiny_fixture() {
     let root = temp_dir("profile-items");
     let profile = profile(&root, "(let identity (fn [[value (List Int)]] -> (List Int) value))\n(let values (identity (as (List Int) (concat [1 2] [3]))))\n(artifact {:count (count values)})");

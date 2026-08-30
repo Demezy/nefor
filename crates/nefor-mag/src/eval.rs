@@ -1014,6 +1014,15 @@ fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError
     env.profile_counters(|counters| {
         counters.runtime_value_validation_visits =
             counters.runtime_value_validation_visits.saturating_add(1);
+        let boundary = match ty {
+            MagType::Named(name, _) => format!("nominal:{name}"),
+            MagType::Function(_, _) => "function".to_owned(),
+            other => format!("type:{other}"),
+        };
+        *counters
+            .runtime_validation_visits_by_boundary
+            .entry(boundary)
+            .or_default() += 1;
     });
     if let Value::Typed(_, evidence) = value {
         if evidence == ty {
@@ -1131,8 +1140,12 @@ fn apply_with_signature(
         counters.function_calls = counters.function_calls.saturating_add(1);
         if matches!(f, Value::BuiltinFn(_)) {
             counters.builtin_calls = counters.builtin_calls.saturating_add(1);
-        } else if matches!(f, Value::Fn(_)) {
+        } else if let Value::Fn(function) = f {
             counters.user_function_calls = counters.user_function_calls.saturating_add(1);
+            *counters
+                .user_function_calls_by_name
+                .entry(function.name.as_deref().unwrap_or("<anonymous>").to_owned())
+                .or_default() += 1;
         }
     });
     match f {
@@ -1155,6 +1168,12 @@ fn apply_with_signature(
             if let Some(result) = caller.memoized_call(fun, resolved_signature, args) {
                 return Ok(result);
             }
+            caller.profile_counters(|counters| {
+                *counters
+                    .user_function_executions_by_name
+                    .entry(fun.name.as_deref().unwrap_or("<anonymous>").to_owned())
+                    .or_default() += 1;
+            });
             let mut env = caller.child_for_call();
             env.replace_scopes(fun.closure.clone());
             env.push_scope();
@@ -1261,6 +1280,10 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
         }
         _ => 0,
     };
+    let remove_at_index = args.get(1).and_then(|value| match raw(value) {
+        Value::Int(index) if *index >= 0 => Some(*index as u64),
+        _ => None,
+    });
     env.profile_counters(|counters| {
         *counters
             .builtin_calls_by_name
@@ -1286,6 +1309,24 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 .builtin_input_items_by_name
                 .entry(name.to_owned())
                 .or_default() += input_items;
+        }
+        if name == "concat" {
+            *counters
+                .builtin_copied_items_by_name
+                .entry(name.to_owned())
+                .or_default() += input_items;
+        } else if name == "remove-at" {
+            *counters
+                .builtin_cloned_items_by_name
+                .entry(name.to_owned())
+                .or_default() += input_items;
+            let shifted = remove_at_index
+                .map(|index| input_items.saturating_sub(index.saturating_add(1)))
+                .unwrap_or(0);
+            *counters
+                .builtin_shifted_items_by_name
+                .entry(name.to_owned())
+                .or_default() += shifted;
         }
     });
     match name {
@@ -1319,9 +1360,19 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
         "canonical" => {
             arity(args, 1)?;
             let json = canonical_json(crate::json::value_to_json(env, &args[0])?);
-            serde_json::to_string(&json)
-                .map(Value::Str)
-                .map_err(|error| MagError::Eval(format!("canonical serialization failed: {error}")))
+            let visits = json_recursive_visits(&json);
+            let encoded = serde_json::to_string(&json).map_err(|error| {
+                MagError::Eval(format!("canonical serialization failed: {error}"))
+            })?;
+            env.profile_counters(|counters| {
+                counters.canonicalization_recursive_visits = counters
+                    .canonicalization_recursive_visits
+                    .saturating_add(visits);
+                counters.canonicalization_serialized_bytes = counters
+                    .canonicalization_serialized_bytes
+                    .saturating_add(encoded.len() as u64);
+            });
+            Ok(Value::Str(encoded))
         }
         "function-name" => {
             arity(args, 1)?;
@@ -1654,8 +1705,46 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 &args[1],
                 "descriptor-input-assignments expects a descriptor list",
             )?;
-            target
-                .assign_input_sources(&sources)
+            let result = target.assign_input_sources(&sources);
+            let (compatibility_checks, search_branches) = if env.profile_started().is_some() {
+                descriptor_assignment_search_profile(target, &sources)
+            } else {
+                (0, 0)
+            };
+            env.profile_counters(|counters| {
+                counters.descriptor_assignment_sources_examined = counters
+                    .descriptor_assignment_sources_examined
+                    .saturating_add(sources.len() as u64);
+                if let ConcreteType::Product { items } = target {
+                    counters.descriptor_assignment_target_product_occurrences = counters
+                        .descriptor_assignment_target_product_occurrences
+                        .saturating_add(items.len() as u64);
+                }
+                counters.descriptor_assignment_compatibility_checks = counters
+                    .descriptor_assignment_compatibility_checks
+                    .saturating_add(compatibility_checks);
+                counters.descriptor_assignment_search_branches = counters
+                    .descriptor_assignment_search_branches
+                    .saturating_add(search_branches);
+                match &result {
+                    Ok(assignments) => {
+                        counters.descriptor_assignment_assignments_produced = counters
+                            .descriptor_assignment_assignments_produced
+                            .saturating_add(assignments.len() as u64);
+                    }
+                    Err(crate::types::InputAssignmentError::IncompleteCoverage) => {
+                        counters.descriptor_assignment_incomplete_outcomes = counters
+                            .descriptor_assignment_incomplete_outcomes
+                            .saturating_add(1);
+                    }
+                    Err(crate::types::InputAssignmentError::AmbiguousCoverage) => {
+                        counters.descriptor_assignment_ambiguous_outcomes = counters
+                            .descriptor_assignment_ambiguous_outcomes
+                            .saturating_add(1);
+                    }
+                }
+            });
+            result
                 .map(|assignments| {
                     Value::List(std::sync::Arc::new(
                         assignments
@@ -1685,18 +1774,46 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             arity(args, 1)?;
             let descriptors =
                 descriptor_list(&args[0], "descriptor-table expects a descriptor list")?;
+            let top_level = descriptors.len() as u64;
+            let recursive_nodes = descriptors.iter().map(descriptor_node_count).sum::<u64>();
+            let hashed_bytes = descriptors.iter().map(descriptor_hashed_bytes).sum::<u64>();
             let mut declarations = BTreeMap::new();
+            let mut inserts = 0_u64;
+            let mut duplicates = 0_u64;
             for descriptor in descriptors {
                 for (id, declaration) in descriptor.declarations()? {
                     if let Some(existing) = declarations.insert(id.clone(), declaration.clone()) {
+                        duplicates = duplicates.saturating_add(1);
                         if existing != declaration {
                             return Err(MagError::Type(format!(
                                 "semantic type identity collision at {id}"
                             )));
                         }
+                    } else {
+                        inserts = inserts.saturating_add(1);
                     }
                 }
             }
+            env.profile_counters(|counters| {
+                counters.descriptor_table_top_level_descriptors = counters
+                    .descriptor_table_top_level_descriptors
+                    .saturating_add(top_level);
+                counters.descriptor_table_recursive_nodes = counters
+                    .descriptor_table_recursive_nodes
+                    .saturating_add(recursive_nodes);
+                counters.descriptor_table_declaration_inserts = counters
+                    .descriptor_table_declaration_inserts
+                    .saturating_add(inserts);
+                counters.descriptor_table_duplicate_declaration_hits = counters
+                    .descriptor_table_duplicate_declaration_hits
+                    .saturating_add(duplicates);
+                counters.descriptor_table_stable_id_invocations = counters
+                    .descriptor_table_stable_id_invocations
+                    .saturating_add(recursive_nodes);
+                counters.descriptor_table_hashed_bytes = counters
+                    .descriptor_table_hashed_bytes
+                    .saturating_add(hashed_bytes);
+            });
             Ok(Value::Map(std::sync::Arc::new(
                 declarations
                     .into_iter()
@@ -1778,6 +1895,14 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
         }
         "require" => Err(MagError::Eval("require is a special form".into())),
         _ => Err(MagError::Eval(format!("unknown builtin {name}"))),
+    }
+}
+
+fn json_recursive_visits(value: &serde_json::Value) -> u64 {
+    1 + match value {
+        serde_json::Value::Array(items) => items.iter().map(json_recursive_visits).sum(),
+        serde_json::Value::Object(fields) => fields.values().map(json_recursive_visits).sum(),
+        _ => 0,
     }
 }
 
@@ -1891,6 +2016,133 @@ fn collection_builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, Ma
             )))
         }
         _ => unreachable!(),
+    }
+}
+
+fn descriptor_assignment_search_profile(
+    target: &ConcreteType,
+    sources: &[ConcreteType],
+) -> (u64, u64) {
+    let ConcreteType::Product { items } = target else {
+        let mut checks = 0_u64;
+        for source in sources {
+            checks = checks.saturating_add(1);
+            if !target.accepts_edge_source(source) {
+                break;
+            }
+        }
+        return (checks, 0);
+    };
+    let mut checks = 0_u64;
+    let component_sources = sources
+        .iter()
+        .filter(|source| {
+            checks = checks.saturating_add(1);
+            !target.accepts(source)
+        })
+        .collect::<Vec<_>>();
+    if component_sources.is_empty() {
+        for source in sources {
+            checks = checks.saturating_add(1);
+            if !target.accepts(source) {
+                break;
+            }
+        }
+        return (checks, 0);
+    }
+    if component_sources.len() != items.len() {
+        return (checks, 0);
+    }
+    let mut capacities = BTreeMap::<ConcreteType, usize>::new();
+    for item in items {
+        *capacities.entry(item.clone()).or_default() += 1;
+    }
+    fn walk(
+        sources: &[&ConcreteType],
+        index: usize,
+        capacities: &mut BTreeMap<ConcreteType, usize>,
+        checks: &mut u64,
+        branches: &mut u64,
+    ) {
+        let Some(source) = sources.get(index) else {
+            return;
+        };
+        let candidates = capacities
+            .iter()
+            .filter(|(component, remaining)| {
+                if **remaining == 0 {
+                    return false;
+                }
+                *checks = checks.saturating_add(1);
+                component.accepts(source)
+            })
+            .map(|(component, _)| component.clone())
+            .collect::<Vec<_>>();
+        for component in candidates {
+            *branches = branches.saturating_add(1);
+            if let Some(remaining) = capacities.get_mut(&component) {
+                *remaining -= 1;
+            }
+            walk(sources, index + 1, capacities, checks, branches);
+            if let Some(remaining) = capacities.get_mut(&component) {
+                *remaining += 1;
+            }
+        }
+    }
+    let mut branches = 0_u64;
+    walk(
+        &component_sources,
+        0,
+        &mut capacities,
+        &mut checks,
+        &mut branches,
+    );
+    (checks, branches)
+}
+
+fn descriptor_node_count(descriptor: &ConcreteType) -> u64 {
+    1 + match descriptor {
+        ConcreteType::Named {
+            arguments, body, ..
+        } => arguments.iter().map(descriptor_node_count).sum::<u64>() + descriptor_node_count(body),
+        ConcreteType::List { item } => descriptor_node_count(item),
+        ConcreteType::Map { key, value } => {
+            descriptor_node_count(key) + descriptor_node_count(value)
+        }
+        ConcreteType::Record { fields } => fields.values().map(descriptor_node_count).sum(),
+        ConcreteType::Sum { arms } => arms.iter().map(descriptor_node_count).sum(),
+        ConcreteType::Product { items } => items.iter().map(descriptor_node_count).sum(),
+        ConcreteType::JsonValue
+        | ConcreteType::Unit
+        | ConcreteType::Bool
+        | ConcreteType::Int
+        | ConcreteType::Float
+        | ConcreteType::String => 0,
+    }
+}
+
+fn descriptor_hashed_bytes(descriptor: &ConcreteType) -> u64 {
+    let own = serde_json::to_vec(descriptor).map_or(0, |bytes| bytes.len() as u64);
+    own + match descriptor {
+        ConcreteType::Named {
+            arguments, body, ..
+        } => {
+            arguments.iter().map(descriptor_hashed_bytes).sum::<u64>()
+                + descriptor_hashed_bytes(body)
+        }
+        ConcreteType::List { item } => descriptor_hashed_bytes(item),
+        ConcreteType::Map { key, value } => {
+            descriptor_hashed_bytes(key) + descriptor_hashed_bytes(value)
+        }
+        ConcreteType::Record { fields } => fields.values().map(descriptor_hashed_bytes).sum(),
+        ConcreteType::Sum { arms } => arms.iter().map(descriptor_hashed_bytes).sum(),
+        ConcreteType::Product { items } => items.iter().map(descriptor_hashed_bytes).sum(),
+        ConcreteType::JsonValue
+        | ConcreteType::Unit
+        | ConcreteType::Bool
+        | ConcreteType::Int
+        | ConcreteType::Float
+        | ConcreteType::String => 0,
     }
 }
 

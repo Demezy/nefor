@@ -9,8 +9,21 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const SCHEMA_VERSION: u8 = 3;
-pub const COMPARISON_SCHEMA_VERSION: u8 = 2;
+pub const SCHEMA_VERSION: u8 = 4;
+pub const COMPARISON_SCHEMA_VERSION: u8 = 3;
+pub const LEGACY_WORKLOAD_CATALOG_VERSION: &str = "cycle-2-v1";
+pub const PHASE0_WORKLOAD_CATALOG_VERSION: &str = "cycle-3-phase0-v1";
+pub const ORACLE_CATALOG_VERSION: &str = "mag-oracles-25-v1";
+pub const PROFILER_SCHEMA_VERSION: &str = "generic-compiler-profile-v2";
+pub const STATISTICS_POLICY_VERSION: &str = "paired-log-ratio-fwer-v1";
+pub const LEGACY_COMBINED_FINGERPRINT: &str =
+    "sha256:0e2cf14afde86802d519af05e668a615e8f1618733c5fe2777adc3778d9c8431";
+pub const LEGACY_WORKLOAD_FINGERPRINT: &str =
+    "sha256:59617bf4d8755e91d7b5ea5d13574bca7efc7c79276e850fd5ce479df037deaa";
+pub const LEGACY_ORACLE_FINGERPRINT: &str =
+    "sha256:c9902c94aa987c9e380c16f32e18ba50142a5fe0b8243cb08c11fb579b9c0411";
+pub const PHASE0_WORKLOAD_FINGERPRINT: &str =
+    "sha256:d40dc0b8654d22b731444071eff0efce9b737f43338720b0a616704ca2c78b7a";
 pub const MAX_TARGET_MEDIAN_RATIO: f64 = 0.90;
 pub const MIN_TARGET_COUNTER_REDUCTION: f64 = 0.40;
 pub const MAX_CASE_P90_RATIO: f64 = 1.10;
@@ -18,11 +31,55 @@ pub const MAX_CASE_P90_RATIO: f64 = 1.10;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Report {
     pub schema_version: u8,
+    #[serde(default)]
+    pub identity: Option<ReportIdentity>,
     pub metadata: Metadata,
     pub counter_semantics: BTreeMap<String, String>,
+    pub statistics_policy: StatisticsPolicy,
     pub cases: Vec<CaseReport>,
     pub oracles: Vec<OracleObservation>,
+    pub exclusive_sections: Vec<ExclusiveCounters>,
     pub recommendation: Recommendation,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReportIdentity {
+    pub report_schema_version: u8,
+    pub workload_catalog_version: String,
+    pub workload_fingerprint: String,
+    pub parent_workload_catalog_version: String,
+    pub parent_workload_fingerprint: String,
+    pub oracle_catalog_version: String,
+    pub oracle_fingerprint: String,
+    pub profiler_schema_version: String,
+    pub statistics_policy_version: String,
+    pub source_ref: String,
+    pub executable_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StatisticsPolicy {
+    pub version: String,
+    pub confidence_method: String,
+    pub family_wise_error_policy: String,
+    pub rng: String,
+    pub sample_escalation_schedule: Vec<usize>,
+    pub regression_ratio: String,
+    pub verdicts: String,
+    pub normalization_policy: String,
+}
+
+pub fn statistics_policy() -> StatisticsPolicy {
+    StatisticsPolicy {
+        version: STATISTICS_POLICY_VERSION.into(),
+        confidence_method: "paired percentile bootstrap; 4096 deterministic resamples".into(),
+        family_wise_error_policy: "Bonferroni 5% across timed cases and one-sided bounds".into(),
+        rng: "xorshift64 with SHA-256(case name) little-endian seed; balanced adjacent AB/BA pairs".into(),
+        sample_escalation_schedule: vec![30, 60, 120],
+        regression_ratio: "candidate_ns / baseline_ns on raw adjacent batches; analyze paired log-ratios and retain empirical ratios".into(),
+        verdicts: "pass iff upper <= 1.10; regression iff lower > 1.10; otherwise inconclusive and fail-closed".into(),
+        normalization_policy: "control normalization is diagnostic only and never replaces raw gates".into(),
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -52,6 +109,7 @@ pub struct CaseReport {
     pub stage: String,
     pub size: Option<usize>,
     pub fixture_fingerprint: String,
+    pub topology_fingerprint: Option<String>,
     pub outcome: String,
     pub expected_error: Option<String>,
     pub artifact_hash: Option<String>,
@@ -61,6 +119,7 @@ pub struct CaseReport {
     pub derived: Option<DerivedCounters>,
     pub profiled_phase_median_ns: Option<PhaseDurations>,
     pub profiled_invocations_are_separate: bool,
+    pub self_comparison: Option<PairedSelfComparison>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -188,28 +247,118 @@ pub struct Fixture {
     pub module_roots: Vec<ModuleRoot>,
     pub inputs: Value,
     pub fixture_fingerprint: String,
+    pub topology_fingerprint: Option<String>,
     pub fixture_files: Vec<PathBuf>,
     pub expected_error: Option<String>,
     pub policy: String,
     pub expected_artifact: Option<Value>,
     pub probes: Vec<Probe>,
+    pub compiler_options: nefor_mag::CompilerOptions,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyManifest {
+    legacy_combined_fingerprint: String,
+    cases: Vec<LegacyCase>,
+    oracles: Vec<LegacyCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyCase {
+    name: String,
+    #[serde(default)]
+    fixture_fingerprint: String,
+    artifact_hash: Option<String>,
+}
+
+pub fn assert_legacy_preserved(cases: &[CaseReport], oracles: &[OracleObservation]) {
+    let manifest: LegacyManifest =
+        serde_json::from_str(include_str!("legacy_cycle2_manifest.json"))
+            .expect("parse immutable cycle-2 manifest");
+    assert_eq!(
+        manifest.legacy_combined_fingerprint,
+        LEGACY_COMBINED_FINGERPRINT
+    );
+    assert_eq!(
+        cases.len(),
+        manifest.cases.len(),
+        "inherited timed case count"
+    );
+    for (actual, expected) in cases.iter().zip(manifest.cases) {
+        assert_eq!(actual.name, expected.name, "inherited timed case order");
+        assert_eq!(
+            actual.fixture_fingerprint, expected.fixture_fingerprint,
+            "{} inherited fixture fingerprint",
+            actual.name
+        );
+        assert_eq!(
+            actual.artifact_hash, expected.artifact_hash,
+            "{} inherited artifact hash",
+            actual.name
+        );
+    }
+    assert_eq!(oracles.len(), manifest.oracles.len(), "legacy oracle count");
+    for (actual, expected) in oracles.iter().zip(manifest.oracles) {
+        assert_eq!(actual.name, expected.name, "legacy oracle order");
+        let artifact_hash = match &actual.observation {
+            SemanticOutcome::Success { artifact_hash, .. } => Some(artifact_hash.clone()),
+            SemanticOutcome::Error { .. } => None,
+        };
+        assert_eq!(
+            artifact_hash, expected.artifact_hash,
+            "{} legacy oracle artifact hash",
+            actual.name
+        );
+    }
 }
 
 pub fn run_case(case: &Fixture, samples: usize, warmups: usize) -> CaseReport {
     for _ in 0..warmups {
         assert_timed_outcome(case, load(case, None));
     }
+    let calibration_started = Instant::now();
+    assert_timed_outcome(case, load(case, None));
+    let calibration_ns = nanos(calibration_started.elapsed());
+    let batch_count = calibrate_batch_count(calibration_ns, 5_000_000);
+    let seed = u64::from_le_bytes(
+        Sha256::digest(case.name.as_bytes())[..8]
+            .try_into()
+            .expect("seed"),
+    );
+    let generated_order = balanced_pair_schedule(seed, samples);
     let mut wall_ns = Vec::with_capacity(samples);
     let mut hashes = Vec::new();
-    for _ in 0..samples {
-        let started = Instant::now();
-        let result = load(case, None);
-        wall_ns.push(nanos(started.elapsed()));
-        if let Some(program) = assert_timed_outcome(case, result) {
-            hashes.push(program.hash.clone());
-            black_box(program.artifact);
-        }
+    let mut raw_samples = Vec::with_capacity(samples);
+    for (block, order) in generated_order.iter().copied().enumerate() {
+        let (baseline_batch_ns, candidate_batch_ns) = match order {
+            PairOrder::AB => (
+                measure_case_batch(case, batch_count, &mut hashes),
+                measure_case_batch(case, batch_count, &mut hashes),
+            ),
+            PairOrder::BA => {
+                let candidate = measure_case_batch(case, batch_count, &mut hashes);
+                let baseline = measure_case_batch(case, batch_count, &mut hashes);
+                (baseline, candidate)
+            }
+        };
+        wall_ns.push(candidate_batch_ns / batch_count);
+        raw_samples.push(PairedSample {
+            block,
+            generated_order: order,
+            actual_order: order,
+            batch_count,
+            baseline_batch_ns,
+            candidate_batch_ns,
+        });
     }
+    let self_comparison = PairedSelfComparison {
+        seed,
+        generated_order,
+        batch_calibration_baseline_ns: calibration_ns,
+        batch_count,
+        analysis: analyze_paired_samples(&raw_samples, 1),
+        raw_samples,
+    };
     assert!(
         hashes.windows(2).all(|pair| pair[0] == pair[1]),
         "{} artifact hash changed",
@@ -240,6 +389,7 @@ pub fn run_case(case: &Fixture, samples: usize, warmups: usize) -> CaseReport {
         stage: case.stage.clone(),
         size: case.size,
         fixture_fingerprint: case.fixture_fingerprint.clone(),
+        topology_fingerprint: case.topology_fingerprint.clone(),
         outcome: if case.expected_error.is_some() {
             "expected_failure"
         } else {
@@ -254,7 +404,19 @@ pub fn run_case(case: &Fixture, samples: usize, warmups: usize) -> CaseReport {
         derived,
         profiled_phase_median_ns: phase_medians(&profiles),
         profiled_invocations_are_separate: true,
+        self_comparison: Some(self_comparison),
     }
+}
+
+fn measure_case_batch(case: &Fixture, batch_count: u64, hashes: &mut Vec<String>) -> u64 {
+    let started = Instant::now();
+    for _ in 0..batch_count {
+        if let Some(program) = assert_timed_outcome(case, load(case, None)) {
+            hashes.push(program.hash.clone());
+            black_box(program.artifact);
+        }
+    }
+    nanos(started.elapsed())
 }
 
 pub fn observe(case: &Fixture) -> OracleObservation {
@@ -308,18 +470,20 @@ fn load(
         .map(|root| root.path.clone())
         .collect::<Vec<_>>();
     match profiler {
-        Some(profiler) => nefor_mag::load_with_profiler(
+        Some(profiler) => nefor_mag::load_with_profiler_and_options(
             &case.source_dir,
             &case.entry,
             case.inputs.clone(),
             &module_roots,
             profiler,
+            case.compiler_options,
         ),
-        None => nefor_mag::load_with_inputs_and_module_roots(
+        None => nefor_mag::load_with_inputs_and_module_roots_and_options(
             &case.source_dir,
             &case.entry,
             case.inputs.clone(),
             &module_roots,
+            case.compiler_options,
         ),
     }
 }
@@ -329,7 +493,12 @@ fn assert_timed_outcome(
     result: Result<nefor_mag::LoadedProgram, MagError>,
 ) -> Option<nefor_mag::LoadedProgram> {
     match (&case.expected_error, result) {
-        (None, Ok(program)) => Some(program),
+        (None, Ok(program)) => {
+            if let Some(expected) = &case.expected_artifact {
+                assert_eq!(&program.artifact, expected, "{} timed artifact", case.name);
+            }
+            Some(program)
+        }
         (Some(expected), Err(error)) if error_class(&error) == expected => None,
         (None, Err(error)) => panic!("{} failed: {error}", case.name),
         (Some(expected), Err(error)) => panic!(
@@ -393,11 +562,13 @@ pub fn fixture(
         module_roots,
         inputs,
         fixture_fingerprint: String::new(),
+        topology_fingerprint: None,
         fixture_files: vec![PathBuf::from(entry)],
         expected_error: expected_error.map(str::to_owned),
         policy: policy.into(),
         expected_artifact,
         probes,
+        compiler_options: nefor_mag::CompilerOptions::default(),
     }
 }
 
@@ -466,6 +637,13 @@ pub fn fixture_fingerprint(case: &Fixture) -> String {
         case.expected_error.as_deref().unwrap_or("").as_bytes(),
     );
     hash_part(&mut digest, "policy", case.policy.as_bytes());
+    if case.compiler_options != nefor_mag::CompilerOptions::default() {
+        hash_part(
+            &mut digest,
+            "compiler_limits",
+            format!("{:?}", case.compiler_options.limits).as_bytes(),
+        );
+    }
     hash_part(
         &mut digest,
         "expected_artifact",
@@ -571,6 +749,54 @@ fn hash_part(digest: &mut Sha256, label: &str, bytes: &[u8]) {
 
 pub fn fingerprint(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+pub fn catalog_fingerprint(fixtures: &[Fixture]) -> String {
+    fingerprint(
+        &fixtures
+            .iter()
+            .flat_map(|fixture| {
+                format!("{}:{}\n", fixture.name, fixture.fixture_fingerprint).into_bytes()
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub fn report_identity(
+    root: &Path,
+    workload_fingerprint: String,
+    parent_workload_fingerprint: String,
+    oracle_fingerprint: String,
+) -> ReportIdentity {
+    let executable_digest = std::env::current_exe()
+        .ok()
+        .and_then(|path| fs::read(path).ok())
+        .map(|bytes| fingerprint(&bytes))
+        .unwrap_or_else(|| "unavailable".into());
+    ReportIdentity {
+        report_schema_version: SCHEMA_VERSION,
+        workload_catalog_version: PHASE0_WORKLOAD_CATALOG_VERSION.into(),
+        workload_fingerprint,
+        parent_workload_catalog_version: LEGACY_WORKLOAD_CATALOG_VERSION.into(),
+        parent_workload_fingerprint,
+        oracle_catalog_version: ORACLE_CATALOG_VERSION.into(),
+        oracle_fingerprint,
+        profiler_schema_version: PROFILER_SCHEMA_VERSION.into(),
+        statistics_policy_version: STATISTICS_POLICY_VERSION.into(),
+        source_ref: command_identity(root, &["git", "rev-parse", "HEAD"]),
+        executable_digest,
+    }
+}
+
+fn command_identity(root: &Path, args: &[&str]) -> String {
+    std::process::Command::new(args[0])
+        .args(&args[1..])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .unwrap_or_else(|| "unavailable".into())
 }
 
 pub fn error_class(error: &MagError) -> &'static str {
@@ -711,6 +937,10 @@ pub fn counter_semantics() -> BTreeMap<String, String> {
             "descriptor list length for descriptor-input-assignments and descriptor-table".into(),
         ),
         (
+            "builtin_copied_shifted_cloned_items_by_name".into(),
+            "actual element clones/copies for concat and remove-at, with remove-at tail shifts reported separately".into(),
+        ),
+        (
             "runtime_value_validation_visits".into(),
             "every recursive validate_value visit".into(),
         ),
@@ -789,7 +1019,12 @@ pub struct OracleComparison {
 }
 
 pub fn compare_reports(baseline: &Report, candidate: &Report, gate: bool) -> ComparisonArtifact {
-    let compatibility_failures = compatibility_failures(baseline, candidate);
+    let mut compatibility_failures = compatibility_failures(baseline, candidate);
+    if gate && baseline.identity.is_some() && candidate.identity.is_some() {
+        compatibility_failures.push(
+            "same-version gate requires an explicit paired/interleaved runner artifact; independent marginal reports are diagnostic only".into(),
+        );
+    }
     let compatible = compatibility_failures.is_empty();
     let mut cases = Vec::new();
     let mut timed_semantics = compatible;
@@ -971,10 +1206,63 @@ fn source_identity(report: &Report) -> SourceIdentity {
     }
 }
 
+#[allow(dead_code)]
+pub fn identities_gate_compatible(left: &ReportIdentity, right: &ReportIdentity) -> bool {
+    left.workload_catalog_version == right.workload_catalog_version
+        && left.workload_fingerprint == right.workload_fingerprint
+        && left.oracle_catalog_version == right.oracle_catalog_version
+        && left.oracle_fingerprint == right.oracle_fingerprint
+        && left.profiler_schema_version == right.profiler_schema_version
+        && left.statistics_policy_version == right.statistics_policy_version
+}
+
+#[allow(dead_code)]
+pub fn reports_gate_compatible(baseline: &Report, candidate: &Report) -> bool {
+    compatibility_failures(baseline, candidate).is_empty()
+}
+
 fn compatibility_failures(baseline: &Report, candidate: &Report) -> Vec<String> {
     let b = &baseline.metadata;
     let c = &candidate.metadata;
     let mut failures = Vec::new();
+    match (&baseline.identity, &candidate.identity) {
+        (Some(left), Some(right)) => {
+            for (label, same) in [
+                (
+                    "workload catalog version",
+                    left.workload_catalog_version == right.workload_catalog_version,
+                ),
+                (
+                    "workload fingerprint",
+                    left.workload_fingerprint == right.workload_fingerprint,
+                ),
+                (
+                    "oracle catalog version",
+                    left.oracle_catalog_version == right.oracle_catalog_version,
+                ),
+                (
+                    "oracle fingerprint",
+                    left.oracle_fingerprint == right.oracle_fingerprint,
+                ),
+                (
+                    "profiler schema version",
+                    left.profiler_schema_version == right.profiler_schema_version,
+                ),
+                (
+                    "statistics policy version",
+                    left.statistics_policy_version == right.statistics_policy_version,
+                ),
+            ] {
+                if !same {
+                    failures.push(format!("incompatible {label}"));
+                }
+            }
+        }
+        (None, None)
+            if b.case_definition_hash == LEGACY_COMBINED_FINGERPRINT
+                && c.case_definition_hash == LEGACY_COMBINED_FINGERPRINT => {}
+        _ => failures.push("incompatible explicit report identity".into()),
+    }
     for (label, same) in [
         (
             "report schema",
@@ -1114,6 +1402,52 @@ fn collect_counter_deltas(
     }
 }
 
+pub fn derived_exclusive_sections(cases: &[CaseReport]) -> Vec<ExclusiveCounters> {
+    let mut sections = Vec::new();
+    for analysis in cases
+        .iter()
+        .filter(|case| case.family == "broad-frontier" && case.stage == "analysis")
+    {
+        let Some(topology) = analysis.topology_fingerprint.as_deref() else {
+            continue;
+        };
+        for (stage, label) in [
+            ("forward-reachability", "forward reachability exclusive"),
+            ("both-reachability", "reverse reachability exclusive"),
+            ("lower", "lowering exclusive after proven analysis prefix"),
+        ] {
+            let smaller = if stage == "both-reachability" {
+                cases.iter().find(|case| {
+                    case.family == "broad-frontier"
+                        && case.stage == "forward-reachability"
+                        && case.topology_fingerprint.as_deref() == Some(topology)
+                })
+            } else {
+                Some(analysis)
+            };
+            let larger = cases.iter().find(|case| {
+                case.family == "broad-frontier"
+                    && case.stage == stage
+                    && case.topology_fingerprint.as_deref() == Some(topology)
+            });
+            let (Some(_), Some(larger), Some(before), Some(after)) = (
+                smaller,
+                larger,
+                smaller.and_then(|case| case.counters.as_ref()),
+                larger.and_then(|case| case.counters.as_ref()),
+            ) else {
+                continue;
+            };
+            sections.push(
+                exclusive_counters(label, topology, topology, true, before, after).unwrap_or_else(
+                    |error| panic!("{label} for {} is not exclusive: {error}", larger.name),
+                ),
+            );
+        }
+    }
+    sections
+}
+
 pub fn recommendation(cases: &[CaseReport]) -> Recommendation {
     let candidates = [
         (
@@ -1191,4 +1525,176 @@ fn counter_value(counters: Option<&OperationCounters>, path: &str) -> u64 {
             .unwrap_or(0),
         _ => 0,
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PairedSelfComparison {
+    pub seed: u64,
+    pub generated_order: Vec<PairOrder>,
+    pub batch_calibration_baseline_ns: u64,
+    pub batch_count: u64,
+    pub raw_samples: Vec<PairedSample>,
+    pub analysis: PairedAnalysis,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PairOrder {
+    AB,
+    BA,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairedSample {
+    pub block: usize,
+    pub generated_order: PairOrder,
+    pub actual_order: PairOrder,
+    pub batch_count: u64,
+    pub baseline_batch_ns: u64,
+    pub candidate_batch_ns: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfidenceVerdict {
+    Pass,
+    Regression,
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PairedAnalysis {
+    pub paired_median_ratio: f64,
+    pub empirical_p90_ratio: f64,
+    pub lower_confidence_bound: f64,
+    pub upper_confidence_bound: f64,
+    pub verdict: ConfidenceVerdict,
+    pub confidence_method: String,
+    pub family_wise_error_policy: String,
+}
+
+pub fn balanced_pair_schedule(seed: u64, blocks: usize) -> Vec<PairOrder> {
+    let mut state = seed.max(1);
+    let mut schedule = Vec::with_capacity(blocks);
+    for pair in 0..blocks.div_ceil(2) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let first = if (state ^ pair as u64) & 1 == 0 {
+            PairOrder::AB
+        } else {
+            PairOrder::BA
+        };
+        schedule.push(first);
+        if schedule.len() < blocks {
+            schedule.push(match first {
+                PairOrder::AB => PairOrder::BA,
+                PairOrder::BA => PairOrder::AB,
+            });
+        }
+    }
+    schedule
+}
+
+pub fn calibrate_batch_count(baseline_warmup_ns: u64, target_batch_ns: u64) -> u64 {
+    if baseline_warmup_ns == 0 {
+        return 1;
+    }
+    target_batch_ns.div_ceil(baseline_warmup_ns).max(1)
+}
+
+pub fn analyze_paired_samples(
+    samples: &[PairedSample],
+    family_case_count: usize,
+) -> PairedAnalysis {
+    assert!(!samples.is_empty(), "paired analysis requires samples");
+    assert!(samples
+        .iter()
+        .all(|sample| sample.batch_count == samples[0].batch_count));
+    let mut log_ratios = samples
+        .iter()
+        .map(|sample| {
+            (sample.candidate_batch_ns as f64 / sample.baseline_batch_ns.max(1) as f64).ln()
+        })
+        .collect::<Vec<_>>();
+    log_ratios.sort_by(f64::total_cmp);
+    let median = f64_quantile(&log_ratios, 0.5).exp();
+    let p90 = f64_quantile(&log_ratios, 0.9).exp();
+
+    // Deterministic percentile bootstrap on paired observations. Bonferroni
+    // allocates the family-wise 5% error budget across every timed case and
+    // both one-sided bounds without pretending the cases are independent.
+    let tails = (0.05 / family_case_count.max(1) as f64 / 2.0).clamp(0.000_001, 0.025);
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64 ^ samples.len() as u64;
+    let mut medians = Vec::with_capacity(4096);
+    for _ in 0..4096 {
+        let mut draw = Vec::with_capacity(log_ratios.len());
+        for _ in 0..log_ratios.len() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            draw.push(log_ratios[(state as usize) % log_ratios.len()]);
+        }
+        draw.sort_by(f64::total_cmp);
+        medians.push(f64_quantile(&draw, 0.5).exp());
+    }
+    medians.sort_by(f64::total_cmp);
+    let lower = f64_quantile(&medians, tails);
+    let upper = f64_quantile(&medians, 1.0 - tails);
+    let verdict = if upper <= MAX_CASE_P90_RATIO {
+        ConfidenceVerdict::Pass
+    } else if lower > MAX_CASE_P90_RATIO {
+        ConfidenceVerdict::Regression
+    } else {
+        ConfidenceVerdict::Inconclusive
+    };
+    PairedAnalysis {
+        paired_median_ratio: median,
+        empirical_p90_ratio: p90,
+        lower_confidence_bound: lower,
+        upper_confidence_bound: upper,
+        verdict,
+        confidence_method: "deterministic paired percentile bootstrap (4096 resamples)".into(),
+        family_wise_error_policy:
+            "Bonferroni 5% family-wise error across cases and one-sided bounds".into(),
+    }
+}
+
+fn f64_quantile(sorted: &[f64], probability: f64) -> f64 {
+    let rank = ((probability * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
+    sorted[rank - 1]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExclusiveCounters {
+    pub label: String,
+    pub topology_fingerprint: String,
+    pub counters: BTreeMap<String, u64>,
+}
+
+pub fn exclusive_counters(
+    label: &str,
+    smaller_fixture: &str,
+    larger_fixture: &str,
+    prefix_proven: bool,
+    smaller: &OperationCounters,
+    larger: &OperationCounters,
+) -> Result<ExclusiveCounters, String> {
+    if smaller_fixture != larger_fixture {
+        return Err("matched stages have different topology fingerprints".into());
+    }
+    if !prefix_proven {
+        return Err("forcing boundary is not a proven prefix".into());
+    }
+    let deltas = counter_deltas(Some(smaller), Some(larger));
+    if deltas.values().any(|delta| *delta < 0) {
+        return Err("exclusive subtraction contains a negative deterministic counter".into());
+    }
+    Ok(ExclusiveCounters {
+        label: label.into(),
+        topology_fingerprint: larger_fixture.into(),
+        counters: deltas
+            .into_iter()
+            .map(|(name, value)| (name, value as u64))
+            .collect(),
+    })
 }

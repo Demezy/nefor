@@ -42,16 +42,42 @@ fn main() {
     refresh_fixture_fingerprints(&mut timed);
     refresh_fixture_fingerprints(&mut oracle_fixtures);
     let definition_hash = definition_hash(&timed, &oracle_fixtures);
+    let inherited_count = timed.len().saturating_sub(12);
+    let parent_workload_fingerprint = catalog_fingerprint(&timed[..inherited_count]);
+    let workload_fingerprint = catalog_fingerprint(&timed);
+    let oracle_fingerprint = catalog_fingerprint(&oracle_fixtures);
+    assert_eq!(
+        parent_workload_fingerprint, LEGACY_WORKLOAD_FINGERPRINT,
+        "legacy workload catalog changed without a version change"
+    );
+    assert_eq!(
+        oracle_fingerprint, LEGACY_ORACLE_FINGERPRINT,
+        "legacy oracle catalog changed without a version change"
+    );
+    assert_eq!(
+        workload_fingerprint, PHASE0_WORKLOAD_FINGERPRINT,
+        "Phase 0 workload catalog changed without a version change"
+    );
+    let identity = report_identity(
+        &root,
+        workload_fingerprint,
+        parent_workload_fingerprint,
+        oracle_fingerprint,
+    );
     let cases = timed
         .iter()
         .map(|case| run_case(case, samples, warmups))
         .collect::<Vec<_>>();
     let oracles = oracle_fixtures.iter().map(observe).collect::<Vec<_>>();
+    assert_legacy_preserved(&cases[..inherited_count], &oracles);
     let report = Report {
         schema_version: SCHEMA_VERSION,
+        identity: Some(identity),
         metadata: metadata(&root, samples, warmups, definition_hash),
         counter_semantics: counter_semantics(),
+        statistics_policy: statistics_policy(),
         recommendation: recommendation(&cases),
+        exclusive_sections: derived_exclusive_sections(&cases),
         cases,
         oracles,
     };
@@ -214,14 +240,49 @@ fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
         source_dir: root.join("examples/nefor-agent"),
         entry: "agentic-loop/lead-turn.mag".into(),
         module_roots: nefor_roots,
-        inputs: nefor_inputs,
+        inputs: nefor_inputs.clone(),
         fixture_fingerprint: String::new(),
+        topology_fingerprint: None,
         fixture_files: vec![PathBuf::from("agentic-loop/lead-turn.mag")],
         expected_error: None,
         policy: "timed".into(),
         expected_artifact: None,
         probes: vec![],
+        compiler_options: nefor_mag::CompilerOptions::default(),
     });
+    for (width, depth) in [(4, 4), (8, 8), (16, 8)] {
+        for stage in [
+            "analysis",
+            "forward-reachability",
+            "both-reachability",
+            "lower",
+        ] {
+            let (source, topology_fingerprint) = broad_frontier_graph(width, depth, stage);
+            let mut generated = fixture(
+                scratch,
+                &format!("broad-frontier-{stage}-{width}x{depth}"),
+                "broad-frontier",
+                stage,
+                Some(width * (depth + 1) + 1),
+                &source,
+                nefor_module_roots(root),
+                nefor_inputs.clone(),
+                None,
+                "timed",
+                Some(json!({
+                    "nodes": width * (depth + 1) + 1,
+                    "edges": width * (depth + 1),
+                    "sources": width,
+                    "outputs": 1,
+                })),
+                vec![],
+            );
+            generated.topology_fingerprint = Some(topology_fingerprint);
+            generated.compiler_options.limits.call_depth = 1024;
+            generated.compiler_options.limits.expression_depth = 2048;
+            cases.push(generated);
+        }
+    }
     cases
 }
 
@@ -481,6 +542,57 @@ fn fan_in_graph(size: usize, stage: &str) -> String {
     source.push_str(&stage_artifact(stage));
     source
 }
+fn broad_frontier_graph(width: usize, depth: usize, stage: &str) -> (String, String) {
+    let mut source = graph_prelude();
+    for chain in 0..width {
+        source.push_str(&format!(
+            "(let s{chain} (nefor.graph.source \"s{chain}\" (type-tag Int) {chain}))\n"
+        ));
+        for level in 0..depth {
+            source.push_str(&format!(
+                "(let n{chain}_{level} (pass \"n{chain}_{level}\"))\n"
+            ));
+        }
+    }
+    let types = (0..width).map(|_| "Int").collect::<Vec<_>>().join(" ");
+    source.push_str(&format!(
+        "(let out (nefor.graph.output \"out\" (type-tag (+ {types}))))\n(let topology (nefor.graph.add-edges nefor.graph.empty-graph ["
+    ));
+    for chain in 0..width {
+        source.push_str(&format!("(nefor.graph.edge s{chain} n{chain}_0) "));
+        for level in 0..depth - 1 {
+            source.push_str(&format!(
+                "(nefor.graph.edge n{chain}_{level} n{chain}_{}) ",
+                level + 1
+            ));
+        }
+        source.push_str(&format!("(nefor.graph.edge n{chain}_{} out) ", depth - 1));
+    }
+    source.push_str("]))\n");
+    let topology_fingerprint = fingerprint(source.as_bytes());
+    source.push_str("(let analysis (nefor.graph.analyze-graph topology))\n");
+    source.push_str("(let summary {:nodes (count (get analysis \"nodes\")) :edges (count (get analysis \"edges\")) :sources (count (get analysis \"sources\")) :outputs (count (get analysis \"outputs\"))})\n");
+    match stage {
+        "analysis" => {}
+        "forward-reachability" => source.push_str(&format!("(let forward (nefor.graph.forward-reachable analysis))\n(let forward-count (count (keys forward)))\n(let forward-proof (if (= forward-count {}) true (fail \"broad-frontier forward reachability changed\")))\n", width * (depth + 1) + 1)),
+        "both-reachability" => source.push_str(&format!("(let forward (nefor.graph.forward-reachable analysis))\n(let forward-count (count (keys forward)))\n(let forward-proof (if (= forward-count {}) true (fail \"broad-frontier forward reachability changed\")))\n(let reverse (nefor.graph.reverse-reachable analysis (first (get analysis \"outputs\"))))\n(let reverse-count (count (keys reverse)))\n(let reverse-proof (if (= reverse-count {}) true (fail \"broad-frontier reverse reachability changed\")))\n", width * (depth + 1) + 1, width * (depth + 1) + 1)),
+        "lower" => {
+            let selected = (0..width)
+                .map(|chain| format!("(= (get candidate \"id\") \"n{chain}_{}\")", depth - 1))
+                .reduce(|left, right| format!("(or {left} {right})"))
+                .expect("positive width");
+            let expected = (0..width).map(|position| position.to_string()).collect::<Vec<_>>().join(" ");
+            source.push_str("(let lowered (nefor.graph.lower topology))\n(let forced (canonical lowered))\n");
+            source.push_str(&format!("(let final-actors (filter (fn [[candidate nefor.graph.LowerActor]] -> Bool {selected}) (get lowered \"actors\")))\n"));
+            source.push_str("(let positions (map (fn [[candidate nefor.graph.LowerActor]] -> Int (get (first (get (get candidate \"routes\") \"nefor.graph.Value\")) \"product_position\")) final-actors))\n");
+            source.push_str(&format!("(let route-order-proof (if (= positions [{expected}]) true (fail \"broad-frontier route order or product positions changed\")))\n"));
+        }
+        _ => unreachable!(),
+    }
+    source.push_str("(artifact summary)");
+    (source, topology_fingerprint)
+}
+
 fn stage_artifact(stage: &str) -> String {
     match stage {
         "build" => "(artifact {:edges (count (get topology \"edges\"))})".into(),
