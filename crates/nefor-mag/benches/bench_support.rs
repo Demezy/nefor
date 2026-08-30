@@ -703,7 +703,7 @@ pub fn counter_semantics() -> BTreeMap<String, String> {
         ),
         (
             "builtin_input_items_by_name.collection".into(),
-            "source collection length for map/indexed-map/filter/flat-map/fold/sort-by/remove-at"
+            "source collection length for map/group-by/indexed-map/filter/flat-map/fold/sort-by/remove-at"
                 .into(),
         ),
         (

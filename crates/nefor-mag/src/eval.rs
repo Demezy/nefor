@@ -1256,7 +1256,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
         "remove-at" | "descriptor-table" => args.first().and_then(collection_len).unwrap_or(0),
         "descriptor-input-assignments" => args.get(1).and_then(collection_len).unwrap_or(0),
         "fold" => args.get(2).and_then(collection_len).unwrap_or(0),
-        "map" | "indexed-map" | "filter" | "flat-map" | "sort-by" => {
+        "map" | "group-by" | "indexed-map" | "filter" | "flat-map" | "sort-by" => {
             args.get(1).and_then(collection_len).unwrap_or(0)
         }
         _ => 0,
@@ -1275,6 +1275,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                     | "descriptor-input-assignments"
                     | "fold"
                     | "map"
+                    | "group-by"
                     | "indexed-map"
                     | "filter"
                     | "flat-map"
@@ -1715,7 +1716,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 args[1].clone()
             })
         }
-        "map" | "indexed-map" | "filter" | "flat-map" | "fold" | "sort-by" => {
+        "map" | "group-by" | "indexed-map" | "filter" | "flat-map" | "fold" | "sort-by" => {
             collection_builtin(env, name, args)
         }
         "read" => {
@@ -1809,6 +1810,26 @@ fn collection_builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, Ma
                     .iter()
                     .map(|v| apply(env, &args[0], std::slice::from_ref(v)))
                     .collect::<Result<_, _>>()?,
+            )))
+        }
+        "group-by" => {
+            arity(args, 2)?;
+            let mut groups = BTreeMap::<String, Vec<Value>>::new();
+            for value in seq(&args[1])?.iter() {
+                let key = apply(env, &args[0], std::slice::from_ref(value))?;
+                let key = key
+                    .as_str()
+                    .ok_or_else(|| MagError::Eval("group-by callback must return String".into()))?;
+                groups
+                    .entry(key.to_owned())
+                    .or_default()
+                    .push(value.clone());
+            }
+            Ok(Value::Map(std::sync::Arc::new(
+                groups
+                    .into_iter()
+                    .map(|(key, values)| (key, Value::List(std::sync::Arc::new(values))))
+                    .collect(),
             )))
         }
         "indexed-map" => {
@@ -2157,6 +2178,25 @@ mod tests {
             },
             other => panic!("expected typed Int, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn group_by_defensively_rejects_a_runtime_non_string_key() {
+        let env = Env::new_with_stdlib();
+        let values = Value::Vector(std::sync::Arc::new(vec![Value::Vector(
+            std::sync::Arc::new(vec![Value::Int(1)]),
+        )]));
+        let error = collection_builtin(
+            &env,
+            "group-by",
+            &[Value::BuiltinFn("count".into()), values],
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "eval: group-by callback must return String"
+        );
     }
 
     #[test]

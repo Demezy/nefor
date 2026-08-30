@@ -1519,6 +1519,124 @@ fn builtin_type_rules_are_total_and_assoc_checks_values() {
 }
 
 #[test]
+fn group_by_orders_keys_and_preserves_bucket_source_order() {
+    let root = workspace("group-by-order");
+    let artifact = compile(
+        r#"
+          (let first-character
+            (fn [[value String]] -> String
+              (if (= value "a1") "a" "b")))
+          (let grouped (group-by first-character ["b1" "a1" "b2"]))
+          (let empty
+            (group-by
+              (fn [[value String]] -> String value)
+              (as (List String) [])))
+          (let skewed
+            (group-by
+              (fn [[value Int]] -> String "all")
+              [1 2 3 4 5 6 7 8]))
+          (let interleaved
+            (group-by
+              (fn [[value String]] -> String
+                (if (= value "a1") "a"
+                  (if (= value "a2") "a" "b")))
+              ["a1" "b1" "a2" "b2"]))
+          (artifact
+            {:keys (keys grouped)
+             :a (get grouped "a")
+             :b (get grouped "b")
+             :empty empty
+             :skewed (get skewed "all")
+             :interleaved-a (get interleaved "a")
+             :interleaved-b (get interleaved "b")})
+        "#,
+        &root,
+    )
+    .unwrap();
+
+    assert_eq!(
+        artifact,
+        json!({
+            "keys": ["a", "b"],
+            "a": ["a1"],
+            "b": ["b1", "b2"],
+            "empty": {},
+            "skewed": [1, 2, 3, 4, 5, 6, 7, 8],
+            "interleaved-a": ["a1", "a2"],
+            "interleaved-b": ["b1", "b2"]
+        })
+    );
+}
+
+#[test]
+fn group_by_visits_left_to_right_and_stops_at_the_first_callback_error() {
+    let root = workspace("group-by-callback-error");
+    let error = compile(
+        r#"
+          (let key
+            (fn [[value String]] -> String
+              (if (= value "first")
+                (fail (str "visited:" value))
+                (fail (str "visited:" value)))))
+          (artifact (group-by key ["first" "second"]))
+        "#,
+        &root,
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("visited:first"), "{error}");
+    assert!(!error.contains("visited:second"), "{error}");
+}
+
+#[test]
+fn group_by_rejects_invalid_static_calls() {
+    let root = workspace("group-by-invalid-calls");
+    for (label, source, expected) in [
+        (
+            "callback result",
+            "(artifact (group-by (fn [[value Int]] -> Int value) [1]))",
+            "group-by callback must return String",
+        ),
+        (
+            "collection",
+            "(artifact (group-by (fn [[value Int]] -> String (str value)) 1))",
+            "group-by expects List",
+        ),
+        (
+            "arity",
+            "(artifact (group-by (fn [[value Int]] -> String (str value))))",
+            "arity: expected 2, got 1",
+        ),
+    ] {
+        let error = compile(source, &root).unwrap_err().to_string();
+        assert!(error.contains(expected), "{label}: {error}");
+    }
+}
+
+#[test]
+fn group_by_builtin_and_non_colliding_user_overload_are_distinguishable() {
+    let root = workspace("group-by-overload");
+    let artifact = compile(
+        r#"
+          (let group-by (fn [[value Int]] -> String "custom"))
+          (let grouped
+            (group-by
+              (fn [[value String]] -> String value)
+              ["builtin" "builtin"]))
+          (artifact {:custom (group-by 1) :builtin (get grouped "builtin")})
+        "#,
+        &root,
+    )
+    .unwrap();
+
+    assert_eq!(
+        artifact,
+        json!({"custom": "custom", "builtin": ["builtin", "builtin"]})
+    );
+}
+
+#[test]
 fn canonical_and_sort_by_are_typed_deterministic_builtins() {
     let root = workspace("canonical-sort-by");
     let artifact = compile(

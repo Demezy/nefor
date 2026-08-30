@@ -996,7 +996,7 @@ fn infer_builtin(
                 actual => Err(MagError::Type(format!("first expects List, got {actual}"))),
             }
         }
-        "map" | "filter" | "flat-map" | "sort-by" => {
+        "map" | "filter" | "flat-map" | "sort-by" | "group-by" => {
             exact(2)?;
             let fun = infer(env, locals, &args[0])?;
             let collection = infer(env, locals, &args[1])?;
@@ -1018,10 +1018,17 @@ fn infer_builtin(
                 compatible(env, &result, &MagType::Bool, &mut HashMap::new())
                     .map_err(MagError::Type)?;
                 Ok(MagType::List(Box::new(item)))
-            } else if name == "sort-by" {
+            } else if name == "sort-by" || name == "group-by" {
                 compatible(env, &result, &MagType::String, &mut HashMap::new())
                     .map_err(MagError::Type)?;
-                Ok(MagType::List(Box::new(item)))
+                if name == "group-by" {
+                    Ok(MagType::Map(
+                        Box::new(MagType::String),
+                        Box::new(MagType::List(Box::new(item))),
+                    ))
+                } else {
+                    Ok(MagType::List(Box::new(item)))
+                }
             } else if name == "flat-map" {
                 match *result {
                     MagType::List(_) => Ok(*result),
@@ -1096,6 +1103,7 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "strip-margin",
     "replace",
     "map",
+    "group-by",
     "indexed-map",
     "filter",
     "flat-map",
@@ -1264,6 +1272,13 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
                 list(var("item")),
             ],
             list(var("result")),
+        )],
+        "group-by" => vec![function(
+            vec![
+                function(vec![var("item")], MagType::String),
+                list(var("item")),
+            ],
+            map(MagType::String, list(var("item"))),
         )],
         "filter" => vec![function(
             vec![
@@ -2469,7 +2484,7 @@ fn compile_builtin_call(
     }
     if matches!(
         name,
-        "map" | "filter" | "flat-map" | "sort-by" | "indexed-map"
+        "map" | "filter" | "flat-map" | "sort-by" | "group-by" | "indexed-map"
     ) {
         return compile_collection_builtin(env, scopes, name, id, expressions, expected);
     }
@@ -2515,7 +2530,7 @@ fn compile_collection_builtin(
     };
     let callback_result = match name {
         "filter" => MagType::Bool,
-        "sort-by" => MagType::String,
+        "sort-by" | "group-by" => MagType::String,
         "map" => match expected {
             Some(MagType::List(result)) => (**result).clone(),
             _ => MagType::Var("\0builtin.result".into()),
@@ -2538,8 +2553,8 @@ fn compile_collection_builtin(
     let callback =
         compile_expr(env, scopes, &expressions[0], Some(&callback_expected)).map_err(|error| {
             match name {
-                "sort-by" => {
-                    MagError::Type(format!("sort-by callback must return String: {error}"))
+                "sort-by" | "group-by" => {
+                    MagError::Type(format!("{name} callback must return String: {error}"))
                 }
                 "filter" => MagError::Type(format!("filter callback must return Bool: {error}")),
                 _ => error,
@@ -2550,6 +2565,7 @@ fn compile_collection_builtin(
     };
     let output = match name {
         "filter" | "sort-by" => collection.ty.clone(),
+        "group-by" => MagType::Map(Box::new(MagType::String), Box::new(collection.ty.clone())),
         "flat-map" => (**result).clone(),
         "map" | "indexed-map" => MagType::List(result.clone()),
         _ => unreachable!(),

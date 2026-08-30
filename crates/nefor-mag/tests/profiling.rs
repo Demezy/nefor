@@ -90,6 +90,36 @@ fn counters_partition_calls_builtins_and_binding_forces() {
 }
 
 #[test]
+fn group_by_profiles_one_builtin_call_and_one_callback_per_item() {
+    let root = temp_dir("profile-group-by");
+    let profile = profile(
+        &root,
+        "(let key (fn [[value Int]] -> String (str value)))\n(let grouped (group-by key [1 2 3]))\n(artifact grouped)",
+    );
+    let counters = profile.counters;
+
+    assert_eq!(counters.builtin_calls_by_name.get("group-by"), Some(&1));
+    assert_eq!(
+        counters.builtin_input_items_by_name.get("group-by"),
+        Some(&3)
+    );
+    assert_eq!(counters.user_function_calls, 3);
+    assert_eq!(
+        counters.function_calls,
+        counters.user_function_calls + counters.builtin_calls
+    );
+    assert_eq!(
+        counters.builtin_calls,
+        counters
+            .builtin_calls_by_name
+            .values()
+            .copied()
+            .sum::<u64>()
+    );
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn builtin_item_work_and_recursive_validation_are_exact_for_tiny_fixture() {
     let root = temp_dir("profile-items");
     let profile = profile(&root, "(let identity (fn [[value (List Int)]] -> (List Int) value))\n(let values (identity (as (List Int) (concat [1 2] [3]))))\n(artifact {:count (count values)})");
