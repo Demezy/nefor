@@ -582,14 +582,18 @@ local function feed_loaded(modification, factories)
   assert_true(load ~= nil,
     "mag compile/apply must emit mag.load to the mag plugin; got "
     .. json.encode(_test.calls()))
-  feed("mag", {
+  local reply = {
     kind        = "mag.loaded",
     in_reply_to = load.body.id,
     hash        = "sha256:test",
     factories   = factories or KERNEL_FACTORIES,
     factory_contracts = factory_contracts(factories),
     artifact = artifact_from_modification(modification),
-  })
+  }
+  if load.body.resident == true then
+    reply.program_id = load.body.id
+  end
+  feed("mag", reply)
   return load
 end
 
@@ -620,15 +624,16 @@ do
   execute_mag("system-overlay-execute", "system-overlay.mag")
   local modification = read_only_modification()
   modification.actors[2].factory = "structured-output"
+  local loaded_artifact = artifact_from_modification(modification)
   feed_loaded(modification,
     { "adapter", "structured-output", "run-tool", "sink", "stub", "tool-result" })
   local exec = find_call(decode_calls(), function(c)
     return c.body.kind == "mag.execute" and c.target == "mag"
   end)
   assert_true(exec ~= nil, "configured universal system permits execution")
-  assert_eq(exec.body.artifact.actors[2].factory,
+  assert_eq(loaded_artifact.actors[2].factory,
     "nefor.factory.structured-output", "execute preserves the plugin artifact factory")
-  assert_true(type(exec.body.artifact.actors[2].type_arguments) == "table",
+  assert_true(type(loaded_artifact.actors[2].type_arguments) == "table",
     "execute preserves the plugin artifact type arguments")
   assert_true(lw._internals.state.kernel_factories["nefor.factory.structured-output"] == true,
     "factory contracts from the plugin reply feed control-plane validation")
@@ -660,7 +665,7 @@ do
   assert_eq(run.nodes["worker.llm"].reasoner, "nefor.factory.structured-output",
     "run metadata uses the artifact factory identity")
   local preview = require("libs.mag-workspace").preview(
-    exec.body.artifact, "sha256:test", KERNEL_FACTORIES)
+    loaded_artifact, "sha256:test", KERNEL_FACTORIES)
   assert_true(preview:find("worker.llm (nefor.factory.structured-output)", 1, true) ~= nil,
     "preview renders the same artifact factory identity")
 end
@@ -726,6 +731,8 @@ do
   })
   local eval_load = latest_mag_load()
   assert_true(eval_load ~= nil, "mag-eval emits mag.load")
+  assert_eq(eval_load.body.resident, true,
+    "mag-eval retains the exact source environment until submission")
   assert_eq(eval_load.body.module_roots[1], "/deps/standard",
     "mag-eval receives its own defensive root copy")
   assert_eq(eval_load.body.module_roots[2], "/deps/extra",
@@ -796,6 +803,8 @@ do
   end)
   assert_true(load ~= nil,
     "fresh mag apply emits mag.load to the plugin; got " .. json.encode(_test.calls()))
+  assert_eq(load.body.resident, true,
+    "fresh mag apply requests an exact resident program handle")
   assert_eq(load.body.entry, "auth-login-map.mag", "mag.load names the .mag entry file")
   assert_true(type(load.body.source_dir) == "string" and #load.body.source_dir > 0,
     "mag.load carries the workspace source_dir")
@@ -812,6 +821,7 @@ do
   feed("mag", {
     kind        = "mag.loaded",
     in_reply_to = load.body.id,
+    program_id  = load.body.id,
     hash        = "sha256:read-only",
     factories   = KERNEL_FACTORIES,
     factory_contracts = factory_contracts(KERNEL_FACTORIES),
@@ -831,11 +841,16 @@ do
 
   assert_eq(exec.body.params_overlay, nil,
     "without ambient system context the runtime emits no parameter overlay")
-  assert_eq(exec.body.artifact.actors[2].params.provider, "chatgpt",
+  assert_eq(exec.body.program_id, load.body.id,
+    "mag.execute addresses the exact resident program returned by mag.loaded")
+  assert_eq(exec.body.artifact, nil,
+    "resident execution does not copy the compiled artifact inline")
+  local loaded_artifact = artifact_from_modification(read_only_modification())
+  assert_eq(loaded_artifact.actors[2].params.provider, "chatgpt",
     "the compiled artifact carries the concrete provider")
-  assert_eq(exec.body.artifact.actors[2].params.model, "gpt-5.6-sol",
+  assert_eq(loaded_artifact.actors[2].params.model, "gpt-5.6-sol",
     "the compiled artifact carries the concrete model")
-  assert_eq(exec.body.artifact.actors[2].params.reasoning_effort, "medium",
+  assert_eq(loaded_artifact.actors[2].params.reasoning_effort, "medium",
     "the compiled artifact carries the concrete reasoning effort")
 
   local reply = find_call(calls, function(c)
@@ -942,6 +957,7 @@ do
     return c.body.kind == "mag.load" and c.target == "mag"
   end)
   assert_true(load ~= nil, "compile emits mag.load")
+  assert_eq(load.body.resident, false, "compile-only loads retain no program environment")
   _test.calls_clear()
   feed("mag", {
     kind        = "mag.error",
@@ -978,6 +994,8 @@ do
     return c.body.kind == "mag.load" and c.target == "mag"
   end)
   assert_true(load ~= nil, "mag apply compiles through mag.load")
+  assert_eq(load.body.resident, false,
+    "live deltas retain no independent program environment")
   assert_eq(tool_result("firing-mag-apply"), nil,
     "mag apply does not settle before compilation and kernel acknowledgement")
 
@@ -1348,6 +1366,7 @@ local function relayed_lead_prompt()
   if load ~= nil then
     agentic_loop.receive_msg(make_entry("mag", {
       kind = "mag.loaded", in_reply_to = load.body.id,
+      program_id = load.body.id,
       hash = "sha256:lead",
       artifact = artifact_from_modification(lead_turn_modification()),
     }))
@@ -1358,11 +1377,10 @@ local function relayed_lead_prompt()
        and c.body.run_name == "lead"
   end)
   if exec == nil then return nil end
-  local modification = exec.body.artifact
-  for _, actor in ipairs(modification and modification.actors or {}) do
-    if actor.id == "lead.source" then return actor.params.value.prompt end
-  end
-  return nil
+  local source = type(exec.body.params_overlay) == "table"
+      and exec.body.params_overlay["lead.source"] or nil
+  return type(source) == "table" and type(source.value) == "table"
+      and source.value.prompt or nil
 end
 
 do
@@ -1712,7 +1730,7 @@ do
     .. json.encode(_test.calls()))
   assert_eq(exec.body.params_overlay, nil,
     "writer needs no runtime overlay without ambient system context")
-  assert_eq(exec.body.artifact.actors[1].params.reasoning_effort, "low",
+  assert_eq(artifact_from_modification(writer_modification()).actors[1].params.reasoning_effort, "low",
     "writer keeps the effort authored in the compiled artifact")
 end
 
@@ -2181,7 +2199,8 @@ do
     "no acknowledgment exists before compilation and validation")
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:eval", factory_contracts = factory_contracts(), artifact = artifact })
+    program_id = load.body.id, hash = "sha256:eval",
+    factory_contracts = factory_contracts(), artifact = artifact })
   local calls = decode_calls()
   local exec = find_call(calls, function(c) return c.body.kind == "mag.execute" end)
   local ack = find_call(calls, function(c)
@@ -2241,7 +2260,8 @@ do
   load = latest_mag_load()
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:agent", factory_contracts = factory_contracts(), artifact = artifact })
+    program_id = load.body.id, hash = "sha256:agent",
+    factory_contracts = factory_contracts(), artifact = artifact })
   calls = decode_calls()
   exec = find_call(calls, function(c) return c.body.kind == "mag.execute" end)
   ack = find_call(calls, function(c)
@@ -2301,7 +2321,8 @@ do
   load = latest_mag_load()
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:auto", factory_contracts = factory_contracts(), artifact = artifact })
+    program_id = load.body.id, hash = "sha256:auto",
+    factory_contracts = factory_contracts(), artifact = artifact })
   exec = find_call(decode_calls(), function(c) return c.body.kind == "mag.execute" end)
   local owner_run_id = exec.body.run_id
   _test.calls_clear()
@@ -2332,7 +2353,8 @@ do
   load = latest_mag_load()
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:agent-cancel", factory_contracts = factory_contracts(), artifact = artifact })
+    program_id = load.body.id, hash = "sha256:agent-cancel",
+    factory_contracts = factory_contracts(), artifact = artifact })
   exec = find_call(decode_calls(), function(c) return c.body.kind == "mag.execute" end)
   assert_true(exec ~= nil and lw._internals.state.active_runs[exec.body.run_id] ~= nil,
     "cancel test starts a detached eval")
@@ -2358,7 +2380,8 @@ do
     local pending_load = latest_mag_load()
     _test.calls_clear()
     feed("mag", { kind = "mag.loaded", in_reply_to = pending_load.body.id,
-      hash = "sha256:lifecycle", factory_contracts = factory_contracts(), artifact = artifact })
+      program_id = pending_load.body.id, hash = "sha256:lifecycle",
+      factory_contracts = factory_contracts(), artifact = artifact })
     local submitted = find_call(decode_calls(), function(c)
       return c.body.kind == "mag.execute"
     end)
@@ -2598,7 +2621,7 @@ do
     "cancel removes pending compile correlation")
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:late", factory_contracts = factory_contracts(),
+    program_id = load.body.id, hash = "sha256:late", factory_contracts = factory_contracts(),
     artifact = artifact_from_modification(read_only_modification()) })
   assert_eq(find_call(decode_calls(), function(c) return c.body.kind == "mag.execute" end), nil,
     "late compile response cannot execute orphaned work")
@@ -2679,7 +2702,8 @@ do
   invalid.result = nil
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:invalid", factory_contracts = factory_contracts(), artifact = invalid })
+    program_id = load.body.id, hash = "sha256:invalid",
+    factory_contracts = factory_contracts(), artifact = invalid })
   calls = decode_calls()
   err = find_call(calls, function(c)
     return c.body.kind == "tool.result" and c.body.id == "gate-validation-error"
@@ -2711,7 +2735,8 @@ do
   _test.calls_clear()
   for i = #loads, 1, -1 do
     feed("mag", { kind = "mag.loaded", in_reply_to = loads[i].body.id,
-      hash = "sha256:" .. tostring(i), factory_contracts = factory_contracts(),
+      program_id = loads[i].body.id, hash = "sha256:" .. tostring(i),
+      factory_contracts = factory_contracts(),
       artifact = artifact_from_modification(read_only_modification()) })
   end
   local calls = decode_calls()
@@ -2759,12 +2784,19 @@ do
   feed("tool-gate", { kind = "lead-workflow.tool.cancel", id = "file-pending-execute" })
   assert_eq(lw._internals.state.pending_mag_load[load.body.id], nil,
     "file execute cancel invalidates pending load correlation")
-  assert_eq(#decode_calls(), 0,
-    "canceling an unsubmitted file load emits no source settlement or kernel control")
+  local cancel_calls = decode_calls()
+  local unload = find_call(cancel_calls, function(c)
+    return c.body.kind == "mag.unload" and c.body.program_id == load.body.id
+  end)
+  assert_true(unload ~= nil,
+    "canceling a resident load releases the handle if compilation wins the race")
+  assert_eq(find_call(cancel_calls, function(c) return c.body.kind == "tool.result" end), nil,
+    "canceling an unsubmitted file load emits no source settlement")
 
   feed("tool-gate", { kind = "lead-workflow.tool.cancel", id = "file-pending-execute" })
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:file-late", factory_contracts = factory_contracts(),
+    program_id = load.body.id, hash = "sha256:file-late",
+    factory_contracts = factory_contracts(),
     artifact = artifact_from_modification(read_only_modification()) })
   feed("mag", { kind = "mag.error", in_reply_to = load.body.id,
     message = "late compiler failure" })
@@ -2793,7 +2825,8 @@ do
     "session end clears all pending file loads")
   _test.calls_clear()
   feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    hash = "sha256:session-late", factory_contracts = factory_contracts(),
+    program_id = load.body.id, hash = "sha256:session-late",
+    factory_contracts = factory_contracts(),
     artifact = artifact_from_modification(read_only_modification()) })
   feed("mag", { kind = "mag.error", in_reply_to = load.body.id,
     message = "late session compiler failure" })
@@ -3152,7 +3185,8 @@ do
   }, { caller_id = "opaque-gate-inner", invocation = lead_eval })
   local eval_load = latest_mag_load()
   feed("mag", { kind = "mag.loaded", in_reply_to = eval_load.body.id,
-    hash = "sha256:provenance", factory_contracts = factory_contracts(),
+    program_id = eval_load.body.id, hash = "sha256:provenance",
+    factory_contracts = factory_contracts(),
     artifact = artifact_from_modification(read_only_modification()) })
   lead_ack = find_call(decode_calls(), function(c)
     return c.body.kind == "tool.result" and c.body.id == "provenance-eval-lead"

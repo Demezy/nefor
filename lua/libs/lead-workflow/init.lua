@@ -231,8 +231,9 @@ local state = {
 
   -- `mag` tool invocations awaiting their `mag.load` reply, keyed by the load
   -- request id. Compile and apply go through this handshake:
-  -- `mag.load` is sent, then the lowered artifact is previewed, submitted as a
-  -- fresh run, or submitted as a delta to one live run.
+  -- `mag.load` is sent, then the lowered artifact is previewed, its exact
+  -- resident handle starts a fresh run, or the artifact is applied as a delta
+  -- to one live run.
   pending_mag_load = {},
 
   -- Compiled apply invocations awaiting the kernel's correlated `mag.applied`
@@ -1771,8 +1772,8 @@ end
 -- plugin: `mag.load` is sent, the `mag.loaded` reply carries the lowered
 -- modification {actors, messages, kills, rules}, the hash, and the kernel
 -- registry's factory names. resume_pending_load then renders the compile
--- preview, submits a fresh internal `mag.execute`, or submits a live-run
--- internal `mag.apply`.
+-- preview, submits a fresh internal `mag.execute` by resident handle, or
+-- submits a live-run internal `mag.apply`.
 -- A `mag.error` reply (compile failure) fails the firing with the compiler message
 -- (fail_pending_load). Lifecycle events (mag.run_started, actor spawn/ready,
 -- mag.run_complete) stream on the bus; the terminal mag.run_result (carrying
@@ -1803,9 +1804,19 @@ local function begin_mag_load(firing_id, action, args, ws, provenance)
   emit_as(SOURCE_NAME, "mag", {
     kind       = "mag.load",
     id         = load_id,
+    resident   = action == "apply" and args.run_id == nil,
     source_dir = ws,
     module_roots = module_roots_for(ws),
     entry      = args.file,
+  })
+end
+
+local function release_loaded_program(program_id)
+  if type(program_id) ~= "string" or #program_id == 0 then return end
+  emit_as(SOURCE_NAME, "mag", {
+    kind = "mag.unload",
+    id = "mag-unload-" .. envelope.uuid_lite(),
+    program_id = program_id,
   })
 end
 
@@ -1818,6 +1829,7 @@ invalidate_pending_mag_loads = function(firing_id)
   for load_id, pending in pairs(state.pending_mag_load) do
     if firing_id == nil or pending.firing_id == firing_id then
       state.pending_mag_load[load_id] = nil
+      release_loaded_program(load_id)
       hit = true
     end
   end
@@ -1898,24 +1910,32 @@ end
 submit_loaded_run = function(pending, body, error_prefix)
   local artifact = body.artifact
   local modification = type(artifact) == "table" and artifact or nil
-  if type(modification) ~= "table" then
-    emit_tool_result_err(pending.firing_id,
-      error_prefix .. ": mag.loaded reply carried no graph artifact")
+  local program_id = body.program_id
+  local function reject(message)
+    release_loaded_program(program_id)
+    emit_tool_result_err(pending.firing_id, message)
     return false
   end
+  if type(modification) ~= "table" then
+    return reject(error_prefix .. ": mag.loaded reply carried no graph artifact")
+  end
+  if type(program_id) ~= "string" or #program_id == 0 then
+    return reject(error_prefix .. ": resident mag.loaded reply carried no program_id")
+  end
   local actors = modification.actors or {}
-  if not validate_factories(actors, pending.firing_id) then return false end
+  if not validate_factories(actors, pending.firing_id) then
+    release_loaded_program(program_id)
+    return false
+  end
   if actors_have_writers(actors) and state.gate_mode == "safe"
       and not has_approved_plan() then
-    emit_tool_result_err(pending.firing_id,
+    return reject(
       "Program contains write-capable agents. Submit a plan via write-review " ..
       "and get approval before executing.")
-    return false
   end
   local terminal_id, result_err = result_actor(modification)
   if not terminal_id then
-    emit_tool_result_err(pending.firing_id, error_prefix .. ": " .. result_err)
-    return false
+    return reject(error_prefix .. ": " .. result_err)
   end
   local overlay = compose_agent_params(actors, pending.session_id)
   local exec = {
@@ -1928,7 +1948,7 @@ submit_loaded_run = function(pending, body, error_prefix)
     invocation_kind = pending.invocation_kind,
     invocation_label = pending.invocation_label,
     conversation_id = pending.conversation_id,
-    artifact = artifact,
+    program_id = program_id,
   }
   if next(overlay) ~= nil then exec.params_overlay = overlay end
   local owner_resume
@@ -1947,6 +1967,10 @@ submit_loaded_run = function(pending, body, error_prefix)
   run.invocation_kind = pending.invocation_kind
   begin_completion_grace(run, async_run_ack(pending, body))
   emit_as(SOURCE_NAME, "mag", exec)
+  -- Fresh file programs and mag-eval expressions are one-shot callers. The
+  -- run pins its source environment during mag.execute, so the retained handle
+  -- can be released immediately after submission.
+  release_loaded_program(program_id)
   return true
 end
 

@@ -2,10 +2,10 @@
 --
 -- The lead's turn is a short-lived MAG program over a persistent chat:
 -- turn-as-function, `(conversation, message) -> response`. Per user message this
--- actor clones the shipped turn-program (agentic-loop/lead-turn.mag,
--- compiled once via `mag.load` and cached), sets the initial `mag.Task`
--- payload to the message, overlays the live provider/model/reasoning effort
--- plus the canonical conversation identity onto the lead
+-- actor addresses the shipped turn-program (agentic-loop/lead-turn.mag,
+-- compiled once via resident `mag.load`), overlays the initial `mag.Task`
+-- payload, live provider/model/reasoning effort, and canonical conversation
+-- identity onto the lead
 -- llm actor, and submits it with `mag.execute`. The constellation runs on
 -- the mag kernel — the lead's tool surface rides the tool-gate capability
 -- bridge like any kernel run — the final response lands in the sink, the
@@ -68,12 +68,13 @@ local state = {
 
   -- The shipped turn-program. `source_dir`/`entry` are composition-owned
   -- (configure { lead_program = … }); the artifact is loaded once per
-  -- session through the mag plugin and cached here, then cloned per turn.
+  -- session through the mag plugin and retained under an exact handle.
   lead_program = {
     source_dir = nil,   ---@type string|nil  resolved lazily (NEFOR_CONFIG_DIR)
     entry      = "agentic-loop/lead-turn.mag",
     module_roots = nil, ---@type string[]|nil explicit ordered search roots
     artifact    = nil,   ---@type table|nil   cached compiled artifact
+    program_id  = nil,   ---@type string|nil  reusable resident program handle
     hash       = nil,   ---@type string|nil
     entry_actor = nil,  ---@type string|nil  the task message's target
     llm_actor  = nil,   ---@type string|nil  the overlay/binding target
@@ -320,8 +321,8 @@ local function lead_program_module_roots(source_dir)
   return roots
 end
 
--- Deep-copy JSON-shaped data (the cached modification is cloned per turn so
--- per-turn mutation never leaks into the cache). Decoded JSON
+-- Deep-copy JSON-shaped data where event snapshots must not share tables.
+-- Decoded JSON
 -- arrays carry a private mlua metatable, which is the only distinction
 -- between an empty `[]` and `{}`; semantic type descriptors rely on it.
 local function deep_clone(value)
@@ -380,7 +381,7 @@ local function derive_program_seams(modification)
 end
 
 -- Kick the turn-program load handshake (idempotent while in flight). The
--- mag.loaded reply caches the modification and flushes queued submits.
+-- mag.loaded reply retains its exact program handle and flushes queued submits.
 local function ensure_lead_program_loaded()
   local p = state.lead_program
   if p.artifact ~= nil or p.load_id ~= nil then return end
@@ -390,6 +391,7 @@ local function ensure_lead_program_loaded()
   emit("mag", {
     kind       = "mag.load",
     id         = p.load_id,
+    resident   = true,
     source_dir = source_dir,
     module_roots = module_roots,
     entry      = p.entry,
@@ -401,13 +403,48 @@ end
 
 local flush_pending_user_inputs
 
+local function emit_program_unload(program_id)
+  if type(program_id) == "string" and #program_id > 0 then
+    envelope.emit_as("agentic-loop", "mag", {
+      kind = "mag.unload",
+      id = "lead-turn-unload-" .. envelope.uuid_lite(),
+      program_id = program_id,
+    })
+  end
+end
+
+local function release_lead_program()
+  local p = state.lead_program
+  emit_program_unload(p.program_id or p.load_id)
+  p.artifact = nil
+  p.program_id = nil
+  p.hash = nil
+  p.source_actor = nil
+  p.entry_actor = nil
+  p.llm_actor = nil
+  p.load_id = nil
+end
+
 local function handle_lead_program_loaded(body)
   local p = state.lead_program
   if body.in_reply_to ~= p.load_id then return end
+  local load_id = p.load_id
   p.load_id = nil
+  local program_id = body.program_id
+  if type(program_id) ~= "string" or #program_id == 0 then
+    emit_program_unload(load_id)
+    emit("nefor-tui", {
+      kind = "chat.error.append",
+      title = "Lead program unavailable",
+      message = "The lead turn program loaded without a resident program handle.",
+      retryable = true,
+    })
+    return
+  end
   local artifact = body.artifact
   local modification = type(artifact) == "table" and artifact or nil
   if type(modification) ~= "table" then
+    emit_program_unload(program_id)
     emit("nefor-tui", {
       kind = "chat.error.append",
       title = "Lead program unavailable",
@@ -418,6 +455,7 @@ local function handle_lead_program_loaded(body)
   end
   local seams, err = derive_program_seams(modification)
   if not seams then
+    emit_program_unload(program_id)
     emit("nefor-tui", {
       kind = "chat.error.append",
       title = "Lead program invalid",
@@ -427,6 +465,7 @@ local function handle_lead_program_loaded(body)
     return
   end
   p.artifact = artifact
+  p.program_id = program_id
   p.hash = body.hash
   p.source_actor = seams.source_actor
   p.entry_actor = seams.entry_actor
@@ -451,8 +490,8 @@ local function handle_lead_program_error(body)
   emit_idle_state("lead-program-load-failed")
 end
 
--- Spawn one turn-program for `user_text`. Clones the cached modification,
--- points the initial mag.Task at the message, overlays live config +
+-- Spawn one turn-program for `user_text`. Addresses the retained program and
+-- overlays the initial mag.Task plus live config +
 -- canonical conversation identity onto the lead llm actor, and submits
 -- `mag.execute`. The provider actor reads history from conversation-manager;
 -- duplicating it in this persisted command would make session growth quadratic.
@@ -471,14 +510,6 @@ local function submit_orchestrator_run(user_text, submission_ids, input_cause)
     state.pending_user_inputs[#state.pending_user_inputs + 1] = { text = user_text, submission_ids = submission_ids or {} }
     ensure_lead_program_loaded()
     return nil
-  end
-
-  local artifact = deep_clone(p.artifact)
-  local mod = artifact
-  for _, actor in ipairs(mod.actors or {}) do
-    if actor.id == p.source_actor then
-      actor.params.value.prompt = user_text
-    end
   end
 
   local overlay_params = {
@@ -517,8 +548,11 @@ local function submit_orchestrator_run(user_text, submission_ids, input_cause)
     conversation_id = conversation_id,
     session_id     = sessions.current_id(),
     principal      = "lead",
-    artifact       = artifact,
-    params_overlay = { [p.llm_actor] = overlay_params },
+    program_id     = p.program_id,
+    params_overlay = {
+      [p.source_actor] = { value = { prompt = user_text } },
+      [p.llm_actor] = overlay_params,
+    },
   })
   nefor.log.info("agentic-loop: lead turn submitted to mag kernel", {
     run_id = run_id,
@@ -1314,6 +1348,7 @@ end
 
 local function teardown_for_session_end()
   kill_active_lead_run()
+  release_lead_program()
   state.current_run_id = nil
   state.current_turn   = nil
   state.deferred_queue     = {}
@@ -1612,6 +1647,7 @@ M._internals  = {
       entry = "agentic-loop/lead-turn.mag",
       module_roots = nil,
       artifact = nil,
+      program_id = nil,
       hash = nil,
       source_actor = nil,
       entry_actor = nil,

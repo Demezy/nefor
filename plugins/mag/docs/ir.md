@@ -77,7 +77,9 @@ does not infer library locations from its installation or configuration.
 MAG is a scripting language for the runtime hosted by this plugin. A program
 is loaded once — parsed, definitions evaluated, initial modification validated,
 and every concrete structured-output schema lowered through the provider's
-strict schema subset — before the resident environment is installed. Provider
+strict schema subset. `resident:true` retains that exact environment under the
+opaque `program_id` returned by `mag.loaded`; a compile-only load retains
+nothing. Provider
 schema lowering is repeated defensively at execute after control-plane overlays
 and before `begin_run`; a failure at either boundary emits `mag.error`. A load
 failure has no run lifecycle. The execute backstop can only reject before
@@ -369,8 +371,9 @@ payloads fail the run explicitly. Terminal settlement waits for this drain.
 - Name-plus-snapshot instead of embedded code: a MAG function closes over
   its defining environment, and re-entering the source snapshot provides
   that environment deterministically — no closure serialization, ever.
-- The environment is evaluated once at load and cached; purity makes the
-  cache exact.
+- A retained environment is evaluated once at load and addressed by its exact
+  `program_id`; purity makes reuse exact. `mag.unload` releases the handle,
+  while each live run keeps the environment it already pinned.
 - **Bounded evaluation**: rule evaluation runs under a step budget;
   exceeding it rejects the modification with an error. Purity means a
   killed evaluation leaves nothing to clean up.
@@ -378,7 +381,9 @@ payloads fail the run explicitly. Terminal settlement waits for this drain.
   returns `Artifact`. A typo'd name is a load error, not a
   runtime surprise.
 - Inline artifacts cannot invent rule bindings: rule-bearing execution must
-  use the resident source snapshot that declared their functions.
+  use the retained source snapshot that declared their functions. Rule
+  evaluation addresses that live run (or an explicit retained `program_id`),
+  never a process-global current program.
 - A modification is a plain map — MAG builds it with ordinary data
   constructors and the standard validator checks its shape.
 

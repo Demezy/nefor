@@ -272,8 +272,13 @@ local function lead_artifact()
   }
 end
 
-local function task_prompt(modification)
-  for _, actor in ipairs(modification.actors or {}) do
+local function task_prompt(execute_body)
+  local source = type(execute_body.params_overlay) == "table"
+      and execute_body.params_overlay["lead.source"] or nil
+  if type(source) == "table" and type(source.value) == "table" then
+    return source.value.prompt
+  end
+  for _, actor in ipairs(execute_body.artifact and execute_body.artifact.actors or {}) do
     if actor.id == "lead.source" then return actor.params.value.prompt end
   end
   return nil
@@ -427,12 +432,14 @@ local function begin_turn(text)
   local load = find_kind(calls, "mag.load")
   if load ~= nil then
     assert_eq(load.target, "mag", "mag.load targets the mag plugin")
+    assert_eq(load.body.resident, true, "lead program load requests a retained handle")
     assert_eq(load.body.entry, "agentic-loop/lead-turn.mag",
       "the shipped turn-program is the load entry")
     _test.calls_clear()
     send_to_loop("mag", {
       kind = "mag.loaded",
       in_reply_to = load.body.id,
+      program_id = load.body.id,
       hash = "sha256:test",
       artifact = lead_artifact(),
     })
@@ -471,7 +478,7 @@ do
   local calls = decode_calls()
   local promoted = find_kind(calls, "mag.execute")
   assert(promoted ~= nil, "early lead.entry failure promotes queued input")
-  assert_eq(task_prompt(promoted.body.artifact), "queued after failure",
+  assert_eq(task_prompt(promoted.body), "queued after failure",
     "the promoted run carries the queued user input")
   assert_eq(agentic_loop._internals.state.current_run_id, promoted.body.run_id,
     "the promoted run becomes the active lead run")
@@ -526,12 +533,13 @@ do
   _test.calls_clear()
   send_to_loop("mag", {
     kind = "mag.loaded", in_reply_to = load.body.id,
+    program_id = load.body.id,
     hash = "sha256:cold", artifact = lead_artifact(),
   })
   calls = decode_calls()
   local exec = find_kind(calls, "mag.execute")
   assert(exec ~= nil, "loaded program starts the queued turn")
-  assert_eq(task_prompt(exec.body.artifact), "cold one\ncold two",
+  assert_eq(task_prompt(exec.body), "cold one\ncold two",
     "cold submits coalesce into one model delivery")
   assert(find_kind(calls, "chat.queue.steered") ~= nil,
     "promotion reconciles the optimistic queue")
@@ -588,12 +596,14 @@ do
   })
   assert_eq(agentic_loop._internals.state.conversation_id, manager_conversation_id,
     "derived child creation cannot replace the active root")
-  local mod = exec.body.artifact
-  assert(type(mod) == "table", "the artifact rides inline on the execute")
+  local mod = lead_artifact()
+  assert_eq(exec.body.program_id, agentic_loop._internals.state.lead_program.program_id,
+    "lead execution addresses the exact retained program")
+  assert_eq(exec.body.artifact, nil, "lead execution does not copy the artifact inline")
   assert_eq(mod.messages[1].to, "lead.source", "Unit activation targets the source actor")
   assert_eq(mod.messages[1].content.kind, "mag.Unit",
     "the source activation remains a Unit message")
-  assert_eq(task_prompt(mod), "hello lead",
+  assert_eq(task_prompt(exec.body), "hello lead",
     "the literal first user message replaces the source's typed task value")
   assert(json.is_array(mod.types.task.arguments),
     "cloning the compiled artifact preserves empty descriptor arrays")
@@ -686,7 +696,7 @@ do
     "the cached program is not re-loaded per turn")
   local exec2 = find_kind(calls, "mag.execute")
   assert(exec2 ~= nil, "second turn executes")
-  assert_eq(task_prompt(exec2.body.artifact), "and more?")
+  assert_eq(task_prompt(exec2.body), "and more?")
   assert_eq(exec2.body.params_overlay["lead.llm"].history, nil,
     "second turn does not persist the prior transcript in MAG")
 end
@@ -1110,7 +1120,7 @@ do
     "queued promotion relies on canonical manager projection")
   local exec2 = find_kind(calls, "mag.execute")
   assert(exec2 ~= nil, "queued input promotes into a fresh turn on close")
-  assert_eq(task_prompt(exec2.body.artifact), "second",
+  assert_eq(task_prompt(exec2.body), "second",
     "the promoted turn carries the queued text")
   assert_eq(exec2.body.params_overlay["lead.llm"].history, nil,
     "the promoted turn reconstructs finished context outside MAG")
@@ -1248,7 +1258,7 @@ do
   local calls = decode_calls()
   local exec2 = find_kind(calls, "mag.execute")
   assert(exec2 ~= nil, "an idle lead relays the completion immediately")
-  local prompt = task_prompt(exec2.body.artifact)
+  local prompt = task_prompt(exec2.body)
   assert_eq(exec2.body.params_overlay["lead.llm"].input_cause,
     "internal_async_completion",
     "the relay persists its causal identity separately from user authorship")
@@ -1287,7 +1297,7 @@ do
   local calls = decode_calls()
   local exec2 = find_kind(calls, "mag.execute")
   assert(exec2 ~= nil, "an idle lead relays the interrupted failure immediately")
-  local prompt = task_prompt(exec2.body.artifact)
+  local prompt = task_prompt(exec2.body)
   assert(string.find(prompt, "FAILED", 1, true) ~= nil,
     "the relay turn marks the interrupted run as FAILED")
   assert(string.find(prompt, "interrupted by user", 1, true) ~= nil,
@@ -1444,7 +1454,7 @@ do
     if c.body.kind == "mag.execute" then execs[#execs + 1] = c end
   end
   assert_eq(#execs, 1, "both queued completions flush as one relay turn")
-  local prompt = task_prompt(execs[1].body.artifact)
+  local prompt = task_prompt(execs[1].body)
   assert(prompt:find("alpha output", 1, true) ~= nil,
     "the merged relay carries the first completion")
   assert(prompt:find("beta output", 1, true) ~= nil,

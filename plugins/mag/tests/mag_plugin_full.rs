@@ -1291,13 +1291,14 @@ mod tests {
         });
         let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
         let mut active = ActiveExecutes::new();
+        let mut programs = ResidentPrograms::new();
         let mut bridge = CapabilityBridge::new("tool-gate");
         handle_execute(
             &out_tx,
             "direct",
             body.as_object().expect("execute body"),
             Some("execute-1"),
-            &None,
+            &mut programs,
             (&host, &mut active, &mut bridge),
         )
         .await
@@ -1335,12 +1336,12 @@ mod tests {
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
-(let exact-model (fn [[model nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel model))
-(let model (as nefor.actors.ResolvedModel {:provider "mock-provider" :model "mock-model" :reasoning-effort "medium"}))
+(let exact-model (fn [[selected nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel selected))
+(let configured-model (as nefor.actors.ResolvedModel {:provider "mock-provider" :model "mock-model" :reasoning-effort "medium"}))
 (let start (nefor.actors.task-source "task" "test"))
 (let worker (nefor.actors.agent exact-model
         (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "worker"
-         :model model
+         :model configured-model
          :system "Answer."
          :tools (as (List String) [])
          :da-policy (nefor.contracts.no-da-policy)
@@ -1374,12 +1375,12 @@ mod tests {
             "entry": "main.mag"
         });
         let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
-        let mut program = None;
+        let mut programs = ResidentPrograms::new();
         handle_load(
             &out_tx,
             body.as_object().expect("load body"),
             Some("load-malformed"),
-            &mut program,
+            &mut programs,
             &host,
         )
         .await
@@ -1398,7 +1399,7 @@ mod tests {
             message.contains("pass only the success output type"),
             "{message}"
         );
-        assert!(program.is_none(), "invalid program is not installed");
+        assert!(programs.is_empty(), "invalid program is not installed");
         assert!(
             host.drain_emits().expect("kernel emits").is_empty(),
             "load rejection cannot emit mag.run_started"
@@ -1431,12 +1432,12 @@ mod tests {
             "entry": "main.mag"
         });
         let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
-        let mut program = None;
+        let mut programs = ResidentPrograms::new();
         handle_load(
             &out_tx,
             body.as_object().expect("load body"),
             Some("load-malformed-rules"),
-            &mut program,
+            &mut programs,
             &host,
         )
         .await
@@ -1450,7 +1451,7 @@ mod tests {
         assert!(body["message"]
             .as_str()
             .is_some_and(|message| message.contains("'rules' must be an array")));
-        assert!(program.is_none(), "invalid program is not installed");
+        assert!(programs.is_empty(), "invalid program is not installed");
         assert!(host.drain_emits().expect("kernel emits").is_empty());
         fs::remove_dir_all(root).ok();
     }
@@ -1468,12 +1469,12 @@ mod tests {
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
-(let exact-model (fn [[model nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel model))
-(let model (as nefor.actors.ResolvedModel {:provider "mock-provider" :model "mock-model" :reasoning-effort "medium"}))
+(let exact-model (fn [[selected nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel selected))
+(let configured-model (as nefor.actors.ResolvedModel {:provider "mock-provider" :model "mock-model" :reasoning-effort "medium"}))
 (let start (nefor.actors.task-source "task" "test"))
 (let worker (nefor.actors.agent exact-model
         (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "worker"
-         :model model
+         :model configured-model
          :system "Answer."
          :tools (as (List String) [])
          :da-policy (nefor.contracts.no-da-policy)
@@ -1501,17 +1502,18 @@ mod tests {
         .expect("kernel");
         let body = serde_json::json!({
             "id": "load-valid",
+            "resident": true,
             "source_dir": root,
             "module_roots": [module_root, config_module_root],
             "entry": "main.mag"
         });
         let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
-        let mut program = None;
+        let mut programs = ResidentPrograms::new();
         handle_load(
             &out_tx,
             body.as_object().expect("load body"),
             Some("load-valid"),
-            &mut program,
+            &mut programs,
             &host,
         )
         .await
@@ -1521,14 +1523,19 @@ mod tests {
         let Body::Event(body) = outgoing.body else {
             panic!("expected event response")
         };
-        assert_eq!(body["kind"], LOADED_KIND);
-        assert!(program.is_some(), "valid program becomes resident");
+        assert_eq!(body["kind"], LOADED_KIND, "{body:?}");
+        assert_eq!(body["program_id"], "load-valid");
+        assert!(
+            programs.contains_key("load-valid"),
+            "valid resident program is retained by its exact handle"
+        );
 
         let execute = serde_json::json!({
             "id": "execute-valid",
             "run_id": "valid-text-agent",
             "run_name": "valid-text-agent",
-            "session_id": "session-1"
+            "session_id": "session-1",
+            "program_id": "load-valid"
         });
         let mut active = ActiveExecutes::new();
         let mut bridge = CapabilityBridge::new("tool-gate");
@@ -1537,7 +1544,7 @@ mod tests {
             "direct",
             execute.as_object().expect("execute body"),
             Some("execute-valid"),
-            &program,
+            &mut programs,
             (&host, &mut active, &mut bridge),
         )
         .await
@@ -1563,8 +1570,118 @@ mod tests {
             "valid TextAnswer agent reaches the provider path"
         );
         assert!(active.contains_key("valid-text-agent"));
+        assert!(
+            programs.contains_key("load-valid"),
+            "execution leaves the reusable retained handle available"
+        );
+        let unload = serde_json::json!({"program_id": "load-valid"});
+        handle_unload(
+            &out_tx,
+            unload.as_object().expect("unload body"),
+            Some("unload-valid"),
+            &mut programs,
+        )
+        .await
+        .expect("unload succeeds");
+        let Body::Event(unloaded) = out_rx.try_recv().expect("unload reply").body else {
+            panic!("expected event response")
+        };
+        assert_eq!(unloaded["kind"], UNLOADED_KIND);
+        assert_eq!(unloaded["released"], true);
+        assert!(programs.is_empty(), "unload releases the reusable handle");
+        assert!(
+            run_program(&active, "valid-text-agent").is_some(),
+            "the live run keeps its already-pinned program environment"
+        );
         host.end_run("valid-text-agent", TeardownReason::Killed)
             .expect("cleanup run");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn retained_program_handles_address_the_exact_source_environment() {
+        fn source(label: &str) -> String {
+            format!(
+                r#"
+(type Task {{:task String}})
+(let expand (fn [[task Task]] -> Artifact
+  (artifact {{:actors [] :messages [] :kills ["{label}"] :rules []}})))
+(artifact {{:actors [{{:id "source" :factory "nefor.factory.stub"
+                       :type_arguments [] :params {{}} :routes {{}}}}]
+           :messages [] :kills []
+           :rules [{{:id "expand"
+                    :on {{:actor "source" :type (type-evidence (type-tag Task)) :wire "stub.Out"}}
+                    :fn "expand"}}]}})
+"#
+            )
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "mag-resident-program-handles-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("alpha")).expect("alpha workspace");
+        fs::create_dir_all(root.join("beta")).expect("beta workspace");
+        fs::write(root.join("alpha/main.mag"), source("alpha")).expect("alpha program");
+        fs::write(root.join("beta/main.mag"), source("beta")).expect("beta program");
+
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let host = LuaHost::load_kernel(
+            &manifest.join("lua/mag-kernel/init.lua"),
+            Some(&manifest.join("../../lua")),
+        )
+        .expect("kernel");
+        let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
+        let mut programs = ResidentPrograms::new();
+        for label in ["alpha", "beta"] {
+            let body = serde_json::json!({
+                "id": format!("load-{label}"),
+                "resident": true,
+                "source_dir": root.join(label),
+                "entry": "main.mag"
+            });
+            handle_load(
+                &out_tx,
+                body.as_object().expect("load body"),
+                Some(&format!("load-{label}")),
+                &mut programs,
+                &host,
+            )
+            .await
+            .expect("resident load");
+            let Body::Event(reply) = out_rx.try_recv().expect("load reply").body else {
+                panic!("expected event response")
+            };
+            assert_eq!(reply["kind"], LOADED_KIND);
+            assert_eq!(reply["program_id"], format!("load-{label}"));
+        }
+
+        let eval = serde_json::json!({
+            "program_id": "load-alpha",
+            "name": "expand",
+            "input": {"task": "test"}
+        });
+        handle_eval(
+            &out_tx,
+            eval.as_object().expect("eval body"),
+            Some("eval-alpha"),
+            &programs,
+            &ActiveExecutes::new(),
+        )
+        .await
+        .expect("exact resident eval");
+        let Body::Event(reply) = out_rx.try_recv().expect("eval reply").body else {
+            panic!("expected event response")
+        };
+        assert_eq!(reply["kind"], "mag.artifact");
+        assert_eq!(reply["artifact"]["kills"], serde_json::json!(["alpha"]));
+        assert_eq!(
+            programs.len(),
+            2,
+            "evaluating one handle retains both programs"
+        );
+
         fs::remove_dir_all(root).ok();
     }
 
@@ -1752,7 +1869,7 @@ mod tests {
             .expect("request id")
             .to_owned();
         let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
-        let mut program = None;
+        let mut programs = ResidentPrograms::new();
         let mut active = HashMap::from([(
             "provider-events".to_owned(),
             ActiveExecute {
@@ -1793,7 +1910,7 @@ mod tests {
                 &out_tx,
                 "conversation-manager",
                 &body,
-                &mut program,
+                &mut programs,
                 &host,
                 &mut active,
                 &mut bridge,

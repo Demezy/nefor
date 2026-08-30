@@ -2,9 +2,10 @@
 //
 // Completes the NCP ready handshake, hosts a Lua VM that loads the kernel from
 // the config-resolved Lua path, and answers the mag protocol: `mag.ping`
-// (liveness), `mag.load` (evaluate a program, cache it, reply with the initial
-// modification + the registry's factory names), `mag.eval` (apply a rule fn),
-// and `mag.execute` (run the resident/inline program through the kernel —
+// (liveness), `mag.load` (evaluate a program, optionally retain its exact
+// environment, and reply with the initial modification + registry factories),
+// `mag.eval` (apply a rule fn to an addressed environment), and `mag.execute`
+// (run an addressed resident program or a rule-free inline artifact —
 // register the constellation, deliver its initial messages (actors construct
 // lazily at first firing), stream lifecycle events, and reply
 // `mag.run_result` with the sink's final result + output path).
@@ -59,16 +60,15 @@ impl std::ops::Deref for ResidentProgram {
 
 /// The in-flight async runs, keyed by run_id.
 type ActiveExecutes = HashMap<String, ActiveExecute>;
+type ResidentPrograms = HashMap<String, Arc<ResidentProgram>>;
 
 fn run_program<'a>(
     active: &'a ActiveExecutes,
-    current: Option<&'a ResidentProgram>,
     run_id: &str,
 ) -> Option<&'a ResidentProgram> {
     active
         .get(run_id)
         .and_then(|execute| execute.program.as_deref())
-        .or(current)
 }
 
 /// Outbound/inbound channel capacity for the stdio transport tasks.
@@ -87,12 +87,14 @@ const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PING_KIND: &str = "mag.ping";
 const PONG_KIND: &str = "mag.pong";
 
-/// Load a MAG program in-process and cache its resident environment for the
-/// session; reply with the initial modification (`mag.loaded`).
+/// Load a MAG program in-process and optionally retain its resident environment;
+/// reply with the initial modification (`mag.loaded`).
 const LOAD_KIND: &str = "mag.load";
 const LOADED_KIND: &str = "mag.loaded";
+const UNLOAD_KIND: &str = "mag.unload";
+const UNLOADED_KIND: &str = "mag.unloaded";
 
-/// Evaluate a named rule fn against a node output over the cached program;
+/// Evaluate a named rule fn against a node output over an addressed program;
 /// reply with the produced modification (`mag.modification`).
 const EVAL_KIND: &str = "mag.eval";
 
@@ -289,10 +291,10 @@ async fn run_dispatch_loop(
     in_rx: &mut mpsc::Receiver<Result<Envelope, TransportError>>,
     host: &LuaHost,
 ) -> Result<(), MagError> {
-    // The session's resident program: loaded once by `mag.load`, then the
-    // source of the cached environment every `mag.eval` evaluates against and
-    // the default program `mag.execute` runs.
-    let mut program: Option<Arc<ResidentProgram>> = None;
+    // Immutable source environments waiting to be executed. A load handle
+    // addresses one exact environment; concurrent callers never race over a
+    // mutable "latest program" slot.
+    let mut programs = ResidentPrograms::new();
     // The in-flight async runs, keyed by run_id (deferred-completion path).
     // Concurrent `mag.execute` requests each hold one entry; each settles
     // independently against its own run-scoped kernel context.
@@ -318,7 +320,7 @@ async fn run_dispatch_loop(
                                 out_tx,
                                 env.from.as_str(),
                                 map,
-                                &mut program,
+                                &mut programs,
                                 host,
                                 &mut active,
                                 &mut bridge,
@@ -428,13 +430,12 @@ async fn settle_run(
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
-    program: Option<&ResidentProgram>,
     run_id: &str,
 ) -> Result<(), MagError> {
     if !active.contains_key(run_id) {
         return Ok(());
     }
-    let pinned_program = run_program(active, program, run_id);
+    let pinned_program = run_program(active, run_id);
     drain_rule_triggers(host, pinned_program, run_id)?;
     flush_emits(out_tx, host, bridge).await?;
     // The teardown reason rides the reap's `mag.actor_killed` events so
@@ -493,14 +494,14 @@ async fn settle_reaped(
 }
 
 /// Handle one inbound event body. We answer `mag.ping` (liveness), `mag.load`
-/// (load a program, cache it, reply with the initial modification), and
-/// `mag.eval` (apply a rule fn over the cached program). Everything else on the
+/// (load a program and reply with its initial modification), and `mag.eval`
+/// (apply a rule fn over an addressed resident program). Everything else on the
 /// broadcast bus is not ours and drops silently.
 async fn handle_event(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     source: &str,
     body: &Map<String, Value>,
-    program: &mut Option<Arc<ResidentProgram>>,
+    programs: &mut ResidentPrograms,
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
@@ -548,23 +549,23 @@ async fn handle_event(
             flush_emits(out_tx, host, bridge).await?;
         }
         if let Some(reply) = bridge.take_reply(kind, body) {
-            return handle_provider_reply(out_tx, reply, program.as_deref(), host, active, bridge)
-                .await;
+            return handle_provider_reply(out_tx, reply, host, active, bridge).await;
         }
         return Ok(());
     }
     let in_reply_to = body.get("id").and_then(Value::as_str);
     match kind {
         PING_KIND => send_event(out_tx, pong_body(in_reply_to)).await,
-        LOAD_KIND => handle_load(out_tx, body, in_reply_to, program, host).await,
-        EVAL_KIND => handle_eval(out_tx, body, in_reply_to, program).await,
+        LOAD_KIND => handle_load(out_tx, body, in_reply_to, programs, host).await,
+        UNLOAD_KIND => handle_unload(out_tx, body, in_reply_to, programs).await,
+        EVAL_KIND => handle_eval(out_tx, body, in_reply_to, programs, active).await,
         EXECUTE_KIND => {
             handle_execute(
                 out_tx,
                 source,
                 body,
                 in_reply_to,
-                program,
+                programs,
                 (host, active, bridge),
             )
             .await
@@ -574,7 +575,6 @@ async fn handle_event(
                 out_tx,
                 body,
                 in_reply_to,
-                program.as_deref(),
                 host,
                 active,
                 bridge,
@@ -585,10 +585,10 @@ async fn handle_event(
         KILL_ALL_RUNS_KIND => handle_kill_all_runs(out_tx, host, active, bridge).await,
         STEER_RUN_KIND => handle_steer_run(out_tx, body, host, active).await,
         RESUME_ACTOR_KIND => {
-            handle_resume_actor(out_tx, body, program.as_deref(), host, active, bridge).await
+            handle_resume_actor(out_tx, body, host, active, bridge).await
         }
         INTERRUPT_RUN_KIND => {
-            handle_interrupt_run(out_tx, body, program.as_deref(), host, active, bridge).await
+            handle_interrupt_run(out_tx, body, host, active, bridge).await
         }
         // A capability response correlated to a kernel-minted request id.
         // Unknown ids are dropped inside the kernel (no open correlation), so
@@ -597,22 +597,52 @@ async fn handle_event(
             handle_tool_stream(out_tx, body, host, bridge).await
         }
         TOOL_RESULT_KIND if !active.is_empty() => {
-            handle_tool_result(out_tx, body, program.as_deref(), host, active, bridge).await
+            handle_tool_result(out_tx, body, host, active, bridge).await
         }
         _ => Ok(()),
     }
 }
 
-/// Load `source_dir/entry` in-process, cache the resident program for the
-/// session, and reply with its initial modification. A load failure replies
-/// `mag.error` and leaves any previously-loaded program untouched.
+/// Load `source_dir/entry` in-process and reply with its initial modification.
+/// `resident:true` retains the exact source environment under an opaque,
+/// reusable program id for subsequent executes. Compile-only loads retain
+/// nothing; `mag.unload` releases a retained handle while live runs keep their
+/// already-pinned environment.
 async fn handle_load(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     body: &Map<String, Value>,
     in_reply_to: Option<&str>,
-    program: &mut Option<Arc<ResidentProgram>>,
+    programs: &mut ResidentPrograms,
     host: &LuaHost,
 ) -> Result<(), MagError> {
+    let retain = body
+        .get("resident")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let program_id = if retain {
+        match in_reply_to.filter(|id| !id.is_empty()) {
+            Some(id) if !programs.contains_key(id) => Some(id.to_owned()),
+            Some(id) => {
+                return send_event(
+                    out_tx,
+                    error_body(
+                        in_reply_to,
+                        &format!("mag.load program id {id:?} is already retained"),
+                    ),
+                )
+                .await
+            }
+            None => {
+                return send_event(
+                    out_tx,
+                    error_body(in_reply_to, "resident mag.load requires a non-empty id"),
+                )
+                .await
+            }
+        }
+    } else {
+        None
+    };
     let source_dir = match body.get("source_dir").and_then(Value::as_str) {
         Some(s) => s,
         None => {
@@ -666,14 +696,45 @@ async fn handle_load(
                 in_reply_to,
                 &loaded.hash,
                 artifact,
+                program_id.as_deref(),
                 &factories,
                 contracts,
             );
-            *program = Some(Arc::new(ResidentProgram { loaded, rules }));
+            if let Some(program_id) = program_id {
+                programs.insert(program_id, Arc::new(ResidentProgram { loaded, rules }));
+            }
             send_event(out_tx, reply).await
         }
         Err(e) => send_event(out_tx, mag_error_body(in_reply_to, &e)).await,
     }
+}
+
+async fn handle_unload(
+    out_tx: &mpsc::Sender<PluginOutgoing>,
+    body: &Map<String, Value>,
+    in_reply_to: Option<&str>,
+    programs: &mut ResidentPrograms,
+) -> Result<(), MagError> {
+    let program_id = match body
+        .get("program_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => id,
+        None => {
+            return send_event(
+                out_tx,
+                error_body(in_reply_to, "mag.unload requires a non-empty program_id"),
+            )
+            .await
+        }
+    };
+    let released = programs.remove(program_id).is_some();
+    send_event(
+        out_tx,
+        unloaded_body(in_reply_to, program_id, released),
+    )
+    .await
 }
 
 fn load_module_roots(body: &Map<String, Value>, source_dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -745,9 +806,9 @@ fn authoritative_principal(source: &str, declared: Option<&Value>) -> Result<Run
     }
 }
 
-/// Run a program through the kernel. The modification is taken inline from the
-/// request (`modification` — the control plane reaches kernel ops directly,
-/// ir.md) or, absent that, from the session's resident program (`mag.load`).
+/// Run a program through the kernel. A `program_id` selects the exact source
+/// environment retained by `mag.load`; an inline `artifact` remains available
+/// for rule-free callers that need no source environment.
 /// Creates the run's own kernel context (begin_run), registers the
 /// constellation, delivers the initial messages (each actor constructs lazily
 /// at its first firing), streams lifecycle events, and — for a synchronous
@@ -761,47 +822,72 @@ async fn handle_execute(
     source: &str,
     body: &Map<String, Value>,
     in_reply_to: Option<&str>,
-    program: &Option<Arc<ResidentProgram>>,
+    programs: &mut ResidentPrograms,
     runtime: (&LuaHost, &mut ActiveExecutes, &mut CapabilityBridge),
 ) -> Result<(), MagError> {
     let (host, active, bridge) = runtime;
-    let mut modification: Value = match body.get("artifact") {
-        Some(artifact) => match artifact_modification(artifact) {
-            Ok(m) => m,
-            Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
-        },
-        None => match program {
-            Some(p) => match artifact_modification(&p.artifact) {
-                Ok(m) => m,
-                Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
-            },
-            None => {
-                return send_event(
-                    out_tx,
-                    error_body(
-                        in_reply_to,
-                        "mag.execute before any mag.load and no inline artifact",
-                    ),
-                )
-                .await
-            }
-        },
-    };
-    if body.get("artifact").is_some()
-        && modification
-            .get("rules")
-            .and_then(Value::as_array)
-            .is_some_and(|rules| !rules.is_empty())
-    {
+    let requested_program = body
+        .get("program_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
+    if requested_program.is_some() && body.get("artifact").is_some() {
         return send_event(
             out_tx,
             error_body(
                 in_reply_to,
-                "inline execution with rules is rejected; load the declaring resident MAG program",
+                "mag.execute accepts either program_id or artifact, not both",
             ),
         )
         .await;
     }
+    let (mut modification, program) = match (requested_program, body.get("artifact")) {
+        (Some(program_id), None) => {
+            let Some(program) = programs.get(program_id).cloned() else {
+                return send_event(
+                    out_tx,
+                    error_body(
+                        in_reply_to,
+                        &format!("mag.execute unknown program_id {program_id:?}"),
+                    ),
+                )
+                .await;
+            };
+            let modification = match artifact_modification(&program.artifact) {
+                Ok(modification) => modification,
+                Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
+            };
+            (modification, Some(program))
+        }
+        (None, Some(artifact)) => {
+            let modification = match artifact_modification(artifact) {
+                Ok(modification) => modification,
+                Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
+            };
+            if modification
+            .get("rules")
+            .and_then(Value::as_array)
+            .is_some_and(|rules| !rules.is_empty())
+            {
+                return send_event(
+                    out_tx,
+                    error_body(
+                        in_reply_to,
+                        "inline execution with rules is rejected; execute the retained program_id returned by resident mag.load",
+                    ),
+                )
+                .await;
+            }
+            (modification, None)
+        }
+        (None, None) => {
+            return send_event(
+                out_tx,
+                error_body(in_reply_to, "mag.execute requires program_id or inline artifact"),
+            )
+            .await
+        }
+        (Some(_), Some(_)) => unreachable!("contradiction rejected above"),
+    };
 
     // Apply the control plane's per-actor params overlay before spawn. Actor
     // params are kernel-opaque data owned by the factory (docs/ir.md), so an
@@ -911,7 +997,7 @@ async fn handle_execute(
         run_id,
         ActiveExecute {
             in_reply_to: in_reply_to.map(str::to_owned),
-            program: program.clone(),
+            program,
         },
     );
     Ok(())
@@ -1074,7 +1160,6 @@ async fn handle_apply(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     body: &Map<String, Value>,
     in_reply_to: Option<&str>,
-    program: Option<&ResidentProgram>,
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
@@ -1155,7 +1240,7 @@ async fn handle_apply(
     .await?;
     // A modification that completes the run (e.g. a send that unblocks the sink)
     // settles that run's in-flight execute reply.
-    settle_run(out_tx, host, active, bridge, program, &run_id).await
+    settle_run(out_tx, host, active, bridge, &run_id).await
 }
 
 /// Kill one live run: end its kernel context — reaping its actors through
@@ -1232,7 +1317,6 @@ async fn handle_steer_run(
 async fn handle_resume_actor(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     body: &Map<String, Value>,
-    program: Option<&ResidentProgram>,
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
@@ -1245,7 +1329,7 @@ async fn handle_resume_actor(
         && host.resume_actor(run_id, actor_id, &message)?;
     if accepted {
         flush_emits(out_tx, host, bridge).await?;
-        settle_run(out_tx, host, active, bridge, program, run_id).await?;
+        settle_run(out_tx, host, active, bridge, run_id).await?;
     }
     let mut ack = Map::new();
     ack.insert("kind".into(), Value::String(ACTOR_RESUMED_KIND.into()));
@@ -1278,7 +1362,6 @@ async fn handle_resume_actor(
 async fn handle_interrupt_run(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     body: &Map<String, Value>,
-    program: Option<&ResidentProgram>,
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
@@ -1322,7 +1405,7 @@ async fn handle_interrupt_run(
     flush_emits(out_tx, host, bridge).await?;
     // The run stays alive on the tool leg (re-fire pending); a provider-leg
     // interrupt may have failed it synchronously — settle if so.
-    settle_run(out_tx, host, active, bridge, program, &run_id).await
+    settle_run(out_tx, host, active, bridge, &run_id).await
 }
 
 async fn handle_tool_stream(
@@ -1362,7 +1445,6 @@ async fn handle_tool_stream(
 async fn handle_tool_result(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     body: &Map<String, Value>,
-    program: Option<&ResidentProgram>,
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
@@ -1378,7 +1460,7 @@ async fn handle_tool_result(
     let advanced = host.bus_response(id, result, error, completion_delivery)?;
     flush_emits(out_tx, host, bridge).await?;
     match advanced {
-        Some(run_id) => settle_run(out_tx, host, active, bridge, program, &run_id).await,
+        Some(run_id) => settle_run(out_tx, host, active, bridge, &run_id).await,
         None => Ok(()),
     }
 }
@@ -1389,7 +1471,6 @@ async fn handle_tool_result(
 async fn handle_provider_reply(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     reply: bridge::ProviderReply,
-    program: Option<&ResidentProgram>,
     host: &LuaHost,
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
@@ -1402,7 +1483,7 @@ async fn handle_provider_reply(
     )?;
     flush_emits(out_tx, host, bridge).await?;
     match advanced {
-        Some(run_id) => settle_run(out_tx, host, active, bridge, program, &run_id).await,
+        Some(run_id) => settle_run(out_tx, host, active, bridge, &run_id).await,
         None => Ok(()),
     }
 }
@@ -1417,14 +1498,14 @@ fn default_run_id() -> String {
     format!("mag-run-{ms}")
 }
 
-/// Evaluate the named rule fn against `input` over the cached program, replying
-/// with the produced modification. No cached program, an unknown fn, a budget
-/// overrun, or an ill-shaped result all reply `mag.error`.
+/// Evaluate the named rule fn against `input` over an explicitly addressed
+/// retained program or live run, replying with the produced modification.
 async fn handle_eval(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     body: &Map<String, Value>,
     in_reply_to: Option<&str>,
-    program: &mut Option<Arc<ResidentProgram>>,
+    programs: &ResidentPrograms,
+    active: &ActiveExecutes,
 ) -> Result<(), MagError> {
     let name = match body.get("name").and_then(Value::as_str) {
         Some(s) => s,
@@ -1432,15 +1513,51 @@ async fn handle_eval(
     };
     let input = body.get("input").cloned().unwrap_or(Value::Null);
 
-    let loaded = match program {
-        Some(p) => p,
-        None => {
+    let loaded = match (
+        body.get("program_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty()),
+        body.get("run_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty()),
+    ) {
+        (Some(_), Some(_)) => {
             return send_event(
                 out_tx,
                 error_body(
                     in_reply_to,
-                    "mag.eval before any mag.load: no resident program",
+                    "mag.eval accepts either program_id or run_id, not both",
                 ),
+            )
+            .await
+        }
+        (Some(program_id), None) => match programs.get(program_id) {
+            Some(program) => program.as_ref(),
+            None => {
+                return send_event(
+                    out_tx,
+                    error_body(
+                        in_reply_to,
+                        &format!("mag.eval unknown program_id {program_id:?}"),
+                    ),
+                )
+                .await
+            }
+        },
+        (None, Some(run_id)) => match run_program(active, run_id) {
+            Some(program) => program,
+            None => {
+                return send_event(
+                    out_tx,
+                    error_body(in_reply_to, &format!("mag.eval run {run_id:?} is not live")),
+                )
+                .await
+            }
+        },
+        (None, None) => {
+            return send_event(
+                out_tx,
+                error_body(in_reply_to, "mag.eval requires program_id or live run_id"),
             )
             .await
         }
@@ -1484,6 +1601,7 @@ fn loaded_body(
     in_reply_to: Option<&str>,
     hash: &str,
     artifact: Value,
+    program_id: Option<&str>,
     factories: &[String],
     contracts: Value,
 ) -> Map<String, Value> {
@@ -1494,6 +1612,12 @@ fn loaded_body(
     }
     m.insert("hash".into(), Value::String(hash.to_owned()));
     m.insert("artifact".into(), artifact);
+    if let Some(program_id) = program_id {
+        m.insert(
+            "program_id".into(),
+            Value::String(program_id.to_owned()),
+        );
+    }
     // The kernel registry's factory names — the control plane's validation
     // source of truth for reasoner/factory types.
     m.insert(
@@ -1501,6 +1625,24 @@ fn loaded_body(
         Value::Array(factories.iter().cloned().map(Value::String).collect()),
     );
     m.insert("factory_contracts".into(), contracts);
+    m
+}
+
+fn unloaded_body(
+    in_reply_to: Option<&str>,
+    program_id: &str,
+    released: bool,
+) -> Map<String, Value> {
+    let mut m = Map::new();
+    m.insert("kind".into(), Value::String(UNLOADED_KIND.into()));
+    if let Some(id) = in_reply_to {
+        m.insert("in_reply_to".into(), Value::String(id.to_owned()));
+    }
+    m.insert(
+        "program_id".into(),
+        Value::String(program_id.to_owned()),
+    );
+    m.insert("released".into(), Value::Bool(released));
     m
 }
 
