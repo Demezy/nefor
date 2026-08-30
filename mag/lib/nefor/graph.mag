@@ -41,6 +41,35 @@
                   :output (Port O)})
 (type Edge {:from StoredNode :to StoredNode :route StoredRoute})
 (type Graph {:edges (List Edge)})
+(type GraphAnalysis
+  {:edges (List Edge)
+   :all_nodes (List StoredNode)
+   :nodes (List StoredNode)
+   :nodes_by_id (Map String (List StoredNode))
+   :actors (List Actor)
+   :actors_by_id (Map String (List Actor))
+   :input_actors_by_address (Map String (List Actor))
+   :output_ports_by_address (Map String (List StoredPort))
+   :routes (List StoredRoute)
+   :route_input_addresses (List String)
+   :diagnostic_routes_by_input (Map String (List StoredRoute))
+   :routes_by_input (Map String (List StoredRoute))
+   :routes_by_output (Map String (List StoredRoute))
+   :routes_by_source_actor (Map String (List StoredRoute))
+   :messages (List Message)
+   :messages_by_input (Map String (List Message))
+   :graph_rules (List Rule)
+   :graph_rules_by_output (Map String (List Rule))
+   :edges_by_from_node (Map String (List Edge))
+   :edges_by_to_node (Map String (List Edge))
+   :roots (List StoredNode)
+   :outputs (List StoredNode)
+   :terminal_outputs_by_full_port (Map String (List StoredNode))})
+
+(type OrderedNodes {:seen (Map String Bool) :values (List StoredNode)})
+(type OrderedStrings {:seen (Map String Bool) :values (List String)})
+(type ReachabilityState
+  {:visited (Map String Bool) :worklist (List String)})
 
 ;; Runtime subscriptions remain program metadata. They observe a graph but are
 ;; not vertices or edges and therefore do not participate in edge-set algebra.
@@ -277,44 +306,164 @@
   (graph (filter (fn [[candidate Edge]] -> Bool
                    (not (edge-in? removed candidate)))
                  (get value "edges")))))
-(let graph-rules (fn [[value Graph]] -> (List Rule)
-  (flat-map (fn [[candidate StoredNode]] -> (List Rule)
-              (get candidate "rules"))
-            (graph-nodes value))))
-(let program (fn [[value Graph] [rules (List Rule)]] -> Program
-  (as Program {:graph value :rules (concat (graph-rules value) rules)})))
+(let port-address-key (fn [[value StoredPort]] -> String
+  (canonical {:actor (get value "actor") :wire (get value "wire")})))
+(let full-port-key (fn [[value StoredPort]] -> String (canonical value)))
+(let node-id (fn [[value StoredNode]] -> String (get value "id")))
+(let actor-id (fn [[value Actor]] -> String (get value "id")))
+(let route-id (fn [[value StoredRoute]] -> String (get value "id")))
+(let contract-id (fn [[value FactoryContract]] -> String (get value "identity")))
 
 (let nodes-from-edge (fn [[value Edge]] -> (List StoredNode)
   [(get value "from") (get value "to")]))
-(let all-nodes (fn [[value Graph]] -> (List StoredNode)
-  (flat-map nodes-from-edge (get value "edges"))))
-(let same-node-id? (fn [[left StoredNode] [right StoredNode]] -> Bool
-  (= (get left "id") (get right "id"))))
-(let node-in? (fn [[nodes (List StoredNode)] [candidate StoredNode]] -> Bool
-  (not (= (count (filter (fn [[value StoredNode]] -> Bool
-                           (same-node-id? value candidate)) nodes)) 0))))
-(let insert-node (fn [[nodes (List StoredNode)] [candidate StoredNode]] -> (List StoredNode)
-  (if (node-in? nodes candidate) nodes (concat nodes [candidate]))))
-(let graph-nodes (fn [[value Graph]] -> (List StoredNode)
-  (fold insert-node (as (List StoredNode) []) (all-nodes value))))
-
-(let conflicting-node? (fn [[nodes (List StoredNode)] [candidate StoredNode]] -> Bool
-  (not (= (count
-    (filter (fn [[value StoredNode]] -> Bool
-      (if (same-node-id? value candidate) (not (= value candidate)) false)) nodes)) 0))))
-(let has-node-conflicts? (fn [[value Graph]] -> Bool
-  (not (= (count (filter (fn [[candidate StoredNode]] -> Bool
-                           (conflicting-node? (all-nodes value) candidate))
-                         (all-nodes value))) 0))))
+(let insert-ordered-node
+  (fn [[state OrderedNodes] [candidate StoredNode]] -> OrderedNodes
+    (let id (node-id candidate))
+    (if (or (get (get state "seen") id) false)
+      state
+      (as OrderedNodes
+        {:seen (assoc (get state "seen") id true)
+         :values (concat (get state "values") [candidate])}))))
+(let ordered-nodes (fn [[values (List StoredNode)]] -> (List StoredNode)
+  (get
+    (fold insert-ordered-node
+      (as OrderedNodes
+        {:seen (as (Map String Bool) {})
+         :values (as (List StoredNode) [])})
+      values)
+    "values")))
+(let insert-ordered-string
+  (fn [[state OrderedStrings] [candidate String]] -> OrderedStrings
+    (if (or (get (get state "seen") candidate) false)
+      state
+      (as OrderedStrings
+        {:seen (assoc (get state "seen") candidate true)
+         :values (concat (get state "values") [candidate])}))))
+(let ordered-strings (fn [[values (List String)]] -> (List String)
+  (get
+    (fold insert-ordered-string
+      (as OrderedStrings
+        {:seen (as (Map String Bool) {})
+         :values (as (List String) [])})
+      values)
+    "values")))
 
 (let external-routes (fn [[value Graph]] -> (List StoredRoute)
   (map (fn [[candidate Edge]] -> StoredRoute (get candidate "route"))
        (get value "edges"))))
+(let analyze-graph (fn [[value Graph]] -> GraphAnalysis
+  (let edges (get value "edges"))
+  (let edges-by-to-node
+    (group-by
+      (fn [[candidate Edge]] -> String
+        (node-id (get candidate "to")))
+      edges))
+  (let all-nodes (flat-map nodes-from-edge edges))
+  (let nodes (ordered-nodes all-nodes))
+  (let roots
+    (filter (fn [[candidate StoredNode]] -> Bool
+              (= (count
+                   (or (get edges-by-to-node (node-id candidate))
+                       (as (List Edge) [])))
+                 0))
+            nodes))
+  (let actors
+    (flat-map (fn [[candidate StoredNode]] -> (List Actor)
+                (get candidate "actors"))
+              nodes))
+  (let internal-routes
+    (flat-map (fn [[candidate StoredNode]] -> (List StoredRoute)
+                (get candidate "routes"))
+              nodes))
+  (let routes (concat internal-routes (external-routes value)))
+  (let authored-messages
+    (flat-map (fn [[candidate StoredNode]] -> (List Message)
+                (get candidate "messages"))
+              nodes))
+  (let messages
+    (concat authored-messages
+      (bootstrap-messages
+        (map (fn [[candidate StoredNode]] -> StoredPort (get candidate "input")) roots)
+        routes authored-messages)))
+  (let graph-rules
+    (flat-map (fn [[candidate StoredNode]] -> (List Rule)
+                (get candidate "rules"))
+              nodes))
+  (let outputs
+    (filter (fn [[candidate StoredNode]] -> Bool
+              (= (get candidate "role") "output"))
+            nodes))
+  (as GraphAnalysis
+    {:edges edges
+     :all_nodes all-nodes
+     :nodes nodes
+     :nodes_by_id (group-by node-id all-nodes)
+     :actors actors
+     :actors_by_id (group-by actor-id actors)
+     :input_actors_by_address
+       (group-by
+         (fn [[candidate Actor]] -> String
+           (port-address-key (get candidate "input")))
+         actors)
+     :output_ports_by_address
+       (group-by port-address-key
+         (flat-map (fn [[candidate Actor]] -> (List StoredPort)
+                     (get candidate "outputs"))
+                   actors))
+     :routes routes
+     :route_input_addresses
+       (ordered-strings
+         (map (fn [[candidate StoredRoute]] -> String
+                (port-address-key (get candidate "to")))
+              routes))
+     :diagnostic_routes_by_input
+       (group-by (fn [[route StoredRoute]] -> String
+                   (port-address-key (get route "to"))) routes)
+     :routes_by_input
+       (group-by
+         (fn [[candidate StoredRoute]] -> String
+           (port-address-key (get candidate "to")))
+         (sort-by route-id routes))
+     :routes_by_output
+       (group-by
+         (fn [[candidate StoredRoute]] -> String
+           (port-address-key (get candidate "from")))
+         routes)
+     :routes_by_source_actor
+       (group-by
+         (fn [[candidate StoredRoute]] -> String
+           (get (get candidate "from") "actor"))
+         routes)
+     :messages messages
+     :messages_by_input
+       (group-by
+         (fn [[candidate Message]] -> String
+           (port-address-key (get candidate "to")))
+         messages)
+     :graph_rules graph-rules
+     :graph_rules_by_output
+       (group-by
+         (fn [[candidate Rule]] -> String
+           (port-address-key (get candidate "on")))
+         graph-rules)
+     :edges_by_from_node
+       (group-by
+         (fn [[candidate Edge]] -> String
+           (node-id (get candidate "from")))
+         edges)
+     :edges_by_to_node edges-by-to-node
+     :roots roots
+     :outputs outputs
+     :terminal_outputs_by_full_port
+       (group-by
+         (fn [[candidate StoredNode]] -> String
+           (full-port-key (get candidate "output")))
+         outputs)})))
+
+(let graph-nodes (fn [[value Graph]] -> (List StoredNode)
+  (get (analyze-graph value) "nodes")))
 (let graph-routes (fn [[value Graph]] -> (List StoredRoute)
-  (concat (flat-map (fn [[candidate StoredNode]] -> (List StoredRoute)
-                      (get candidate "routes"))
-                    (graph-nodes value))
-          (external-routes value))))
+  (get (analyze-graph value) "routes")))
 (let graph-actors (fn [[value Graph]] -> (List Actor)
   (flat-map (fn [[candidate StoredNode]] -> (List Actor)
               (get candidate "actors"))
@@ -328,10 +477,13 @@
 (let unit-input? (fn [[input StoredPort]] -> Bool
   (descriptor-accepts-value? (get input "type") (type-evidence (type-tag Unit)))))
 (let input-needs-bootstrap?
-  (fn [[routes (List StoredRoute)] [messages (List Message)] [input StoredPort]] -> Bool
+  (fn [[routes-by-input (Map String (List StoredRoute))]
+       [messages-by-input (Map String (List Message))] [input StoredPort]] -> Bool
     (if (unit-input? input)
-      (if (= (count (incoming-routes-to routes input)) 0)
-        (= (count (messages-to messages input)) 0)
+      (if (= (count (or (get routes-by-input (port-address-key input))
+                        (as (List StoredRoute) []))) 0)
+        (= (count (or (get messages-by-input (port-address-key input))
+                       (as (List Message) []))) 0)
         false)
       false)))
 (let bootstrap-message (fn [[input StoredPort]] -> Message
@@ -342,18 +494,19 @@
 (let bootstrap-messages
   (fn [[boundary-ports (List StoredPort)] [routes (List StoredRoute)]
        [messages (List Message)]] -> (List Message)
+    (let routes-by-input (group-by
+      (fn [[route StoredRoute]] -> String (port-address-key (get route "to"))) routes))
+    (let messages-by-input (group-by
+      (fn [[message Message]] -> String (port-address-key (get message "to"))) messages))
     (map bootstrap-message
       (filter (fn [[candidate StoredPort]] -> Bool
-                (input-needs-bootstrap? routes messages candidate)) boundary-ports))))
+                (input-needs-bootstrap? routes-by-input messages-by-input candidate)) boundary-ports))))
 (let graph-messages (fn [[value Graph]] -> (List Message)
-  (let authored (authored-graph-messages value))
-  ;; Only exposed root boundaries are eligible. Internal actors must receive
-  ;; their inputs through the composite's routes, even when they accept Unit.
-  (let boundary-ports
-    (map (fn [[candidate StoredNode]] -> StoredPort
-           (get candidate "input")) (roots value)))
-  (concat authored
-    (bootstrap-messages boundary-ports (graph-routes value) authored))))
+  (get (analyze-graph value) "messages")))
+(let graph-rules (fn [[value Graph]] -> (List Rule)
+  (get (analyze-graph value) "graph_rules")))
+(let program (fn [[value Graph] [rules (List Rule)]] -> Program
+  (as Program {:graph value :rules (concat (graph-rules value) rules)})))
 (let graph-logical-nodes (fn [[value Graph]] -> (List LogicalNode)
   (flat-map (fn [[candidate StoredNode]] -> (List LogicalNode)
               (get candidate "nodes"))
@@ -390,59 +543,92 @@
     (= (string-set members) (string-set actors))
     false)))
 
-(let incoming-count (fn [[value Graph] [id String]] -> Int
-  (count (filter (fn [[candidate Edge]] -> Bool
-                   (= (get (get candidate "to") "id") id))
-                 (get value "edges")))))
-(let outgoing-count (fn [[value Graph] [id String]] -> Int
-  (count (filter (fn [[candidate Edge]] -> Bool
-                   (= (get (get candidate "from") "id") id))
-                 (get value "edges")))))
 (let role? (fn [[candidate StoredNode] [role String]] -> Bool
   (= (get candidate "role") role)))
-(let roots (fn [[value Graph]] -> (List StoredNode)
-  (filter (fn [[candidate StoredNode]] -> Bool
-            (= (incoming-count value (get candidate "id")) 0))
-          (graph-nodes value))))
-(let outputs (fn [[value Graph]] -> (List StoredNode)
-  (filter (fn [[candidate StoredNode]] -> Bool (role? candidate "output"))
-          (graph-nodes value))))
-(let root-shape-valid? (fn [[value Graph] [candidate StoredNode]] -> Bool
-  (if (= (incoming-count value (get candidate "id")) 0)
-    (unit-input? (get candidate "input"))
-    true)))
-(let output-shape-valid? (fn [[value Graph] [candidate StoredNode]] -> Bool
-  (if (role? candidate "output")
-    (if (not (= (incoming-count value (get candidate "id")) 0))
-      (= (outgoing-count value (get candidate "id")) 0)
-      false)
-    true)))
+(let indexed-count
+  (fn [T] [[index (Map String (List T))] [id String]] -> Int
+    (count (or (get index id) (as (List T) [])))))
+(let incoming-count (fn [[analysis GraphAnalysis] [id String]] -> Int
+  (indexed-count (get analysis "edges_by_to_node") id)))
+(let outgoing-count (fn [[analysis GraphAnalysis] [id String]] -> Int
+  (indexed-count (get analysis "edges_by_from_node") id)))
+(let root-shape-valid?
+  (fn [[analysis GraphAnalysis] [candidate StoredNode]] -> Bool
+    (if (= (incoming-count analysis (node-id candidate)) 0)
+      (unit-input? (get candidate "input"))
+      true)))
+(let output-shape-valid?
+  (fn [[analysis GraphAnalysis] [candidate StoredNode]] -> Bool
+    (if (role? candidate "output")
+      (if (not (= (incoming-count analysis (node-id candidate)) 0))
+        (= (outgoing-count analysis (node-id candidate)) 0)
+        false)
+      true)))
 
-(let next-node-ids (fn [[value Graph] [id String]] -> (List String)
-  (map (fn [[candidate Edge]] -> String (get (get candidate "to") "id"))
-    (filter (fn [[candidate Edge]] -> Bool
-              (= (get (get candidate "from") "id") id))
-            (get value "edges")))))
-(let path-to? (fn [[value Graph] [id String] [target String]
-                    [visited (List String)]] -> Bool
-  (if (= id target)
-    true
-    (if (not (= (count (filter (fn [[seen String]] -> Bool (= seen id)) visited)) 0))
-      false
-      (not (= (count
-        (filter (fn [[next String]] -> Bool
-                  (path-to? value next target (concat visited [id])))
-                (next-node-ids value id))) 0))))))
-(let reachable-from-root? (fn [[value Graph] [candidate StoredNode]] -> Bool
-  (not (= (count
-    (filter (fn [[start StoredNode]] -> Bool
-              (path-to? value (get start "id") (get candidate "id")
-                        (as (List String) [])))
-            (roots value))) 0))))
-(let reaches-output? (fn [[value Graph] [candidate StoredNode]] -> Bool
-  (let result (first (outputs value)))
-  (path-to? value (get candidate "id") (get result "id")
-              (as (List String) []))))
+(let enqueue-unvisited
+  (fn [[state ReachabilityState] [id String]] -> ReachabilityState
+    (if (or (get (get state "visited") id) false)
+      state
+      (as ReachabilityState
+        {:visited (assoc (get state "visited") id true)
+         :worklist (concat (get state "worklist") [id])}))))
+(let initial-reachability-state
+  (fn [[ids (List String)]] -> ReachabilityState
+    (fold enqueue-unvisited
+      (as ReachabilityState
+        {:visited (as (Map String Bool) {})
+         :worklist (as (List String) [])})
+      ids)))
+(let walk-forward
+  (fn [[analysis GraphAnalysis] [state ReachabilityState]]
+    -> (Map String Bool)
+    (let worklist (get state "worklist"))
+    (if (= (count worklist) 0)
+      (get state "visited")
+      ((fn [] -> (Map String Bool)
+        (let id (first worklist))
+        (let outgoing
+          (or (get (get analysis "edges_by_from_node") id)
+              (as (List Edge) [])))
+        (let next
+          (map (fn [[candidate Edge]] -> String
+                 (node-id (get candidate "to")))
+               outgoing))
+        (let remaining
+          (as ReachabilityState
+            {:visited (get state "visited")
+             :worklist (remove-at worklist 0)}))
+        (walk-forward analysis
+          (fold enqueue-unvisited remaining next)))))))
+(let forward-reachable (fn [[analysis GraphAnalysis]] -> (Map String Bool)
+  (walk-forward analysis
+    (initial-reachability-state
+      (map node-id (get analysis "roots"))))))
+(let walk-reverse
+  (fn [[analysis GraphAnalysis] [state ReachabilityState]]
+    -> (Map String Bool)
+    (let worklist (get state "worklist"))
+    (if (= (count worklist) 0)
+      (get state "visited")
+      ((fn [] -> (Map String Bool)
+        (let id (first worklist))
+        (let incoming
+          (or (get (get analysis "edges_by_to_node") id)
+              (as (List Edge) [])))
+        (let previous
+          (map (fn [[candidate Edge]] -> String
+                 (node-id (get candidate "from")))
+               incoming))
+        (let remaining
+          (as ReachabilityState
+            {:visited (get state "visited")
+             :worklist (remove-at worklist 0)}))
+        (walk-reverse analysis
+          (fold enqueue-unvisited remaining previous)))))))
+(let reverse-reachable
+  (fn [[analysis GraphAnalysis] [result StoredNode]] -> (Map String Bool)
+    (walk-reverse analysis
+      (initial-reachability-state [(node-id result)]))))
 
 (let factory-contract
   (fn [[entry {:identity String
@@ -574,76 +760,86 @@
 (let actor-output-wires (fn [[value Actor]] -> (List String)
   (map (fn [[output StoredPort]] -> String (get output "wire"))
        (get value "outputs"))))
-(let actor-contract-errors (fn [[contracts (List FactoryContract)] [value Actor]]
-  -> (List String)
-  (let identity (get value "factory"))
-  (let matching (filter (fn [[contract FactoryContract]] -> Bool
-                           (= (get contract "identity") identity))
-                         contracts))
-  (if (= (count matching) 0)
+(let actor-contract-errors
+  (fn [[contracts-by-id (Map String (List FactoryContract))] [value Actor]]
+    -> (List String)
+    (let identity (get value "factory"))
+    (let matching
+      (or (get contracts-by-id identity) (as (List FactoryContract) [])))
+    (if (= (count matching) 0)
       [(str (str (str "actor " (canonical (get value "id")))
                  ": factory identity ")
             (str (canonical identity) " is not present in the runtime inventory"))]
       ((fn [] -> (List String)
-      (let scheme (get (first matching) "type_scheme"))
-      (let input-wire (get (get value "input") "wire"))
-      (let accepted-inputs (get scheme "input_tags"))
-      (let output-wires (actor-output-wires value))
-      (let accepted-outputs (get scheme "outputs"))
-      (let input-errors (if (contains-string? accepted-inputs input-wire)
-                (as (List String) [])
-                [(str
-                   (str (str (str (str "actor " (canonical (get value "id")))
-                                      ": factory ")
-                                 (canonical identity))
-                            (str " rejects input wire " (canonical input-wire)))
-                   (str "; accepted input wires: " (canonical accepted-inputs)))]))
-      (let output-errors (if (all-strings-in? output-wires accepted-outputs)
-                (as (List String) [])
-                [(str
-                   (str (str (str (str "actor " (canonical (get value "id")))
-                                      ": factory ")
-                                 (canonical identity))
-                            (str " exposes output wires " (canonical output-wires)))
-                   (str "; accepted output wires: " (canonical accepted-outputs)))]))
-      (concat input-errors output-errors))))))
+        (let scheme (get (first matching) "type_scheme"))
+        (let input-wire (get (get value "input") "wire"))
+        (let accepted-inputs (get scheme "input_tags"))
+        (let output-wires (actor-output-wires value))
+        (let accepted-outputs (get scheme "outputs"))
+        (let input-errors
+          (if (contains-string? accepted-inputs input-wire)
+            (as (List String) [])
+            [(str
+               (str (str (str (str "actor " (canonical (get value "id")))
+                                  ": factory ")
+                             (canonical identity))
+                        (str " rejects input wire " (canonical input-wire)))
+               (str "; accepted input wires: " (canonical accepted-inputs)))]))
+        (let output-errors
+          (if (all-strings-in? output-wires accepted-outputs)
+            (as (List String) [])
+            [(str
+               (str (str (str (str "actor " (canonical (get value "id")))
+                                  ": factory ")
+                             (canonical identity))
+                        (str " exposes output wires " (canonical output-wires)))
+               (str "; accepted output wires: " (canonical accepted-outputs)))]))
+        (concat input-errors output-errors))))))
 
-(let actor-id-count (fn [[actors (List Actor)] [id String]] -> Int
-  (count (filter (fn [[candidate Actor]] -> Bool (= (get candidate "id") id)) actors))))
-(let actor-ids-valid? (fn [[value Graph]] -> Bool
-  (= (count (filter (fn [[candidate Actor]] -> Bool
-                      (not (= (actor-id-count (graph-actors value)
-                                              (get candidate "id")) 1)))
-                    (graph-actors value))) 0)))
-(let actor-by-id-exists? (fn [[actors (List Actor)] [id String]] -> Bool
-  (= (actor-id-count actors id) 1)))
+(let has-node-conflicts? (fn [[analysis GraphAnalysis]] -> Bool
+  (not (= (count
+    (filter (fn [[candidate StoredNode]] -> Bool
+              (let matching
+                (or (get (get analysis "nodes_by_id") (node-id candidate))
+                    (as (List StoredNode) [])))
+              (if (= (count matching) 0)
+                false
+                (not (= (first matching) candidate))))
+            (get analysis "all_nodes")))
+    0))))
+(let actor-ids-valid? (fn [[analysis GraphAnalysis]] -> Bool
+  (= (count
+    (filter (fn [[candidate Actor]] -> Bool
+              (not (= (indexed-count (get analysis "actors_by_id")
+                                     (actor-id candidate))
+                      1)))
+            (get analysis "actors")))
+    0)))
 (let same-port-address? (fn [[left StoredPort] [right StoredPort]] -> Bool
-  (if (= (get left "actor") (get right "actor"))
-    (= (get left "wire") (get right "wire"))
-    false)))
-(let port-is-output? (fn [[actors (List Actor)] [value StoredPort]] -> Bool
-  (= (count (flat-map (fn [[candidate Actor]] -> (List StoredPort)
-    (filter (fn [[output StoredPort]] -> Bool
-              (if (same-port-address? output value)
-                (descriptor-accepts? (get output "type") (get value "type"))
-                false))
-            (get candidate "outputs"))) actors)) 1)))
-(let port-is-input? (fn [[actors (List Actor)] [value StoredPort]] -> Bool
-  (= (count (filter (fn [[candidate Actor]] -> Bool
-    (let input (get candidate "input"))
-    (if (same-port-address? input value)
-      (descriptor-accepts? (get input "type") (get value "type")) false)) actors)) 1)))
-(let route-id (fn [[value StoredRoute]] -> String (get value "id")))
-(let incoming-routes-to (fn [[routes (List StoredRoute)] [input StoredPort]]
-  -> (List StoredRoute)
-  (sort-by route-id
-    (filter (fn [[candidate StoredRoute]] -> Bool
-              (same-port-address? (get candidate "to") input))
-            routes))))
-(let messages-to (fn [[messages (List Message)] [input StoredPort]] -> (List Message)
-  (filter (fn [[candidate Message]] -> Bool
-            (same-port-address? (get candidate "to") input))
-          messages)))
+  (= (port-address-key left) (port-address-key right))))
+(let port-is-output?
+  (fn [[analysis GraphAnalysis] [value StoredPort]] -> Bool
+    (let candidates
+      (or (get (get analysis "output_ports_by_address")
+               (port-address-key value))
+          (as (List StoredPort) [])))
+    (= (count
+      (filter (fn [[output StoredPort]] -> Bool
+                (descriptor-accepts? (get output "type") (get value "type")))
+              candidates))
+      1)))
+(let port-is-input?
+  (fn [[analysis GraphAnalysis] [value StoredPort]] -> Bool
+    (let candidates
+      (or (get (get analysis "input_actors_by_address")
+               (port-address-key value))
+          (as (List Actor) [])))
+    (= (count
+      (filter (fn [[candidate Actor]] -> Bool
+                (descriptor-accepts? (get (get candidate "input") "type")
+                                     (get value "type")))
+              candidates))
+      1)))
 (let port-address (fn [[value StoredPort]] -> String
   (str (get value "actor") (str "." (get value "wire")))))
 (let describe-route-source (fn [[route StoredRoute]] -> String
@@ -653,64 +849,6 @@
               :type (get source "type")})))
 (let describe-message-source (fn [[message Message]] -> String
   (str "initial message type " (canonical (get message "semantic_type")))))
-(let actor-input-sources (fn [[value Graph] [candidate Actor]] -> (List String)
-  (let input (get candidate "input"))
-  (concat
-    (map describe-route-source (incoming-routes-to (graph-routes value) input))
-    (map describe-message-source (messages-to (graph-messages value) input)))))
-(let actor-input-source-types (fn [[value Graph] [candidate Actor]]
-  -> (List TypeDescriptor)
-  (let input (get candidate "input"))
-  (concat
-      (map (fn [[route StoredRoute]] -> TypeDescriptor
-             (get (get route "from") "type"))
-           (incoming-routes-to (graph-routes value) input))
-      (map (fn [[message Message]] -> TypeDescriptor
-             (get message "semantic_type"))
-           (messages-to (graph-messages value) input)))))
-(let actor-input-coverage-valid? (fn [[value Graph] [candidate Actor]] -> Bool
-  (descriptor-input-covered-by?
-    (get (get candidate "input") "type")
-    (actor-input-source-types value candidate))))
-(let route-handler-types (fn [[routes (List StoredRoute)] [output StoredPort]]
-  -> (List TypeDescriptor)
-  (map (fn [[route StoredRoute]] -> TypeDescriptor
-         (get (get route "to") "type"))
-       (filter (fn [[candidate StoredRoute]] -> Bool
-                 (same-port-address? (get candidate "from") output))
-               routes))))
-(let rule-handler-types (fn [[rules (List Rule)] [output StoredPort]]
-  -> (List TypeDescriptor)
-  (map (fn [[candidate Rule]] -> TypeDescriptor
-         (get (get candidate "on") "type"))
-       (filter (fn [[candidate Rule]] -> Bool
-                 (let handler (get candidate "on"))
-                 (if (= (get handler "actor") (get output "actor"))
-                     (= (get handler "wire") (get output "wire"))
-                     false))
-               rules))))
-(let terminal-output? (fn [[value Graph] [output StoredPort]] -> Bool
-  (not (= (count
-    (filter (fn [[candidate StoredNode]] -> Bool
-              (if (= (get candidate "role") "output")
-                (= (get candidate "output") output)
-                false))
-            (graph-nodes value))) 0))))
-(let actor-output-coverage-valid? (fn [[value Graph] [rules (List Rule)]
-                                         [output StoredPort]] -> Bool
-  (if (terminal-output? value output)
-    true
-    (descriptor-output-covered-by?
-      (get output "type")
-      (concat (route-handler-types (graph-routes value) output)
-              (rule-handler-types rules output))))))
-(let actor-outputs-coverage-valid? (fn [[value Graph] [rules (List Rule)]
-                                          [candidate Actor]] -> Bool
-  (= (count
-       (filter (fn [[output StoredPort]] -> Bool
-                 (not (actor-output-coverage-valid? value rules output)))
-               (get candidate "outputs")))
-     0)))
 (let describe-route-handler (fn [[route StoredRoute]] -> String
   (let target (get route "to"))
   (canonical {:kind "route"
@@ -721,188 +859,455 @@
               :id (get candidate "id")
               :function (get candidate "fn")
               :type (get (get candidate "on") "type")})))
-(let output-handlers (fn [[value Graph] [rules (List Rule)] [output StoredPort]]
-  -> (List String)
+(let actor-input-sources (fn [[analysis GraphAnalysis] [candidate Actor]] -> (List String)
+  (let key (port-address-key (get candidate "input")))
   (concat
-    (map describe-route-handler
-      (filter (fn [[candidate StoredRoute]] -> Bool
-                (same-port-address? (get candidate "from") output))
-              (graph-routes value)))
-    (map describe-rule-handler
-      (filter (fn [[candidate Rule]] -> Bool
-                (same-port-address? (get candidate "on") output)) rules)))))
-(let route-valid? (fn [[actors (List Actor)] [value StoredRoute]] -> Bool
-  (if (port-is-output? actors (get value "from"))
-    (if (port-is-input? actors (get value "to"))
-      (descriptor-accepts? (get (get value "to") "type")
-                           (get (get value "from") "type"))
-      false)
-    false)))
+    (map describe-route-source (or (get (get analysis "diagnostic_routes_by_input") key)
+                                  (as (List StoredRoute) [])))
+    (map describe-message-source (or (get (get analysis "messages_by_input") key)
+                                    (as (List Message) []))))))
+(let output-handlers
+  (fn [[analysis GraphAnalysis] [rules-by-output (Map String (List Rule))]
+       [output StoredPort]] -> (List String)
+    (let key (port-address-key output))
+    (concat
+      (map describe-route-handler (or (get (get analysis "routes_by_output") key)
+                                     (as (List StoredRoute) [])))
+      (map describe-rule-handler (or (get rules-by-output key) (as (List Rule) []))))))
 
-(let validate-with-rules (fn [[value Graph] [rules (List Rule)]
-                              [contracts (List FactoryContract)]]
-  -> (core.validated.Validated String Graph)
-  (let all-rules (concat (graph-rules value) rules))
-  (let nodes (graph-nodes value))
-    (let actors (graph-actors value))
-    (let bad-roots (filter (fn [[candidate StoredNode]] -> Bool
-                       (not (root-shape-valid? value candidate))) nodes))
-    (let bad-outputs (filter (fn [[candidate StoredNode]] -> Bool
-                         (not (output-shape-valid? value candidate))) nodes))
-    (let unreachable (filter (fn [[candidate StoredNode]] -> Bool
-                        (not (reachable-from-root? value candidate))) nodes))
-    (let dead (if (= (count (outputs value)) 1)
-                 (filter (fn [[candidate StoredNode]] -> Bool
-                           (not (reaches-output? value candidate))) nodes)
-                 nodes))
-    (let contract-errors (flat-map
-                            (fn [[candidate Actor]] -> (List String)
-                              (actor-contract-errors contracts candidate))
-                            actors))
-    (let bad-boundaries (filter (fn [[candidate StoredNode]] -> Bool
-                            (not (boundary-valid? candidate))) nodes))
-    (let bad-input-coverage (filter (fn [[candidate Actor]] -> Bool
-                                (not (actor-input-coverage-valid? value candidate))) actors))
+(let actor-input-source-types
+  (fn [[analysis GraphAnalysis] [candidate Actor]] -> (List TypeDescriptor)
+    (let key (port-address-key (get candidate "input")))
+    (let incoming
+      (or (get (get analysis "routes_by_input") key)
+          (as (List StoredRoute) [])))
+    (let messages
+      (or (get (get analysis "messages_by_input") key)
+          (as (List Message) [])))
+    (concat
+      (map (fn [[route StoredRoute]] -> TypeDescriptor
+             (get (get route "from") "type"))
+           incoming)
+      (map (fn [[message Message]] -> TypeDescriptor
+             (get message "semantic_type"))
+           messages))))
+(let actor-input-coverage-valid?
+  (fn [[analysis GraphAnalysis] [candidate Actor]] -> Bool
+    (descriptor-input-covered-by?
+      (get (get candidate "input") "type")
+      (actor-input-source-types analysis candidate))))
+(let route-handler-types
+  (fn [[analysis GraphAnalysis] [output StoredPort]] -> (List TypeDescriptor)
+    (map (fn [[route StoredRoute]] -> TypeDescriptor
+           (get (get route "to") "type"))
+         (or (get (get analysis "routes_by_output")
+                  (port-address-key output))
+             (as (List StoredRoute) [])))))
+(let rule-handler-types
+  (fn [[rules-by-output (Map String (List Rule))] [output StoredPort]]
+    -> (List TypeDescriptor)
+    (map (fn [[candidate Rule]] -> TypeDescriptor
+           (get (get candidate "on") "type"))
+         (or (get rules-by-output (port-address-key output))
+             (as (List Rule) [])))))
+(let terminal-output?
+  (fn [[analysis GraphAnalysis] [output StoredPort]] -> Bool
+    (not (= (indexed-count (get analysis "terminal_outputs_by_full_port")
+                           (full-port-key output))
+            0))))
+(let actor-output-coverage-valid?
+  (fn [[analysis GraphAnalysis]
+       [rules-by-output (Map String (List Rule))]
+       [output StoredPort]] -> Bool
+    (if (terminal-output? analysis output)
+      true
+      (descriptor-output-covered-by?
+        (get output "type")
+        (concat (route-handler-types analysis output)
+                (rule-handler-types rules-by-output output))))))
+(let actor-outputs-coverage-valid?
+  (fn [[analysis GraphAnalysis]
+       [rules-by-output (Map String (List Rule))]
+       [candidate Actor]] -> Bool
+    (= (count
+         (filter (fn [[output StoredPort]] -> Bool
+                   (not (actor-output-coverage-valid?
+                          analysis rules-by-output output)))
+                 (get candidate "outputs")))
+       0)))
+(let route-valid?
+  (fn [[analysis GraphAnalysis] [value StoredRoute]] -> Bool
+    (if (port-is-output? analysis (get value "from"))
+      (if (port-is-input? analysis (get value "to"))
+        (descriptor-accepts? (get (get value "to") "type")
+                             (get (get value "from") "type"))
+        false)
+      false)))
+
+(let validate-routes-stage
+  (fn [[value Graph] [analysis GraphAnalysis]]
+    -> (core.validated.Validated String Graph)
+    (let bad-routes
+      (filter (fn [[candidate StoredRoute]] -> Bool
+                (not (route-valid? analysis candidate)))
+              (get analysis "routes")))
+    (as (core.validated.Validated String Graph)
+      (if (= (count bad-routes) 0)
+        (core.validated.valid value)
+        (core.validated.invalid
+          ["graph contains an unknown or incompatible edge"])))))
+(let validate-contracts-stage
+  (fn [[value Graph] [analysis GraphAnalysis]
+       [contracts (List FactoryContract)]]
+    -> (core.validated.Validated String Graph)
+    (let contracts-by-id (group-by contract-id contracts))
+    (let contract-errors
+      (flat-map
+        (fn [[candidate Actor]] -> (List String)
+          (actor-contract-errors contracts-by-id candidate))
+        (get analysis "actors")))
+    (as (core.validated.Validated String Graph)
+      (if (= (count contract-errors) 0)
+        (validate-routes-stage value analysis)
+        (core.validated.invalid contract-errors)))))
+(let validate-dead-stage
+  (fn [[value Graph] [analysis GraphAnalysis]
+       [contracts (List FactoryContract)] [result StoredNode]]
+    -> (core.validated.Validated String Graph)
+    (let reverse (reverse-reachable analysis result))
+    (let dead
+      (filter (fn [[candidate StoredNode]] -> Bool
+                (not (or (get reverse (node-id candidate)) false)))
+              (get analysis "nodes")))
+    (as (core.validated.Validated String Graph)
+      (if (= (count dead) 0)
+        (validate-contracts-stage value analysis contracts)
+        (core.validated.invalid
+          ["every node must have a path to the output node"])))))
+(let validate-reachable-stage
+  (fn [[value Graph] [analysis GraphAnalysis]
+       [contracts (List FactoryContract)] [result StoredNode]]
+    -> (core.validated.Validated String Graph)
+    (let forward (forward-reachable analysis))
+    (let unreachable
+      (filter (fn [[candidate StoredNode]] -> Bool
+                (not (or (get forward (node-id candidate)) false)))
+              (get analysis "nodes")))
+    (as (core.validated.Validated String Graph)
+      (if (= (count unreachable) 0)
+        (validate-dead-stage value analysis contracts result)
+        (core.validated.invalid
+          ["every node must be reachable from a root node whose input accepts Unit"])))))
+(let validate-output-coverage-stage
+  (fn [[value Graph] [analysis GraphAnalysis]
+       [rules-by-output (Map String (List Rule))]
+       [contracts (List FactoryContract)] [result StoredNode]]
+    -> (core.validated.Validated String Graph)
     (let bad-output-coverage
       (flat-map (fn [[candidate Actor]] -> (List StoredPort)
                   (filter (fn [[output StoredPort]] -> Bool
-                            (not (actor-output-coverage-valid? value all-rules output)))
-                          (get candidate "outputs"))) actors))
-    (let root-errors
-      (map (fn [[candidate StoredNode]] -> String
-             (let input (get candidate "input"))
-             (str "root validation failed: "
-               (canonical {:node (get candidate "id")
-                           :input (port-address input)
-                           :input_type (get input "type")
-                           :reason "zero incoming edges; only inputs that accept Unit can be activated automatically"})))
-           bad-roots))
-    (let input-coverage-errors
+                            (not (actor-output-coverage-valid? analysis rules-by-output output)))
+                          (get candidate "outputs"))) (get analysis "actors")))
+    (let errors
+      (map (fn [[output StoredPort]] -> String
+             (str "output coverage failed: "
+               (canonical {:actor (get output "actor")
+                           :output (port-address output)
+                           :output_type (get output "type")
+                           :available_handlers (output-handlers analysis rules-by-output output)
+                           :reason "coverage is incomplete; every output alternative needs an ordinary route, resident subscription, or terminal output path"})))
+           bad-output-coverage))
+    (as (core.validated.Validated String Graph)
+      (if (= (count bad-output-coverage) 0)
+        (validate-reachable-stage value analysis contracts result)
+        (core.validated.invalid errors)))))
+(let validate-input-coverage-stage
+  (fn [[value Graph] [analysis GraphAnalysis]
+       [rules-by-output (Map String (List Rule))]
+       [contracts (List FactoryContract)] [result StoredNode]]
+    -> (core.validated.Validated String Graph)
+    (let bad-input-coverage
+      (filter (fn [[candidate Actor]] -> Bool
+                (not (actor-input-coverage-valid? analysis candidate)))
+              (get analysis "actors")))
+    (let errors
       (map (fn [[candidate Actor]] -> String
              (let input (get candidate "input"))
              (str "input coverage failed: "
                (canonical {:actor (get candidate "id")
                            :input (port-address input)
                            :expected_type (get input "type")
-                           :incoming_sources (actor-input-sources value candidate)
+                           :incoming_sources (actor-input-sources analysis candidate)
                            :reason "sources must be compatible and exactly cover every product occurrence; check for missing, extra, or ambiguous occurrences"})))
            bad-input-coverage))
-    (let output-coverage-errors
-      (map (fn [[output StoredPort]] -> String
-             (str "output coverage failed: "
-               (canonical {:actor (get output "actor")
-                           :output (port-address output)
-                           :output_type (get output "type")
-                           :available_handlers (output-handlers value all-rules output)
-                           :reason "coverage is incomplete; every output alternative needs an ordinary route, resident subscription, or terminal output path"})))
-           bad-output-coverage))
-    (let bad-routes (filter (fn [[candidate StoredRoute]] -> Bool
-                        (not (route-valid? actors candidate))) (graph-routes value)))
     (as (core.validated.Validated String Graph)
-    (if (= (count (get value "edges")) 0)
+      (if (= (count bad-input-coverage) 0)
+        (validate-output-coverage-stage
+          value analysis rules-by-output contracts result)
+        (core.validated.invalid errors)))))
+(let validate-outputs-stage
+  (fn [[value Graph] [analysis GraphAnalysis]
+       [rules-by-output (Map String (List Rule))]
+       [contracts (List FactoryContract)] [result StoredNode]]
+    -> (core.validated.Validated String Graph)
+    (let bad-outputs
+      (filter (fn [[candidate StoredNode]] -> Bool
+                (not (output-shape-valid? analysis candidate)))
+              (get analysis "nodes")))
+    (as (core.validated.Validated String Graph)
+      (if (= (count bad-outputs) 0)
+        (validate-input-coverage-stage
+          value analysis rules-by-output contracts result)
+        (core.validated.invalid
+          ["output nodes require an incoming edge and are terminal"])))))
+(let validate-roots-stage
+  (fn [[value Graph] [analysis GraphAnalysis]
+       [rules-by-output (Map String (List Rule))]
+       [contracts (List FactoryContract)] [result StoredNode]]
+    -> (core.validated.Validated String Graph)
+    (let bad-roots
+      (filter (fn [[candidate StoredNode]] -> Bool
+                (not (root-shape-valid? analysis candidate)))
+              (get analysis "nodes")))
+    (as (core.validated.Validated String Graph)
+      (if (= (count bad-roots) 0)
+        (validate-outputs-stage
+          value analysis rules-by-output contracts result)
+        (core.validated.invalid
+          (map (fn [[candidate StoredNode]] -> String
+             (let input (get candidate "input"))
+             (str "root validation failed: "
+               (canonical {:node (get candidate "id")
+                           :input (port-address input)
+                           :input_type (get input "type")
+                           :reason "zero incoming edges; only inputs that accept Unit can be activated automatically"}))) bad-roots))))))
+(let validate-boundaries-stage
+  (fn [[value Graph] [analysis GraphAnalysis]
+       [rules-by-output (Map String (List Rule))]
+       [contracts (List FactoryContract)] [result StoredNode]]
+    -> (core.validated.Validated String Graph)
+    (let bad-boundaries
+      (filter (fn [[candidate StoredNode]] -> Bool
+                (not (boundary-valid? candidate)))
+              (get analysis "nodes")))
+    (as (core.validated.Validated String Graph)
+      (if (= (count bad-boundaries) 0)
+        (validate-roots-stage
+          value analysis rules-by-output contracts result)
+        (core.validated.invalid
+          ["boundary node roles require their concrete source/output factory shape, and ordinary nodes cannot contain initial messages"])))))
+(let validate-unique-output-stage
+  (fn [[value Graph] [analysis GraphAnalysis] [rules (List Rule)]
+       [contracts (List FactoryContract)]]
+    -> (core.validated.Validated String Graph)
+    (let all-rules (concat (get analysis "graph_rules") rules))
+    (let rules-by-output
+      (group-by
+        (fn [[candidate Rule]] -> String
+          (port-address-key (get candidate "on")))
+        all-rules))
+    (let result (first (get analysis "outputs")))
+    (validate-boundaries-stage
+      value analysis rules-by-output contracts result)))
+(let validate-with-rules
+  (fn [[value Graph] [rules (List Rule)]
+       [contracts (List FactoryContract)]]
+    -> (core.validated.Validated String Graph)
+    (let analysis (analyze-graph value))
+    (as (core.validated.Validated String Graph)
+      (if (= (count (get analysis "edges")) 0)
         (core.validated.invalid ["graph needs at least one edge"])
-        (if (has-node-conflicts? value)
-          (core.validated.invalid ["one node id must denote one immutable node definition"])
-            (if (not (actor-ids-valid? value))
-              (core.validated.invalid ["runtime actor ids must be unique across graph nodes"])
-              (if (not (logical-paths-valid? value))
-                (core.validated.invalid ["logical node paths must be non-empty and unique"])
-                (if (not (logical-members-valid? value))
-                  (core.validated.invalid ["every runtime actor must belong to exactly one logical node"])
-                  (if (not (= (count (outputs value)) 1))
-              (core.validated.invalid ["graph needs exactly one concrete output node"])
-              (if (= (count bad-boundaries) 0)
-                (if (= (count bad-roots) 0)
-                  (if (= (count bad-outputs) 0)
-                  (if (= (count bad-input-coverage) 0)
-                    (if (= (count bad-output-coverage) 0)
-                      (if (= (count unreachable) 0)
-                        (if (= (count dead) 0)
-                          (if (= (count contract-errors) 0)
-                            (if (= (count bad-routes) 0)
-                              (core.validated.valid value)
-                              (core.validated.invalid ["graph contains an unknown or incompatible edge"]))
-                            (core.validated.invalid contract-errors))
-                          (core.validated.invalid ["every node must have a path to the output node"]))
-                        (core.validated.invalid ["every node must be reachable from a root node whose input accepts Unit"]))
-                      (core.validated.invalid output-coverage-errors))
-                    (core.validated.invalid input-coverage-errors))
-                  (core.validated.invalid ["output nodes require an incoming edge and are terminal"]))
-                (core.validated.invalid root-errors))
-              (core.validated.invalid ["boundary node roles require their concrete source/output factory shape, and ordinary nodes cannot contain initial messages"])))))))))))
+        (if (has-node-conflicts? analysis)
+          (core.validated.invalid
+            ["one node id must denote one immutable node definition"])
+          (if (not (actor-ids-valid? analysis))
+            (core.validated.invalid
+              ["runtime actor ids must be unique across graph nodes"])
+            (if (not (logical-paths-valid? value))
+              (core.validated.invalid
+                ["logical node paths must be non-empty and unique"])
+              (if (not (logical-members-valid? value))
+                (core.validated.invalid
+                  ["every runtime actor must belong to exactly one logical node"])
+                (if (not (= (count (get analysis "outputs")) 1))
+                  (core.validated.invalid
+                    ["graph needs exactly one concrete output node"])
+                  (validate-unique-output-stage
+                    value analysis rules contracts))))))))))
 
 (let validate (fn [[value Graph] [contracts (List FactoryContract)]]
   -> (core.validated.Validated String Graph)
   (validate-with-rules value (as (List Rule) []) contracts)))
 
-(let zip-route-assignments (fn [[routes (List StoredRoute)] [positions (List Int)]]
-  -> (List AssignedRoute)
-  (if (= (count routes) 0)
-    (as (List AssignedRoute) [])
-    (concat
-      [(as AssignedRoute {:route (first routes)
-                          :product_position (first positions)})]
-      (zip-route-assignments (remove-at routes 0) (remove-at positions 0))))))
-(let assigned-routes-to (fn [[routes (List StoredRoute)] [input StoredPort]]
-  -> (List AssignedRoute)
-  (let incoming (incoming-routes-to routes input))
-  (let sources (map (fn [[candidate StoredRoute]] -> TypeDescriptor
-                       (get (get candidate "from") "type"))
-                     incoming))
-  (if (= (count incoming) 0)
+(let zip-route-assignments
+  (fn [[routes (List StoredRoute)] [positions (List Int)]]
+    -> (List AssignedRoute)
+    (if (= (count routes) 0)
+      (as (List AssignedRoute) [])
+      (concat
+        [(as AssignedRoute
+           {:route (first routes)
+            :product_position (first positions)})]
+        (zip-route-assignments
+          (remove-at routes 0) (remove-at positions 0))))))
+(let route-destination-descriptor-key
+  (fn [[value StoredRoute]] -> String
+    (canonical (get (get value "to") "type"))))
+(let assigned-route-for
+  (fn [[assignments (List AssignedRoute)] [candidate StoredRoute]]
+    -> AssignedRoute
+    (first
+      (filter (fn [[assigned AssignedRoute]] -> Bool
+                (= (get (get assigned "route") "id")
+                   (get candidate "id")))
+              assignments))))
+(let descriptor-assignment-index
+  (fn [[routes (List StoredRoute)]
+       [descriptor-keys (List String)]
+       [routes-by-descriptor (Map String (List StoredRoute))]
+       [sources (List TypeDescriptor)]]
+    -> (Map String (List AssignedRoute))
+    (fold
+      (fn [[out (Map String (List AssignedRoute))]
+           [descriptor-key String]]
+        -> (Map String (List AssignedRoute))
+        (let descriptor-routes
+          (or (get routes-by-descriptor descriptor-key)
+              (as (List StoredRoute) [])))
+        (let positions
+          (descriptor-input-assignments
+            (get (get (first descriptor-routes) "to") "type")
+            sources))
+        (assoc out descriptor-key
+          (zip-route-assignments routes positions)))
+      (as (Map String (List AssignedRoute)) {})
+      descriptor-keys)))
+(let assigned-input-bucket
+  (fn [[routes (List StoredRoute)]] -> (List AssignedRoute)
+    (if (= (count routes) 0)
       (as (List AssignedRoute) [])
       ((fn [] -> (List AssignedRoute)
-        (let positions (descriptor-input-assignments (get input "type") sources))
-        (zip-route-assignments incoming positions))))))
-(let assigned-route (fn [[routes (List StoredRoute)] [candidate StoredRoute]]
-  -> AssignedRoute
-  (first
-    (filter (fn [[assigned AssignedRoute]] -> Bool
-              (= (get (get assigned "route") "id") (get candidate "id")))
-            (assigned-routes-to routes (get candidate "to"))))))
-(let assigned-routes (fn [[routes (List StoredRoute)]]
-  -> (List AssignedRoute)
-  (map (fn [[candidate StoredRoute]] -> AssignedRoute
-         (assigned-route routes candidate))
-       routes)))
-(let assigned-routes-from (fn [[routes (List AssignedRoute)] [actor-id String]]
-  -> (List AssignedRoute)
-  (filter (fn [[candidate AssignedRoute]] -> Bool
-            (= (get (get (get candidate "route") "from") "actor") actor-id))
-          routes)))
-(let actor-routes (fn [[routes (List AssignedRoute)] [value Actor]]
-  -> (Map String (List LowerDestination))
-  (fold (fn [[out (Map String (List LowerDestination))] [assigned AssignedRoute]]
+        (let sources
+          (map (fn [[candidate StoredRoute]] -> TypeDescriptor
+                 (get (get candidate "from") "type"))
+               routes))
+        (let routes-by-descriptor
+          (group-by route-destination-descriptor-key routes))
+        (let assignments-by-descriptor
+          (descriptor-assignment-index
+            routes (keys routes-by-descriptor) routes-by-descriptor sources))
+        (map
+          (fn [[candidate StoredRoute]] -> AssignedRoute
+            (assigned-route-for
+              (or (get assignments-by-descriptor
+                       (route-destination-descriptor-key candidate))
+                  (as (List AssignedRoute) []))
+              candidate))
+          routes))))))
+(let route-assignment-key
+  (fn [[value StoredRoute]] -> String
+    (canonical
+      {:input (port-address-key (get value "to"))
+       :route (route-id value)})))
+(let assigned-route-key
+  (fn [[value AssignedRoute]] -> String
+    (route-assignment-key (get value "route"))))
+(let route-assignment-index
+  (fn [[route-input-addresses (List String)]
+       [routes-by-input (Map String (List StoredRoute))]]
+    -> (Map String (List AssignedRoute))
+    (group-by assigned-route-key
+      (flat-map
+        (fn [[address String]] -> (List AssignedRoute)
+          (assigned-input-bucket
+            (or (get routes-by-input address)
+                (as (List StoredRoute) []))))
+        route-input-addresses))))
+(let reconstruct-assigned-routes
+  (fn [[routes (List StoredRoute)]
+       [assignments-by-key (Map String (List AssignedRoute))]]
+    -> (List AssignedRoute)
+    (map
+      (fn [[candidate StoredRoute]] -> AssignedRoute
+        (first
+          (or (get assignments-by-key (route-assignment-key candidate))
+              (as (List AssignedRoute) []))))
+      routes)))
+(let assigned-routes-from-indexes
+  (fn [[routes (List StoredRoute)]
+       [route-input-addresses (List String)]
+       [routes-by-input (Map String (List StoredRoute))]]
+    -> (List AssignedRoute)
+    (reconstruct-assigned-routes routes
+      (route-assignment-index route-input-addresses routes-by-input))))
+(let assigned-analysis-routes
+  (fn [[analysis GraphAnalysis]] -> (List AssignedRoute)
+    (assigned-routes-from-indexes
+      (get analysis "routes")
+      (get analysis "route_input_addresses")
+      (get analysis "routes_by_input"))))
+(let assigned-routes
+  (fn [[routes (List StoredRoute)]] -> (List AssignedRoute)
+    (let route-input-addresses
+      (ordered-strings
+        (map (fn [[candidate StoredRoute]] -> String
+               (port-address-key (get candidate "to")))
+             routes)))
+    (let routes-by-input
+      (group-by
+        (fn [[candidate StoredRoute]] -> String
+          (port-address-key (get candidate "to")))
+        (sort-by route-id routes)))
+    (assigned-routes-from-indexes
+      routes route-input-addresses routes-by-input)))
+(let assigned-route-source-actor
+  (fn [[candidate AssignedRoute]] -> String
+    (get (get (get candidate "route") "from") "actor")))
+(let actor-routes
+  (fn [[routes (List AssignedRoute)]]
     -> (Map String (List LowerDestination))
-    (let candidate (get assigned "route"))
-    (let from (get candidate "from"))
-    (let to (get candidate "to"))
-    (let wire (get from "wire"))
-    (let old (or (get out wire) (as (List LowerDestination) [])))
-    (let destination (as LowerDestination {:actor (get to "actor")
-                                             :wire (get to "wire")
-                                             :edge_id (get candidate "id")
-                                             :source_type_id (get from "type_id")
-                                             :destination_type_id (get to "type_id")
-                                             :product_position (get assigned "product_position")}))
-    (assoc out wire (concat old [destination])))
-    (as (Map String (List LowerDestination)) {})
-    (assigned-routes-from routes (get value "id")))))
-(let lower-actor-with-routes (fn [[routes (List AssignedRoute)] [value Actor]] -> LowerActor
-  (as LowerActor {:id (get value "id") :factory (get value "factory")
-                  :type_arguments (get value "type_arguments") :input (get value "input")
-                  :outputs (get value "outputs") :params (get value "params")
-                  :routes (actor-routes routes value)})))
+    (fold
+      (fn [[out (Map String (List LowerDestination))]
+           [assigned AssignedRoute]]
+        -> (Map String (List LowerDestination))
+        (let candidate (get assigned "route"))
+        (let from (get candidate "from"))
+        (let to (get candidate "to"))
+        (let wire (get from "wire"))
+        (let old
+          (or (get out wire) (as (List LowerDestination) [])))
+        (let destination
+          (as LowerDestination
+            {:actor (get to "actor")
+             :wire (get to "wire")
+             :edge_id (get candidate "id")
+             :source_type_id (get from "type_id")
+             :destination_type_id (get to "type_id")
+             :product_position (get assigned "product_position")}))
+        (assoc out wire (concat old [destination])))
+      (as (Map String (List LowerDestination)) {})
+      routes)))
+(let lower-actor-with-routes
+  (fn [[routes (List AssignedRoute)] [value Actor]] -> LowerActor
+    (as LowerActor
+      {:id (get value "id")
+       :factory (get value "factory")
+       :type_arguments (get value "type_arguments")
+       :input (get value "input")
+       :outputs (get value "outputs")
+       :params (get value "params")
+       :routes (actor-routes routes)})))
 (let lower-message (fn [[value Message]] -> LowerMessage
   (let to (get value "to"))
   (as LowerMessage {:to (get to "actor")
-                      :semantic_type (get value "semantic_type")
-                      :semantic_type_id (get value "semantic_type_id")
-                      :content (get value "content")})))
+                    :semantic_type (get value "semantic_type")
+                    :semantic_type_id (get value "semantic_type_id")
+                    :content (get value "content")})))
 (let lower-rule (fn [[value Rule]] -> LowerRule
   (as LowerRule {:id (get value "id") :on (get value "on") :fn (get value "fn")})))
-(let result-boundary (fn [[value Graph]] -> ResultBoundary
-  (as ResultBoundary {:from (get (first (outputs value)) "output")})))
+(let result-boundary (fn [[analysis GraphAnalysis]] -> ResultBoundary
+  (as ResultBoundary
+    {:from (get (first (get analysis "outputs")) "output")})))
 (let actor-descriptors (fn [[actors (List Actor)]] -> (List TypeDescriptor)
   (flat-map (fn [[candidate Actor]] -> (List TypeDescriptor)
               (concat [(get (get candidate "input") "type")]
@@ -923,17 +1328,18 @@
   (map (fn [[candidate Rule]] -> TypeDescriptor
          (get (get candidate "on") "type"))
        rules)))
-(let program-descriptors (fn [[topology Graph] [rules (List Rule)]]
-  -> (List TypeDescriptor)
-  (concat
+(let program-descriptors
+  (fn [[analysis GraphAnalysis] [rules (List Rule)]]
+    -> (List TypeDescriptor)
     (concat
       (concat
-        (actor-descriptors (graph-actors topology))
-        (route-descriptors (graph-routes topology)))
-      (concat
-        (message-descriptors (graph-messages topology))
-        (rule-descriptors rules)))
-    [(get (get (first (outputs topology)) "output") "type")])))
+        (concat
+          (actor-descriptors (get analysis "actors"))
+          (route-descriptors (get analysis "routes")))
+        (concat
+          (message-descriptors (get analysis "messages"))
+          (rule-descriptors rules)))
+      [(get (get (first (get analysis "outputs")) "output") "type")])))
 (let delta-descriptors (fn [[value Delta]] -> (List TypeDescriptor)
   (concat
     (concat
@@ -942,18 +1348,25 @@
     (message-descriptors (get value "messages")))))
 (let lower-program (fn [[value Program]] -> Modification
   (let topology (get value "graph"))
-  (let actors (graph-actors topology))
-  (let routes (assigned-routes (graph-routes topology)))
+  (let analysis (analyze-graph topology))
+  (let assigned (assigned-analysis-routes analysis))
+  (let assigned-by-source
+    (group-by assigned-route-source-actor assigned))
+  (let rules (get value "rules"))
   (as Modification
-      {:actors (map (fn [[candidate Actor]] -> LowerActor
-                      (lower-actor-with-routes routes candidate))
-                    actors)
-       :messages (map lower-message (graph-messages topology))
-       :kills (as (List String) [])
-       :rules (map lower-rule (get value "rules"))
-       :types (descriptor-table (program-descriptors topology (get value "rules")))
-       :nodes (graph-logical-nodes topology)
-       :result (result-boundary topology)})))
+    {:actors
+       (map (fn [[candidate Actor]] -> LowerActor
+              (lower-actor-with-routes
+                (or (get assigned-by-source (actor-id candidate))
+                    (as (List AssignedRoute) []))
+                candidate))
+            (get analysis "actors"))
+     :messages (map lower-message (get analysis "messages"))
+     :kills (as (List String) [])
+     :rules (map lower-rule rules)
+     :types (descriptor-table (program-descriptors analysis rules))
+     :nodes (graph-logical-nodes topology)
+     :result (result-boundary analysis)})))
 (let lower (fn [[value Graph]] -> Modification
   (lower-program (program value (as (List Rule) [])))))
 
@@ -998,7 +1411,6 @@
              :kills (get change "kills")})))
 (let lower-delta (fn [[value Delta]] -> LowerDelta
   (let actors (get value "actors"))
-  (let routes (assigned-routes (get value "routes")))
   (let authored-messages (get value "messages"))
   ;; Deltas retain no exposed Node boundaries. Preserve their existing exact
   ;; Unit actor bootstrap rule rather than activate newly eligible internals.
@@ -1007,9 +1419,15 @@
               (= (get input "type") (type-evidence (type-tag Unit))))
       (map (fn [[candidate Actor]] -> StoredPort
              (get candidate "input")) actors)))
+  (let routes (assigned-routes (get value "routes")))
+  (let routes-by-source
+    (group-by assigned-route-source-actor routes))
   (as LowerDelta
     {:actors (map (fn [[candidate Actor]] -> LowerActor
-                    (lower-actor-with-routes routes candidate))
+                    (lower-actor-with-routes
+                      (or (get routes-by-source (actor-id candidate))
+                          (as (List AssignedRoute) []))
+                      candidate))
                   actors)
      :messages (map lower-message
                  (concat authored-messages
