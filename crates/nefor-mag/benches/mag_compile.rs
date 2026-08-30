@@ -107,12 +107,19 @@ fn write_json(root: &Path, path: &str, value: &impl serde::Serialize, label: &st
     eprintln!("wrote {label} {}", path.display());
 }
 
+fn nefor_module_roots(root: &Path) -> Vec<ModuleRoot> {
+    vec![
+        ModuleRoot::implementation("nefor-mag", root.join("mag/lib")),
+        ModuleRoot::workload(
+            "nefor-agent-config",
+            root.join("examples/nefor-agent/mag/lib"),
+        ),
+    ]
+}
+
 fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
     let core_roots = vec![];
-    let nefor_roots = vec![
-        root.join("mag/lib"),
-        root.join("examples/nefor-agent/mag/lib"),
-    ];
+    let nefor_roots = nefor_module_roots(root);
     let nefor_inputs = json!({"factory_contracts": contracts});
     let mut cases = vec![fixture(
         scratch,
@@ -220,10 +227,7 @@ fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
 
 fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
     let core = vec![];
-    let nefor = vec![
-        root.join("mag/lib"),
-        root.join("examples/nefor-agent/mag/lib"),
-    ];
+    let nefor = nefor_module_roots(root);
     let inputs = json!({"factory_contracts": contracts});
     let mut out = Vec::new();
     let errors = [

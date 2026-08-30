@@ -18,11 +18,14 @@ fn nearest_rank_tail_is_exact_for_tiny_and_default_samples() {
 }
 
 #[test]
-fn fixture_fingerprint_covers_every_workload_input() {
-    let scratch = scratch("fingerprint");
-    let module_root = scratch.join("modules");
-    fs::create_dir_all(&module_root).unwrap();
-    fs::write(module_root.join("library.mag"), "(let value 1)").unwrap();
+fn fixture_fingerprint_separates_workload_and_implementation_roots() {
+    let scratch = scratch("fingerprint-roots");
+    let workload_root = scratch.join("workload-modules");
+    let implementation_root = scratch.join("implementation-modules");
+    fs::create_dir_all(&workload_root).unwrap();
+    fs::create_dir_all(&implementation_root).unwrap();
+    fs::write(workload_root.join("library.mag"), "(let value 1)").unwrap();
+    fs::write(implementation_root.join("library.mag"), "(let value 1)").unwrap();
     let mut case = fixture(
         &scratch,
         "case",
@@ -30,7 +33,46 @@ fn fixture_fingerprint_covers_every_workload_input() {
         "oracle",
         None,
         "(artifact {})",
-        vec![module_root.clone()],
+        vec![
+            ModuleRoot::workload("workload", workload_root.clone()),
+            ModuleRoot::implementation("implementation", implementation_root.clone()),
+        ],
+        json!({}),
+        None,
+        "static",
+        Some(json!({})),
+        vec![],
+    );
+    let initial = fixture_fingerprint(&case);
+
+    fs::write(workload_root.join("library.mag"), "(let value 2)").unwrap();
+    assert_ne!(initial, fixture_fingerprint(&case));
+    fs::write(workload_root.join("library.mag"), "(let value 1)").unwrap();
+
+    fs::write(implementation_root.join("library.mag"), "(let value 2)").unwrap();
+    assert_eq!(initial, fixture_fingerprint(&case));
+
+    case.module_roots[2].role = ModuleRootRole::Workload;
+    assert_ne!(initial, fixture_fingerprint(&case));
+    case.module_roots[2].role = ModuleRootRole::Implementation;
+
+    case.module_roots.swap(0, 1);
+    assert_ne!(initial, fixture_fingerprint(&case));
+
+    fs::remove_dir_all(scratch).ok();
+}
+
+#[test]
+fn fixture_fingerprint_covers_non_module_workload_inputs() {
+    let scratch = scratch("fingerprint-inputs");
+    let mut case = fixture(
+        &scratch,
+        "case",
+        "oracle",
+        "oracle",
+        None,
+        "(artifact {})",
+        vec![],
         json!({"nested":{"value":1}}),
         None,
         "static",
@@ -41,36 +83,27 @@ fn fixture_fingerprint_covers_every_workload_input() {
     let initial = fixture_fingerprint(&case);
 
     case.inputs = json!({"nested":{"value":2}});
-    let input_changed = fixture_fingerprint(&case);
-    assert_ne!(initial, input_changed);
+    assert_ne!(initial, fixture_fingerprint(&case));
     case.inputs = json!({"nested":{"value":1}});
 
-    fs::write(module_root.join("library.mag"), "(let value 2)").unwrap();
-    let module_changed = fixture_fingerprint(&case);
-    assert_ne!(initial, module_changed);
-    fs::write(module_root.join("library.mag"), "(let value 1)").unwrap();
-
-    let second_root = scratch.join("second-modules");
-    fs::create_dir_all(&second_root).unwrap();
-    fs::write(second_root.join("other.mag"), "(let other 2)").unwrap();
-    case.module_roots.push(second_root);
-    let roots_changed = fixture_fingerprint(&case);
-    assert_ne!(initial, roots_changed);
-    case.module_roots.pop();
+    fs::write(
+        case.source_dir.join("main.mag"),
+        "(artifact {:changed true})",
+    )
+    .unwrap();
+    assert_ne!(initial, fixture_fingerprint(&case));
+    fs::write(case.source_dir.join("main.mag"), "(artifact {})").unwrap();
 
     write_fixture_file(&mut case, "data.txt", b"second");
-    let file_changed = fixture_fingerprint(&case);
-    assert_ne!(initial, file_changed);
+    assert_ne!(initial, fixture_fingerprint(&case));
     write_fixture_file(&mut case, "data.txt", b"first");
 
     case.expected_artifact = Some(json!({"changed":true}));
-    let outcome_changed = fixture_fingerprint(&case);
-    assert_ne!(initial, outcome_changed);
+    assert_ne!(initial, fixture_fingerprint(&case));
     case.expected_artifact = Some(json!({}));
 
     case.probes = vec![probe_success("run", json!(1), json!(2))];
-    let probe_changed = fixture_fingerprint(&case);
-    assert_ne!(initial, probe_changed);
+    assert_ne!(initial, fixture_fingerprint(&case));
 
     fs::remove_dir_all(scratch).ok();
 }
@@ -119,7 +152,33 @@ fn gate_artifact_rejects_performance_semantics_and_workload_independently() {
     assert!(!comparison.overall.passed);
 }
 
+#[test]
+fn gate_rejects_p90_regression_independently_of_target_median() {
+    let baseline = report_with_p90(100, 100, 100, "artifact", "workload");
+    let candidate = report_with_p90(80, 111, 50, "artifact", "workload");
+
+    let comparison = compare_reports(&baseline, &candidate, true);
+    assert!(comparison.target_median.passed);
+    assert!(comparison.target_logical_counter.passed);
+    assert!(!comparison.all_case_p90.passed);
+    assert!(comparison
+        .all_case_p90
+        .detail
+        .contains("nefor-linear-validate-12"));
+    assert!(!comparison.overall.passed);
+}
+
 fn report(median: u64, equality_visits: u64, artifact_hash: &str, workload: &str) -> Report {
+    report_with_p90(median, median, equality_visits, artifact_hash, workload)
+}
+
+fn report_with_p90(
+    median: u64,
+    p90: u64,
+    equality_visits: u64,
+    artifact_hash: &str,
+    workload: &str,
+) -> Report {
     let mut counters = OperationCounters::default();
     counters.value_equality_visits = equality_visits;
     Report {
@@ -157,7 +216,7 @@ fn report(median: u64, equality_visits: u64, artifact_hash: &str, workload: &str
                 min: median,
                 median,
                 mean: median,
-                p90: median,
+                p90,
                 p95: median,
                 max: median,
             },

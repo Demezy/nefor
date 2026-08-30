@@ -10,9 +10,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const SCHEMA_VERSION: u8 = 3;
-pub const COMPARISON_SCHEMA_VERSION: u8 = 1;
+pub const COMPARISON_SCHEMA_VERSION: u8 = 2;
 pub const MAX_TARGET_MEDIAN_RATIO: f64 = 0.90;
 pub const MIN_TARGET_COUNTER_REDUCTION: f64 = 0.40;
+pub const MAX_CASE_P90_RATIO: f64 = 1.10;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Report {
@@ -137,6 +138,46 @@ pub struct Probe {
     expected: ProbeExpectation,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModuleRootRole {
+    Workload,
+    Implementation,
+}
+
+impl ModuleRootRole {
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Workload => "workload",
+            Self::Implementation => "implementation",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleRoot {
+    pub label: String,
+    pub path: PathBuf,
+    pub role: ModuleRootRole,
+}
+
+impl ModuleRoot {
+    pub fn workload(label: impl Into<String>, path: PathBuf) -> Self {
+        Self {
+            label: label.into(),
+            path,
+            role: ModuleRootRole::Workload,
+        }
+    }
+
+    pub fn implementation(label: impl Into<String>, path: PathBuf) -> Self {
+        Self {
+            label: label.into(),
+            path,
+            role: ModuleRootRole::Implementation,
+        }
+    }
+}
+
 pub struct Fixture {
     pub name: String,
     pub family: String,
@@ -144,7 +185,7 @@ pub struct Fixture {
     pub size: Option<usize>,
     pub source_dir: PathBuf,
     pub entry: String,
-    pub module_roots: Vec<PathBuf>,
+    pub module_roots: Vec<ModuleRoot>,
     pub inputs: Value,
     pub fixture_fingerprint: String,
     pub fixture_files: Vec<PathBuf>,
@@ -261,19 +302,24 @@ fn load(
     case: &Fixture,
     profiler: Option<&nefor_mag::profile::CompileProfiler>,
 ) -> Result<nefor_mag::LoadedProgram, MagError> {
+    let module_roots = case
+        .module_roots
+        .iter()
+        .map(|root| root.path.clone())
+        .collect::<Vec<_>>();
     match profiler {
         Some(profiler) => nefor_mag::load_with_profiler(
             &case.source_dir,
             &case.entry,
             case.inputs.clone(),
-            &case.module_roots,
+            &module_roots,
             profiler,
         ),
         None => nefor_mag::load_with_inputs_and_module_roots(
             &case.source_dir,
             &case.entry,
             case.inputs.clone(),
-            &case.module_roots,
+            &module_roots,
         ),
     }
 }
@@ -324,7 +370,7 @@ pub fn fixture(
     stage: &str,
     size: Option<usize>,
     source: &str,
-    roots: Vec<PathBuf>,
+    roots: Vec<ModuleRoot>,
     inputs: Value,
     expected_error: Option<&str>,
     policy: &str,
@@ -335,7 +381,7 @@ pub fn fixture(
     fs::create_dir_all(&dir).expect("create fixture dir");
     let entry = "main.mag";
     fs::write(dir.join(entry), source).expect("write fixture");
-    let mut module_roots = vec![dir.clone()];
+    let mut module_roots = vec![ModuleRoot::workload("fixture-source", dir.clone())];
     module_roots.extend(roots);
     Fixture {
         name: name.into(),
@@ -455,9 +501,21 @@ pub fn fixture_fingerprint(case: &Fixture) -> String {
     }
 
     for (index, root) in case.module_roots.iter().enumerate() {
-        hash_part(&mut digest, &format!("module-root:{index}"), b"");
+        hash_part(
+            &mut digest,
+            &format!("module-root:{index}:label"),
+            root.label.as_bytes(),
+        );
+        hash_part(
+            &mut digest,
+            &format!("module-root:{index}:role"),
+            root.role.marker().as_bytes(),
+        );
+        if root.role == ModuleRootRole::Implementation {
+            continue;
+        }
         let mut modules = Vec::new();
-        collect_mag_files(root, root, &mut modules);
+        collect_mag_files(&root.path, &root.path, &mut modules);
         modules.sort_by(|left, right| left.0.cmp(&right.0));
         for (relative, path) in modules {
             let bytes = fs::read(&path)
@@ -676,6 +734,7 @@ pub struct ComparisonArtifact {
     pub clean_candidate: GateVerdict,
     pub target_median: GateVerdict,
     pub target_logical_counter: GateVerdict,
+    pub all_case_p90: GateVerdict,
     pub cases: Vec<CaseComparison>,
     pub oracles: Vec<OracleComparison>,
     pub overall: GateVerdict,
@@ -694,6 +753,7 @@ pub struct SourceIdentity {
 pub struct Thresholds {
     pub target_median_ratio_max: f64,
     pub target_logical_counter_reduction_min: f64,
+    pub case_p90_ratio_max: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -840,11 +900,29 @@ pub fn compare_reports(baseline: &Report, candidate: &Report, gate: bool) -> Com
             "candidate commit and tree are clean".into()
         },
     );
+    let p90_violations = cases
+        .iter()
+        .filter(|comparison| comparison.p90_ratio > MAX_CASE_P90_RATIO)
+        .map(|comparison| format!("{} ({:.5})", comparison.name, comparison.p90_ratio))
+        .collect::<Vec<_>>();
+    let all_case_p90 = verdict(
+        p90_violations.is_empty(),
+        if p90_violations.is_empty() {
+            format!("every timed case p90 ratio is <= {:.2}", MAX_CASE_P90_RATIO)
+        } else {
+            format!(
+                "timed cases exceeding p90 ratio {:.2}: {}",
+                MAX_CASE_P90_RATIO,
+                p90_violations.join(", ")
+            )
+        },
+    );
     let passed = compatibility.passed
         && semantic.passed
         && clean_candidate.passed
         && target_median.passed
-        && target_logical_counter.passed;
+        && target_logical_counter.passed
+        && all_case_p90.passed;
     ComparisonArtifact {
         schema_version: COMPARISON_SCHEMA_VERSION,
         mode: if gate { "gate" } else { "comparison" }.into(),
@@ -853,6 +931,7 @@ pub fn compare_reports(baseline: &Report, candidate: &Report, gate: bool) -> Com
         thresholds: Thresholds {
             target_median_ratio_max: MAX_TARGET_MEDIAN_RATIO,
             target_logical_counter_reduction_min: MIN_TARGET_COUNTER_REDUCTION,
+            case_p90_ratio_max: MAX_CASE_P90_RATIO,
         },
         quantile_policy: candidate.metadata.quantile_policy.clone(),
         compatibility,
@@ -860,6 +939,7 @@ pub fn compare_reports(baseline: &Report, candidate: &Report, gate: bool) -> Com
         clean_candidate,
         target_median,
         target_logical_counter,
+        all_case_p90,
         cases,
         oracles,
         overall: verdict(

@@ -19,7 +19,15 @@ just bench-mag --baseline baseline.json \
 Gate mode requires a clean candidate tree. It rejects workload-definition or
 benchmark-environment mismatches before treating performance results as comparable,
 and independently requires semantic equivalence, the selected target's median ratio
-to be at most `0.90`, its selected logical counter reduction to be at least `40%`.
+to be at most `0.90`, its selected logical counter reduction to be at least `40%`,
+and every timed case's p90 ratio to be at most `1.10`. The comparison artifact
+lists every case that violates the p90 gate.
+
+Module roots have stable labels and explicit workload or implementation roles. Root
+order, labels, and roles are fingerprinted. Workload-root `.mag` contents contribute
+to workload identity; implementation-root contents do not, so a library candidate can
+be compared with the baseline whose workload it implements. Absolute root paths never
+contribute to the workload hash.
 
 Distributions use the empirical **nearest-rank** quantile: for percentile `p` and
 `n` sorted observations, select one-based rank `ceil(p × n)`. This conservative
