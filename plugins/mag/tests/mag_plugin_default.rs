@@ -453,6 +453,7 @@ mod tests {
             Some("load-1"),
             "sha256:abc",
             serde_json::json!({"actors": []}),
+            None,
             &["stub".to_owned(), "sink".to_owned()],
             serde_json::json!([{"identity": "nefor.factory.stub"}]),
         );

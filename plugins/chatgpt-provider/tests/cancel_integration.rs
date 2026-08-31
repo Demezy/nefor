@@ -620,6 +620,7 @@ async fn concurrent_direct_completions_keep_request_local_tool_allowlists() {
 struct ScriptedSseReply {
     body: String,
     declared_length: usize,
+    linger: Duration,
 }
 
 impl ScriptedSseReply {
@@ -628,6 +629,7 @@ impl ScriptedSseReply {
         Self {
             declared_length: body.len(),
             body,
+            linger: Duration::ZERO,
         }
     }
 
@@ -636,6 +638,15 @@ impl ScriptedSseReply {
         Self {
             declared_length: body.len() + 64,
             body,
+            linger: Duration::ZERO,
+        }
+    }
+
+    fn stalled(linger: Duration) -> Self {
+        Self {
+            body: String::new(),
+            declared_length: 64,
+            linger,
         }
     }
 }
@@ -661,6 +672,9 @@ async fn serve_scripted_sse(
             .write_all(reply.body.as_bytes())
             .await
             .expect("write body");
+        if !reply.linger.is_zero() {
+            tokio::time::sleep(reply.linger).await;
+        }
         stream.shutdown().await.expect("close response");
     }
 }
@@ -668,6 +682,18 @@ async fn serve_scripted_sse(
 async fn start_direct_harness(
     base_url: String,
     client: ResponsesClient,
+) -> (
+    mpsc::Sender<Result<Envelope, TransportError>>,
+    mpsc::Receiver<PluginOutgoing>,
+    tokio::task::JoinHandle<Result<(), chatgpt_provider::error::ChatgptError>>,
+) {
+    start_direct_harness_with_budget(base_url, client, None).await
+}
+
+async fn start_direct_harness_with_budget(
+    base_url: String,
+    client: ResponsesClient,
+    retry_budget: Option<Duration>,
 ) -> (
     mpsc::Sender<Result<Envelope, TransportError>>,
     mpsc::Receiver<PluginOutgoing>,
@@ -686,7 +712,7 @@ async fn start_direct_harness(
     );
     let _ = auth.apply_auth_set("test-token".into()).await;
     let (out_tx, out_rx) = mpsc::channel::<PluginOutgoing>(256);
-    let ctx = DispatcherContext::new(
+    let mut ctx = DispatcherContext::new(
         args,
         chats,
         auth,
@@ -695,6 +721,9 @@ async fn start_direct_harness(
         Arc::new(client),
         out_tx,
     );
+    if let Some(retry_budget) = retry_budget {
+        ctx = ctx.with_pre_output_retry_budget(retry_budget);
+    }
     let (in_tx, in_rx) = mpsc::channel::<Result<Envelope, TransportError>>(64);
     let loop_handle = tokio::spawn(run_dispatch_loop(ctx, in_rx));
     (in_tx, out_rx, loop_handle)
@@ -729,6 +758,44 @@ async fn finish_harness(
 ) {
     drop(in_tx);
     let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
+}
+
+async fn assert_truncated_observation_blocks_replay(
+    request_id: &str,
+    event_body: &str,
+    expected_reason: &str,
+) -> Value {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let server = tokio::spawn(serve_scripted_sse(
+        listener,
+        vec![ScriptedSseReply::truncated(event_body)],
+        hits.clone(),
+    ));
+    let base_url = format!("http://{addr}");
+    let (in_tx, mut out_rx, loop_handle) =
+        start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
+
+    submit_direct_completion(&in_tx, request_id).await;
+    let decision = wait_for_completion_event(
+        &mut out_rx,
+        request_id,
+        "retry_decision",
+        Duration::from_secs(3),
+    )
+    .await
+    .expect("retry decision");
+    assert_eq!(decision["retry"], false);
+    assert_eq!(decision["retry_reason"], expected_reason);
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "request was not replayed");
+    wait_for_completion_event(&mut out_rx, request_id, "error", Duration::from_secs(3))
+        .await
+        .expect("terminal error");
+
+    finish_harness(in_tx, loop_handle).await;
+    server.await.expect("server");
+    Value::Object(decision)
 }
 
 #[tokio::test]
@@ -790,6 +857,70 @@ async fn truncated_body_before_output_replays_once_then_succeeds() {
 }
 
 #[tokio::test]
+async fn replay_body_read_stops_at_the_absolute_recovery_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let server = tokio::spawn(serve_scripted_sse(
+        listener,
+        vec![
+            ScriptedSseReply::truncated(""),
+            ScriptedSseReply::stalled(Duration::from_millis(1_200)),
+        ],
+        hits.clone(),
+    ));
+    let base_url = format!("http://{addr}");
+    let retry_budget = Duration::from_millis(600);
+    let (in_tx, mut out_rx, loop_handle) = start_direct_harness_with_budget(
+        base_url.clone(),
+        test_responses_client(base_url),
+        Some(retry_budget),
+    )
+    .await;
+
+    let started = tokio::time::Instant::now();
+    submit_direct_completion(&in_tx, "bounded-replay").await;
+    let first = wait_for_completion_event(
+        &mut out_rx,
+        "bounded-replay",
+        "retry_decision",
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("first retry decision");
+    assert_eq!(first["retry"], true);
+    let final_decision = wait_for_completion_event(
+        &mut out_rx,
+        "bounded-replay",
+        "retry_decision",
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("deadline decision");
+    assert_eq!(final_decision["retry"], false);
+    assert_eq!(final_decision["retry_reason"], "elapsed_budget_exhausted");
+    assert_eq!(final_decision["failure_kind"], "recovery_timeout");
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "replay must stop at its short recovery budget, not the 300s SSE idle timeout"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+    let failed = wait_for_completion_event(
+        &mut out_rx,
+        "bounded-replay",
+        "error",
+        Duration::from_secs(2),
+    )
+    .await
+    .expect("bounded replay failure");
+    assert_eq!(failed["stream_attempts"], 2);
+
+    finish_harness(in_tx, loop_handle).await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
 async fn pre_output_transport_retries_stop_at_attempt_limit() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -831,6 +962,68 @@ async fn pre_output_transport_retries_stop_at_attempt_limit() {
 
     finish_harness(in_tx, loop_handle).await;
     server.await.expect("server");
+}
+
+#[tokio::test]
+async fn out_of_order_function_argument_events_never_replay() {
+    let cases = [
+        (
+            "function-args-delta",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\",\"item_id\":\"fc_unknown\"}\n\n",
+        ),
+        (
+            "function-args-done",
+            "data: {\"type\":\"response.function_call_arguments.done\",\"arguments\":\"{}\",\"item_id\":\"fc_unknown\"}\n\n",
+        ),
+    ];
+    for (request_id, event_body) in cases {
+        let decision = assert_truncated_observation_blocks_replay(
+            request_id,
+            event_body,
+            "tool_call_state_exists",
+        )
+        .await;
+        assert_eq!(decision["tool_state_blocked"], true);
+    }
+}
+
+#[tokio::test]
+async fn reasoning_output_item_observation_never_replays() {
+    let decision = assert_truncated_observation_blocks_replay(
+        "reasoning-item-added",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}}\n\n",
+        "native_output_state_exists",
+    )
+    .await;
+    assert_eq!(decision["native_output_state_blocked"], true);
+    assert_eq!(decision["visible_state_blocked"], false);
+}
+
+#[tokio::test]
+async fn empty_text_and_reasoning_observations_never_replay() {
+    let cases = [
+        (
+            "empty-text-delta",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"\"}\n\n",
+        ),
+        (
+            "empty-reasoning-delta",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"\",\"item_id\":\"rs_1\"}\n\n",
+        ),
+        (
+            "empty-reasoning-part",
+            "data: {\"type\":\"response.reasoning_summary_part.added\",\"summary_index\":0,\"item_id\":\"rs_1\"}\n\n",
+        ),
+    ];
+    for (request_id, event_body) in cases {
+        let decision = assert_truncated_observation_blocks_replay(
+            request_id,
+            event_body,
+            "visible_or_reasoning_state_exists",
+        )
+        .await;
+        assert_eq!(decision["visible_state_blocked"], true);
+    }
 }
 
 #[tokio::test]

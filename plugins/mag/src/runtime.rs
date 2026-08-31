@@ -1868,16 +1868,3 @@ async fn send_ready(out_tx: &mpsc::Sender<PluginOutgoing>) -> Result<(), MagErro
         .map_err(|_| TransportError::WriterClosed)?;
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::is_provider_diagnostic_event;
-
-    #[test]
-    fn retry_decisions_use_the_existing_provider_diagnostic_path() {
-        assert!(is_provider_diagnostic_event("retry_decision"));
-        assert!(is_provider_diagnostic_event("error"));
-        assert!(!is_provider_diagnostic_event("text_delta"));
-        assert!(!is_provider_diagnostic_event("completed"));
-    }
-}

@@ -84,6 +84,13 @@ pub enum ChatgptError {
     #[error("responses SSE stream idle timeout after {timeout_ms}ms without activity")]
     ResponsesStreamIdleTimeout { timeout_ms: u64 },
 
+    /// An automatically replayed request consumed the remaining recovery
+    /// window while opening or reading its response. The first request keeps
+    /// the normal provider timeouts; only replay work is constrained by this
+    /// absolute deadline.
+    #[error("responses SSE recovery budget exhausted after {budget_ms}ms")]
+    ResponsesStreamRecoveryTimeout { budget_ms: u64 },
+
     /// The transport closed cleanly without a semantic terminal event.
     /// A clean EOF is not proof that the Responses API completed the turn.
     #[error("responses SSE stream ended before a terminal event")]

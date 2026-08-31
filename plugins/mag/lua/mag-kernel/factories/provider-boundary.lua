@@ -489,8 +489,8 @@ function M.construct(id, params, emit, options)
   function instance.handle_observation(observation)
     local value = observation and observation.value
     if observation.binding == "conversation" and type(value) == "table" then
-      if value.kind == "retry" then
-        facts:retry(value.error or value.message or "provider_retry", value)
+      if value.kind == "retry" or (value.kind == "retry_decision" and value.retry == true) then
+        facts:retry(value.error or value.message or value.retry_reason or "provider_retry", value)
       elseif value.kind == "usage" then
         provider_round_metadata = value
         terminal_metadata.usage = value.usage or value.result or value

@@ -319,6 +319,8 @@ async fn two_agents_one_killed_mid_flight_the_other_completes() {
     let mut a2_pending_request: Option<String> = None;
     let mut a2_kill_sent = false;
     let mut a2_void_sent = false;
+    let mut retry_diagnostic_seen = false;
+    let mut retry_marker_became_transcript = false;
     let request_kind = "conversation.provider.invoke.request";
     let mut provider_rounds = std::collections::HashMap::<String, usize>::new();
     let run_result;
@@ -428,6 +430,22 @@ async fn two_agents_one_killed_mid_flight_the_other_completes() {
                             &mut stdin,
                             completion_event(
                                 &request_id,
+                                "retry_decision",
+                                json!({
+                                    "retry": true,
+                                    "retry_reason": "retryable_pre_output_failure",
+                                    "error": "retry-marker"
+                                })
+                                .as_object()
+                                .expect("retry diagnostic fields")
+                                .clone(),
+                            ),
+                        )
+                        .await;
+                        send_event(
+                            &mut stdin,
+                            completion_event(
+                                &request_id,
                                 "tool_call",
                                 json!({ "id": "c1", "name": "echo", "arguments": { "text": "hi" } })
                                     .as_object()
@@ -518,6 +536,35 @@ async fn two_agents_one_killed_mid_flight_the_other_completes() {
                     .await;
                 }
             }
+            "conversation.fact.append" => {
+                let fact = body
+                    .get("fact")
+                    .and_then(Value::as_object)
+                    .expect("conversation fact");
+                match fact.get("kind").and_then(Value::as_str) {
+                    Some("retry_started") => {
+                        assert_eq!(
+                            fact.get("reason").and_then(Value::as_str),
+                            Some("retry-marker")
+                        );
+                        assert_eq!(
+                            fact.get("provenance")
+                                .and_then(|value| value.get("kind"))
+                                .and_then(Value::as_str),
+                            Some("retry_decision")
+                        );
+                        retry_diagnostic_seen = true;
+                    }
+                    Some("content_chunk_appended") => {
+                        retry_marker_became_transcript |= fact
+                            .get("chunk")
+                            .and_then(|value| value.get("data"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| text.contains("retry-marker"));
+                    }
+                    _ => {}
+                }
+            }
             "mag.run_result" => {
                 run_result = body;
                 break;
@@ -526,6 +573,17 @@ async fn two_agents_one_killed_mid_flight_the_other_completes() {
         }
     }
 
+    assert!(
+        retry_diagnostic_seen,
+        "retry_decision reached the canonical conversation diagnostic path"
+    );
+    assert!(
+        !retry_marker_became_transcript,
+        "provider retry diagnostics stay out of assistant transcript content"
+    );
+
+    // The provider request remained open after the non-terminal diagnostic:
+    // its following tool call and completion drove the agent to a final result.
     // ── SIX STEPS #1: two agents in one graph. ──────────────────────────────
     assert!(
         ready_ids.iter().any(|id| id == "a1.llm") && ready_ids.iter().any(|id| id == "a2.llm"),
