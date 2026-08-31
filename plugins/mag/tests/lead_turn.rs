@@ -594,12 +594,24 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         }
     });
     handshake(&mut reader, &mut stdin).await;
+    let assert_snapshot = |request: &Map<String, Value>| {
+        assert_eq!(
+            request.get("model").and_then(Value::as_str),
+            Some("snapshot-dynamic")
+        );
+        assert_eq!(
+            request.get("reasoning_effort").and_then(Value::as_str),
+            Some("high")
+        );
+    };
     send_event(
         &mut stdin,
-        obj(json!({"kind":"mag.load","id":"dynamic-load",
+        obj(
+            json!({"kind":"mag.load","id":"dynamic-load","resident":true,
       "source_dir":starter_dir().to_string_lossy(),
       "module_roots":module_roots(),
-      "entry":"agentic-loop/dynamic-tasks.mag"})),
+      "entry":"agentic-loop/dynamic-tasks.mag"}),
+        ),
     )
     .await;
     let loaded = next_event_of_kind(&mut reader, "mag.loaded").await;
@@ -618,17 +630,21 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         &mut stdin,
         obj(json!({"kind":"mag.execute","id":"dynamic-exec",
       "run_id":"dynamic-run","run_name":"dynamic-tasks","session_id":SESSION_ID,
-      "principal":"lead","conversation_id":CONVERSATION_ID})),
+      "principal":"lead","conversation_id":CONVERSATION_ID,"program_id":"dynamic-load",
+      "model_snapshot":{"provider":"mock-provider","model":"snapshot-dynamic","reasoning_effort":"high"}})),
     )
     .await;
 
     let planner = next_provider_request(&mut reader, "mock-provider").await;
+    assert_snapshot(&planner);
     let planner_id = planner["request_id"].as_str().unwrap().to_owned();
     complete_chat(&mut reader, &mut stdin, &planner_id,
       r#"{"value":[{"task":"a","description":"first","dependent_tasks":[]},{"task":"a.collect","description":"second","dependent_tasks":["a"]}]}"#).await;
 
     let first = next_provider_request(&mut reader, "mock-provider").await;
     let second = next_provider_request(&mut reader, "mock-provider").await;
+    assert_snapshot(&first);
+    assert_snapshot(&second);
     let first_id = first["request_id"].as_str().unwrap().to_owned();
     let second_id = second["request_id"].as_str().unwrap().to_owned();
     assert_ne!(
@@ -657,6 +673,7 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
 
     let (summary_create, summary_facts) =
         next_provider_request_with_facts(&mut reader, "mock-provider").await;
+    assert_snapshot(&summary_create);
     assert_eq!(
         summary_create.pointer_str("/output_schema/type"),
         Some("object")

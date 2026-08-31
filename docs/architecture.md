@@ -109,6 +109,17 @@ behind every entry point — the `/model` picker, `/model <provider> <model>`, a
   guess. `/model <provider> <model>` is the user's own authority and does not
   require catalog membership, so a model id containing slashes works.
 
+`lua/libs/agentic-loop` mirrors the same request/acknowledgment distinction for
+execution policy. A `chat.model.set` records only a pending pair; the effective
+provider/model changes only on the matching `chat.model.set_ack`, and rejection
+leaves the prior pair intact. Its `model_snapshot()` accessor returns an owned
+copy of that acknowledged state. `lua/libs/lead-workflow` samples the accessor
+exactly once after a fresh delegated program finishes validation and puts the
+closed snapshot on `mag.execute`; `mag.apply` inherits the target run context
+instead of sampling again. The MAG kernel applies that immutable snapshot at
+lazy LLM construction, so runtime expansion cannot observe a later `/model`
+selection.
+
 Route enforcement is deliberately out of scope: the composition targets a
 selection at a provider actor, and that actor decides what it will serve. Nefor
 does not template per-model endpoints or carry routing metadata that would let

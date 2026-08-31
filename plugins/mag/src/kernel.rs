@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
 
 use crate::error::MagError;
@@ -42,6 +43,33 @@ pub struct BeginRunOutcome {
     pub ok: bool,
     pub error: Option<String>,
     pub reaped: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionModelSnapshot {
+    pub provider: String,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+impl ExecutionModelSnapshot {
+    pub fn validate(self) -> Result<Self, String> {
+        if self.provider.is_empty() {
+            return Err("model_snapshot.provider must be a non-empty string".to_owned());
+        }
+        if self.model.is_empty() {
+            return Err("model_snapshot.model must be a non-empty string".to_owned());
+        }
+        if self.reasoning_effort.as_deref() == Some("") {
+            return Err(
+                "model_snapshot.reasoning_effort must be a non-empty string when present"
+                    .to_owned(),
+            );
+        }
+        Ok(self)
+    }
 }
 
 /// Why a run context is torn down. Threaded through `end_run` onto every
@@ -184,7 +212,7 @@ impl LuaHost {
         run_name: &str,
         session_id: Option<&str>,
     ) -> Result<BeginRunOutcome, MagError> {
-        self.begin_run_with_principal(run_id, run_name, session_id, None, None)
+        self.begin_run_with_principal(run_id, run_name, session_id, None, None, None)
     }
 
     pub fn begin_run_with_principal(
@@ -194,6 +222,7 @@ impl LuaHost {
         session_id: Option<&str>,
         principal: Option<&str>,
         conversation_id: Option<&str>,
+        model_snapshot: Option<&ExecutionModelSnapshot>,
     ) -> Result<BeginRunOutcome, MagError> {
         let meta = self.lua.create_table()?;
         meta.set("run_id", run_id)?;
@@ -206,6 +235,9 @@ impl LuaHost {
         }
         if let Some(id) = conversation_id {
             meta.set("conversation_id", id)?;
+        }
+        if let Some(snapshot) = model_snapshot {
+            meta.set("model_snapshot", self.lua.to_value(snapshot)?)?;
         }
         let f: Function = self.kernel.get("begin_run")?;
         let res: Table = f.call::<Table>(meta)?;

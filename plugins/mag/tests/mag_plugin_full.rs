@@ -274,16 +274,16 @@ pub mod kernel {
 
     (let exact-model (fn [[model nefor.actors.ResolvedModel]]
       -> nefor.actors.ResolvedModel model))
-    (let model (as nefor.actors.ResolvedModel
+    (let resolved (as nefor.actors.ResolvedModel
       {:provider "test-provider" :model "test-model"
-       :reasoning-effort "medium"}))
+       :reasoning-effort (nefor.actors.reasoning-effort "medium")}))
 
     (let make-agent (fn [I O] [[id String] [input-type (TypeTag I)]
                                 [output-type (TypeTag O)]]
       -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
       (nefor.actors.agent exact-model
         (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel)
-          {:id id :model model
+          {:id id :model resolved
            :system "" :tools [] :da-policy (nefor.contracts.no-da-policy)
            :max-corrections 2})
         input-type output-type)))
@@ -325,6 +325,227 @@ pub mod kernel {
                 Some(20),
                 "each node is lowered once even when it appears at multiple edge boundaries"
             );
+        }
+
+        #[test]
+        fn run_model_snapshot_overrides_llm_factories_without_mutating_specs() {
+            let host = shipped_host();
+            let direct = r#"
+    (require "nefor.actors")
+    (require "nefor.artifact")
+    (require "nefor.contracts")
+    (require "nefor.graph")
+    (let exact-model (fn [[model nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel model))
+    (let resolved (as nefor.actors.ResolvedModel
+      {:provider "authored-provider" :model "authored-model"
+       :reasoning-effort (nefor.actors.reasoning-effort "authored-effort")}))
+    (let start (nefor.actors.task-source "task" "answer"))
+    (let worker (nefor.actors.agent exact-model
+      (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel)
+        {:id "worker" :model resolved :system "" :tools []
+         :da-policy (nefor.contracts.no-da-policy) :max-corrections 2})
+      (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer)))
+    (let result (nefor.graph.output "result"
+      (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+    (nefor.artifact.compile (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+      (nefor.graph.add-edges graph
+        [(nefor.graph.edge start worker) (nefor.graph.edge worker result)])))
+    "#;
+            let structured = direct
+                .replace(
+                    "(require \"nefor.actors\")",
+                    "(require \"nefor.actors\")\n    (type Answer {:answer String})",
+                )
+                .replace("nefor.contracts.TextAnswer)))", "Answer)))")
+                .replace(
+                    "(type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))",
+                    "(type-tag (| Answer nefor.contracts.AgentError))",
+                );
+
+            for (run_id, source, factory) in [
+                ("snapshot-direct", direct.to_owned(), "nefor.factory.llm"),
+                (
+                    "snapshot-structured",
+                    structured,
+                    "nefor.factory.structured-output",
+                ),
+            ] {
+                let modification = compile_mag_source(&host, run_id, &source);
+                let snapshot = ExecutionModelSnapshot {
+                    provider: "snapshot-provider".to_owned(),
+                    model: "snapshot-model".to_owned(),
+                    reasoning_effort: None,
+                };
+                let begun = host
+                    .begin_run_with_principal(
+                        run_id,
+                        run_id,
+                        Some("session"),
+                        Some("subagent"),
+                        Some("conversation"),
+                        Some(&snapshot),
+                    )
+                    .expect("begin snapshotted run");
+                assert!(begun.ok, "begin failed: {:?}", begun.error);
+                host.drain_emits().expect("drain begin");
+                let outcome = host.start(run_id, &modification).expect("start run");
+                assert!(outcome.ok, "start failed: {:?}", outcome.error);
+                let emits = host.drain_emits().expect("drain start");
+                let spawned = emits
+                    .iter()
+                    .find(|event| {
+                        event["kind"] == "mag.actor_spawned" && event["id"] == "worker.llm"
+                    })
+                    .expect("llm spawn event");
+                assert_eq!(spawned["factory"], factory);
+                assert_eq!(spawned["spec"]["params"]["provider"], "authored-provider");
+                assert_eq!(spawned["spec"]["params"]["model"], "authored-model");
+                assert_eq!(
+                    spawned["spec"]["params"]["reasoning_effort"]["present"], true,
+                    "inventory retains authored optional effort"
+                );
+                let invoke = tool_invoke(&emits, "snapshot-provider");
+                assert_eq!(invoke["args"]["model"], "snapshot-model");
+                assert!(
+                    invoke["args"].get("reasoning_effort").is_none(),
+                    "snapshot omission clears authored effort: {invoke:?}"
+                );
+
+                if run_id == "snapshot-direct" {
+                    let later_snapshot = ExecutionModelSnapshot {
+                        provider: "later-provider".to_owned(),
+                        model: "later-model".to_owned(),
+                        reasoning_effort: Some("low".to_owned()),
+                    };
+                    let begun = host
+                        .begin_run_with_principal(
+                            "snapshot-later",
+                            "snapshot-later",
+                            Some("session"),
+                            Some("subagent"),
+                            Some("conversation-later"),
+                            Some(&later_snapshot),
+                        )
+                        .expect("begin later run");
+                    assert!(begun.ok);
+                    host.drain_emits().expect("drain later begin");
+                    let outcome = host
+                        .start("snapshot-later", &modification)
+                        .expect("start later run");
+                    assert!(outcome.ok, "later start failed: {:?}", outcome.error);
+                    let later_emits = host.drain_emits().expect("drain later invoke");
+                    let later_invoke = tool_invoke(&later_emits, "later-provider");
+                    assert_eq!(later_invoke["args"]["model"], "later-model");
+
+                    let patch_source = direct
+                        .replace("\"task\"", "\"patch-task\"")
+                        .replace("\"worker\"", "\"patch\"")
+                        .replace("\"result\"", "\"patch-result\"");
+                    let mut patch = compile_mag_source(&host, "snapshot-patch", &patch_source);
+                    patch
+                        .as_object_mut()
+                        .expect("patch object")
+                        .remove("result");
+                    let outcome = host.apply(run_id, &patch).expect("apply snapshotted patch");
+                    assert!(outcome.ok, "patch failed: {:?}", outcome.error);
+                    let patch_emits = host.drain_emits().expect("drain patch invoke");
+                    let patch_invoke = tool_invoke(&patch_emits, "snapshot-provider");
+                    assert_eq!(patch_invoke["args"]["model"], "snapshot-model");
+                    assert!(patch_invoke["args"].get("reasoning_effort").is_none());
+                    let patch_spawn = patch_emits
+                        .iter()
+                        .find(|event| {
+                            event["kind"] == "mag.actor_spawned" && event["id"] == "patch.llm"
+                        })
+                        .expect("patch llm spawn");
+                    assert_eq!(
+                        patch_spawn["spec"]["params"]["provider"],
+                        "authored-provider"
+                    );
+
+                    host.end_run("snapshot-later", TeardownReason::Killed)
+                        .expect("end later run");
+                    host.drain_emits().expect("drain later end");
+                }
+
+                host.end_run(run_id, TeardownReason::Killed)
+                    .expect("end snapshot run");
+                host.drain_emits().expect("drain end");
+            }
+
+            let modification = compile_mag_source(&host, "snapshot-effort", direct);
+            let snapshot = ExecutionModelSnapshot {
+                provider: "snapshot-provider".to_owned(),
+                model: "snapshot-model".to_owned(),
+                reasoning_effort: Some("high".to_owned()),
+            };
+            let begun = host
+                .begin_run_with_principal(
+                    "snapshot-effort",
+                    "snapshot-effort",
+                    Some("session"),
+                    Some("subagent"),
+                    Some("conversation"),
+                    Some(&snapshot),
+                )
+                .expect("begin effort run");
+            assert!(begun.ok);
+            host.drain_emits().expect("drain begin");
+            let outcome = host
+                .start("snapshot-effort", &modification)
+                .expect("start effort run");
+            assert!(outcome.ok, "start failed: {:?}", outcome.error);
+            let emits = host.drain_emits().expect("drain effort invoke");
+            let invoke = tool_invoke(&emits, "snapshot-provider");
+            assert_eq!(invoke["args"]["reasoning_effort"], "high");
+            host.end_run("snapshot-effort", TeardownReason::Killed)
+                .expect("end effort run");
+            host.drain_emits().expect("drain effort end");
+
+            let begun = host
+                .begin_run("snapshot-fallback", "snapshot-fallback", Some("session"))
+                .expect("begin fallback run");
+            assert!(begun.ok);
+            host.drain_emits().expect("drain fallback begin");
+            let outcome = host
+                .start("snapshot-fallback", &modification)
+                .expect("start fallback run");
+            assert!(outcome.ok, "fallback start failed: {:?}", outcome.error);
+            let emits = host.drain_emits().expect("drain fallback invoke");
+            let invoke = tool_invoke(&emits, "authored-provider");
+            assert_eq!(invoke["args"]["model"], "authored-model");
+            assert_eq!(invoke["args"]["reasoning_effort"], "authored-effort");
+            host.end_run("snapshot-fallback", TeardownReason::Killed)
+                .expect("end fallback run");
+            host.drain_emits().expect("drain fallback end");
+
+            let mut malformed = modification;
+            let llm = malformed["actors"]
+                .as_array_mut()
+                .expect("actors")
+                .iter_mut()
+                .find(|actor| actor["id"] == "worker.llm")
+                .expect("worker llm");
+            llm["params"]["reasoning_effort"] = serde_json::json!({"present": true, "value": ""});
+            let begun = host
+                .begin_run("malformed-effort", "malformed-effort", Some("session"))
+                .expect("begin malformed run");
+            assert!(begun.ok);
+            host.drain_emits().expect("drain malformed begin");
+            let outcome = host
+                .start("malformed-effort", &malformed)
+                .expect("start malformed run");
+            assert!(outcome.ok, "initial modification still applies");
+            let failure = host
+                .take_run_failed("malformed-effort")
+                .expect("take malformed failure")
+                .expect("malformed effort fails construction");
+            assert!(failure.contains("present=true requires a non-empty value"));
+            assert!(host
+                .drain_emits()
+                .expect("drain malformed failure")
+                .iter()
+                .all(|event| event["kind"] != "tool.invoke"));
         }
 
         #[test]
@@ -512,6 +733,7 @@ pub mod kernel {
                     Some("session-1"),
                     Some("subagent"),
                     Some("conversation-1"),
+                    None,
                 )
                 .expect("begin provenance run");
             assert!(begun.ok, "begin failed: {:?}", begun.error);
@@ -1337,7 +1559,7 @@ mod tests {
 (require "nefor.contracts")
 (require "nefor.graph")
 (let exact-model (fn [[selected nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel selected))
-(let configured-model (as nefor.actors.ResolvedModel {:provider "mock-provider" :model "mock-model" :reasoning-effort "medium"}))
+(let configured-model (as nefor.actors.ResolvedModel {:provider "mock-provider" :model "mock-model" :reasoning-effort (nefor.actors.reasoning-effort "medium")}))
 (let start (nefor.actors.task-source "task" "test"))
 (let worker (nefor.actors.agent exact-model
         (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "worker"
@@ -1470,7 +1692,7 @@ mod tests {
 (require "nefor.contracts")
 (require "nefor.graph")
 (let exact-model (fn [[selected nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel selected))
-(let configured-model (as nefor.actors.ResolvedModel {:provider "mock-provider" :model "mock-model" :reasoning-effort "medium"}))
+(let configured-model (as nefor.actors.ResolvedModel {:provider "mock-provider" :model "mock-model" :reasoning-effort (nefor.actors.reasoning-effort "medium")}))
 (let start (nefor.actors.task-source "task" "test"))
 (let worker (nefor.actors.agent exact-model
         (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "worker"

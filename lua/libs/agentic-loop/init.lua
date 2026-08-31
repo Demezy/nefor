@@ -65,6 +65,7 @@ local state = {
     system           = nil,
     ambient_context  = nil,
   },
+  pending_model_selection = nil, ---@type table|nil { provider, model }
 
   -- The shipped turn-program. `source_dir`/`entry` are composition-owned
   -- (configure { lead_program = … }); the artifact is loaded once per
@@ -134,13 +135,22 @@ local function append_conversation_fact(fact)
   })
 end
 
-local function configuration_provenance()
-  return {
-    surface = "lead",
+local function model_snapshot()
+  local snapshot = {
     provider = state.config.provider,
     model = state.config.model,
-    reasoning_effort = state.config.reasoning_effort,
   }
+  if type(state.config.reasoning_effort) == "string"
+      and state.config.reasoning_effort ~= "" then
+    snapshot.reasoning_effort = state.config.reasoning_effort
+  end
+  return snapshot
+end
+
+local function configuration_provenance()
+  local snapshot = model_snapshot()
+  snapshot.surface = "lead"
+  return snapshot
 end
 
 local function ensure_conversation_id()
@@ -903,13 +913,36 @@ end
 local function handle_chat_model_set(body)
   local model = body.model
   local provider = body.provider
-  if type(model) == "string" and #model > 0 then
-    nefor.log.info("agentic-loop: chat.model.set received", {
-      provider = provider, model = model, previous = state.config.model,
-    })
-    set_model(provider, model)
-    request_context("model-changed")
+  if type(provider) ~= "string" or provider == ""
+      or type(model) ~= "string" or model == "" then return end
+  nefor.log.info("agentic-loop: chat.model.set received", {
+    provider = provider, model = model, previous = state.config.model,
+  })
+  state.pending_model_selection = { provider = provider, model = model }
+end
+
+local function handle_chat_model_set_ack(body)
+  local pending = state.pending_model_selection
+  if type(pending) ~= "table" or body.provider ~= pending.provider
+      or body.model ~= pending.model then return end
+  local provider_changed = state.config.provider ~= pending.provider
+  state.config.provider = pending.provider
+  state.config.model = pending.model
+  if type(body.reasoning_effort) == "string" and body.reasoning_effort ~= "" then
+    state.config.reasoning_effort = body.reasoning_effort
+  elseif provider_changed then
+    state.config.reasoning_effort = nil
   end
+  state.pending_model_selection = nil
+  record_configuration()
+  request_context("model-changed")
+end
+
+local function handle_chat_model_set_failed(body)
+  local pending = state.pending_model_selection
+  if type(pending) ~= "table" or body.provider ~= pending.provider
+      or body.model ~= pending.model then return end
+  state.pending_model_selection = nil
 end
 
 local function handle_chat_reasoning_set(body)
@@ -1360,6 +1393,7 @@ local function teardown_for_session_end()
   state.pending_system_seed = nil
   state.pending_compaction = nil
   state.pending_context_request = nil
+  state.pending_model_selection = nil
   emit_idle_state("session-ended")
   nefor.log.info("agentic-loop: sessions.session_end → state cleared", {})
 end
@@ -1382,6 +1416,7 @@ function M.cancel()      cancel() end
 function M.cancel_all()  return cancel_all() end
 function M.new_chat()    new_chat() end
 function M.set_model(provider, model) set_model(provider, model) end
+function M.model_snapshot() return model_snapshot() end
 function M.set_yolo(enabled) set_yolo(enabled) end
 function M.set_mode(mode) set_mode(mode) end
 
@@ -1556,6 +1591,8 @@ local function receive_msg(entry)
   if kind == "chat.interrupt"    then cancel(body.drop_queued == true); return end
   if kind == "chat.interrupt_all" then cancel_all(); return end
   if kind == "chat.model.set" then handle_chat_model_set(body); return end
+  if kind == "chat.model.set_ack" then handle_chat_model_set_ack(body); return end
+  if kind == "chat.model.set_failed" then handle_chat_model_set_failed(body); return end
   if kind == "chat.reasoning.set" then handle_chat_reasoning_set(body); return end
   if kind == "chat.compaction.request" then handle_chat_compaction_request(body); return end
 
@@ -1642,6 +1679,7 @@ M._internals  = {
       system = nil,
       ambient_context = nil,
     }
+    state.pending_model_selection = nil
     state.lead_program = {
       source_dir = nil,
       entry = "agentic-loop/lead-turn.mag",

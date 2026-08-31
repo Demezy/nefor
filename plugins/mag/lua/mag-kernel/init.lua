@@ -145,8 +145,46 @@ local function persist_modlog_entry(entry)
     tonumber(entry.seq) or -1, tostring(entry.outcome)))
 end
 
+local function is_llm_factory(factory)
+  return factory == "nefor.factory.llm" or factory == "llm"
+      or factory == "nefor.factory.structured-output" or factory == "structured-output"
+end
+
+local function lower_reasoning_effort(value)
+  if value == nil then return nil end
+  if type(value) == "string" then
+    if value == "" then return nil, "reasoning_effort must be a non-empty string when present" end
+    return value
+  end
+  if type(value) ~= "table" or type(value.present) ~= "boolean"
+      or type(value.value) ~= "string" then
+    return nil, "reasoning_effort must be a string or { present = Bool, value = String }"
+  end
+  local fields = 0
+  for key in pairs(value) do
+    if key ~= "present" and key ~= "value" then
+      return nil, "reasoning_effort record has unknown field " .. tostring(key)
+    end
+    fields = fields + 1
+  end
+  if fields ~= 2 then
+    return nil, "reasoning_effort record must contain exactly present and value"
+  end
+  if value.present then
+    if value.value == "" then
+      return nil, "reasoning_effort present=true requires a non-empty value"
+    end
+    return value.value
+  end
+  if value.value ~= "" then
+    return nil, "reasoning_effort present=false requires an empty value"
+  end
+  return nil
+end
+
 -- Build one run context. `meta` carries the host-provided run identity
--- (run_id/run_name/session_id) — injected, never ambient (docs/ir.md).
+-- (run_id/run_name/session_id/model_snapshot) — injected, never ambient
+-- (docs/ir.md).
 local function new_run_context(meta)
   run_seq = run_seq + 1
   local scope = "r" .. tostring(run_seq)
@@ -158,6 +196,8 @@ local function new_run_context(meta)
     run_name = meta.run_name,
     session_id = meta.session_id,
     principal = meta.principal,
+    model_snapshot = type(meta.model_snapshot) == "table"
+      and plain_data.copy(meta.model_snapshot) or nil,
     conversation_id = meta.conversation_id
       or (tostring(meta.session_id or "sessionless") .. "/" .. tostring(meta.run_id)),
     actor_conversations = {},
@@ -383,6 +423,20 @@ local function new_run_context(meta)
   router:set_construct(function(record)
     local emit = router:emitter(record.id)
     local actor_params = record.params or {}
+    if is_llm_factory(record.factory) then
+      local effective = {}
+      for key, value in pairs(actor_params) do effective[key] = value end
+      actor_params = effective
+      local effort, effort_error = lower_reasoning_effort(actor_params.reasoning_effort)
+      if effort_error then return nil, effort_error end
+      actor_params.reasoning_effort = effort
+      local snapshot = ctx.model_snapshot
+      if snapshot ~= nil then
+        actor_params.provider = snapshot.provider
+        actor_params.model = snapshot.model
+        actor_params.reasoning_effort = snapshot.reasoning_effort
+      end
+    end
     local explicit_conversation_id = type(actor_params.conversation_id) == "string"
         and actor_params.conversation_id ~= "" and actor_params.conversation_id or nil
     local actor_conversation_id = explicit_conversation_id
@@ -430,7 +484,7 @@ local function new_run_context(meta)
         return true
       end,
     }
-    return registry:construct(record.factory, record.id, record.params, emit, deps)
+    return registry:construct(record.factory, record.id, actor_params, emit, deps)
   end)
   inv.set_deliver(function(to, from, content, message)
     message = message or { content = content }

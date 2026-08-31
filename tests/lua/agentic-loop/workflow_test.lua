@@ -150,41 +150,68 @@ end
 
 agentic_loop.configure {
   provider = "ollama",
-  model    = "initial-model",
+  model = "initial-model",
+  reasoning_effort = "medium",
 }
 
 do
-  assert_eq(agentic_loop.config().provider, "ollama", "configure seeds provider")
-  assert_eq(agentic_loop.config().model,    "initial-model", "configure seeds model")
-end
+  local before = agentic_loop.model_snapshot()
+  send_to_loop("nefor-tui", {
+    kind = "chat.model.set", provider = "ollama", model = "new-model",
+  })
+  local pending = agentic_loop.model_snapshot()
+  assert_eq(pending.provider, before.provider,
+    "model request leaves the effective provider unchanged")
+  assert_eq(pending.model, before.model,
+    "model request leaves the effective model unchanged")
+  assert_eq(pending.reasoning_effort, "medium",
+    "model request leaves the effective effort unchanged")
 
--- chat.model.set with a non-empty model updates the live config.model.
-do
-  send_to_loop("nefor-tui", { kind = "chat.model.set", provider = "ollama", model = "new-model" })
-  assert_eq(agentic_loop.config().model, "new-model", "config.model updated by chat.model.set")
-end
+  send_to_loop("ollama", {
+    kind = "chat.model.set_ack", provider = "ollama", model = "new-model",
+    reasoning_effort = "high",
+  })
+  local acknowledged = agentic_loop.model_snapshot()
+  assert_eq(acknowledged.provider, "ollama", "matching ack adopts provider")
+  assert_eq(acknowledged.model, "new-model", "matching ack adopts model")
+  assert_eq(acknowledged.reasoning_effort, "high", "matching ack adopts explicit effort")
 
--- chat.model.set with an empty model is a no-op (no crash, no update).
-do
-  send_to_loop("nefor-tui", { kind = "chat.model.set", provider = "ollama", model = "" })
-  assert_eq(agentic_loop.config().model, "new-model", "empty-model set did not clobber config.model")
-end
+  send_to_loop("nefor-tui", {
+    kind = "chat.model.set", provider = "rejected", model = "nope",
+  })
+  send_to_loop("rejected", {
+    kind = "chat.model.set_failed", provider = "rejected", model = "nope",
+  })
+  assert_eq(agentic_loop.model_snapshot().model, "new-model",
+    "failed selection leaves the prior effective model unchanged")
 
--- chat.model.set with the model field absent is also a no-op.
-do
-  send_to_loop("nefor-tui", { kind = "chat.model.set", provider = "ollama" })
-  assert_eq(agentic_loop.config().model, "new-model", "missing-model set did not clobber config.model")
-end
+  send_to_loop("rejected", {
+    kind = "chat.model.set_ack", provider = "rejected", model = "nope",
+  })
+  assert_eq(agentic_loop.model_snapshot().provider, "ollama",
+    "stale acknowledgment cannot change the effective provider")
 
--- A cross-provider switch just updates the live config: history is
--- canonical in the spawner and reseeded per turn, so no provider-side
--- rebuild happens (and none is needed for continuity).
-do
-  send_to_loop("nefor-tui", { kind = "chat.model.set", provider = "qwen-provider", model = "qwen-model" })
-  assert_eq(agentic_loop.config().provider, "qwen-provider",
-    "chat.model.set with new provider updates config.provider")
-  assert_eq(agentic_loop.config().model, "qwen-model",
-    "chat.model.set with new model updates config.model")
+  send_to_loop("nefor-tui", {
+    kind = "chat.model.set", provider = "other", model = "other-model",
+  })
+  send_to_loop("other", {
+    kind = "chat.model.set_ack", provider = "other", model = "mismatch",
+  })
+  assert_eq(agentic_loop.model_snapshot().model, "new-model",
+    "mismatched acknowledgment cannot change the effective model")
+  send_to_loop("other", {
+    kind = "chat.model.set_ack", provider = "other", model = "other-model",
+  })
+  local switched = agentic_loop.model_snapshot()
+  assert_eq(switched.provider, "other", "matching cross-provider ack adopts provider")
+  assert_eq(switched.model, "other-model", "matching cross-provider ack adopts model")
+  assert_eq(switched.reasoning_effort, nil,
+    "cross-provider acknowledgment without effort clears provider-specific effort")
+
+  switched.provider = "mutated"
+  switched.model = "mutated"
+  assert_eq(agentic_loop.model_snapshot().provider, "other",
+    "model_snapshot returns an isolated copy")
 end
 
 -- ------------------------------------------------------------------
@@ -557,6 +584,9 @@ do
   _test.calls_clear()
   send_to_loop("nefor-tui", {
     kind = "chat.model.set", provider = "other-provider", model = "other-model",
+  })
+  send_to_loop("other-provider", {
+    kind = "chat.model.set_ack", provider = "other-provider", model = "other-model",
   })
   local model_fact = find_kind(decode_calls(), "conversation.fact.append")
   assert(model_fact ~= nil, "model selection appends a canonical fact")

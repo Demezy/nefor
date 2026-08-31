@@ -286,6 +286,7 @@ lead_workflow.configure {
   dependency_module_roots = MAG_MODULE_ROOTS,
   ambient_context = mag_context,
   agent_system = lead_role.WORKER_SYSTEM_PROMPT,
+  resolve_model_snapshot = agentic_loop.model_snapshot,
 }
 actor.spawn(lead_workflow)
 

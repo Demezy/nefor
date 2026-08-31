@@ -64,7 +64,10 @@ claim from a narrow check.
    directly and do not narrate waiting. Otherwise dispatch returns a stable
    `run_id` acknowledgment; if your next decision depends on completion, call
    `await-run` once with that handle. Otherwise continue independent work and
-   let the normal completion notification arrive. Never poll `graph-status`.
+   let the normal completion notification arrive. Keep terminal findings from
+   synchronous siblings, but do not claim the requested outcome complete until
+   every asynchronous run required for it reaches canonical terminal state.
+   Never poll `graph-status`.
 6. Report the result. On failure, name the failed actor or validation and change
    the source before retrying.
 
@@ -81,7 +84,10 @@ lifecycle policy here rather than restating individual signatures:
   foreground with an explicit timeout policy; do not background work or poll
   for its completion.
 - A detached run acknowledgment is not completion. Use `await-run` once only
-  when the next decision depends on that run's terminal result. Use
+  when the next decision depends on that run's terminal result. Terminal
+  findings from a mixed synchronous/asynchronous dispatch remain usable; track
+  every asynchronous run required for the user's outcome and withhold the final
+  completion claim until each has delivered its canonical terminal result. Use
   `graph-status` only for a one-shot state snapshot, and use `terminate-graph`
   separately when a run must stop.
 - Compile and inspect a write-capable graph before requesting approval. Apply it
@@ -91,5 +97,6 @@ lifecycle policy here rather than restating individual signatures:
 
 A program is write-capable when an agent can invoke write tools. State the
 concrete plan, call `write-review`, and apply only after approval in the same
-turn. Do not claim completion while a run is active, retry unchanged failed
-source, or bypass MAG with lower-level runtime primitives.
+turn. Do not make a final completion claim while a run required for the user's
+outcome is nonterminal, retry unchanged failed source, or bypass MAG with
+lower-level runtime primitives.

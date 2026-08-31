@@ -11,12 +11,20 @@
 (let human-factory "nefor.factory.human")
 
 (type AdapterParams {:seed String :schema TypeSchema})
+(type OptionalReasoningEffort {:present Bool :value String})
+
+(let reasoning-effort
+  (fn [[value String]] -> OptionalReasoningEffort
+    (as OptionalReasoningEffort {:present true :value value})))
+(let no-reasoning-effort
+  (as OptionalReasoningEffort {:present false :value ""}))
+
 (type ResolvedModel {:provider String
                      :model String
-                     :reasoning-effort String})
+                     :reasoning-effort OptionalReasoningEffort})
 (type LlmParams {:model String
                  :provider String
-                 :reasoning_effort String
+                 :reasoning_effort OptionalReasoningEffort
                  :system String
                  :tools (List String)
                  :output_type SemanticTypeId
@@ -24,7 +32,7 @@
                  :provider_error_type SemanticTypeId})
 (type StructuredOutputParams {:model String
                               :provider String
-                              :reasoning_effort String
+                              :reasoning_effort OptionalReasoningEffort
                               :system String
                               :tools (List String)
                               :schema TypeSchema
@@ -35,7 +43,7 @@
                               :max_corrections Int})
 (type DynamicStructuredOutputParams {:model String
                                      :provider String
-                                     :reasoning_effort String
+                                     :reasoning_effort OptionalReasoningEffort
                                      :system String
                                      :tools (List String)
                                      :schema TypeSchema

@@ -344,7 +344,7 @@ Authored data on the llm actor spec:
 | `model`            | provider model id — required                                                                                                                                                                                                                                                          |
 | `system`           | system prompt; rides the request's `system` field every round                                                                                                                                                                                                                         |
 | `tools`            | advertised tool list for the call                                                                                                                                                                                                                                                     |
-| `reasoning_effort` | reasoning effort for the call — required; this is the only shipped reasoning knob forwarded by the MAG bridge on the direct llm path                                                                                                                                                  |
+| `reasoning_effort` | optional reasoning effort for the call; omission reaches the provider wire as omission, while an explicit string is forwarded unchanged                                                                                                                                               |
 | `history`          | transcript seed: an array of provider-dialect messages (role-tagged turns; assistant tool-call turns in the wire shape the transcript records) that becomes the owned transcript's initial contents at construct — every round replays it ahead of the turns the instance accumulates |
 
 `history` is the turn-as-function seam: the lead's turn is a short-lived
@@ -373,10 +373,25 @@ forwards `model`, `system`, `tools`, and `reasoning_effort` into the provider
 construction. Config-owned MAG libraries may define any typed model vocabulary
 they need and pass an exhaustive `Model -> ResolvedModel` function to
 `nefor.actors.agent`; the resulting artifact already contains the concrete
-provider, model, and reasoning effort. Arbitrary provider-specific
-reasoning settings are not shipped through this path unless both the bridge and
-the provider schema add them; use `reasoning_effort` in MAG examples instead
-of provider-specific reasoning knobs.
+provider, model, and reasoning effort. `ResolvedModel` represents effort with
+`nefor.actors.reasoning-effort` or `nefor.actors.no-reasoning-effort`; the
+kernel lowers that closed record once to a non-empty string or field absence.
+Raw runtime artifacts may supply the already-lowered optional string.
+Arbitrary provider-specific reasoning settings are not shipped through this
+path unless both the bridge and the provider schema add them; use
+`reasoning_effort` in MAG examples instead of provider-specific reasoning
+knobs.
+
+A fresh delegated execution may carry an immutable `model_snapshot` with a
+non-empty provider/model and optional non-empty reasoning effort. The kernel
+stores one owned copy in the run context and applies it only while constructing
+`llm` and `structured-output` actors. It therefore covers initial actors,
+resident-rule expansion, and actors added through `mag.apply` without rewriting
+their inventory specs. Snapshot provider/model/effort override authored and
+overlaid values; omitting snapshot effort explicitly clears authored effort.
+Runs without a snapshot retain authored behavior, while authoritative
+`subagent` executions fail closed if the snapshot is absent. A live
+`mag.apply` cannot replace the target run's snapshot.
 
 ### Structured output boundary
 
@@ -411,8 +426,9 @@ protected params data. `mag.execute` rejects any `params_overlay` that attempts
 to replace `schema`, `provider_error_type`, or `validation_error_type`;
 accepting such an overlay would let runtime data weaken or counterfeit the type
 promised by the fragment. Provider/model/history overlays remain ordinary
-runtime configuration. The structured-output boundary likewise protects its
-compiler-derived `output_type` and `error_type`.
+runtime configuration, but a run model snapshot is authoritative over the
+model fields at construction. The structured-output boundary likewise protects
+its compiler-derived `output_type` and `error_type`.
 
 Both provider-boundary factories use `factories/provider-boundary.lua` for
 history validation and seeding, provider correlation, tool-call transcript

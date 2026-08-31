@@ -130,7 +130,8 @@ M.schema = {
     "Use nefor.shell.script only for explicit /bin/sh programs; both operations carry an explicit timeout option. " ..
     "After an asynchronous acknowledgment, root-lead completion arrives through the " ..
     "normal owner-scoped notification; a terminal tool return is already final and must " ..
-    "not be narrated as waiting. delegated callers use their " ..
+    "not be narrated as waiting. Terminal findings remain usable, but no completion claim " ..
+    "may depend on a required run that has only acknowledged execution. Delegated callers use their " ..
     "available run-wait capability when dependent work cannot be composed into the same " ..
     "graph. Multi-step or multi-file work runs as a .mag program via the " ..
     "mag tool instead.",

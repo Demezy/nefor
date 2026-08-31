@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::bridge::CapabilityBridge;
 use crate::error::MagError;
-use crate::kernel::{LuaHost, RunCompletion, TeardownReason};
+use crate::kernel::{ExecutionModelSnapshot, LuaHost, RunCompletion, TeardownReason};
 
 /// A run driven asynchronously to completion: the execute reply is deferred
 /// until that run signals `mag.run_complete` or `mag.run_failed` (via inbound
@@ -815,6 +815,29 @@ fn authoritative_principal(source: &str, declared: Option<&Value>) -> Result<Run
     }
 }
 
+fn parse_model_snapshot(
+    body: &Map<String, Value>,
+    principal: RunPrincipal,
+) -> Result<Option<ExecutionModelSnapshot>, String> {
+    let Some(raw) = body.get("model_snapshot") else {
+        return if principal == RunPrincipal::Subagent {
+            Err("subagent mag.execute requires model_snapshot".to_owned())
+        } else {
+            Ok(None)
+        };
+    };
+    if raw
+        .as_object()
+        .is_some_and(|snapshot| snapshot.get("reasoning_effort") == Some(&Value::Null))
+    {
+        return Err("model_snapshot.reasoning_effort cannot be null".to_owned());
+    }
+    serde_json::from_value::<ExecutionModelSnapshot>(raw.clone())
+        .map_err(|error| format!("invalid mag.execute model_snapshot: {error}"))?
+        .validate()
+        .map(Some)
+}
+
 /// Run a program through the kernel. A `program_id` selects the exact source
 /// environment retained by `mag.load`; an inline `artifact` remains available
 /// for rule-free callers that need no source environment.
@@ -936,6 +959,10 @@ async fn handle_execute(
         Ok(principal) => principal,
         Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
     };
+    let model_snapshot = match parse_model_snapshot(body, principal) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
+    };
     let conversation_id = match body.get("conversation_id").and_then(Value::as_str) {
         Some(id) if !id.is_empty() => id.to_owned(),
         _ if principal == RunPrincipal::Lead => {
@@ -957,6 +984,7 @@ async fn handle_execute(
         Some(session_id),
         Some(principal.as_str()),
         Some(&conversation_id),
+        model_snapshot.as_ref(),
     )?;
     // The kernel reaps stale contexts from a previous session at the boundary
     // (begin_run); fail their pending replies before driving the new run.
@@ -1173,6 +1201,13 @@ async fn handle_apply(
     active: &mut ActiveExecutes,
     bridge: &mut CapabilityBridge,
 ) -> Result<(), MagError> {
+    if body.contains_key("model_snapshot") {
+        return send_event(
+            out_tx,
+            error_body(in_reply_to, "mag.apply cannot replace a run model_snapshot"),
+        )
+        .await;
+    }
     // Resolve the target run: explicit run_id, else the single live run.
     let run_id = match body.get("run_id").and_then(Value::as_str) {
         Some(rid) if active.contains_key(rid) => rid.to_owned(),

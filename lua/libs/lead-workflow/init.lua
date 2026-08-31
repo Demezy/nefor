@@ -139,6 +139,7 @@ local run_registry = RunRegistry.new({
 local dependency_module_roots = {}
 local agent_system = nil
 local ambient_context = nil
+local resolve_model_snapshot = nil
 
 local SYNC_COMPLETION_GRACE_MS = 3000
 local TERMINATION_CONFIRM_TIMEOUT_MS = 30000
@@ -409,8 +410,32 @@ local function is_llm_actor(actor)
       or actor.factory == "nefor.factory.structured-output"
 end
 
--- Model choice is already concrete in the compiled artifact. The runtime only
--- composes ambient instructions with each actor's authored system prompt.
+-- Model selection is captured separately at fresh-run submission. Actor
+-- overlays remain responsible only for ambient/system composition.
+local function copy_model_snapshot(snapshot)
+  if type(snapshot) ~= "table" then
+    return nil, "model snapshot callback must return a table"
+  end
+  local copy = {}
+  for key, value in pairs(snapshot) do
+    if key ~= "provider" and key ~= "model" and key ~= "reasoning_effort" then
+      return nil, "model snapshot has unknown field " .. tostring(key)
+    end
+    copy[key] = value
+  end
+  if type(copy.provider) ~= "string" or copy.provider == "" then
+    return nil, "model snapshot provider must be a non-empty string"
+  end
+  if type(copy.model) ~= "string" or copy.model == "" then
+    return nil, "model snapshot model must be a non-empty string"
+  end
+  if copy.reasoning_effort ~= nil
+      and (type(copy.reasoning_effort) ~= "string" or copy.reasoning_effort == "") then
+    return nil, "model snapshot reasoning_effort must be a non-empty string when present"
+  end
+  return copy
+end
+
 local function compose_agent_params(actors, session_id)
   local overlay = {}
   for _, actor in ipairs(actors or {}) do
@@ -1693,8 +1718,11 @@ local function lead_workflow_tool_schemas()
         "A fresh apply waits briefly for that exact run's canonical terminal result. A quick " ..
         "success or failure returns directly; otherwise the existing asynchronous " ..
         "acknowledgment with a stable run_id is returned and completion arrives later " ..
-        "through the normal owner-scoped notification. Do not narrate waiting after a " ..
-        "terminal result. MAG already owns the run lifecycle, so commands inside " ..
+        "through the normal owner-scoped notification. Terminal results returned " ..
+        "synchronously remain usable immediately. If any run required for the requested " ..
+        "outcome returned an asynchronous acknowledgment, that outcome remains incomplete " ..
+        "until every required run reaches canonical terminal state. Do not narrate waiting " ..
+        "after a terminal result. MAG already owns the run lifecycle, so commands inside " ..
         "the graph should normally stay in the foreground rather than using shell " ..
         "backgrounding. Background only when a process intentionally needs a " ..
         "separately retained lifecycle. Graph and agent semantics live in " ..
@@ -1850,14 +1878,15 @@ end
 local function async_run_ack(pending, body)
   local message
   if pending.dispatcher_id == nil then
-    message = "Program submitted to the MAG actor kernel. If completion is required, stop " ..
-      "this turn and wait for the normal owner-scoped completion notification; do not call " ..
-      "graph-status merely to wait. Compose dependent work into one MAG graph or bounded " ..
+    message = "Program submitted to the MAG actor kernel. This acknowledgment is not " ..
+      "completion; stop this turn and wait for the normal owner-scoped completion " ..
+      "notification. Do not call graph-status merely to wait. Synchronously terminal " ..
+      "sibling findings remain usable. Compose dependent work into one MAG graph or bounded " ..
       "operation when it must continue within one workflow."
   else
-    message = "Program submitted to the MAG actor kernel. Use await-run with this run_id when " ..
-      "your next step depends on completion; do not poll graph-status. The normal completion " ..
-      "notification remains independent."
+    message = "Program submitted to the MAG actor kernel. This acknowledgment is not " ..
+      "completion. Use await-run with this run_id when dependent work requires the terminal " ..
+      "result; do not poll graph-status. Synchronously terminal sibling findings remain usable."
   end
   return {
     status = "executing",
@@ -1937,6 +1966,18 @@ submit_loaded_run = function(pending, body, error_prefix)
   if not terminal_id then
     return reject(error_prefix .. ": " .. result_err)
   end
+  if type(resolve_model_snapshot) ~= "function" then
+    return reject(error_prefix .. ": no model snapshot resolver is configured")
+  end
+  local resolved, snapshot = pcall(resolve_model_snapshot)
+  if not resolved then
+    return reject(error_prefix .. ": model snapshot resolver failed: " .. tostring(snapshot))
+  end
+  local snapshot_error
+  snapshot, snapshot_error = copy_model_snapshot(snapshot)
+  if snapshot == nil then
+    return reject(error_prefix .. ": invalid model snapshot: " .. tostring(snapshot_error))
+  end
   local overlay = compose_agent_params(actors, pending.session_id)
   local exec = {
     kind = "mag.execute",
@@ -1949,6 +1990,7 @@ submit_loaded_run = function(pending, body, error_prefix)
     invocation_label = pending.invocation_label,
     conversation_id = pending.conversation_id,
     program_id = program_id,
+    model_snapshot = snapshot,
   }
   if next(overlay) ~= nil then exec.params_overlay = overlay end
   local owner_resume
@@ -2534,6 +2576,7 @@ local M = {
       dependency_module_roots = {}
       agent_system = nil
       ambient_context = nil
+      resolve_model_snapshot = nil
       mag_eval._internals.reset()
       advertised = false
     end,
@@ -2565,6 +2608,12 @@ function M.configure(opts)
     agent_system = opts.agent_system
   else
     agent_system = nil
+  end
+  if opts.resolve_model_snapshot ~= nil then
+    if type(opts.resolve_model_snapshot) ~= "function" then
+      error("lead-workflow: resolve_model_snapshot must be a function", 2)
+    end
+    resolve_model_snapshot = opts.resolve_model_snapshot
   end
   mag_eval.configure({
     dependency_module_roots = copy_roots(roots),

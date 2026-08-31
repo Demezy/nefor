@@ -479,14 +479,14 @@ async fn load_text_answer_program(
 (require "nefor.contracts")
 (require "nefor.graph")
 (let exact-model (fn [[model nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel model))
-(let model (as nefor.actors.ResolvedModel {:provider "provider" :model "test-model" :reasoning-effort "medium"}))
+(let resolved (as nefor.actors.ResolvedModel {:provider "provider" :model "test-model" :reasoning-effort (nefor.actors.reasoning-effort "medium")}))
 
 (let start (nefor.graph.source "task"
               (type-tag nefor.contracts.Task)
               (as nefor.contracts.Task {:prompt "return done"})))
 (let answer (nefor.actors.agent exact-model
                (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "answer"
-                :model model
+                :model resolved
                 :system "Return the requested structured answer."
                 :tools []
                 :da-policy (nefor.contracts.no-da-policy)
@@ -511,7 +511,7 @@ async fn load_text_answer_program(
             "kind": "mag.load",
             "id": "structured-load",
             "source_dir": source_dir,
-            "module_roots": [starter_dir().join("mag/lib")],
+            "module_roots": [repo_root().join("mag/lib"), starter_dir().join("mag/lib")],
             "entry": "final-answer.mag"
         })),
     )

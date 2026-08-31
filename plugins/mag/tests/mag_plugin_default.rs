@@ -401,6 +401,52 @@ mod tests {
     }
 
     #[test]
+    fn execution_model_snapshot_is_closed_optional_and_required_for_subagents() {
+        let valid = serde_json::json!({
+            "model_snapshot": {"provider": "p", "model": "m", "reasoning_effort": "high"}
+        });
+        let parsed = parse_model_snapshot(valid.as_object().unwrap(), RunPrincipal::Subagent)
+            .expect("valid subagent snapshot")
+            .expect("snapshot present");
+        assert_eq!(parsed.provider, "p");
+        assert_eq!(parsed.model, "m");
+        assert_eq!(parsed.reasoning_effort.as_deref(), Some("high"));
+
+        let absent_effort = serde_json::json!({
+            "model_snapshot": {"provider": "p", "model": "m"}
+        });
+        assert_eq!(
+            parse_model_snapshot(absent_effort.as_object().unwrap(), RunPrincipal::Lead)
+                .unwrap()
+                .unwrap()
+                .reasoning_effort,
+            None
+        );
+        assert_eq!(
+            parse_model_snapshot(&Map::new(), RunPrincipal::Lead).unwrap(),
+            None,
+            "lead execution preserves the no-snapshot compatibility path"
+        );
+        assert!(parse_model_snapshot(&Map::new(), RunPrincipal::Subagent).is_err());
+
+        for malformed in [
+            serde_json::json!(null),
+            serde_json::json!({}),
+            serde_json::json!({"provider": "", "model": "m"}),
+            serde_json::json!({"provider": "p", "model": ""}),
+            serde_json::json!({"provider": "p", "model": "m", "reasoning_effort": null}),
+            serde_json::json!({"provider": "p", "model": "m", "reasoning_effort": ""}),
+            serde_json::json!({"provider": "p", "model": "m", "extra": true}),
+        ] {
+            let body = serde_json::json!({"model_snapshot": malformed});
+            assert!(
+                parse_model_snapshot(body.as_object().unwrap(), RunPrincipal::Lead).is_err(),
+                "malformed snapshot must fail: {body}"
+            );
+        }
+    }
+
+    #[test]
     fn hello_body_advertises_version_and_kernel() {
         let contracts = serde_json::json!([{"identity": "nefor.factory.llm"}]);
         let b = hello_body(

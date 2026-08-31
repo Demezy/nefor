@@ -64,7 +64,7 @@ local CANNED_MAG_PROGRAM = table.concat({
   "(type OctopusSummary {:content String})",
   "(type LighthouseSummary {:content String})",
   '(let exact-model (fn [[model nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel model))',
-  '(let resolved-model-value (as nefor.actors.ResolvedModel {:provider "mock-plugin" :model "mock-model" :reasoning-effort "medium"}))',
+  '(let resolved-model-value (as nefor.actors.ResolvedModel {:provider "mock-plugin" :model "mock-model" :reasoning-effort (nefor.actors.reasoning-effort "medium")}))',
   "",
   '(let start (nefor.graph.source "task"',
   '              (type-tag nefor.contracts.Task)',

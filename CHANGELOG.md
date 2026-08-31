@@ -2,6 +2,7 @@
 
 ## v0.5.0
 
+- Delegated MAG runs now pin the lead's acknowledged provider/model selection for their full lifetime, including dynamic actors and live additions. Reasoning effort is optional end to end: explicit values remain provider-neutral, while omission stays omitted on the provider wire.
 - Made the conversation manager the canonical owner of durable conversation facts, transcript projection, model context, and provider-scoped compaction checkpoints. `/compact` now works during live sessions, preserves the full transcript as fallback, carries the active model into native ChatGPT compaction, and reports structured provider failures intelligibly.
 - Added a separately configurable shared session root, acknowledgement-first session replacement, and cooperative resume with progress. Semantic replay now reconstructs conversation state without re-running tools or workflows, rejects superseded replay traffic, preserves first-message listings, and no longer resurrects historical MAG notifications or approvals.
 - Expanded MAG with typed products and sums, structured agent results, explicit Git worktree create/open nodes, detached execution, awaiting, run inspection, and scoped termination. New `process.exec` and POSIX `shell.script` primitives provide explicit timeouts plus structured stdout, stderr, exit, and signal results; `mag-eval` now resolves these libraries and preserves process results correctly.

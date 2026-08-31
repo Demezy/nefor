@@ -14,8 +14,8 @@
     [Standard value
       (as nefor.actors.ResolvedModel
         {:provider "chatgpt" :model "gpt-5.6-sol"
-         :reasoning-effort "medium"})]
+         :reasoning-effort (nefor.actors.reasoning-effort "medium")})]
     [Mock value
       (as nefor.actors.ResolvedModel
         {:provider "mock-provider" :model "mock-model"
-         :reasoning-effort "medium"})])))
+         :reasoning-effort (nefor.actors.reasoning-effort "medium")})])))

@@ -5,7 +5,7 @@
   -> nefor.actors.ResolvedModel model))
 (let resolved-model-value (as nefor.actors.ResolvedModel
   {:provider "mock-plugin" :model "mock-model"
-   :reasoning-effort "medium"}))
+   :reasoning-effort (nefor.actors.reasoning-effort "medium")}))
 
 (nefor.actors.agent exact-model
   (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "invalid"

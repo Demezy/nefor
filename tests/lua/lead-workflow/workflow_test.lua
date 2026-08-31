@@ -64,8 +64,19 @@ local function feed(origin, body)
   lw.receive_msg(make_entry(origin, body))
 end
 
+local selected_model_snapshot
+local model_snapshot_resolutions
+
 local function fresh()
   lw._internals.reset()
+  selected_model_snapshot = { provider = "snapshot-provider", model = "snapshot-model" }
+  model_snapshot_resolutions = 0
+  lw.configure({
+    resolve_model_snapshot = function()
+      model_snapshot_resolutions = model_snapshot_resolutions + 1
+      return selected_model_snapshot
+    end,
+  })
   lw._internals.set_grace_scheduler(function(_, callback)
     callback()
     return function() end
@@ -131,6 +142,9 @@ do
   assert_true(mag_schema.description:find("A quick success or failure returns directly", 1, true) ~= nil
       and mag_schema.description:find("Do not narrate waiting after a terminal result", 1, true) ~= nil,
     "fresh mag apply schema explains both grace outcomes")
+  assert_true(mag_schema.description:find("Terminal results returned synchronously remain usable immediately", 1, true) ~= nil
+      and mag_schema.description:find("until every required run reaches canonical terminal state", 1, true) ~= nil,
+    "MAG schema keeps partial findings while enforcing the required-run completion barrier")
   local actions = {}
   for _, action in ipairs(mag_schema.parameters.properties.action.enum or {}) do
     actions[action] = true
@@ -175,7 +189,7 @@ do
     "shared mag-eval schema explains its two delivery outcomes")
   assert_true(mag_eval_schema.description:find("call await-run", 1, true) == nil,
     "shared mag-eval schema does not command a root lead to use an unavailable tool")
-  assert_true(mag_eval_schema.description:find("delegated callers", 1, true) ~= nil
+  assert_true(mag_eval_schema.description:find("Delegated callers", 1, true) ~= nil
       and mag_eval_schema.description:find("available run-wait capability", 1, true) ~= nil,
     "shared mag-eval schema preserves worker dependency waiting without assuming a surface")
   assert_true(await_schema.description:find("waits indefinitely", 1, true) ~= nil,
@@ -759,6 +773,31 @@ do
   assert_config_rejected({ [1] = "/a", named = "/b" }, "a keyed root list")
 end
 
+do
+  local invalid_snapshots = {
+    { label = "scalar", value = "bad" },
+    { label = "empty-provider", value = { provider = "", model = "m" } },
+    { label = "empty-model", value = { provider = "p", model = "" } },
+    { label = "empty-effort", value = { provider = "p", model = "m", reasoning_effort = "" } },
+    { label = "unknown-field", value = { provider = "p", model = "m", extra = true } },
+  }
+  for _, case in ipairs(invalid_snapshots) do
+    fresh()
+    lw.configure({ resolve_model_snapshot = function() return case.value end })
+    write_mag_file("invalid-snapshot-write-" .. case.label, "invalid-snapshot.mag", READ_ONLY_MAG)
+    _test.calls_clear()
+    execute_mag("invalid-snapshot-exec-" .. case.label, "invalid-snapshot.mag")
+    feed_loaded(read_only_modification())
+    assert_eq(find_call(decode_calls(), function(call)
+      return call.body.kind == "mag.execute"
+    end), nil, case.label .. " model snapshot fails before mag.execute")
+    local rejected = tool_result("invalid-snapshot-exec-" .. case.label)
+    assert_true(rejected ~= nil and type(rejected.body.error) == "string"
+        and rejected.body.error:find("invalid model snapshot", 1, true) ~= nil,
+      case.label .. " model snapshot reports a validation error")
+  end
+end
+
 -- ------------------------------------------------------------------
 -- parse_approval_command — pin the command grammar
 -- ------------------------------------------------------------------
@@ -817,6 +856,9 @@ do
   end)
   assert_eq(pre_reply, nil, "no executing reply until the load handshake resolves")
 
+  selected_model_snapshot = {
+    provider = "snapshot-provider-b", model = "snapshot-model-b", reasoning_effort = "high",
+  }
   _test.calls_clear()
   feed("mag", {
     kind        = "mag.loaded",
@@ -838,6 +880,14 @@ do
     "lead injects session_id on mag.execute")
   assert_eq(exec.body.principal, "subagent",
     "fresh mag apply declares the subagent domain principal")
+  assert_eq(exec.body.model_snapshot.provider, "snapshot-provider-b",
+    "fresh execution samples the acknowledged provider after loading finishes")
+  assert_eq(exec.body.model_snapshot.model, "snapshot-model-b",
+    "fresh execution samples the acknowledged model after loading finishes")
+  assert_eq(exec.body.model_snapshot.reasoning_effort, "high",
+    "fresh execution forwards explicit acknowledged effort")
+  assert_eq(model_snapshot_resolutions, 1,
+    "fresh execution resolves its model snapshot exactly once after validation")
 
   assert_eq(exec.body.params_overlay, nil,
     "without ambient system context the runtime emits no parameter overlay")
@@ -883,6 +933,35 @@ do
   assert_eq(nodes[1].id, "worker.entry", "actor ids preserved in run summaries")
   assert_eq(nodes[2].reasoner, "nefor.factory.llm",
     "qualified factory identity carried under the reasoner key")
+end
+
+do
+  fresh()
+  write_mag_file("snapshot-runs-write", "snapshot-runs.mag", READ_ONLY_MAG)
+  _test.calls_clear()
+  execute_mag("snapshot-run-a", "snapshot-runs.mag")
+  feed_loaded(read_only_modification())
+  local first_exec = find_call(decode_calls(), function(call)
+    return call.body.kind == "mag.execute"
+  end)
+  assert_eq(first_exec.body.model_snapshot.provider, "snapshot-provider")
+  assert_eq(first_exec.body.model_snapshot.model, "snapshot-model")
+  assert_eq(first_exec.body.model_snapshot.reasoning_effort, nil,
+    "absent effort is omitted from the execution snapshot")
+
+  selected_model_snapshot = { provider = "snapshot-provider-c", model = "snapshot-model-c" }
+  _test.calls_clear()
+  execute_mag("snapshot-run-c", "snapshot-runs.mag")
+  feed_loaded(read_only_modification())
+  local second_exec = find_call(decode_calls(), function(call)
+    return call.body.kind == "mag.execute"
+  end)
+  assert_eq(second_exec.body.model_snapshot.provider, "snapshot-provider-c",
+    "a later run captures the later acknowledged provider")
+  assert_eq(second_exec.body.model_snapshot.model, "snapshot-model-c",
+    "a later run captures the later acknowledged model")
+  assert_eq(first_exec.body.model_snapshot.provider, "snapshot-provider",
+    "later selection cannot retarget an already emitted run snapshot")
 end
 
 do
@@ -1043,6 +1122,10 @@ do
     "mag apply submits the compiler-produced kills")
   assert_eq(apply.body.params_overlay, nil,
     "apply emits no parameter overlay without ambient system context")
+  assert_eq(apply.body.model_snapshot, nil,
+    "live apply cannot replace the target run model snapshot")
+  assert_eq(model_snapshot_resolutions, 0,
+    "live apply does not recompute the target run model snapshot")
   assert_eq(apply.body.modification.actors[1].params.provider, "chatgpt",
     "apply preserves the compiler-produced provider")
   assert_eq(apply.body.modification.actors[1].params.model, "gpt-5.6-sol",
@@ -2221,6 +2304,9 @@ do
     "root-lead acknowledgment names no unavailable wait tool")
   assert_true(ack.body.output.message:find("graph-status merely to wait", 1, true) ~= nil,
     "root-lead acknowledgment keeps graph-status out of dependency synchronization")
+  assert_true(ack.body.output.message:find("acknowledgment is not completion", 1, true) ~= nil
+      and ack.body.output.message:find("Synchronously terminal sibling findings remain usable", 1, true) ~= nil,
+    "root acknowledgment preserves terminal siblings without claiming mixed-run completion")
   assert_true(ack.body.output.message:find("one MAG graph or bounded operation", 1, true) ~= nil,
     "root-lead acknowledgment teaches within-workflow dependency composition")
   assert_true(load.body.entry:match("^eval/eval%-%d+%.mag$") ~= nil,
@@ -2277,6 +2363,9 @@ do
     "worker acknowledgment accurately names its available dependency wait tool")
   assert_true(ack.body.output.message:find("do not poll graph-status", 1, true) ~= nil,
     "worker acknowledgment distinguishes awaiting from status snapshots")
+  assert_true(ack.body.output.message:find("acknowledgment is not completion", 1, true) ~= nil
+      and ack.body.output.message:find("Synchronously terminal sibling findings remain usable", 1, true) ~= nil,
+    "worker acknowledgment preserves terminal siblings without claiming mixed-run completion")
   assert_eq(exec.body.conversation_id, "worker.run-tool:conversation",
     "nested eval preserves the dispatching worker conversation")
   assert_true(lw._internals.state.active_runs[exec.body.run_id] ~= nil,
