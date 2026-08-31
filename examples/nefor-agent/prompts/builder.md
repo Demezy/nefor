@@ -12,16 +12,13 @@ Your loop:
 4. **Commit.** Commit all intentional changes with a concise one-line message before finalizing. Leave the worktree clean.
 5. **Finalize.** Call `finalize` with the structured payload below.
 
-## Tools you have
+## Tool policy
 
-- `read_file` — read a text file by path.
-- `read_image` — load an image file for visual inspection. If the active model cannot consume images, report that limitation to the user.
-- `edit_file` — replace one exact string in an existing file.
-- `write_file` — create a new file or overwrite an existing one.
-- `mag-eval` — evaluate one Nefor node expression; always supply a 1–5 word `intent` naming the operation. This is your shell
-  for listing, searching, building, testing, and committing. Use real commands:
-  - `(nefor.shell.script "test" (as nefor.shell.ShellScriptParams {:script "cargo test 2>&1" :cwd "." :timeout (nefor.contracts.no-timeout)}))`
-  - `(nefor.shell.script "search" (as nefor.shell.ShellScriptParams {:script "rg -n 'TODO' src/ | sort" :cwd "." :timeout (nefor.contracts.no-timeout)}))`
+Use the advertised tools according to their schemas. Read relevant files before
+editing. Use `mag-eval` for world queries and command execution. Prefer
+structured process execution for a single command; use a shell script only when
+an explicit POSIX shell program is required. Use edit and write tools only for
+the implementation in scope.
 
 ## Output format
 

@@ -173,17 +173,42 @@ async fn shutdown(mut stdin: ChildStdin, mut child: Child) {
 }
 
 #[test]
-fn active_starter_prompts_and_mock_do_not_use_removed_mag_teaching_forms() {
+fn starter_prompts_defer_mag_reference_material_to_ambient_context() {
     let root = repo_root();
-    let mut paths = source_files(&root.join("examples/nefor-agent/prompts"), "md");
-    paths.extend(source_files(
+    let mut prompts = source_files(&root.join("examples/nefor-agent/prompts"), "md");
+    prompts.extend(source_files(
         &root.join("examples/nefor-agent/mag/lib/prompts"),
         "md",
     ));
-    paths.push(root.join("mag/book/01. core/00. MAG in Five Minutes.md"));
-    paths.push(root.join("mag/book/02. nefor/00. Nefor MAG in Five Minutes.md"));
-    let guidance_paths = paths.clone();
-    paths.push(root.join("examples/nefor-agent/mock-provider/init.lua"));
+    let tutorial_markers = [
+        "```lisp",
+        "(require \"nefor.",
+        "nefor.shell.ShellScriptParams",
+        "nefor.process.ProcessExecParams",
+        "## MAG programs",
+        "A minimal agent program is",
+        "Available MAG modules:",
+        "Full MAG Book:",
+        "Writable source directory:",
+    ];
+
+    for path in prompts {
+        let source = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read starter prompt {}: {error}", path.display()));
+        for marker in tutorial_markers {
+            assert!(
+                !source.contains(marker),
+                "starter prompt {} duplicates ambient MAG reference material {marker:?}",
+                path.display()
+            );
+        }
+    }
+
+    let mut canonical_teaching = vec![
+        root.join("mag/book/01. core/00. MAG in Five Minutes.md"),
+        root.join("mag/book/02. nefor/00. Nefor MAG in Five Minutes.md"),
+        root.join("examples/nefor-agent/mock-provider/init.lua"),
+    ];
     let removed = [
         "(agent ",
         "(node ",
@@ -197,8 +222,8 @@ fn active_starter_prompts_and_mock_do_not_use_removed_mag_teaching_forms() {
         "-> composes",
     ];
 
-    for path in &paths {
-        let source = fs::read_to_string(path).unwrap_or_else(|error| {
+    for path in canonical_teaching.drain(..) {
+        let source = fs::read_to_string(&path).unwrap_or_else(|error| {
             panic!(
                 "read active MAG teaching source {}: {error}",
                 path.display()
@@ -208,27 +233,6 @@ fn active_starter_prompts_and_mock_do_not_use_removed_mag_teaching_forms() {
             assert!(
                 !source.contains(obsolete),
                 "active MAG teaching source {} contains obsolete form {obsolete:?}",
-                path.display()
-            );
-        }
-    }
-
-    for path in guidance_paths {
-        let source = fs::read_to_string(&path).unwrap_or_else(|error| {
-            panic!(
-                "read active MAG teaching source {}: {error}",
-                path.display()
-            )
-        });
-        if source.contains("mag-eval") {
-            assert!(
-                source.contains("intent"),
-                "active MAG teaching source {} omits intent guidance",
-                path.display()
-            );
-            assert!(
-                source.contains("1–5 word") || source.contains("1–5-word"),
-                "active MAG teaching source {} omits the 1–5-word intent constraint",
                 path.display()
             );
         }

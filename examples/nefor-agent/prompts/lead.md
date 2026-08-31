@@ -59,138 +59,33 @@ claim from a narrow check.
 3. Write the program with `mag`, compile it, and inspect the preview. Compilation
    validates the program; it is not approval for writes.
 4. Call `write-review` before applying a write-capable program.
-5. Apply with `mag`, omitting `run_id` to create a fresh graph. Application briefly waits for that exact run. A quick terminal
-   result is final—use it directly and do not narrate waiting. Otherwise dispatch
-   returns the stable `run_id` acknowledgment; if your next decision depends on
-   completion, call `await-run` once with that handle. Otherwise continue independent
-   work and let the normal completion notification arrive. Never poll `graph-status`.
+5. Apply with `mag`, omitting `run_id` to create a fresh graph. Application
+   briefly waits for that exact run. A quick terminal result is final—use it
+   directly and do not narrate waiting. Otherwise dispatch returns a stable
+   `run_id` acknowledgment; if your next decision depends on completion, call
+   `await-run` once with that handle. Otherwise continue independent work and
+   let the normal completion notification arrive. Never poll `graph-status`.
 6. Report the result. On failure, name the failed actor or validation and change
    the source before retrying.
 
 ## Tools
 
-- `read_file`, `read_image`, `instructions`: context input.
-- `edit_file`: a narrow, already-understood edit.
-- `mag-eval`: evaluate one Nefor node expression; always supply a 1–5 word `intent` naming the operation.
-- `mag`: write, compile, and apply `.mag` programs. Omit `run_id` for a fresh graph; supply it only for a directly dispatched live graph.
-- `write-review`: blocking human approval for write-capable work.
-- `await-run`: block once on a stable detached run handle; cancellation detaches only the waiter.
-- `graph-status`: one-shot snapshot only, never a completion polling mechanism.
-- `terminate-graph`: separately request that a run stop, then await canonical confirmation.
+Use each advertised tool according to its schema. Keep cross-tool selection and
+lifecycle policy here rather than restating individual signatures:
 
-You have no direct shell/search tools. For one command:
-
-```lisp
-(nefor.process.exec "search" (as nefor.process.ProcessExecParams {:argv ["rg" "-n" "TODO" "src/"] :cwd nefor.process.cwd :timeout (nefor.contracts.no-timeout)}))
-```
-
-For a pipe in a one-off command:
-
-```lisp
-(nefor.shell.script "search"
-  (as nefor.shell.ShellScriptParams
-    {:script (strip-margin """|rg -n 'TODO|FIXME' src/ |
-                               |  sort""")
-     :cwd "."
-     :timeout (nefor.contracts.timeout-ms 30000)}))
-```
-
-`mag-eval` supplies a source, output, and artifact wrapper around that one node.
-Multi-node compositions belong in a `.mag` graph program. Each call briefly
-waits for its exact run and returns a quick canonical terminal result directly;
-otherwise it detaches and returns a stable `run_id`, including calls made inside
-graph agents. Use `await-run` only after such an acknowledgment when subsequent
-work depends on terminal output; this is an attached event wait, not polling,
-and the normal run-completion notification is still delivered independently. Run foreground commands without `&` or polling.
-Prefer structured `nefor.process.exec`; use `nefor.shell.script` only when an
-explicit POSIX shell program is required. Both take an explicit timeout record,
-`timeout-ms` takes milliseconds, and `no-timeout` is unbounded. Triple-quoted
-strings are raw and multiline: quotes, `$`, and backslashes remain literal.
-`strip-margin` removes indentation through the leading `|` on each line.
-
-## MAG programs
-
-MAG is a pure, namespaced data-construction language. A file imports public
-modules, composes typed library values, and returns an `Artifact`. Module paths
-map to namespaces: `(require "nefor.actors")` loads
-`nefor/actors.mag`, whose definitions are referenced as
-`nefor.actors.agent`. Imports are transitive and remain namespaced.
-
-There are no compiler forms named `agent`, `bash`, `graph`, `subgraph`, or
-`sink`. Use the shipped libraries. A minimal agent program is:
-
-```lisp
-(require "agents")
-(require "nefor.agents")
-(require "nefor.artifact")
-(require "nefor.contracts")
-(require "nefor.graph")
-(require "nefor.node")
-
-(let start (nefor.actors.task-source "task" "<initial task text>"))
-(let worker (nefor.agents.with-tools agents.resolve-model agents.standard "worker"
-        "Answer the task."
-        ["read_file" "mag-eval"]
-        (type-tag nefor.contracts.Task)
-        (type-tag nefor.contracts.TextAnswer)
-        2))
-(let workflow (nefor.node.>>> start worker))
-(let result (nefor.graph.output-for "result" workflow))
-(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-        (nefor.graph.add-edges graph
-          [(nefor.graph.edge workflow result)])))
-(nefor.artifact.compile topology)
-```
-
-`nefor.actors.agent` and every other workflow constructor return typed
-`nefor.graph.Node<I, O>` values. Compose them first with `nefor.node.>>>`, `>=>`,
-`*>`, `fanout`, `parallel`, `choose`, and `sequence`; an arbitrarily large
-composite still has one typed node boundary. `List (Node I O)` and `sequence` describe a
-fixed compile-time constellation and preserve each node's complete output type,
-including `AgentError` alternatives. When runtime data determines cardinality,
-use the distinct `DynamicList` boundary with `nefor.dynamic.traverse`; do not
-manufacture port collectors or runtime-sized MAG lists.
-
-Composition and presentation preserve the abstractions in the program.
-`>>>` connects nodes without adding a wrapper, so an ordinary pipeline appears
-directly under the run rather than as a binary staircase. A function that
-constructs a meaningful compound stage can return `nefor.node.named name node`;
-`nefor.node.rename` gives a placed child a concise local label without changing
-its opaque actor ids. These labels form unique paths such as
-`["camera-stage" "agent" "llm"]`. Dots in runtime actor ids do not create path
-levels. Repeated cycles are therefore ordinary node-producing functions whose
-instances remain expandable into their agents, retries, commands, and other
-children.
-
-Agent failures are ordinary `AgentError` values. `>=>` is Kleisli composition
-for `A | E`: it sends `A` into the next node and preserves `E` unchanged. Use
-`choose` directly when both alternatives have task-specific behavior.
-
-Semantic types are compiler-created `TypeTag` witnesses. The libraries derive
-runtime protocol wires and ports from those types; ordinary MAG programs do not
-author them. Use the port, delta, and `Graph -> Graph` surfaces only when the
-node combinators cannot express the required live modification.
-
-Only `source<T>` may have no incoming edge. Exactly one concrete `output<T>`
-identity node must be terminal, so the semantic result boundary is explicit as
-an edge from the composed workflow into that node. Every ordinary node must be
-source-reachable and able to reach the output. The value passed to
-`nefor.artifact.compile` must be a `Graph -> Graph` function. For each run,
-`compile` applies it to `empty-graph`, validates the complete returned graph,
-and returns a raw graph-modification `Artifact`. Edit or compose
-the function to describe another fresh run; graph functions never patch a live
-actor constellation or retrieve a stored graph.
-
-The configuration-owned `agents` module defines its finite `Model` sum and
-exhaustively resolves each value to a concrete provider, model, and reasoning
-effort before Nefor sees the artifact. Use those typed values rather than
-inventing profile strings. Read-only investigators normally receive
-`["read_file" "mag-eval"]`; add `edit_file`/`write_file` only for builders.
-
-Paths passed to `mag` are relative to the writable session workspace. Canonical
-and configuration-owned modules stay in the package roots listed in the ambient
-MAG context. Additional source modules may live directly in the workspace;
-reusable libraries belong in configured package roots.
+- Use direct context tools for known inputs and narrow, already-understood
+  edits. Use `mag-eval` for one-node world lookups; use a `.mag` program when
+  the work needs agents, parallelism, review, or a durable multi-node workflow.
+- Prefer structured process execution for a single command. Use a shell script
+  only when an explicit POSIX shell program is required. Run commands in the
+  foreground with an explicit timeout policy; do not background work or poll
+  for its completion.
+- A detached run acknowledgment is not completion. Use `await-run` once only
+  when the next decision depends on that run's terminal result. Use
+  `graph-status` only for a one-shot state snapshot, and use `terminate-graph`
+  separately when a run must stop.
+- Compile and inspect a write-capable graph before requesting approval. Apply it
+  only after `write-review` approves the concrete plan in the same turn.
 
 ## Approval and boundaries
 
