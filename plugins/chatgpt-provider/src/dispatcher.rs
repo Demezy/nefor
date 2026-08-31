@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use nefor_protocol::{Body, Envelope, PluginName, PluginOutgoing, SystemBody};
+use rand::Rng;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Mutex};
@@ -51,11 +52,15 @@ pub const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// asking for tools; this prevents runaways.
 pub const TOOL_LOOP_MAX_ITERATIONS: u32 = 20;
 
-/// Retry transient stream failures for at least this long, but only while
-/// the failed attempts have emitted no visible output. Once a
-/// delta/reasoning/tool-call fragment is on the bus, re-POSTing would
-/// duplicate transcript/session-log state.
+/// Transient SSE failures may replay only before text, reasoning, native
+/// output items, or tool-call state exist. The attempt cap is authoritative;
+/// the elapsed budget is a second bound so delayed attempts cannot stretch
+/// recovery indefinitely.
+const PRE_OUTPUT_MAX_ATTEMPTS: u32 = 3;
 const PRE_OUTPUT_RETRY_BUDGET: Duration = Duration::from_secs(30);
+const PRE_OUTPUT_RETRY_BASE_DELAY_MS: u64 = 200;
+const PRE_OUTPUT_RETRY_MAX_DELAY_MS: u64 = 1_500;
+const PRE_OUTPUT_RETRY_JITTER_MS: i64 = 100;
 
 const LOGOUT_REFUSED_ENV_MESSAGE: &str =
     "no login to revoke — credentials come from the environment; restart the plugin without it";
@@ -283,13 +288,75 @@ fn stream_retry_body(
     args: &ServeArgs,
     chat_id: &ChatId,
     attempt: u32,
-    message: &str,
+    delay: Duration,
+    failure: &StreamFailure,
 ) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("chat_id".into(), Value::String(chat_id.to_string()));
     m.insert("attempt".into(), Value::Number(attempt.into()));
-    m.insert("message".into(), Value::String(message.to_owned()));
+    m.insert(
+        "max_attempts".into(),
+        Value::Number(PRE_OUTPUT_MAX_ATTEMPTS.into()),
+    );
+    m.insert("retry".into(), Value::Bool(true));
+    m.insert(
+        "retry_reason".into(),
+        Value::String(
+            RetryDecisionReason::RetryablePreOutputFailure
+                .as_str()
+                .into(),
+        ),
+    );
+    m.insert(
+        "failure_kind".into(),
+        Value::String(failure.kind.as_str().into()),
+    );
+    m.insert(
+        "delay_ms".into(),
+        Value::Number((delay.as_millis() as u64).into()),
+    );
+    m.insert("message".into(), Value::String(failure.message.clone()));
     make_event(format!("{}stream.retry", args.event_prefix()), m)
+}
+
+fn retry_decision_body(
+    args: &ServeArgs,
+    request_id: &str,
+    attempt: u32,
+    delay: Duration,
+    failure: &StreamFailure,
+    decision: RetryDecision,
+    state: StreamAttemptState,
+) -> Map<String, Value> {
+    completion_event_body(
+        args,
+        request_id,
+        "retry_decision",
+        [
+            ("attempt", Value::Number(attempt.into())),
+            (
+                "max_attempts",
+                Value::Number(PRE_OUTPUT_MAX_ATTEMPTS.into()),
+            ),
+            ("retry", Value::Bool(decision.retry)),
+            (
+                "retry_reason",
+                Value::String(decision.reason.as_str().into()),
+            ),
+            ("failure_kind", Value::String(failure.kind.as_str().into())),
+            ("delay_ms", Value::Number((delay.as_millis() as u64).into())),
+            (
+                "terminal_event_seen",
+                Value::Bool(state.terminal_event_seen),
+            ),
+            (
+                "visible_state_blocked",
+                Value::Bool(state.visible_state_blocked),
+            ),
+            ("tool_state_blocked", Value::Bool(state.tool_state_blocked)),
+            ("error", Value::String(failure.message.clone())),
+        ],
+    )
 }
 
 fn stream_reasoning_delta_body(
@@ -2599,6 +2666,10 @@ impl ReasoningSummaryFormatter {
         self.drain(true)
     }
 
+    fn has_pending(&self) -> bool {
+        !self.buffer.is_empty()
+    }
+
     fn drain(&mut self, flush: bool) -> Vec<String> {
         let mut out = Vec::new();
         loop {
@@ -2730,20 +2801,151 @@ fn usage_to_record(interrupted: bool, total_usage: Option<(u64, u64)>) -> Option
     }
 }
 
-fn should_retry_pre_output_stream_error(
-    err: &ChatgptError,
-    output_text: &str,
-    reasoning_text: &str,
-    tool_buf: &ToolCallBuffer,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamFailureKind {
+    BodyRead,
+    IdleTimeout,
+    CleanEof,
+    Parse,
+    Endpoint,
+    Semantic,
+    Other,
+}
+
+impl StreamFailureKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::BodyRead => "body_read",
+            Self::IdleTimeout => "idle_timeout",
+            Self::CleanEof => "clean_eof",
+            Self::Parse => "parse",
+            Self::Endpoint => "endpoint",
+            Self::Semantic => "semantic",
+            Self::Other => "other",
+        }
+    }
+
+    fn transport_retryable(self) -> bool {
+        matches!(self, Self::BodyRead | Self::IdleTimeout | Self::CleanEof)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StreamFailure {
+    kind: StreamFailureKind,
+    message: String,
+    retryable: bool,
+}
+
+impl StreamFailure {
+    fn from_error(error: ChatgptError) -> Self {
+        let kind = match error {
+            ChatgptError::ResponsesStreamRead(_) => StreamFailureKind::BodyRead,
+            ChatgptError::ResponsesStreamIdleTimeout { .. } => StreamFailureKind::IdleTimeout,
+            ChatgptError::ResponsesStreamEnded => StreamFailureKind::CleanEof,
+            ChatgptError::ResponsesStreamParse(_) => StreamFailureKind::Parse,
+            ChatgptError::ResponsesEndpoint { .. } => StreamFailureKind::Endpoint,
+            _ => StreamFailureKind::Other,
+        };
+        Self {
+            kind,
+            message: format!("stream error: {error}"),
+            retryable: kind.transport_retryable(),
+        }
+    }
+
+    fn semantic(response: &Value) -> Self {
+        Self {
+            kind: StreamFailureKind::Semantic,
+            message: response_failure_message(response),
+            retryable: response_failure_is_transient(response),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StreamAttemptState {
+    visible_state_blocked: bool,
+    native_output_state_blocked: bool,
+    tool_state_blocked: bool,
+    terminal_event_seen: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryDecisionReason {
+    RetryablePreOutputFailure,
+    FailureNotRetryable,
+    VisibleStateExists,
+    NativeOutputStateExists,
+    ToolStateExists,
+    AttemptLimitReached,
+    ElapsedBudgetExhausted,
+}
+
+impl RetryDecisionReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RetryablePreOutputFailure => "retryable_pre_output_failure",
+            Self::FailureNotRetryable => "failure_not_retryable",
+            Self::VisibleStateExists => "visible_or_reasoning_state_exists",
+            Self::NativeOutputStateExists => "native_output_state_exists",
+            Self::ToolStateExists => "tool_call_state_exists",
+            Self::AttemptLimitReached => "attempt_limit_reached",
+            Self::ElapsedBudgetExhausted => "elapsed_budget_exhausted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RetryDecision {
+    retry: bool,
+    reason: RetryDecisionReason,
+}
+
+fn decide_pre_output_retry(
+    failure: &StreamFailure,
+    state: StreamAttemptState,
+    attempt: u32,
     elapsed: Duration,
-) -> bool {
-    matches!(
-        err,
-        ChatgptError::ResponsesStreamRead(_) | ChatgptError::ResponsesStreamEnded
-    ) && output_text.is_empty()
-        && reasoning_text.is_empty()
-        && tool_buf.is_empty()
-        && elapsed < PRE_OUTPUT_RETRY_BUDGET
+    next_delay: Duration,
+) -> RetryDecision {
+    let reason = if state.tool_state_blocked {
+        RetryDecisionReason::ToolStateExists
+    } else if state.visible_state_blocked {
+        RetryDecisionReason::VisibleStateExists
+    } else if state.native_output_state_blocked {
+        RetryDecisionReason::NativeOutputStateExists
+    } else if !failure.retryable {
+        RetryDecisionReason::FailureNotRetryable
+    } else if attempt >= PRE_OUTPUT_MAX_ATTEMPTS {
+        RetryDecisionReason::AttemptLimitReached
+    } else if elapsed.saturating_add(next_delay) >= PRE_OUTPUT_RETRY_BUDGET {
+        RetryDecisionReason::ElapsedBudgetExhausted
+    } else {
+        return RetryDecision {
+            retry: true,
+            reason: RetryDecisionReason::RetryablePreOutputFailure,
+        };
+    };
+    RetryDecision {
+        retry: false,
+        reason,
+    }
+}
+
+fn pre_output_retry_delay(retry_number: u32) -> Duration {
+    let jitter =
+        rand::thread_rng().gen_range(-PRE_OUTPUT_RETRY_JITTER_MS..=PRE_OUTPUT_RETRY_JITTER_MS);
+    pre_output_retry_delay_with_jitter(retry_number, jitter)
+}
+
+fn pre_output_retry_delay_with_jitter(retry_number: u32, jitter_ms: i64) -> Duration {
+    let shift = retry_number.saturating_sub(1).min(32);
+    let factor = 1_u64.checked_shl(shift).unwrap_or(u64::MAX);
+    let delay = PRE_OUTPUT_RETRY_BASE_DELAY_MS
+        .saturating_mul(factor)
+        .min(PRE_OUTPUT_RETRY_MAX_DELAY_MS);
+    Duration::from_millis((delay as i64 + jitter_ms).max(0) as u64)
 }
 
 fn response_failure_message(response: &Value) -> String {
@@ -2775,18 +2977,42 @@ fn response_failure_is_transient(response: &Value) -> bool {
     .any(|needle| fingerprint.contains(needle))
 }
 
-fn should_retry_pre_output_response_failure(
-    response: &Value,
-    output_text: &str,
-    reasoning_text: &str,
-    tool_buf: &ToolCallBuffer,
-    elapsed: Duration,
-) -> bool {
-    response_failure_is_transient(response)
-        && output_text.is_empty()
-        && reasoning_text.is_empty()
-        && tool_buf.is_empty()
-        && elapsed < PRE_OUTPUT_RETRY_BUDGET
+fn terminal_stream_failure_message(
+    failure: &StreamFailure,
+    decision: RetryDecision,
+    state: StreamAttemptState,
+    attempt: u32,
+) -> String {
+    if state.tool_state_blocked {
+        return format!(
+            "ChatGPT stream interrupted after tool-call state began. Nefor did not replay the request because tool state or side effects may already exist. Cause: {}",
+            failure.message
+        );
+    }
+    if state.visible_state_blocked {
+        return format!(
+            "ChatGPT stream interrupted after partial text or reasoning state. Nefor did not replay the request because doing so could duplicate visible output. Cause: {}",
+            failure.message
+        );
+    }
+    if state.native_output_state_blocked {
+        return format!(
+            "ChatGPT stream interrupted after provider response state began. Nefor did not replay the request because text, reasoning, or tool-call state may already exist. Cause: {}",
+            failure.message
+        );
+    }
+    if failure.kind.transport_retryable()
+        && matches!(
+            decision.reason,
+            RetryDecisionReason::AttemptLimitReached | RetryDecisionReason::ElapsedBudgetExhausted
+        )
+    {
+        return format!(
+            "ChatGPT stream transport failed before any text, reasoning, or tool-call state after {attempt} attempts. Automatic recovery is exhausted; retrying the turn is safe. Cause: {}",
+            failure.message
+        );
+    }
+    failure.message.clone()
 }
 
 fn spawn_turn(
@@ -2819,6 +3045,8 @@ fn spawn_turn(
         let mut active_model = String::new();
         let mut pre_output_stream_retries: u32 = 0;
         let mut pre_output_retry_started: Option<Instant> = None;
+        let mut final_stream_attempts: u32 = 0;
+        let mut final_terminal_event_seen = false;
         let mut auth_401_recovery_stage: u8 = 0;
         let conversation_id = logical_routing_id(
             ctx.chats
@@ -3180,8 +3408,9 @@ fn spawn_turn(
             let mut iter_finish_reason: Option<String> = None;
             let mut iter_usage: Option<(u64, u64)> = None;
             let mut iter_interrupted = false;
+            let mut iter_failure: Option<StreamFailure> = None;
             let mut iter_errored: Option<String> = None;
-            let mut iter_retryable_before_output = false;
+            let mut terminal_event_seen = false;
 
             loop {
                 tokio::select! {
@@ -3357,26 +3586,19 @@ fn spawn_turn(
                                     iter_native_output.push(item);
                                 }
                                 ResponseEvent::Completed { response } => {
+                                    terminal_event_seen = true;
                                     iter_finish_reason =
                                         response.get("finish_reason").and_then(|v| v.as_str()).map(str::to_owned);
                                     iter_usage = parsed_token_usage(&response);
                                     break;
                                 }
                                 ResponseEvent::Failed { response } => {
-                                    iter_retryable_before_output =
-                                        should_retry_pre_output_response_failure(
-                                            &response,
-                                            &output_text,
-                                            &reasoning_text,
-                                            &tool_buf,
-                                            pre_output_retry_started
-                                                .map(|retry_started| retry_started.elapsed())
-                                                .unwrap_or(Duration::ZERO),
-                                        );
-                                    iter_errored = Some(response_failure_message(&response));
+                                    terminal_event_seen = true;
+                                    iter_failure = Some(StreamFailure::semantic(&response));
                                     break;
                                 }
                                 ResponseEvent::Incomplete { response } => {
+                                    terminal_event_seen = true;
                                     iter_finish_reason = response
                                         .get("incomplete_details")
                                         .and_then(|d| d.get("reason"))
@@ -3387,33 +3609,14 @@ fn spawn_turn(
                                 }
                                 _ => {}
                             },
-                            Some(Err(e)) => {
-                                iter_retryable_before_output =
-                                    should_retry_pre_output_stream_error(
-                                        &e,
-                                        &output_text,
-                                        &reasoning_text,
-                                        &tool_buf,
-                                        pre_output_retry_started
-                                            .map(|retry_started| retry_started.elapsed())
-                                            .unwrap_or(Duration::ZERO),
-                                    );
-                                iter_errored = Some(format!("stream error: {e}"));
+                            Some(Err(error)) => {
+                                iter_failure = Some(StreamFailure::from_error(error));
                                 break;
                             }
                             None => {
-                                let e = ChatgptError::ResponsesStreamEnded;
-                                iter_retryable_before_output =
-                                    should_retry_pre_output_stream_error(
-                                        &e,
-                                        &output_text,
-                                        &reasoning_text,
-                                        &tool_buf,
-                                        pre_output_retry_started
-                                            .map(|retry_started| retry_started.elapsed())
-                                            .unwrap_or(Duration::ZERO),
-                                    );
-                                iter_errored = Some(format!("stream error: {e}"));
+                                iter_failure = Some(StreamFailure::from_error(
+                                    ChatgptError::ResponsesStreamEnded,
+                                ));
                                 break;
                             }
                         }
@@ -3430,6 +3633,71 @@ fn spawn_turn(
             // interrupted-result path below.
             if cancel.is_suppressed() {
                 break;
+            }
+
+            final_stream_attempts = pre_output_stream_retries + 1;
+            final_terminal_event_seen = terminal_event_seen;
+
+            if let Some(failure) = iter_failure.take() {
+                let attempt = pre_output_stream_retries + 1;
+                let retry_started = *pre_output_retry_started.get_or_insert_with(Instant::now);
+                let candidate_delay = pre_output_retry_delay(attempt);
+                let state = StreamAttemptState {
+                    visible_state_blocked: !output_text.is_empty()
+                        || !reasoning_text.is_empty()
+                        || reasoning_formatter.has_pending(),
+                    native_output_state_blocked: !iter_native_output.is_empty(),
+                    tool_state_blocked: !tool_buf.is_empty(),
+                    terminal_event_seen,
+                };
+                let decision = decide_pre_output_retry(
+                    &failure,
+                    state,
+                    attempt,
+                    retry_started.elapsed(),
+                    candidate_delay,
+                );
+                let delay = if decision.retry {
+                    candidate_delay
+                } else {
+                    Duration::ZERO
+                };
+                tracing::warn!(
+                    chat_id = %chat_id,
+                    attempt,
+                    max_attempts = PRE_OUTPUT_MAX_ATTEMPTS,
+                    retry = decision.retry,
+                    retry_reason = decision.reason.as_str(),
+                    failure_kind = failure.kind.as_str(),
+                    terminal_event_seen,
+                    visible_state_blocked = state.visible_state_blocked,
+                    native_output_state_blocked = state.native_output_state_blocked,
+                    tool_state_blocked = state.tool_state_blocked,
+                    elapsed_ms = retry_started.elapsed().as_millis() as u64,
+                    budget_ms = PRE_OUTPUT_RETRY_BUDGET.as_millis() as u64,
+                    delay_ms = delay.as_millis() as u64,
+                    error = %failure.message,
+                    "Responses stream retry decision",
+                );
+                if let Some((request_id, _)) = &direct_request {
+                    let body = retry_decision_body(
+                        &ctx.args, request_id, attempt, delay, &failure, decision, state,
+                    );
+                    let _ = ctx.out_tx.send(PluginOutgoing::event(body)).await;
+                }
+                if decision.retry {
+                    pre_output_stream_retries += 1;
+                    iterations = iterations.saturating_sub(1);
+                    if direct_request.is_none() {
+                        let body = stream_retry_body(&ctx.args, &chat_id, attempt, delay, &failure);
+                        let _ = ctx.out_tx.send(PluginOutgoing::event(body)).await;
+                    }
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                iter_errored = Some(terminal_stream_failure_message(
+                    &failure, decision, state, attempt,
+                ));
             }
 
             for formatted in reasoning_formatter.finish() {
@@ -3492,41 +3760,6 @@ fn spawn_turn(
             }
 
             if let Some(err_msg) = iter_errored {
-                if iter_retryable_before_output {
-                    pre_output_stream_retries += 1;
-                    let retry_started = *pre_output_retry_started.get_or_insert_with(Instant::now);
-                    iterations = iterations.saturating_sub(1);
-                    tracing::warn!(
-                        chat_id = %chat_id,
-                        attempt = pre_output_stream_retries,
-                        elapsed_ms = retry_started.elapsed().as_millis() as u64,
-                        budget_ms = PRE_OUTPUT_RETRY_BUDGET.as_millis() as u64,
-                        error = %err_msg,
-                        "Responses stream failed before output; retrying turn iteration",
-                    );
-                    let retry_delay =
-                        crate::responses::retry_delay(pre_output_stream_retries - 1, None);
-                    let retry_body = if let Some((request_id, _)) = &direct_request {
-                        completion_event_body(
-                            &ctx.args,
-                            request_id,
-                            "retry",
-                            [
-                                ("attempt", Value::Number(pre_output_stream_retries.into())),
-                                (
-                                    "delay_ms",
-                                    Value::Number((retry_delay.as_millis() as u64).into()),
-                                ),
-                                ("error", Value::String(err_msg.clone())),
-                            ],
-                        )
-                    } else {
-                        stream_retry_body(&ctx.args, &chat_id, pre_output_stream_retries, &err_msg)
-                    };
-                    let _ = ctx.out_tx.send(PluginOutgoing::event(retry_body)).await;
-                    tokio::time::sleep(retry_delay).await;
-                    continue;
-                }
                 let _ = ctx
                     .out_tx
                     .send(PluginOutgoing::event(turn_error_body(
@@ -3688,6 +3921,14 @@ fn spawn_turn(
                         ),
                         ("model", Value::String(active_model.clone())),
                         ("duration_ms", Value::Number(elapsed_ms.into())),
+                        (
+                            "stream_attempts",
+                            Value::Number(final_stream_attempts.into()),
+                        ),
+                        (
+                            "terminal_event_seen",
+                            Value::Bool(final_terminal_event_seen),
+                        ),
                     ],
                 )
             } else {
@@ -3706,6 +3947,14 @@ fn spawn_turn(
                         ),
                         ("model", Value::String(active_model.clone())),
                         ("duration_ms", Value::Number(elapsed_ms.into())),
+                        (
+                            "stream_attempts",
+                            Value::Number(final_stream_attempts.into()),
+                        ),
+                        (
+                            "terminal_event_seen",
+                            Value::Bool(final_terminal_event_seen),
+                        ),
                     ],
                 )
             };
@@ -4657,70 +4906,78 @@ mod tests {
     }
 
     #[test]
-    fn stream_retry_gate_only_allows_read_errors_before_output() {
-        let empty_tools = ToolCallBuffer::default();
-        assert!(should_retry_pre_output_stream_error(
-            &ChatgptError::ResponsesStreamRead("reset".into()),
-            "",
-            "",
-            &empty_tools,
-            Duration::ZERO,
-        ));
-        assert!(should_retry_pre_output_stream_error(
-            &ChatgptError::ResponsesStreamEnded,
-            "",
-            "",
-            &empty_tools,
-            Duration::ZERO,
-        ));
-        assert!(!should_retry_pre_output_stream_error(
-            &ChatgptError::ResponsesStreamEnded,
-            "visible",
-            "",
-            &empty_tools,
-            Duration::ZERO,
-        ));
-        assert!(!should_retry_pre_output_stream_error(
-            &ChatgptError::ResponsesStreamParse("bad frame".into()),
-            "",
-            "",
-            &empty_tools,
-            Duration::ZERO,
-        ));
-        assert!(!should_retry_pre_output_stream_error(
-            &ChatgptError::ResponsesStreamRead("reset".into()),
-            "visible",
-            "",
-            &empty_tools,
-            Duration::ZERO,
-        ));
-
-        let mut tool_buf = ToolCallBuffer::default();
-        tool_buf.on_item_added(
-            "item_1".into(),
-            "call_1".into(),
-            "read".into(),
-            String::new(),
+    fn stream_retry_policy_is_bounded_and_preserves_output_safety() {
+        let failure = StreamFailure::from_error(ChatgptError::ResponsesStreamRead("reset".into()));
+        let clear = StreamAttemptState {
+            visible_state_blocked: false,
+            native_output_state_blocked: false,
+            tool_state_blocked: false,
+            terminal_event_seen: false,
+        };
+        assert_eq!(
+            decide_pre_output_retry(
+                &failure,
+                clear,
+                1,
+                Duration::ZERO,
+                Duration::from_millis(200),
+            ),
+            RetryDecision {
+                retry: true,
+                reason: RetryDecisionReason::RetryablePreOutputFailure,
+            }
         );
-        assert!(!should_retry_pre_output_stream_error(
-            &ChatgptError::ResponsesStreamRead("reset".into()),
-            "",
-            "",
-            &tool_buf,
-            Duration::ZERO,
-        ));
-        assert!(!should_retry_pre_output_stream_error(
-            &ChatgptError::ResponsesStreamRead("reset".into()),
-            "",
-            "",
-            &empty_tools,
-            PRE_OUTPUT_RETRY_BUDGET,
-        ));
+        assert_eq!(
+            decide_pre_output_retry(
+                &failure,
+                clear,
+                PRE_OUTPUT_MAX_ATTEMPTS,
+                Duration::ZERO,
+                Duration::from_millis(200),
+            )
+            .reason,
+            RetryDecisionReason::AttemptLimitReached,
+        );
+        assert_eq!(
+            decide_pre_output_retry(&failure, clear, 1, PRE_OUTPUT_RETRY_BUDGET, Duration::ZERO,)
+                .reason,
+            RetryDecisionReason::ElapsedBudgetExhausted,
+        );
+
+        let visible = StreamAttemptState {
+            visible_state_blocked: true,
+            ..clear
+        };
+        assert_eq!(
+            decide_pre_output_retry(&failure, visible, 1, Duration::ZERO, Duration::ZERO,).reason,
+            RetryDecisionReason::VisibleStateExists,
+        );
+        let native = StreamAttemptState {
+            native_output_state_blocked: true,
+            ..clear
+        };
+        assert_eq!(
+            decide_pre_output_retry(&failure, native, 1, Duration::ZERO, Duration::ZERO,).reason,
+            RetryDecisionReason::NativeOutputStateExists,
+        );
+        let tool = StreamAttemptState {
+            tool_state_blocked: true,
+            ..clear
+        };
+        assert_eq!(
+            decide_pre_output_retry(&failure, tool, 1, Duration::ZERO, Duration::ZERO,).reason,
+            RetryDecisionReason::ToolStateExists,
+        );
+
+        let parse = StreamFailure::from_error(ChatgptError::ResponsesStreamParse("bad".into()));
+        assert_eq!(
+            decide_pre_output_retry(&parse, clear, 1, Duration::ZERO, Duration::ZERO,).reason,
+            RetryDecisionReason::FailureNotRetryable,
+        );
     }
 
     #[test]
-    fn response_failure_retry_gate_only_allows_transient_failures_before_output() {
-        let empty_tools = ToolCallBuffer::default();
+    fn semantic_retry_classification_is_explicit_and_backoff_is_short() {
         let overloaded = serde_json::json!({
             "error": {
                 "message": "Our servers are currently overloaded. Please try again later.",
@@ -4728,38 +4985,13 @@ mod tests {
                 "code": "service_unavailable"
             }
         });
-        assert!(should_retry_pre_output_response_failure(
-            &overloaded,
-            "",
-            "",
-            &empty_tools,
-            Duration::ZERO,
-        ));
+        let failure = StreamFailure::semantic(&overloaded);
+        assert_eq!(failure.kind, StreamFailureKind::Semantic);
+        assert!(failure.retryable);
         assert_eq!(
-            response_failure_message(&overloaded),
+            failure.message,
             "Our servers are currently overloaded. Please try again later."
         );
-        assert!(should_retry_pre_output_response_failure(
-            &overloaded,
-            "",
-            "",
-            &empty_tools,
-            PRE_OUTPUT_RETRY_BUDGET - Duration::from_millis(1),
-        ));
-        assert!(!should_retry_pre_output_response_failure(
-            &overloaded,
-            "visible",
-            "",
-            &empty_tools,
-            Duration::ZERO,
-        ));
-        assert!(!should_retry_pre_output_response_failure(
-            &overloaded,
-            "",
-            "",
-            &empty_tools,
-            PRE_OUTPUT_RETRY_BUDGET,
-        ));
 
         let invalid = serde_json::json!({
             "error": {
@@ -4768,26 +5000,20 @@ mod tests {
                 "code": "unsupported_parameter"
             }
         });
-        assert!(!should_retry_pre_output_response_failure(
-            &invalid,
-            "",
-            "",
-            &empty_tools,
-            Duration::ZERO,
-        ));
+        assert!(!StreamFailure::semantic(&invalid).retryable);
 
-        let generic_server_failure = serde_json::json!({
-            "error": {
-                "message": "An error occurred while processing your request. You can retry your request. Please include the request ID req_42."
-            }
-        });
-        assert!(should_retry_pre_output_response_failure(
-            &generic_server_failure,
-            "",
-            "",
-            &empty_tools,
-            Duration::ZERO,
-        ));
+        assert_eq!(
+            pre_output_retry_delay_with_jitter(1, 0),
+            Duration::from_millis(PRE_OUTPUT_RETRY_BASE_DELAY_MS),
+        );
+        assert_eq!(
+            pre_output_retry_delay_with_jitter(2, 0),
+            Duration::from_millis(PRE_OUTPUT_RETRY_BASE_DELAY_MS * 2),
+        );
+        assert_eq!(
+            pre_output_retry_delay_with_jitter(99, 0),
+            Duration::from_millis(PRE_OUTPUT_RETRY_MAX_DELAY_MS),
+        );
     }
 
     #[test]

@@ -185,11 +185,17 @@ const RETRY_MAX_DELAY_MS: u64 = 30_000;
 const RETRY_JITTER_MS: i64 = 500;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Time-to-first-byte cap per attempt. The SSE stream is unbounded once
-/// headers arrive — this only covers the window from "request sent" to
-/// "response headers received". A 16-minute hang (observed in production
-/// via a proxy/VPN layer) is the failure mode this prevents.
+/// Time-to-first-byte cap per attempt. This covers only the window from
+/// "request sent" to "response headers received"; post-header body silence is
+/// bounded independently by [`DEFAULT_SSE_IDLE_TIMEOUT`]. A 16-minute header
+/// hang (observed in production via a proxy/VPN layer) is the failure mode this
+/// prevents.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Maximum silence between post-header SSE body chunks. Any received bytes,
+/// including keepalive comments that do not decode into a Responses event,
+/// reset the timer.
+pub const DEFAULT_SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// HTTP client for the Responses endpoint.
 ///
@@ -202,6 +208,7 @@ pub struct ResponsesClient {
     base_url: String,
     installation_id: String,
     originator: String,
+    sse_idle_timeout: Duration,
 }
 
 impl ResponsesClient {
@@ -222,6 +229,7 @@ impl ResponsesClient {
             base_url,
             installation_id,
             originator,
+            sse_idle_timeout: DEFAULT_SSE_IDLE_TIMEOUT,
         })
     }
 
@@ -233,11 +241,30 @@ impl ResponsesClient {
         installation_id: String,
         originator: String,
     ) -> Self {
+        Self::with_http_and_idle_timeout(
+            http,
+            base_url,
+            installation_id,
+            originator,
+            DEFAULT_SSE_IDLE_TIMEOUT,
+        )
+    }
+
+    /// Variant for integrations that need an explicit post-header idle bound;
+    /// normal provider construction uses the conservative default.
+    pub fn with_http_and_idle_timeout(
+        http: reqwest::Client,
+        base_url: String,
+        installation_id: String,
+        originator: String,
+        sse_idle_timeout: Duration,
+    ) -> Self {
         Self {
             http,
             base_url,
             installation_id,
             originator,
+            sse_idle_timeout,
         }
     }
 
@@ -284,7 +311,7 @@ impl ResponsesClient {
         turn.capture_response_headers(response.headers());
         let usage = UsageSnapshot::from_headers(response.headers());
         let byte_stream = response.bytes_stream();
-        let parsed = parse_byte_stream(byte_stream);
+        let parsed = parse_byte_stream(byte_stream, self.sse_idle_timeout);
         Ok(ResponseStream::new(Box::pin(parsed), usage))
     }
 
@@ -686,6 +713,7 @@ pub(crate) fn retry_delay(attempt: u32, retry_after_sec: Option<u64>) -> Duratio
 /// `[DONE]` sentinel through as a clean stream end.
 fn parse_byte_stream<S>(
     byte_stream: S,
+    idle_timeout: Duration,
 ) -> impl futures::Stream<Item = Result<ResponseEvent, ChatgptError>> + Send + 'static
 where
     S: futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
@@ -700,8 +728,8 @@ where
                 if let Some(event) = pop_pending(&mut pending) {
                     return Some((event, (byte_stream, buffer, pending)));
                 }
-                match byte_stream.next().await {
-                    Some(Ok(chunk)) => {
+                match tokio::time::timeout(idle_timeout, byte_stream.next()).await {
+                    Ok(Some(Ok(chunk))) => {
                         buffer.push(&chunk);
                         for frame in buffer.drain() {
                             match frame {
@@ -715,7 +743,7 @@ where
                             }
                         }
                     }
-                    Some(Err(err)) => {
+                    Ok(Some(Err(err))) => {
                         return Some((
                             Err(ChatgptError::ResponsesStreamRead(reqwest_error_detail(
                                 &err,
@@ -723,7 +751,15 @@ where
                             (byte_stream, buffer, pending),
                         ));
                     }
-                    None => return None,
+                    Ok(None) => return None,
+                    Err(_) => {
+                        return Some((
+                            Err(ChatgptError::ResponsesStreamIdleTimeout {
+                                timeout_ms: idle_timeout.as_millis() as u64,
+                            }),
+                            (byte_stream, buffer, pending),
+                        ));
+                    }
                 }
             }
         },

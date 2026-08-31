@@ -613,3 +613,124 @@ fn message_content_output_text_uses_snake_case_tag() {
     assert_eq!(v["type"], json!("output_text"));
     assert_eq!(v["text"], json!("hello"));
 }
+
+fn test_auth_snapshot() -> AuthSnapshot {
+    AuthSnapshot {
+        tokens: Some(TokenData {
+            id_token: "test-id".into(),
+            access_token: AccessToken("test-access".into()),
+            refresh_token: RefreshToken("test-refresh".into()),
+            account_id: None,
+        }),
+        state: AuthState::Connected,
+        source: Some(TokenSource::AuthSet),
+    }
+}
+
+async fn read_http_headers(stream: &mut tokio::net::TcpStream) {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+        let count = stream.read(&mut buffer).await.expect("read request");
+        assert!(count > 0, "request closed before headers");
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+}
+
+#[tokio::test]
+async fn post_header_sse_idle_timeout_has_its_own_error_class() {
+    use chatgpt_provider::error::ChatgptError;
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        read_http_headers(&mut stream).await;
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .expect("headers");
+        stream.flush().await.expect("flush");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    });
+
+    let client = ResponsesClient::with_http_and_idle_timeout(
+        reqwest::Client::builder().build().expect("HTTP client"),
+        format!("http://{addr}"),
+        "test-installation".into(),
+        "nefor_test".into(),
+        Duration::from_millis(100),
+    );
+    let mut turn = ResponsesTurnContext::new("session", "thread");
+    let mut response = client
+        .stream(&minimal_request(), &test_auth_snapshot(), &mut turn)
+        .await
+        .expect("response headers");
+    let error = response
+        .next()
+        .await
+        .expect("timeout event")
+        .expect_err("idle stream must fail");
+    assert!(matches!(
+        error,
+        ChatgptError::ResponsesStreamIdleTimeout { timeout_ms: 100 }
+    ));
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn any_sse_bytes_reset_the_activity_idle_timeout() {
+    use chatgpt_provider::responses::ResponseEvent;
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        read_http_headers(&mut stream).await;
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .expect("headers");
+        for _ in 0..3 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            stream
+                .write_all(b": keepalive\n\n")
+                .await
+                .expect("keepalive");
+            stream.flush().await.expect("flush keepalive");
+        }
+        stream
+            .write_all(b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\n")
+            .await
+            .expect("completion");
+        stream.shutdown().await.expect("close");
+    });
+
+    let client = ResponsesClient::with_http_and_idle_timeout(
+        reqwest::Client::builder().build().expect("HTTP client"),
+        format!("http://{addr}"),
+        "test-installation".into(),
+        "nefor_test".into(),
+        Duration::from_millis(100),
+    );
+    let mut turn = ResponsesTurnContext::new("session", "thread");
+    let mut response = client
+        .stream(&minimal_request(), &test_auth_snapshot(), &mut turn)
+        .await
+        .expect("response headers");
+    let event = response
+        .next()
+        .await
+        .expect("completion event")
+        .expect("active stream");
+    assert!(matches!(event, ResponseEvent::Completed { .. }));
+    server.await.expect("server");
+}

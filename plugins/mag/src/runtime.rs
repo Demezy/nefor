@@ -497,6 +497,13 @@ async fn settle_reaped(
 /// (load a program and reply with its initial modification), and `mag.eval`
 /// (apply a rule fn over an addressed resident program). Everything else on the
 /// broadcast bus is not ours and drops silently.
+fn is_provider_diagnostic_event(event: &str) -> bool {
+    matches!(
+        event,
+        "retry" | "retry_decision" | "usage" | "failed" | "error" | "interrupted"
+    )
+}
+
 async fn handle_event(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     source: &str,
@@ -533,8 +540,10 @@ async fn handle_event(
                 }
             }
         }
-        if let Some(event @ ("retry" | "usage" | "failed" | "error" | "interrupted")) =
-            body.get("event").and_then(Value::as_str)
+        if let Some(event) = body
+            .get("event")
+            .and_then(Value::as_str)
+            .filter(|event| is_provider_diagnostic_event(event))
         {
             let mut observation = body.clone();
             observation.insert("kind".into(), Value::String(event.into()));
@@ -1858,4 +1867,17 @@ async fn send_ready(out_tx: &mpsc::Sender<PluginOutgoing>) -> Result<(), MagErro
         .await
         .map_err(|_| TransportError::WriterClosed)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_provider_diagnostic_event;
+
+    #[test]
+    fn retry_decisions_use_the_existing_provider_diagnostic_path() {
+        assert!(is_provider_diagnostic_event("retry_decision"));
+        assert!(is_provider_diagnostic_event("error"));
+        assert!(!is_provider_diagnostic_event("text_delta"));
+        assert!(!is_provider_diagnostic_event("completed"));
+    }
 }

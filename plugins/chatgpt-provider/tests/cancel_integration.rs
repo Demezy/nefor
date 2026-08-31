@@ -617,39 +617,65 @@ async fn concurrent_direct_completions_keep_request_local_tool_allowlists() {
     let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
 }
 
-#[tokio::test]
-async fn clean_eof_requires_terminal_event_and_next_submissions_settle() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    let hits = Arc::new(AtomicUsize::new(0));
-    let hits_srv = hits.clone();
+struct ScriptedSseReply {
+    body: String,
+    declared_length: usize,
+}
 
-    let server = tokio::spawn(async move {
-        let responses = [
-            // Before output: retryable because nothing user-visible escaped.
-            String::new(),
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"retried\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\n".into(),
-            // After partial output: terminal error, never replay the visible prefix.
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n".into(),
-            // A semantic terminal event makes the following transport EOF valid.
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"after-error\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r3\"}}\n\n".into(),
-        ];
-        for body in responses {
-            let (mut stream, _) = listener.accept().await.expect("accept");
-            let _ = read_request(&mut stream).await;
-            hits_srv.fetch_add(1, Ordering::SeqCst);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(), body
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
-            let _ = stream.shutdown().await;
+impl ScriptedSseReply {
+    fn complete(body: impl Into<String>) -> Self {
+        let body = body.into();
+        Self {
+            declared_length: body.len(),
+            body,
         }
-    });
+    }
 
+    fn truncated(body: impl Into<String>) -> Self {
+        let body = body.into();
+        Self {
+            declared_length: body.len() + 64,
+            body,
+        }
+    }
+}
+
+async fn serve_scripted_sse(
+    listener: TcpListener,
+    replies: Vec<ScriptedSseReply>,
+    hits: Arc<AtomicUsize>,
+) {
+    for reply in replies {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let _ = read_request(&mut stream).await;
+        hits.fetch_add(1, Ordering::SeqCst);
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            reply.declared_length,
+        );
+        stream
+            .write_all(headers.as_bytes())
+            .await
+            .expect("write headers");
+        stream
+            .write_all(reply.body.as_bytes())
+            .await
+            .expect("write body");
+        stream.shutdown().await.expect("close response");
+    }
+}
+
+async fn start_direct_harness(
+    base_url: String,
+    client: ResponsesClient,
+) -> (
+    mpsc::Sender<Result<Envelope, TransportError>>,
+    mpsc::Receiver<PluginOutgoing>,
+    tokio::task::JoinHandle<Result<(), chatgpt_provider::error::ChatgptError>>,
+) {
     let args = Arc::new(ServeArgs {
         provider_name: PROVIDER.into(),
-        base_url: format!("http://{addr}"),
+        base_url,
     });
     let chats = Arc::new(Chats::with_default_model(None));
     let dir = tempfile::tempdir().expect("tempdir");
@@ -659,90 +685,353 @@ async fn clean_eof_requires_terminal_event_and_next_submissions_settle() {
             .expect("auth store"),
     );
     let _ = auth.apply_auth_set("test-token".into()).await;
-    let (out_tx, mut out_rx) = mpsc::channel::<PluginOutgoing>(256);
+    let (out_tx, out_rx) = mpsc::channel::<PluginOutgoing>(256);
     let ctx = DispatcherContext::new(
         args,
         chats,
         auth,
         Arc::new(ToolCatalog::new()),
         Arc::new(ToolBroker::new()),
-        Arc::new(test_responses_client(format!("http://{addr}"))),
+        Arc::new(client),
         out_tx,
     );
     let (in_tx, in_rx) = mpsc::channel::<Result<Envelope, TransportError>>(64);
     let loop_handle = tokio::spawn(run_dispatch_loop(ctx, in_rx));
+    (in_tx, out_rx, loop_handle)
+}
 
-    async fn submit(in_tx: &mpsc::Sender<Result<Envelope, TransportError>>, id: &str) {
-        in_tx
-            .send(Ok(event_env(
-                &kind("completion.request"),
-                &[
-                    ("request_id", Value::String(id.into())),
-                    ("model", Value::String("test-model".into())),
-                    (
-                        "messages",
-                        serde_json::json!([
-                            {"role":"system","content":"be concise"},
-                            {"role":"user","content":"hi"}
-                        ]),
-                    ),
-                ],
-            )))
-            .await
-            .expect("completion request");
-    }
+async fn submit_direct_completion(
+    in_tx: &mpsc::Sender<Result<Envelope, TransportError>>,
+    request_id: &str,
+) {
+    in_tx
+        .send(Ok(event_env(
+            &kind("completion.request"),
+            &[
+                ("request_id", Value::String(request_id.into())),
+                ("model", Value::String("test-model".into())),
+                (
+                    "messages",
+                    serde_json::json!([
+                        {"role":"system","content":"be concise"},
+                        {"role":"user","content":"hi"}
+                    ]),
+                ),
+            ],
+        )))
+        .await
+        .expect("completion request");
+}
 
-    submit(&in_tx, "before-output").await;
-    let retried = wait_for_completion_event(
-        &mut out_rx,
-        "before-output",
-        "completed",
-        Duration::from_secs(5),
-    )
-    .await
-    .expect("pre-output EOF retries and settles");
-    assert_eq!(retried["request_id"], "before-output");
-    assert_eq!(retried["event"], "completed");
-    assert_eq!(retried["text"], "retried");
-    assert_eq!(hits.load(Ordering::SeqCst), 2);
-
-    submit(&in_tx, "after-partial").await;
-    let failed = wait_for_completion_event(
-        &mut out_rx,
-        "after-partial",
-        "error",
-        Duration::from_secs(3),
-    )
-    .await
-    .expect("partial EOF settles as an error");
-    assert_eq!(failed["request_id"], "after-partial");
-    assert_eq!(failed["event"], "error");
-    assert!(failed["message"]
-        .as_str()
-        .is_some_and(|error| error.contains("before a terminal event")));
-    assert_eq!(
-        hits.load(Ordering::SeqCst),
-        3,
-        "visible output disables retry"
-    );
-
-    submit(&in_tx, "after-terminal").await;
-    let completed = wait_for_completion_event(
-        &mut out_rx,
-        "after-terminal",
-        "completed",
-        Duration::from_secs(3),
-    )
-    .await
-    .expect("provider remains usable after scoped EOF error");
-    assert_eq!(completed["request_id"], "after-terminal");
-    assert_eq!(completed["event"], "completed");
-    assert_eq!(completed["text"], "after-error");
-    assert_eq!(hits.load(Ordering::SeqCst), 4);
-
+async fn finish_harness(
+    in_tx: mpsc::Sender<Result<Envelope, TransportError>>,
+    loop_handle: tokio::task::JoinHandle<Result<(), chatgpt_provider::error::ChatgptError>>,
+) {
     drop(in_tx);
     let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
-    let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+}
+
+#[tokio::test]
+async fn truncated_body_before_output_replays_once_then_succeeds() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let completed = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"retried\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\n"
+    );
+    let server = tokio::spawn(serve_scripted_sse(
+        listener,
+        vec![
+            ScriptedSseReply::truncated(""),
+            ScriptedSseReply::complete(completed),
+        ],
+        hits.clone(),
+    ));
+    let base_url = format!("http://{addr}");
+    let (in_tx, mut out_rx, loop_handle) =
+        start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
+
+    submit_direct_completion(&in_tx, "truncated-replay").await;
+    let decision = wait_for_completion_event(
+        &mut out_rx,
+        "truncated-replay",
+        "retry_decision",
+        Duration::from_secs(3),
+    )
+    .await
+    .expect("retry decision");
+    assert_eq!(decision["attempt"], 1);
+    assert_eq!(decision["max_attempts"], 3);
+    assert_eq!(decision["retry"], true);
+    assert_eq!(decision["failure_kind"], "body_read");
+    assert_eq!(decision["terminal_event_seen"], false);
+    assert_eq!(decision["visible_state_blocked"], false);
+    assert_eq!(decision["tool_state_blocked"], false);
+    assert!(decision["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("source:")));
+
+    let completed = wait_for_completion_event(
+        &mut out_rx,
+        "truncated-replay",
+        "completed",
+        Duration::from_secs(3),
+    )
+    .await
+    .expect("retried completion");
+    assert_eq!(completed["text"], "retried");
+    assert_eq!(completed["stream_attempts"], 2);
+    assert_eq!(completed["terminal_event_seen"], true);
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "exactly one replay");
+
+    finish_harness(in_tx, loop_handle).await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn pre_output_transport_retries_stop_at_attempt_limit() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let server = tokio::spawn(serve_scripted_sse(
+        listener,
+        (0..3).map(|_| ScriptedSseReply::truncated("")).collect(),
+        hits.clone(),
+    ));
+    let base_url = format!("http://{addr}");
+    let (in_tx, mut out_rx, loop_handle) =
+        start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
+
+    submit_direct_completion(&in_tx, "exhausted").await;
+    for attempt in 1..=3 {
+        let decision = wait_for_completion_event(
+            &mut out_rx,
+            "exhausted",
+            "retry_decision",
+            Duration::from_secs(3),
+        )
+        .await
+        .expect("retry decision");
+        assert_eq!(decision["attempt"], attempt);
+        assert_eq!(decision["retry"], attempt < 3);
+        if attempt == 3 {
+            assert_eq!(decision["retry_reason"], "attempt_limit_reached");
+        }
+    }
+    let failed =
+        wait_for_completion_event(&mut out_rx, "exhausted", "error", Duration::from_secs(3))
+            .await
+            .expect("exhausted completion");
+    assert!(failed["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("retrying the turn is safe")));
+    assert_eq!(failed["stream_attempts"], 3);
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
+
+    finish_harness(in_tx, loop_handle).await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn interruption_after_text_never_replays() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n";
+    let server = tokio::spawn(serve_scripted_sse(
+        listener,
+        vec![ScriptedSseReply::truncated(body)],
+        hits.clone(),
+    ));
+    let base_url = format!("http://{addr}");
+    let (in_tx, mut out_rx, loop_handle) =
+        start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
+
+    submit_direct_completion(&in_tx, "partial-text").await;
+    let decision = wait_for_completion_event(
+        &mut out_rx,
+        "partial-text",
+        "retry_decision",
+        Duration::from_secs(3),
+    )
+    .await
+    .expect("retry decision");
+    assert_eq!(decision["retry"], false);
+    assert_eq!(
+        decision["retry_reason"],
+        "visible_or_reasoning_state_exists"
+    );
+    assert_eq!(decision["visible_state_blocked"], true);
+    let failed =
+        wait_for_completion_event(&mut out_rx, "partial-text", "error", Duration::from_secs(3))
+            .await
+            .expect("terminal error");
+    assert!(failed["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("did not replay")));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    finish_harness(in_tx, loop_handle).await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn interruption_after_buffered_reasoning_never_replays() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let body = "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"**Considering recovery\",\"item_id\":\"rs_1\"}\n\n";
+    let server = tokio::spawn(serve_scripted_sse(
+        listener,
+        vec![ScriptedSseReply::truncated(body)],
+        hits.clone(),
+    ));
+    let base_url = format!("http://{addr}");
+    let (in_tx, mut out_rx, loop_handle) =
+        start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
+
+    submit_direct_completion(&in_tx, "partial-reasoning").await;
+    let decision = wait_for_completion_event(
+        &mut out_rx,
+        "partial-reasoning",
+        "retry_decision",
+        Duration::from_secs(3),
+    )
+    .await
+    .expect("retry decision");
+    assert_eq!(decision["retry"], false);
+    assert_eq!(
+        decision["retry_reason"],
+        "visible_or_reasoning_state_exists"
+    );
+    assert_eq!(decision["visible_state_blocked"], true);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    finish_harness(in_tx, loop_handle).await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn interruption_after_tool_call_state_never_replays() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let body = "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"inspect\",\"arguments\":\"\"}}\n\n";
+    let server = tokio::spawn(serve_scripted_sse(
+        listener,
+        vec![ScriptedSseReply::truncated(body)],
+        hits.clone(),
+    ));
+    let base_url = format!("http://{addr}");
+    let (in_tx, mut out_rx, loop_handle) =
+        start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
+
+    submit_direct_completion(&in_tx, "partial-tool").await;
+    let decision = wait_for_completion_event(
+        &mut out_rx,
+        "partial-tool",
+        "retry_decision",
+        Duration::from_secs(3),
+    )
+    .await
+    .expect("retry decision");
+    assert_eq!(decision["retry"], false);
+    assert_eq!(decision["retry_reason"], "tool_call_state_exists");
+    assert_eq!(decision["tool_state_blocked"], true);
+    let failed =
+        wait_for_completion_event(&mut out_rx, "partial-tool", "error", Duration::from_secs(3))
+            .await
+            .expect("terminal error");
+    assert!(failed["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("tool state or side effects may already exist")));
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    finish_harness(in_tx, loop_handle).await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn clean_eof_before_completion_is_not_semantic_success() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let server = tokio::spawn(serve_scripted_sse(
+        listener,
+        (0..3).map(|_| ScriptedSseReply::complete("")).collect(),
+        hits.clone(),
+    ));
+    let base_url = format!("http://{addr}");
+    let (in_tx, mut out_rx, loop_handle) =
+        start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
+
+    submit_direct_completion(&in_tx, "clean-eof").await;
+    let mut last = None;
+    for _ in 0..3 {
+        last = wait_for_completion_event(
+            &mut out_rx,
+            "clean-eof",
+            "retry_decision",
+            Duration::from_secs(3),
+        )
+        .await;
+    }
+    let last = last.expect("final EOF decision");
+    assert_eq!(last["failure_kind"], "clean_eof");
+    assert_eq!(last["terminal_event_seen"], false);
+    assert_eq!(last["retry"], false);
+    let failed =
+        wait_for_completion_event(&mut out_rx, "clean-eof", "error", Duration::from_secs(3))
+            .await
+            .expect("EOF terminal error");
+    assert!(failed["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("before a terminal event")));
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
+
+    finish_harness(in_tx, loop_handle).await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn response_completed_wins_over_following_connection_failure() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let body = concat!(
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\n"
+    );
+    let server = tokio::spawn(serve_scripted_sse(
+        listener,
+        vec![ScriptedSseReply::truncated(body)],
+        hits.clone(),
+    ));
+    let base_url = format!("http://{addr}");
+    let (in_tx, mut out_rx, loop_handle) =
+        start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
+
+    submit_direct_completion(&in_tx, "completed-before-reset").await;
+    let completed = wait_for_completion_event(
+        &mut out_rx,
+        "completed-before-reset",
+        "completed",
+        Duration::from_secs(3),
+    )
+    .await
+    .expect("semantic completion");
+    assert_eq!(completed["text"], "done");
+    assert_eq!(completed["terminal_event_seen"], true);
+    assert_eq!(completed["stream_attempts"], 1);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    let trailing = drain_for(&mut out_rx, Duration::from_millis(100)).await;
+    assert!(!trailing
+        .iter()
+        .any(|body| { body.get("event").and_then(Value::as_str) == Some("retry_decision") }));
+
+    finish_harness(in_tx, loop_handle).await;
+    server.await.expect("server");
 }
 
 #[tokio::test]

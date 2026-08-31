@@ -71,11 +71,18 @@ pub enum ChatgptError {
     #[error("responses endpoint returned {status}: {body}")]
     ResponsesEndpoint { status: u16, body: String },
 
-    /// Mid-stream transport read failure (TCP reset, idle timeout,
-    /// chunked decoder error). Safe to retry only before an attempt has
-    /// emitted any user-visible output.
+    /// Mid-stream transport read failure (TCP reset or chunked decoder
+    /// error). Safe to retry only before an attempt has emitted any
+    /// user-visible output or tool-call state.
     #[error("responses SSE stream read error: {0}")]
     ResponsesStreamRead(String),
+
+    /// Response headers arrived, but the SSE body produced no network
+    /// activity for the configured interval. Kept separate from body-read
+    /// failures so diagnostics can distinguish a stalled upstream path from a
+    /// reset or truncated transfer.
+    #[error("responses SSE stream idle timeout after {timeout_ms}ms without activity")]
+    ResponsesStreamIdleTimeout { timeout_ms: u64 },
 
     /// The transport closed cleanly without a semantic terminal event.
     /// A clean EOF is not proof that the Responses API completed the turn.
