@@ -65,11 +65,33 @@
    :roots (List StoredNode)
    :outputs (List StoredNode)
    :terminal_outputs_by_full_port (Map String (List StoredNode))})
+(type GraphProjection
+  {:edges (List Edge)
+   :all_nodes (List StoredNode)
+   :nodes (List StoredNode)
+   :actors (List Actor)
+   :routes (List StoredRoute)
+   :messages (List Message)
+   :graph_rules (List Rule)
+   :logical_nodes (List LogicalNode)
+   :edges_by_from_node (Map String (List Edge))
+   :edges_by_to_node (Map String (List Edge))
+   :roots (List StoredNode)
+   :outputs (List StoredNode)})
+(type LoweringAnalysis
+  {:actors (List Actor)
+   :routes (List StoredRoute)
+   :route_input_addresses (List String)
+   :routes_by_input (Map String (List StoredRoute))
+   :messages (List Message)
+   :logical_nodes (List LogicalNode)
+   :outputs (List StoredNode)})
 
 (type OrderedNodes {:seen (Map String Bool) :values (List StoredNode)})
 (type OrderedStrings {:seen (Map String Bool) :values (List String)})
 (type ReachabilityState
-  {:visited (Map String Bool) :worklist (List String)})
+  {:visited (Map String Bool) :frontier (List String)})
+(type IndexedPosition {:index String :position Int})
 
 ;; Runtime subscriptions remain program metadata. They observe a graph but are
 ;; not vertices or edges and therefore do not participate in edge-set algebra.
@@ -294,8 +316,20 @@
       edges
       (concat edges [candidate]))
     (concat edges [candidate]))))
+(let insert-edge-definition
+  (fn [[definitions (List Edge)] [candidate Edge]] -> (List Edge)
+    (if (= (count (filter (fn [[value Edge]] -> Bool
+                            (same-edge-definition? value candidate))
+                          definitions)) 0)
+      (concat definitions [candidate])
+      definitions)))
 (let normalize-edges (fn [[edges (List Edge)]] -> (List Edge)
-  (sort-by edge-key (fold insert-edge (as (List Edge) []) edges))))
+  (let edges-by-key (group-by edge-key edges))
+  (flat-map
+    (fn [[key String]] -> (List Edge)
+      (fold insert-edge-definition (as (List Edge) [])
+        (or (get edges-by-key key) (as (List Edge) []))))
+    (keys edges-by-key))))
 
 (let empty-graph (as Graph {:edges (as (List Edge) [])}))
 (let graph (fn [[edges (List Edge)]] -> Graph
@@ -351,8 +385,13 @@
 (let external-routes (fn [[value Graph]] -> (List StoredRoute)
   (map (fn [[candidate Edge]] -> StoredRoute (get candidate "route"))
        (get value "edges"))))
-(let analyze-graph (fn [[value Graph]] -> GraphAnalysis
+(let graph-projection (fn [[value Graph]] -> GraphProjection
   (let edges (get value "edges"))
+  (let edges-by-from-node
+    (group-by
+      (fn [[candidate Edge]] -> String
+        (node-id (get candidate "from")))
+      edges))
   (let edges-by-to-node
     (group-by
       (fn [[candidate Edge]] -> String
@@ -389,10 +428,56 @@
     (flat-map (fn [[candidate StoredNode]] -> (List Rule)
                 (get candidate "rules"))
               nodes))
-  (let outputs
-    (filter (fn [[candidate StoredNode]] -> Bool
-              (= (get candidate "role") "output"))
-            nodes))
+  (let logical-nodes
+    (flat-map (fn [[candidate StoredNode]] -> (List LogicalNode)
+                (get candidate "nodes"))
+              nodes))
+  (as GraphProjection
+    {:edges edges
+     :all_nodes all-nodes
+     :nodes nodes
+     :actors actors
+     :routes routes
+     :messages messages
+     :graph_rules graph-rules
+     :logical_nodes logical-nodes
+     :edges_by_from_node edges-by-from-node
+     :edges_by_to_node edges-by-to-node
+     :roots roots
+     :outputs
+       (filter (fn [[candidate StoredNode]] -> Bool
+                 (= (get candidate "role") "output"))
+               nodes)})))
+(let analyze-for-lowering (fn [[value Graph]] -> LoweringAnalysis
+  (let projection (graph-projection value))
+  (let routes (get projection "routes"))
+  (as LoweringAnalysis
+    {:actors (get projection "actors")
+     :routes routes
+     :route_input_addresses
+       (ordered-strings
+         (map (fn [[candidate StoredRoute]] -> String
+                (port-address-key (get candidate "to")))
+              routes))
+     :routes_by_input
+       (group-by
+         (fn [[candidate StoredRoute]] -> String
+           (port-address-key (get candidate "to")))
+         (sort-by route-id routes))
+     :messages (get projection "messages")
+     :logical_nodes (get projection "logical_nodes")
+     :outputs (get projection "outputs")})))
+(let analyze-graph (fn [[value Graph]] -> GraphAnalysis
+  (let lowering (analyze-for-lowering value))
+  (let projection (graph-projection value))
+  (let edges (get projection "edges"))
+  (let all-nodes (get projection "all_nodes"))
+  (let nodes (get projection "nodes"))
+  (let actors (get projection "actors"))
+  (let routes (get projection "routes"))
+  (let messages (get projection "messages"))
+  (let graph-rules (get projection "graph_rules"))
+  (let outputs (get projection "outputs"))
   (as GraphAnalysis
     {:edges edges
      :all_nodes all-nodes
@@ -411,19 +496,11 @@
                      (get candidate "outputs"))
                    actors))
      :routes routes
-     :route_input_addresses
-       (ordered-strings
-         (map (fn [[candidate StoredRoute]] -> String
-                (port-address-key (get candidate "to")))
-              routes))
+     :route_input_addresses (get lowering "route_input_addresses")
+     :routes_by_input (get lowering "routes_by_input")
      :diagnostic_routes_by_input
        (group-by (fn [[route StoredRoute]] -> String
                    (port-address-key (get route "to"))) routes)
-     :routes_by_input
-       (group-by
-         (fn [[candidate StoredRoute]] -> String
-           (port-address-key (get candidate "to")))
-         (sort-by route-id routes))
      :routes_by_output
        (group-by
          (fn [[candidate StoredRoute]] -> String
@@ -446,13 +523,9 @@
          (fn [[candidate Rule]] -> String
            (port-address-key (get candidate "on")))
          graph-rules)
-     :edges_by_from_node
-       (group-by
-         (fn [[candidate Edge]] -> String
-           (node-id (get candidate "from")))
-         edges)
-     :edges_by_to_node edges-by-to-node
-     :roots roots
+     :edges_by_from_node (get projection "edges_by_from_node")
+     :edges_by_to_node (get projection "edges_by_to_node")
+     :roots (get projection "roots")
      :outputs outputs
      :terminal_outputs_by_full_port
        (group-by
@@ -461,17 +534,11 @@
          outputs)})))
 
 (let graph-nodes (fn [[value Graph]] -> (List StoredNode)
-  (get (analyze-graph value) "nodes")))
+  (get (graph-projection value) "nodes")))
 (let graph-routes (fn [[value Graph]] -> (List StoredRoute)
-  (get (analyze-graph value) "routes")))
+  (get (graph-projection value) "routes")))
 (let graph-actors (fn [[value Graph]] -> (List Actor)
-  (flat-map (fn [[candidate StoredNode]] -> (List Actor)
-              (get candidate "actors"))
-            (graph-nodes value))))
-(let authored-graph-messages (fn [[value Graph]] -> (List Message)
-  (flat-map (fn [[candidate StoredNode]] -> (List Message)
-              (get candidate "messages"))
-            (graph-nodes value))))
+  (get (graph-projection value) "actors")))
 ;; Whole-value compatibility matters: edge compatibility also accepts one
 ;; product component, which is not enough to activate a root.
 (let unit-input? (fn [[input StoredPort]] -> Bool
@@ -502,15 +569,13 @@
       (filter (fn [[candidate StoredPort]] -> Bool
                 (input-needs-bootstrap? routes-by-input messages-by-input candidate)) boundary-ports))))
 (let graph-messages (fn [[value Graph]] -> (List Message)
-  (get (analyze-graph value) "messages")))
+  (get (graph-projection value) "messages")))
 (let graph-rules (fn [[value Graph]] -> (List Rule)
-  (get (analyze-graph value) "graph_rules")))
+  (get (graph-projection value) "graph_rules")))
 (let program (fn [[value Graph] [rules (List Rule)]] -> Program
   (as Program {:graph value :rules (concat (graph-rules value) rules)})))
 (let graph-logical-nodes (fn [[value Graph]] -> (List LogicalNode)
-  (flat-map (fn [[candidate StoredNode]] -> (List LogicalNode)
-              (get candidate "nodes"))
-            (graph-nodes value))))
+  (get (graph-projection value) "logical_nodes")))
 (let insert-string
   (fn [[values (Map String Bool)] [value String]] -> (Map String Bool)
     (assoc values value true)))
@@ -571,60 +636,60 @@
       state
       (as ReachabilityState
         {:visited (assoc (get state "visited") id true)
-         :worklist (concat (get state "worklist") [id])}))))
+         :frontier (concat (get state "frontier") [id])}))))
 (let initial-reachability-state
   (fn [[ids (List String)]] -> ReachabilityState
     (fold enqueue-unvisited
       (as ReachabilityState
         {:visited (as (Map String Bool) {})
-         :worklist (as (List String) [])})
+         :frontier (as (List String) [])})
       ids)))
+(let next-forward-frontier
+  (fn [[analysis GraphAnalysis] [state ReachabilityState]] -> ReachabilityState
+    (let next
+      (flat-map
+        (fn [[id String]] -> (List String)
+          (map (fn [[candidate Edge]] -> String
+                 (node-id (get candidate "to")))
+               (or (get (get analysis "edges_by_from_node") id)
+                   (as (List Edge) []))))
+        (get state "frontier")))
+    (fold enqueue-unvisited
+      (as ReachabilityState
+        {:visited (get state "visited")
+         :frontier (as (List String) [])})
+      next)))
 (let walk-forward
   (fn [[analysis GraphAnalysis] [state ReachabilityState]]
     -> (Map String Bool)
-    (let worklist (get state "worklist"))
-    (if (= (count worklist) 0)
+    (if (= (count (get state "frontier")) 0)
       (get state "visited")
-      ((fn [] -> (Map String Bool)
-        (let id (first worklist))
-        (let outgoing
-          (or (get (get analysis "edges_by_from_node") id)
-              (as (List Edge) [])))
-        (let next
-          (map (fn [[candidate Edge]] -> String
-                 (node-id (get candidate "to")))
-               outgoing))
-        (let remaining
-          (as ReachabilityState
-            {:visited (get state "visited")
-             :worklist (remove-at worklist 0)}))
-        (walk-forward analysis
-          (fold enqueue-unvisited remaining next)))))))
+      (walk-forward analysis (next-forward-frontier analysis state)))))
 (let forward-reachable (fn [[analysis GraphAnalysis]] -> (Map String Bool)
   (walk-forward analysis
     (initial-reachability-state
       (map node-id (get analysis "roots"))))))
+(let next-reverse-frontier
+  (fn [[analysis GraphAnalysis] [state ReachabilityState]] -> ReachabilityState
+    (let previous
+      (flat-map
+        (fn [[id String]] -> (List String)
+          (map (fn [[candidate Edge]] -> String
+                 (node-id (get candidate "from")))
+               (or (get (get analysis "edges_by_to_node") id)
+                   (as (List Edge) []))))
+        (get state "frontier")))
+    (fold enqueue-unvisited
+      (as ReachabilityState
+        {:visited (get state "visited")
+         :frontier (as (List String) [])})
+      previous)))
 (let walk-reverse
   (fn [[analysis GraphAnalysis] [state ReachabilityState]]
     -> (Map String Bool)
-    (let worklist (get state "worklist"))
-    (if (= (count worklist) 0)
+    (if (= (count (get state "frontier")) 0)
       (get state "visited")
-      ((fn [] -> (Map String Bool)
-        (let id (first worklist))
-        (let incoming
-          (or (get (get analysis "edges_by_to_node") id)
-              (as (List Edge) [])))
-        (let previous
-          (map (fn [[candidate Edge]] -> String
-                 (node-id (get candidate "from")))
-               incoming))
-        (let remaining
-          (as ReachabilityState
-            {:visited (get state "visited")
-             :worklist (remove-at worklist 0)}))
-        (walk-reverse analysis
-          (fold enqueue-unvisited remaining previous)))))))
+      (walk-reverse analysis (next-reverse-frontier analysis state)))))
 (let reverse-reachable
   (fn [[analysis GraphAnalysis] [result StoredNode]] -> (Map String Bool)
     (walk-reverse analysis
@@ -1142,35 +1207,38 @@
 (let zip-route-assignments
   (fn [[routes (List StoredRoute)] [positions (List Int)]]
     -> (List AssignedRoute)
-    (if (= (count routes) 0)
-      (as (List AssignedRoute) [])
-      (concat
-        [(as AssignedRoute
-           {:route (first routes)
-            :product_position (first positions)})]
-        (zip-route-assignments
-          (remove-at routes 0) (remove-at positions 0))))))
+    (let positions-by-index
+      (group-by
+        (fn [[candidate IndexedPosition]] -> String
+          (get candidate "index"))
+        (indexed-map
+          (fn [[index Int] [position Int]] -> IndexedPosition
+            (as IndexedPosition
+              {:index (str index) :position position}))
+          positions)))
+    (indexed-map
+      (fn [[index Int] [route StoredRoute]] -> AssignedRoute
+        (as AssignedRoute
+          {:route route
+           :product_position
+             (get (first (get positions-by-index (str index))) "position")}))
+      routes)))
 (let route-destination-descriptor-key
   (fn [[value StoredRoute]] -> String
     (canonical (get (get value "to") "type"))))
-(let assigned-route-for
-  (fn [[assignments (List AssignedRoute)] [candidate StoredRoute]]
-    -> AssignedRoute
-    (first
-      (filter (fn [[assigned AssignedRoute]] -> Bool
-                (= (get (get assigned "route") "id")
-                   (get candidate "id")))
-              assignments))))
+(let assigned-route-id
+  (fn [[assigned AssignedRoute]] -> String
+    (get (get assigned "route") "id")))
 (let descriptor-assignment-index
   (fn [[routes (List StoredRoute)]
        [descriptor-keys (List String)]
        [routes-by-descriptor (Map String (List StoredRoute))]
        [sources (List TypeDescriptor)]]
-    -> (Map String (List AssignedRoute))
+    -> (Map String (Map String (List AssignedRoute)))
     (fold
-      (fn [[out (Map String (List AssignedRoute))]
+      (fn [[out (Map String (Map String (List AssignedRoute)))]
            [descriptor-key String]]
-        -> (Map String (List AssignedRoute))
+        -> (Map String (Map String (List AssignedRoute)))
         (let descriptor-routes
           (or (get routes-by-descriptor descriptor-key)
               (as (List StoredRoute) [])))
@@ -1179,8 +1247,9 @@
             (get (get (first descriptor-routes) "to") "type")
             sources))
         (assoc out descriptor-key
-          (zip-route-assignments routes positions)))
-      (as (Map String (List AssignedRoute)) {})
+          (group-by assigned-route-id
+            (zip-route-assignments routes positions))))
+      (as (Map String (Map String (List AssignedRoute))) {})
       descriptor-keys)))
 (let assigned-input-bucket
   (fn [[routes (List StoredRoute)]] -> (List AssignedRoute)
@@ -1198,11 +1267,13 @@
             routes (keys routes-by-descriptor) routes-by-descriptor sources))
         (map
           (fn [[candidate StoredRoute]] -> AssignedRoute
-            (assigned-route-for
+            (let assignments-by-id
               (or (get assignments-by-descriptor
                        (route-destination-descriptor-key candidate))
-                  (as (List AssignedRoute) []))
-              candidate))
+                  (as (Map String (List AssignedRoute)) {})))
+            (first
+              (or (get assignments-by-id (route-id candidate))
+                  (as (List AssignedRoute) []))))
           routes))))))
 (let route-assignment-key
   (fn [[value StoredRoute]] -> String
@@ -1246,6 +1317,12 @@
       (get analysis "routes")
       (get analysis "route_input_addresses")
       (get analysis "routes_by_input"))))
+(let assigned-lowering-routes
+  (fn [[analysis LoweringAnalysis]] -> (List AssignedRoute)
+    (assigned-routes-from-indexes
+      (get analysis "routes")
+      (get analysis "route_input_addresses")
+      (get analysis "routes_by_input"))))
 (let assigned-routes
   (fn [[routes (List StoredRoute)]] -> (List AssignedRoute)
     (let route-input-addresses
@@ -1263,30 +1340,34 @@
 (let assigned-route-source-actor
   (fn [[candidate AssignedRoute]] -> String
     (get (get (get candidate "route") "from") "actor")))
+(let assigned-route-source-wire
+  (fn [[candidate AssignedRoute]] -> String
+    (get (get (get candidate "route") "from") "wire")))
+(let lower-destination
+  (fn [[assigned AssignedRoute]] -> LowerDestination
+    (let candidate (get assigned "route"))
+    (let from (get candidate "from"))
+    (let to (get candidate "to"))
+    (as LowerDestination
+      {:actor (get to "actor")
+       :wire (get to "wire")
+       :edge_id (get candidate "id")
+       :source_type_id (get from "type_id")
+       :destination_type_id (get to "type_id")
+       :product_position (get assigned "product_position")})))
 (let actor-routes
   (fn [[routes (List AssignedRoute)]]
     -> (Map String (List LowerDestination))
+    (let routes-by-wire (group-by assigned-route-source-wire routes))
     (fold
-      (fn [[out (Map String (List LowerDestination))]
-           [assigned AssignedRoute]]
+      (fn [[out (Map String (List LowerDestination))] [wire String]]
         -> (Map String (List LowerDestination))
-        (let candidate (get assigned "route"))
-        (let from (get candidate "from"))
-        (let to (get candidate "to"))
-        (let wire (get from "wire"))
-        (let old
-          (or (get out wire) (as (List LowerDestination) [])))
-        (let destination
-          (as LowerDestination
-            {:actor (get to "actor")
-             :wire (get to "wire")
-             :edge_id (get candidate "id")
-             :source_type_id (get from "type_id")
-             :destination_type_id (get to "type_id")
-             :product_position (get assigned "product_position")}))
-        (assoc out wire (concat old [destination])))
+        (assoc out wire
+          (map lower-destination
+            (or (get routes-by-wire wire)
+                (as (List AssignedRoute) [])))))
       (as (Map String (List LowerDestination)) {})
-      routes)))
+      (keys routes-by-wire))))
 (let lower-actor-with-routes
   (fn [[routes (List AssignedRoute)] [value Actor]] -> LowerActor
     (as LowerActor
@@ -1305,7 +1386,7 @@
                     :content (get value "content")})))
 (let lower-rule (fn [[value Rule]] -> LowerRule
   (as LowerRule {:id (get value "id") :on (get value "on") :fn (get value "fn")})))
-(let result-boundary (fn [[analysis GraphAnalysis]] -> ResultBoundary
+(let result-boundary (fn [[analysis LoweringAnalysis]] -> ResultBoundary
   (as ResultBoundary
     {:from (get (first (get analysis "outputs")) "output")})))
 (let actor-descriptors (fn [[actors (List Actor)]] -> (List TypeDescriptor)
@@ -1329,7 +1410,7 @@
          (get (get candidate "on") "type"))
        rules)))
 (let program-descriptors
-  (fn [[analysis GraphAnalysis] [rules (List Rule)]]
+  (fn [[analysis LoweringAnalysis] [rules (List Rule)]]
     -> (List TypeDescriptor)
     (concat
       (concat
@@ -1348,8 +1429,8 @@
     (message-descriptors (get value "messages")))))
 (let lower-program (fn [[value Program]] -> Modification
   (let topology (get value "graph"))
-  (let analysis (analyze-graph topology))
-  (let assigned (assigned-analysis-routes analysis))
+  (let analysis (analyze-for-lowering topology))
+  (let assigned (assigned-lowering-routes analysis))
   (let assigned-by-source
     (group-by assigned-route-source-actor assigned))
   (let rules (get value "rules"))
@@ -1365,7 +1446,7 @@
      :kills (as (List String) [])
      :rules (map lower-rule rules)
      :types (descriptor-table (program-descriptors analysis rules))
-     :nodes (graph-logical-nodes topology)
+     :nodes (get analysis "logical_nodes")
      :result (result-boundary analysis)})))
 (let lower (fn [[value Graph]] -> Modification
   (lower-program (program value (as (List Rule) [])))))

@@ -276,42 +276,82 @@ struct LegacyCase {
     artifact_hash: Option<String>,
 }
 
+fn manifest_catalog_fingerprint(entries: &[LegacyCase]) -> String {
+    fingerprint(
+        &entries
+            .iter()
+            .flat_map(|entry| {
+                format!("{}:{}\n", entry.name, entry.fixture_fingerprint).into_bytes()
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
 pub fn assert_legacy_preserved(cases: &[CaseReport], oracles: &[OracleObservation]) {
-    let manifest: LegacyManifest =
+    let historical: LegacyManifest =
         serde_json::from_str(include_str!("legacy_cycle2_manifest.json"))
             .expect("parse immutable cycle-2 manifest");
+    let current: LegacyManifest =
+        serde_json::from_str(include_str!("current_main_a0_manifest.json"))
+            .expect("parse current-main A0 manifest");
     assert_eq!(
-        manifest.legacy_combined_fingerprint,
+        historical.legacy_combined_fingerprint,
         LEGACY_COMBINED_FINGERPRINT
     );
     assert_eq!(
+        current.legacy_combined_fingerprint,
+        LEGACY_COMBINED_FINGERPRINT
+    );
+    assert_eq!(
+        manifest_catalog_fingerprint(&historical.cases),
+        LEGACY_WORKLOAD_FINGERPRINT
+    );
+    assert_eq!(
+        manifest_catalog_fingerprint(&current.cases),
+        CURRENT_MAIN_A0_WORKLOAD_FINGERPRINT
+    );
+    assert_eq!(
         cases.len(),
-        manifest.cases.len(),
+        historical.cases.len(),
         "inherited timed case count"
     );
-    for (actual, expected) in cases.iter().zip(manifest.cases) {
-        assert_eq!(actual.name, expected.name, "inherited timed case order");
+    assert_eq!(cases.len(), current.cases.len(), "current A0 case count");
+    for ((actual, historical), current) in cases.iter().zip(historical.cases).zip(current.cases) {
+        assert_eq!(actual.name, historical.name, "inherited timed case order");
+        assert_eq!(actual.name, current.name, "current A0 timed case order");
         assert_eq!(
-            actual.fixture_fingerprint, expected.fixture_fingerprint,
-            "{} inherited fixture fingerprint",
+            actual.fixture_fingerprint, current.fixture_fingerprint,
+            "{} current-main A0 fixture fingerprint",
             actual.name
         );
         assert_eq!(
-            actual.artifact_hash, expected.artifact_hash,
-            "{} inherited artifact hash",
+            actual.artifact_hash, current.artifact_hash,
+            "{} current-main A0 artifact hash",
             actual.name
         );
     }
-    assert_eq!(oracles.len(), manifest.oracles.len(), "legacy oracle count");
-    for (actual, expected) in oracles.iter().zip(manifest.oracles) {
-        assert_eq!(actual.name, expected.name, "legacy oracle order");
+    assert_eq!(
+        oracles.len(),
+        historical.oracles.len(),
+        "legacy oracle count"
+    );
+    assert_eq!(
+        oracles.len(),
+        current.oracles.len(),
+        "current A0 oracle count"
+    );
+    for ((actual, historical), current) in
+        oracles.iter().zip(historical.oracles).zip(current.oracles)
+    {
+        assert_eq!(actual.name, historical.name, "legacy oracle order");
+        assert_eq!(actual.name, current.name, "current A0 oracle order");
         let artifact_hash = match &actual.observation {
             SemanticOutcome::Success { artifact_hash, .. } => Some(artifact_hash.clone()),
             SemanticOutcome::Error { .. } => None,
         };
         assert_eq!(
-            artifact_hash, expected.artifact_hash,
-            "{} legacy oracle artifact hash",
+            artifact_hash, current.artifact_hash,
+            "{} current-main A0 oracle artifact hash",
             actual.name
         );
     }
