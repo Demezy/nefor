@@ -9,21 +9,25 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const SCHEMA_VERSION: u8 = 4;
-pub const COMPARISON_SCHEMA_VERSION: u8 = 3;
-pub const LEGACY_WORKLOAD_CATALOG_VERSION: &str = "cycle-2-v1";
-pub const PHASE0_WORKLOAD_CATALOG_VERSION: &str = "cycle-3-phase0-v1";
+pub const SCHEMA_VERSION: u8 = 5;
+pub const COMPARISON_SCHEMA_VERSION: u8 = 4;
+pub const CURRENT_MAIN_A0_WORKLOAD_CATALOG_VERSION: &str = "cycle-2-current-main-v2";
+pub const PHASE0_WORKLOAD_CATALOG_VERSION: &str = "cycle-3-a0-evidence-v1";
 pub const ORACLE_CATALOG_VERSION: &str = "mag-oracles-25-v1";
 pub const PROFILER_SCHEMA_VERSION: &str = "generic-compiler-profile-v2";
-pub const STATISTICS_POLICY_VERSION: &str = "paired-log-ratio-fwer-v1";
+pub const STATISTICS_POLICY_VERSION: &str = "paired-nearest-rank-p90-fwer-v2";
+pub const WORKER_PROTOCOL_VERSION: &str = "mag-bench-worker-v1";
+pub const BOOTSTRAP_RESAMPLES: usize = 131_072;
 pub const LEGACY_COMBINED_FINGERPRINT: &str =
     "sha256:0e2cf14afde86802d519af05e668a615e8f1618733c5fe2777adc3778d9c8431";
 pub const LEGACY_WORKLOAD_FINGERPRINT: &str =
     "sha256:59617bf4d8755e91d7b5ea5d13574bca7efc7c79276e850fd5ce479df037deaa";
-pub const LEGACY_ORACLE_FINGERPRINT: &str =
-    "sha256:c9902c94aa987c9e380c16f32e18ba50142a5fe0b8243cb08c11fb579b9c0411";
+pub const CURRENT_MAIN_A0_WORKLOAD_FINGERPRINT: &str =
+    "sha256:9c485ea062a2df747c27272fc69a5fbe547ccccddfac08d6a63bc3fd284a9498";
+pub const CURRENT_MAIN_A0_ORACLE_FINGERPRINT: &str =
+    "sha256:4a558e3cd73cc1f4bb1259d698bdbf313301dfbf7898092a725350540491d03e";
 pub const PHASE0_WORKLOAD_FINGERPRINT: &str =
-    "sha256:d40dc0b8654d22b731444071eff0efce9b737f43338720b0a616704ca2c78b7a";
+    "sha256:a90c11c492f9736376591f9e4916082e8dc42d4bf13ad29607eadff5ba620762";
 pub const MAX_TARGET_MEDIAN_RATIO: f64 = 0.90;
 pub const MIN_TARGET_COUNTER_REDUCTION: f64 = 0.40;
 pub const MAX_CASE_P90_RATIO: f64 = 1.10;
@@ -72,9 +76,9 @@ pub struct StatisticsPolicy {
 pub fn statistics_policy() -> StatisticsPolicy {
     StatisticsPolicy {
         version: STATISTICS_POLICY_VERSION.into(),
-        confidence_method: "paired percentile bootstrap; 4096 deterministic resamples".into(),
-        family_wise_error_policy: "Bonferroni 5% across timed cases and one-sided bounds".into(),
-        rng: "xorshift64 with SHA-256(case name) little-endian seed; balanced adjacent AB/BA pairs".into(),
+        confidence_method: "paired nearest-rank p90 percentile bootstrap; 131072 deterministic resamples".into(),
+        family_wise_error_policy: "Bonferroni 0.05 / (2 × fixed case count) per lower/upper tail".into(),
+        rng: "xorshift64; balanced adjacent AB/BA schedule uses SHA-256(case name), bootstrap uses fixed constant xor sample count".into(),
         sample_escalation_schedule: vec![30, 60, 120],
         regression_ratio: "candidate_ns / baseline_ns on raw adjacent batches; analyze paired log-ratios and retain empirical ratios".into(),
         verdicts: "pass iff upper <= 1.10; regression iff lower > 1.10; otherwise inconclusive and fail-closed".into(),
@@ -152,6 +156,7 @@ pub enum SemanticOutcome {
         class: String,
         message: String,
         policy_stage: String,
+        ordered_diagnostics: Vec<String>,
     },
 }
 
@@ -176,7 +181,7 @@ pub struct ErrorObservation {
     pub message: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OracleObservation {
     pub name: String,
     pub policy: String,
@@ -449,6 +454,7 @@ pub fn observe(case: &Fixture) -> OracleObservation {
             class: error_class(&error).into(),
             message: error.to_string(),
             policy_stage: case.policy.clone(),
+            ordered_diagnostics: vec![error.to_string()],
         },
     };
     validate_oracle(case, &observation);
@@ -777,7 +783,7 @@ pub fn report_identity(
         report_schema_version: SCHEMA_VERSION,
         workload_catalog_version: PHASE0_WORKLOAD_CATALOG_VERSION.into(),
         workload_fingerprint,
-        parent_workload_catalog_version: LEGACY_WORKLOAD_CATALOG_VERSION.into(),
+        parent_workload_catalog_version: CURRENT_MAIN_A0_WORKLOAD_CATALOG_VERSION.into(),
         parent_workload_fingerprint,
         oracle_catalog_version: ORACLE_CATALOG_VERSION.into(),
         oracle_fingerprint,
@@ -986,7 +992,7 @@ pub struct Thresholds {
     pub case_p90_ratio_max: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GateVerdict {
     pub passed: bool,
     pub detail: String,
@@ -1208,7 +1214,8 @@ fn source_identity(report: &Report) -> SourceIdentity {
 
 #[allow(dead_code)]
 pub fn identities_gate_compatible(left: &ReportIdentity, right: &ReportIdentity) -> bool {
-    left.workload_catalog_version == right.workload_catalog_version
+    left.report_schema_version == right.report_schema_version
+        && left.workload_catalog_version == right.workload_catalog_version
         && left.workload_fingerprint == right.workload_fingerprint
         && left.oracle_catalog_version == right.oracle_catalog_version
         && left.oracle_fingerprint == right.oracle_fingerprint
@@ -1402,50 +1409,11 @@ fn collect_counter_deltas(
     }
 }
 
-pub fn derived_exclusive_sections(cases: &[CaseReport]) -> Vec<ExclusiveCounters> {
-    let mut sections = Vec::new();
-    for analysis in cases
-        .iter()
-        .filter(|case| case.family == "broad-frontier" && case.stage == "analysis")
-    {
-        let Some(topology) = analysis.topology_fingerprint.as_deref() else {
-            continue;
-        };
-        for (stage, label) in [
-            ("forward-reachability", "forward reachability exclusive"),
-            ("both-reachability", "reverse reachability exclusive"),
-            ("lower", "lowering exclusive after proven analysis prefix"),
-        ] {
-            let smaller = if stage == "both-reachability" {
-                cases.iter().find(|case| {
-                    case.family == "broad-frontier"
-                        && case.stage == "forward-reachability"
-                        && case.topology_fingerprint.as_deref() == Some(topology)
-                })
-            } else {
-                Some(analysis)
-            };
-            let larger = cases.iter().find(|case| {
-                case.family == "broad-frontier"
-                    && case.stage == stage
-                    && case.topology_fingerprint.as_deref() == Some(topology)
-            });
-            let (Some(_), Some(larger), Some(before), Some(after)) = (
-                smaller,
-                larger,
-                smaller.and_then(|case| case.counters.as_ref()),
-                larger.and_then(|case| case.counters.as_ref()),
-            ) else {
-                continue;
-            };
-            sections.push(
-                exclusive_counters(label, topology, topology, true, before, after).unwrap_or_else(
-                    |error| panic!("{label} for {} is not exclusive: {error}", larger.name),
-                ),
-            );
-        }
-    }
-    sections
+pub fn derived_exclusive_sections(_cases: &[CaseReport]) -> Vec<ExclusiveCounters> {
+    // Independent marginal reports do not carry the forcing and complete
+    // fixture evidence required for exclusive subtraction. Paired worker
+    // reports own stage attribution and retain that evidence explicitly.
+    Vec::new()
 }
 
 pub fn recommendation(cases: &[CaseReport]) -> Recommendation {
@@ -1623,10 +1591,10 @@ pub fn analyze_paired_samples(
     // Deterministic percentile bootstrap on paired observations. Bonferroni
     // allocates the family-wise 5% error budget across every timed case and
     // both one-sided bounds without pretending the cases are independent.
-    let tails = (0.05 / family_case_count.max(1) as f64 / 2.0).clamp(0.000_001, 0.025);
+    let tails = family_tail_probability(family_case_count).clamp(0.000_001, 0.025);
     let mut state = 0x9e37_79b9_7f4a_7c15_u64 ^ samples.len() as u64;
-    let mut medians = Vec::with_capacity(4096);
-    for _ in 0..4096 {
+    let mut p90_statistics = Vec::with_capacity(BOOTSTRAP_RESAMPLES);
+    for _ in 0..BOOTSTRAP_RESAMPLES {
         let mut draw = Vec::with_capacity(log_ratios.len());
         for _ in 0..log_ratios.len() {
             state ^= state << 13;
@@ -1635,11 +1603,11 @@ pub fn analyze_paired_samples(
             draw.push(log_ratios[(state as usize) % log_ratios.len()]);
         }
         draw.sort_by(f64::total_cmp);
-        medians.push(f64_quantile(&draw, 0.5).exp());
+        p90_statistics.push(f64_quantile(&draw, 0.9).exp());
     }
-    medians.sort_by(f64::total_cmp);
-    let lower = f64_quantile(&medians, tails);
-    let upper = f64_quantile(&medians, 1.0 - tails);
+    p90_statistics.sort_by(f64::total_cmp);
+    let lower = f64_quantile(&p90_statistics, tails);
+    let upper = f64_quantile(&p90_statistics, 1.0 - tails);
     let verdict = if upper <= MAX_CASE_P90_RATIO {
         ConfidenceVerdict::Pass
     } else if lower > MAX_CASE_P90_RATIO {
@@ -1653,7 +1621,8 @@ pub fn analyze_paired_samples(
         lower_confidence_bound: lower,
         upper_confidence_bound: upper,
         verdict,
-        confidence_method: "deterministic paired percentile bootstrap (4096 resamples)".into(),
+        confidence_method:
+            "deterministic paired nearest-rank p90 percentile bootstrap (131072 resamples)".into(),
         family_wise_error_policy:
             "Bonferroni 5% family-wise error across cases and one-sided bounds".into(),
     }
@@ -1671,30 +1640,564 @@ pub struct ExclusiveCounters {
     pub counters: BTreeMap<String, u64>,
 }
 
-pub fn exclusive_counters(
-    label: &str,
-    smaller_fixture: &str,
-    larger_fixture: &str,
-    prefix_proven: bool,
-    smaller: &OperationCounters,
-    larger: &OperationCounters,
-) -> Result<ExclusiveCounters, String> {
-    if smaller_fixture != larger_fixture {
-        return Err("matched stages have different topology fingerprints".into());
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerEndpoint {
+    pub executable_path: PathBuf,
+    pub clean_source_root: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerSourceIdentity {
+    pub source_root: PathBuf,
+    pub source_ref: String,
+    pub tree: String,
+    pub dirty: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerExecutableIdentity {
+    pub path: PathBuf,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MeasurementKind {
+    TimedBatch,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkerRequest {
+    pub sequence: usize,
+    pub case_fingerprint: String,
+    pub batch_count: u64,
+    pub measurement_kind: MeasurementKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkerResponse {
+    pub sequence: usize,
+    pub case_name: String,
+    pub case_fingerprint: String,
+    pub executable_identity: WorkerExecutableIdentity,
+    pub source_identity: WorkerSourceIdentity,
+    pub semantic_observation: SemanticOutcome,
+    pub logical_counters: Option<OperationCounters>,
+    pub raw_batch_ns: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkerCaseManifest {
+    pub name: String,
+    pub family: String,
+    pub stage: String,
+    pub policy: String,
+    pub size: Option<usize>,
+    pub case_fingerprint: String,
+    pub workload_fingerprint: String,
+    pub fixture_source_fingerprint: String,
+    pub topology_fingerprint: Option<String>,
+    pub forced_terminal_binding: String,
+    pub forcing_dependency_proof: Option<String>,
+    pub declared_direct_prerequisite: Option<String>,
+    pub expected_semantic_artifact_fingerprint: String,
+    pub semantic_observation: SemanticOutcome,
+    pub logical_counters: Option<OperationCounters>,
+    pub baseline_warmup_ns: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkerHello {
+    pub protocol_version: String,
+    pub executable_identity: WorkerExecutableIdentity,
+    pub source_identity: WorkerSourceIdentity,
+    pub benchmark_definition_identity: String,
+    pub workload_catalog_version: String,
+    pub oracle_catalog_version: String,
+    pub statistics_policy_version: String,
+    pub warmup_iterations: usize,
+    pub cases: Vec<WorkerCaseManifest>,
+    pub oracles: Vec<OracleObservation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AttributionKind {
+    Exclusive,
+    Inclusive,
+    InclusiveAfterProvenAnalysisPrefix,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StageAttribution {
+    pub label: String,
+    pub kind: AttributionKind,
+    pub workload_fingerprint: String,
+    pub fixture_source_fingerprint: String,
+    pub topology_fingerprint: Option<String>,
+    pub forced_terminal_binding: String,
+    pub forcing_dependency_proof: Option<String>,
+    pub declared_direct_prerequisite: Option<String>,
+    pub expected_semantic_artifact_fingerprint: String,
+    pub prefix_proven: bool,
+    pub counters: BTreeMap<String, u64>,
+}
+
+pub fn semantic_fingerprint(observation: &SemanticOutcome) -> String {
+    fingerprint(&canonical_json_bytes(
+        &serde_json::to_value(observation).expect("semantic observation"),
+    ))
+}
+
+pub fn forced_terminal_binding(stage: &str) -> &'static str {
+    match stage {
+        "analysis" => "analysis-summary-artifact",
+        "forward-reachability" => "forward-proof",
+        "both-reachability" => "reverse-proof",
+        "lower" => "canonical-lowered-artifact",
+        _ => "entry-artifact",
     }
-    if !prefix_proven {
-        return Err("forcing boundary is not a proven prefix".into());
+}
+
+pub fn declared_direct_prerequisite(stage: &str) -> Option<&'static str> {
+    match stage {
+        "forward-reachability" => Some("analysis"),
+        "both-reachability" => Some("forward-reachability"),
+        // Lowering invokes analyze-graph internally. Its analysis prefix is
+        // observable but the remaining work cannot be isolated by subtraction.
+        "lower" => Some("analysis"),
+        _ => None,
     }
-    let deltas = counter_deltas(Some(smaller), Some(larger));
-    if deltas.values().any(|delta| *delta < 0) {
-        return Err("exclusive subtraction contains a negative deterministic counter".into());
+}
+
+pub fn stage_attribution(
+    smaller: &WorkerCaseManifest,
+    larger: &WorkerCaseManifest,
+) -> StageAttribution {
+    let complete_match = smaller.workload_fingerprint == larger.workload_fingerprint
+        && smaller.fixture_source_fingerprint == larger.fixture_source_fingerprint
+        && smaller.topology_fingerprint == larger.topology_fingerprint;
+    let forcing_proven = larger.declared_direct_prerequisite.as_deref() == Some(&smaller.stage)
+        && !smaller.forced_terminal_binding.is_empty()
+        && !larger.forced_terminal_binding.is_empty()
+        && larger
+            .forcing_dependency_proof
+            .as_deref()
+            .is_some_and(|proof| !proof.is_empty());
+    let deltas = counter_deltas(
+        smaller.logical_counters.as_ref(),
+        larger.logical_counters.as_ref(),
+    );
+    let nonnegative = deltas.values().all(|delta| *delta >= 0);
+    let prefix_proven = complete_match && forcing_proven && nonnegative;
+    let kind = if larger.stage == "lower" && prefix_proven {
+        AttributionKind::InclusiveAfterProvenAnalysisPrefix
+    } else if prefix_proven {
+        AttributionKind::Exclusive
+    } else {
+        AttributionKind::Inclusive
+    };
+    StageAttribution {
+        label: match kind {
+            AttributionKind::Exclusive => format!("{} exclusive", larger.stage),
+            AttributionKind::Inclusive => format!("{} inclusive", larger.stage),
+            AttributionKind::InclusiveAfterProvenAnalysisPrefix => {
+                "lowering inclusive after proven analysis prefix".into()
+            }
+        },
+        kind,
+        workload_fingerprint: larger.workload_fingerprint.clone(),
+        fixture_source_fingerprint: larger.fixture_source_fingerprint.clone(),
+        topology_fingerprint: larger.topology_fingerprint.clone(),
+        forced_terminal_binding: larger.forced_terminal_binding.clone(),
+        forcing_dependency_proof: larger.forcing_dependency_proof.clone(),
+        declared_direct_prerequisite: larger.declared_direct_prerequisite.clone(),
+        expected_semantic_artifact_fingerprint: larger
+            .expected_semantic_artifact_fingerprint
+            .clone(),
+        prefix_proven,
+        counters: if prefix_proven && larger.stage != "lower" {
+            deltas
+                .into_iter()
+                .filter_map(|(name, value)| u64::try_from(value).ok().map(|value| (name, value)))
+                .collect()
+        } else {
+            BTreeMap::new()
+        },
     }
-    Ok(ExclusiveCounters {
-        label: label.into(),
-        topology_fingerprint: larger_fixture.into(),
-        counters: deltas
-            .into_iter()
-            .map(|(name, value)| (name, value as u64))
-            .collect(),
+}
+
+pub fn validate_worker_pair(
+    baseline: &WorkerHello,
+    candidate: &WorkerHello,
+    calibration: bool,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    if baseline.protocol_version != WORKER_PROTOCOL_VERSION
+        || candidate.protocol_version != WORKER_PROTOCOL_VERSION
+        || baseline.protocol_version != candidate.protocol_version
+    {
+        failures.push("worker protocol mismatch".into());
+    }
+    if baseline.statistics_policy_version != STATISTICS_POLICY_VERSION
+        || candidate.statistics_policy_version != STATISTICS_POLICY_VERSION
+        || baseline.workload_catalog_version != candidate.workload_catalog_version
+        || baseline.oracle_catalog_version != candidate.oracle_catalog_version
+        || baseline.warmup_iterations != candidate.warmup_iterations
+    {
+        failures.push("worker benchmark policy mismatch".into());
+    }
+    if baseline.benchmark_definition_identity != candidate.benchmark_definition_identity {
+        failures.push("benchmark workload definition mismatch".into());
+    }
+    if baseline.cases.len() != candidate.cases.len()
+        || baseline
+            .cases
+            .iter()
+            .zip(&candidate.cases)
+            .any(|(left, right)| {
+                left.name != right.name
+                    || left.policy != right.policy
+                    || left.case_fingerprint != right.case_fingerprint
+                    || left.workload_fingerprint != right.workload_fingerprint
+                    || left.fixture_source_fingerprint != right.fixture_source_fingerprint
+                    || left.topology_fingerprint != right.topology_fingerprint
+            })
+    {
+        failures.push("worker workload or fixture mismatch".into());
+    }
+    if baseline.oracles.len() != candidate.oracles.len()
+        || baseline
+            .oracles
+            .iter()
+            .zip(&candidate.oracles)
+            .any(|(left, right)| left.name != right.name || left.policy != right.policy)
+    {
+        failures.push("worker oracle policy mismatch".into());
+    }
+    if baseline.source_identity.dirty || candidate.source_identity.dirty {
+        failures.push("worker source root is dirty".into());
+    }
+    let identical = baseline.executable_identity.sha256 == candidate.executable_identity.sha256
+        || (baseline.source_identity.source_ref == candidate.source_identity.source_ref
+            && baseline.source_identity.tree == candidate.source_identity.tree);
+    if identical && !calibration {
+        failures.push(
+            "identical endpoints are calibration-only and cannot satisfy an optimization gate"
+                .into(),
+        );
+    }
+    failures
+}
+
+pub fn observations_match(left: &SemanticOutcome, right: &SemanticOutcome) -> bool {
+    left == right
+}
+
+#[allow(dead_code)]
+pub fn next_escalation_sample_count(current: usize, inconclusive: bool) -> Option<usize> {
+    if !inconclusive {
+        return None;
+    }
+    [30, 60, 120].into_iter().find(|count| *count > current)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PairedCaseReport {
+    pub name: String,
+    pub family: String,
+    pub stage: String,
+    pub seed: u64,
+    pub generated_order: Vec<PairOrder>,
+    pub actual_order: Vec<PairOrder>,
+    pub batch_count: u64,
+    pub raw_paired_batch_samples: Vec<PairedSample>,
+    pub analysis: PairedAnalysis,
+    pub baseline_semantic_observation: SemanticOutcome,
+    pub candidate_semantic_observation: SemanticOutcome,
+    pub semantic_match: bool,
+    pub baseline_logical_counters: Option<OperationCounters>,
+    pub candidate_logical_counters: Option<OperationCounters>,
+    pub baseline_attribution: Option<StageAttribution>,
+    pub candidate_attribution: Option<StageAttribution>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PairedWorkerReport {
+    pub schema_version: u8,
+    pub report_kind: String,
+    pub authoritative: bool,
+    pub status: String,
+    pub protocol_version: String,
+    pub benchmark_definition_identity: String,
+    pub statistics_policy: StatisticsPolicy,
+    pub baseline: WorkerHello,
+    pub candidate: WorkerHello,
+    pub compatibility: GateVerdict,
+    pub semantic: GateVerdict,
+    pub performance: GateVerdict,
+    pub target_case: Option<String>,
+    pub target_counter: Option<String>,
+    pub target_median: GateVerdict,
+    pub target_logical_counter: GateVerdict,
+    pub cases: Vec<PairedCaseReport>,
+    pub baseline_stage_attributions: Vec<StageAttribution>,
+    pub candidate_stage_attributions: Vec<StageAttribution>,
+    pub overall: GateVerdict,
+}
+
+pub fn paired_target_verdicts(
+    case: Option<&PairedCaseReport>,
+    counter: Option<&str>,
+) -> (GateVerdict, GateVerdict) {
+    let Some(case) = case else {
+        return (
+            verdict(
+                false,
+                "paired optimization gate requires a selected target case".into(),
+            ),
+            verdict(
+                false,
+                "paired optimization gate requires a selected target logical counter".into(),
+            ),
+        );
+    };
+    let median = verdict(
+        case.analysis.paired_median_ratio <= MAX_TARGET_MEDIAN_RATIO,
+        format!(
+            "{} paired median ratio {:.5} must be <= {:.2}",
+            case.name, case.analysis.paired_median_ratio, MAX_TARGET_MEDIAN_RATIO
+        ),
+    );
+    let Some(counter) = counter else {
+        return (
+            median,
+            verdict(
+                false,
+                "paired optimization gate requires a selected target logical counter".into(),
+            ),
+        );
+    };
+    let baseline = serialized_counter_value(case.baseline_logical_counters.as_ref(), counter);
+    let candidate = serialized_counter_value(case.candidate_logical_counters.as_ref(), counter);
+    let logical = match (baseline, candidate) {
+        (Some(baseline), Some(candidate)) if baseline > 0 && candidate <= baseline => {
+            let reduction = 1.0 - candidate as f64 / baseline as f64;
+            verdict(
+                reduction >= MIN_TARGET_COUNTER_REDUCTION,
+                format!(
+                    "{} {counter} reduction {:.5} ({baseline} -> {candidate}) must be >= {:.2}",
+                    case.name, reduction, MIN_TARGET_COUNTER_REDUCTION
+                ),
+            )
+        }
+        (Some(0), _) => verdict(false, format!("{} baseline {counter} is zero", case.name)),
+        (Some(baseline), Some(candidate)) => verdict(
+            false,
+            format!(
+                "{} {counter} regressed ({baseline} -> {candidate})",
+                case.name
+            ),
+        ),
+        _ => verdict(
+            false,
+            format!("{} does not expose logical counter {counter}", case.name),
+        ),
+    };
+    (median, logical)
+}
+
+fn serialized_counter_value(counters: Option<&OperationCounters>, path: &str) -> Option<u64> {
+    let value = serde_json::to_value(counters?).ok()?;
+    path.split('.')
+        .try_fold(&value, |current, segment| current.get(segment))?
+        .as_u64()
+}
+
+pub fn warm_worker_case(case: &Fixture, iterations: usize) -> u64 {
+    let mut elapsed = 0;
+    for _ in 0..iterations.max(1) {
+        let started = Instant::now();
+        assert_timed_outcome(case, load(case, None));
+        elapsed = nanos(started.elapsed());
+    }
+    elapsed
+}
+
+pub fn measure_worker_batch(case: &Fixture, batch_count: u64) -> u64 {
+    let started = Instant::now();
+    for _ in 0..batch_count {
+        if let Some(program) = assert_timed_outcome(case, load(case, None)) {
+            black_box(program.hash);
+            black_box(program.artifact);
+        }
+    }
+    nanos(started.elapsed())
+}
+
+pub fn worker_case_observation(case: &Fixture) -> SemanticOutcome {
+    observe(case).observation
+}
+
+pub fn worker_case_counters(case: &Fixture) -> Option<OperationCounters> {
+    let profiler = nefor_mag::profile::CompileProfiler::new();
+    assert_timed_outcome(case, load(case, Some(&profiler)));
+    let counters = profiler.snapshot().counters;
+    assert_counter_invariants(&counters, &case.name);
+    Some(counters)
+}
+
+pub fn executable_identity(path: &Path) -> Result<WorkerExecutableIdentity, String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("canonicalize executable {}: {error}", path.display()))?;
+    let bytes = fs::read(&canonical)
+        .map_err(|error| format!("read executable {}: {error}", canonical.display()))?;
+    Ok(WorkerExecutableIdentity {
+        path: canonical,
+        sha256: fingerprint(&bytes),
     })
+}
+
+pub fn family_tail_probability(case_count: usize) -> f64 {
+    0.05 / (2.0 * case_count.max(1) as f64)
+}
+
+pub fn validate_worker_endpoint(
+    endpoint: &WorkerEndpoint,
+    hello: &WorkerHello,
+) -> Result<(), String> {
+    let expected_executable = executable_identity(&endpoint.executable_path)?;
+    if expected_executable != hello.executable_identity {
+        return Err("worker executable identity does not match configured endpoint".into());
+    }
+    let expected_root = endpoint
+        .clean_source_root
+        .canonicalize()
+        .map_err(|error| format!("canonicalize source root: {error}"))?;
+    if expected_root != hello.source_identity.source_root {
+        return Err("worker source identity does not match configured source root".into());
+    }
+    if hello.source_identity.dirty {
+        return Err("worker source root is dirty".into());
+    }
+    Ok(())
+}
+
+pub fn validate_worker_response(
+    hello: &WorkerHello,
+    case: &WorkerCaseManifest,
+    request: &WorkerRequest,
+    response: &WorkerResponse,
+) -> Result<(), String> {
+    if response.sequence != request.sequence {
+        return Err("worker response order mismatch".into());
+    }
+    if response.case_name != case.name || response.case_fingerprint != request.case_fingerprint {
+        return Err("worker response missing or mismatched case".into());
+    }
+    if response.executable_identity != hello.executable_identity {
+        return Err("worker executable identity changed".into());
+    }
+    if response.source_identity != hello.source_identity {
+        return Err("worker source identity changed".into());
+    }
+    if response.semantic_observation != case.semantic_observation {
+        return Err("worker semantic observation changed during measurement".into());
+    }
+    if response.logical_counters != case.logical_counters {
+        return Err("worker logical counters changed during measurement".into());
+    }
+    Ok(())
+}
+
+pub fn decode_worker_response(line: &str) -> Result<WorkerResponse, String> {
+    serde_json::from_str(line).map_err(|error| format!("malformed worker response: {error}"))
+}
+
+pub fn stage_fixture_source_fingerprint(case: &Fixture) -> String {
+    let Some(topology) = case.topology_fingerprint.as_deref() else {
+        return case.fixture_fingerprint.clone();
+    };
+    let mut digest = Sha256::new();
+    hash_part(&mut digest, "topology", topology.as_bytes());
+    hash_part(&mut digest, "inputs", &canonical_json_bytes(&case.inputs));
+    hash_part(
+        &mut digest,
+        "compiler_limits",
+        format!("{:?}", case.compiler_options.limits).as_bytes(),
+    );
+    for (index, root) in case.module_roots.iter().enumerate() {
+        hash_part(
+            &mut digest,
+            &format!("module-root:{index}:label"),
+            root.label.as_bytes(),
+        );
+        hash_part(
+            &mut digest,
+            &format!("module-root:{index}:role"),
+            root.role.marker().as_bytes(),
+        );
+        if root.role == ModuleRootRole::Implementation || root.path == case.source_dir {
+            continue;
+        }
+        let mut modules = Vec::new();
+        collect_mag_files(&root.path, &root.path, &mut modules);
+        modules.sort_by(|left, right| left.0.cmp(&right.0));
+        for (relative, path) in modules {
+            let bytes = fs::read(&path)
+                .unwrap_or_else(|error| panic!("read stage source {}: {error}", path.display()));
+            hash_part(
+                &mut digest,
+                &format!("module:{index}:{}", relative.to_string_lossy()),
+                &bytes,
+            );
+        }
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
+pub fn forcing_dependency_proof(case: &Fixture) -> Option<String> {
+    let source = fs::read_to_string(case.source_dir.join(&case.entry)).ok()?;
+    let graph_source = case
+        .module_roots
+        .iter()
+        .find(|root| root.role == ModuleRootRole::Implementation)
+        .and_then(|root| fs::read_to_string(root.path.join("nefor/graph.mag")).ok());
+    forcing_dependency_proof_from_sources(&case.stage, &source, graph_source.as_deref())
+}
+
+pub fn forcing_dependency_proof_from_sources(
+    stage: &str,
+    source: &str,
+    graph_source: Option<&str>,
+) -> Option<String> {
+    let evidence = match stage {
+        "forward-reachability"
+            if source.contains("(nefor.graph.forward-reachable analysis)")
+                && source.contains("(artifact {:summary summary :forced forward-proof})") =>
+        {
+            "analysis -> forward -> forward-proof"
+        }
+        "both-reachability"
+            if source.contains("(nefor.graph.forward-reachable analysis)")
+                && source.contains("(let reverse (force-reverse forward-proof))")
+                && source.contains("(artifact {:summary summary :forced reverse-proof})") =>
+        {
+            "forward-proof -> reverse -> reverse-proof"
+        }
+        "lower"
+            if source.contains("(let lowered (nefor.graph.lower topology))")
+                && source.contains("(let forced (canonical lowered))")
+                && source
+                    .contains("(artifact {:summary summary :lowered lowered :forced forced})")
+                && graph_source.is_some_and(|graph_source| {
+                    graph_source.contains("(let lower-program (fn [[value Program]] -> Modification\n  (let topology (get value \"graph\"))\n  (let analysis (analyze-graph topology))")
+                }) =>
+        {
+            "analysis -> lower-program -> canonical-lowered-artifact"
+        }
+        _ => return None,
+    };
+    Some(fingerprint(evidence.as_bytes()))
 }

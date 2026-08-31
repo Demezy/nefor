@@ -2,38 +2,73 @@ mod bench_support;
 
 use bench_support::*;
 use mlua::{Lua, LuaSerdeExt, Table, Value as LuaValue};
+use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_SAMPLES: usize = 30;
 const DEFAULT_WARMUPS: usize = 3;
 
+const BUILD_SOURCE_ROOT: Option<&str> = option_env!("NEFOR_MAG_BENCH_BUILD_SOURCE_ROOT");
+const BUILD_SOURCE_REF: Option<&str> = option_env!("NEFOR_MAG_BENCH_BUILD_SOURCE_REF");
+const BUILD_SOURCE_TREE: Option<&str> = option_env!("NEFOR_MAG_BENCH_BUILD_SOURCE_TREE");
+const BUILD_SOURCE_DIRTY: Option<&str> = option_env!("NEFOR_MAG_BENCH_BUILD_SOURCE_DIRTY");
+
 fn main() {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.iter().any(|arg| arg == "--worker") {
+        if let Err(error) = worker_main(&args) {
+            eprintln!("MAG benchmark worker failed: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
+    if args.iter().any(|arg| arg == "--paired") {
+        if let Err(error) = paired_main(&args) {
+            let root = workspace_root();
+            let output = value_after(&args, "--output");
+            let rejection = json!({
+                "schema_version": SCHEMA_VERSION,
+                "report_kind": "paired_worker_rejection",
+                "authoritative": false,
+                "status": "rejected",
+                "error": error,
+            });
+            if let Some(path) = output {
+                write_json(&root, &path, &rejection, "paired worker rejection");
+            }
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+        return;
+    }
+    marginal_main(&args);
+}
+
+fn marginal_main(args: &[String]) {
     let root = workspace_root();
     let samples = positive_env("MAG_BENCH_SAMPLES", DEFAULT_SAMPLES);
     let warmups = positive_env("MAG_BENCH_WARMUPS", DEFAULT_WARMUPS);
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let baseline = value_after(&args, "--baseline");
-    let output_path = value_after(&args, "--output");
-    let comparison_path = value_after(&args, "--comparison-output");
+    let baseline = value_after(args, "--baseline");
+    let output_path = value_after(args, "--output");
+    let comparison_path = value_after(args, "--comparison-output");
     let gate = args.iter().any(|arg| arg == "--gate");
-    for arg in &args {
-        if !matches!(
-            arg.as_str(),
-            "--bench" | "--baseline" | "--output" | "--comparison-output" | "--gate"
-        ) && !args.windows(2).any(|pair| {
-            pair[1] == *arg
-                && matches!(
-                    pair[0].as_str(),
-                    "--baseline" | "--output" | "--comparison-output"
-                )
-        }) {
-            panic!("unknown benchmark argument: {arg}");
-        }
-    }
+    validate_args(
+        args,
+        &[
+            "--bench",
+            "--baseline",
+            "--output",
+            "--comparison-output",
+            "--gate",
+        ],
+        &["--baseline", "--output", "--comparison-output"],
+    );
 
     let scratch = fresh_scratch(&root);
     let contracts = load_runtime_contracts(&root.join("plugins/mag/lua/mag-kernel/init.lua"));
@@ -47,17 +82,11 @@ fn main() {
     let workload_fingerprint = catalog_fingerprint(&timed);
     let oracle_fingerprint = catalog_fingerprint(&oracle_fixtures);
     assert_eq!(
-        parent_workload_fingerprint, LEGACY_WORKLOAD_FINGERPRINT,
-        "legacy workload catalog changed without a version change"
+        parent_workload_fingerprint,
+        CURRENT_MAIN_A0_WORKLOAD_FINGERPRINT
     );
-    assert_eq!(
-        oracle_fingerprint, LEGACY_ORACLE_FINGERPRINT,
-        "legacy oracle catalog changed without a version change"
-    );
-    assert_eq!(
-        workload_fingerprint, PHASE0_WORKLOAD_FINGERPRINT,
-        "Phase 0 workload catalog changed without a version change"
-    );
+    assert_eq!(oracle_fingerprint, CURRENT_MAIN_A0_ORACLE_FINGERPRINT);
+    assert_eq!(workload_fingerprint, PHASE0_WORKLOAD_FINGERPRINT);
     let identity = report_identity(
         &root,
         workload_fingerprint,
@@ -82,11 +111,7 @@ fn main() {
         oracles,
     };
     let comparison = baseline.map(|path| {
-        let baseline_path = if Path::new(&path).is_absolute() {
-            PathBuf::from(&path)
-        } else {
-            root.join(&path)
-        };
+        let baseline_path = absolute_from(&root, &path);
         let baseline: Report =
             serde_json::from_slice(&fs::read(&baseline_path).unwrap_or_else(|error| {
                 panic!("read baseline {}: {error}", baseline_path.display())
@@ -103,11 +128,13 @@ fn main() {
     if let (Some(comparison), Some(path)) = (&comparison, comparison_path) {
         write_json(&root, &path, comparison, "comparison artifact");
     }
-    let encoded = serde_json::to_string_pretty(&report).expect("serialize report");
     if let Some(path) = output_path {
         write_json(&root, &path, &report, "benchmark report");
     } else {
-        println!("{encoded}");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).expect("serialize report")
+        );
     }
     fs::remove_dir_all(&scratch).ok();
     if gate
@@ -119,12 +146,566 @@ fn main() {
     }
 }
 
-fn write_json(root: &Path, path: &str, value: &impl serde::Serialize, label: &str) {
-    let path = if Path::new(path).is_absolute() {
+struct WorkerProcess {
+    child: Child,
+    input: BufWriter<ChildStdin>,
+    output: BufReader<ChildStdout>,
+    hello: WorkerHello,
+}
+
+impl WorkerProcess {
+    fn spawn(endpoint: &WorkerEndpoint, warmups: usize) -> Result<Self, String> {
+        let mut child = Command::new(&endpoint.executable_path)
+            .args(["--worker", "--source-root"])
+            .arg(&endpoint.clean_source_root)
+            .env("MAG_BENCH_WARMUPS", warmups.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| {
+                format!(
+                    "spawn worker {}: {error}",
+                    endpoint.executable_path.display()
+                )
+            })?;
+        let input = BufWriter::new(child.stdin.take().ok_or("worker stdin unavailable")?);
+        let mut output = BufReader::new(child.stdout.take().ok_or("worker stdout unavailable")?);
+        let mut line = String::new();
+        if output
+            .read_line(&mut line)
+            .map_err(|error| format!("read worker hello: {error}"))?
+            == 0
+        {
+            return Err("worker exited before protocol hello".into());
+        }
+        let hello = serde_json::from_str(&line)
+            .map_err(|error| format!("malformed worker hello: {error}"))?;
+        Ok(Self {
+            child,
+            input,
+            output,
+            hello,
+        })
+    }
+
+    fn request(&mut self, request: &WorkerRequest) -> Result<WorkerResponse, String> {
+        serde_json::to_writer(&mut self.input, request)
+            .map_err(|error| format!("serialize worker request: {error}"))?;
+        self.input
+            .write_all(b"\n")
+            .map_err(|error| format!("write worker request: {error}"))?;
+        self.input
+            .flush()
+            .map_err(|error| format!("flush worker request: {error}"))?;
+        let mut line = String::new();
+        if self
+            .output
+            .read_line(&mut line)
+            .map_err(|error| format!("read worker response: {error}"))?
+            == 0
+        {
+            return Err("worker crashed or closed stdout before response".into());
+        }
+        decode_worker_response(&line)
+    }
+}
+
+impl Drop for WorkerProcess {
+    fn drop(&mut self) {
+        drop(self.input.flush());
+        drop(self.child.kill());
+        drop(self.child.wait());
+    }
+}
+
+fn paired_main(args: &[String]) -> Result<(), String> {
+    validate_args(
+        args,
+        &[
+            "--bench",
+            "--paired",
+            "--baseline-worker",
+            "--baseline-root",
+            "--candidate-worker",
+            "--candidate-root",
+            "--target-case",
+            "--target-counter",
+            "--calibration",
+            "--output",
+            "--gate",
+        ],
+        &[
+            "--baseline-worker",
+            "--baseline-root",
+            "--candidate-worker",
+            "--candidate-root",
+            "--target-case",
+            "--target-counter",
+            "--output",
+        ],
+    );
+    let root = workspace_root();
+    let calibration = args.iter().any(|arg| arg == "--calibration");
+    let gate = args.iter().any(|arg| arg == "--gate");
+    let target_case = value_after(args, "--target-case");
+    let target_counter = value_after(args, "--target-counter");
+    if calibration && gate {
+        return Err("--calibration cannot satisfy --gate".into());
+    }
+    if target_case.is_some() != target_counter.is_some() {
+        return Err("--target-case and --target-counter must be supplied together".into());
+    }
+    if gate && target_case.is_none() {
+        return Err("--gate requires --target-case and --target-counter".into());
+    }
+    let samples = positive_env("MAG_BENCH_SAMPLES", DEFAULT_SAMPLES);
+    let warmups = positive_env("MAG_BENCH_WARMUPS", DEFAULT_WARMUPS);
+    let current_exe =
+        std::env::current_exe().map_err(|error| format!("current executable: {error}"))?;
+    let endpoint = |worker_flag: &str, root_flag: &str| -> Result<WorkerEndpoint, String> {
+        let executable_path = value_after(args, worker_flag).map(PathBuf::from);
+        let clean_source_root = value_after(args, root_flag).map(PathBuf::from);
+        match (executable_path, clean_source_root) {
+            (Some(executable_path), Some(clean_source_root)) => Ok(WorkerEndpoint {
+                executable_path,
+                clean_source_root,
+            }),
+            (None, None) if calibration => Ok(WorkerEndpoint {
+                executable_path: current_exe.clone(),
+                clean_source_root: root.clone(),
+            }),
+            (None, None) => Err(
+                "identical endpoints are calibration-only and cannot satisfy an optimization gate"
+                    .into(),
+            ),
+            _ => Err(format!(
+                "{worker_flag} and {root_flag} must be supplied together"
+            )),
+        }
+    };
+    let baseline_endpoint = endpoint("--baseline-worker", "--baseline-root")?;
+    let candidate_endpoint = endpoint("--candidate-worker", "--candidate-root")?;
+    if gate && ![30, 60, 120].contains(&samples) {
+        return Err(
+            "optimization gates require a preregistered sample count: 30, 60, or 120".into(),
+        );
+    }
+    let mut baseline = WorkerProcess::spawn(&baseline_endpoint, warmups)?;
+    let mut candidate = WorkerProcess::spawn(&candidate_endpoint, warmups)?;
+    validate_worker_endpoint(&baseline_endpoint, &baseline.hello)?;
+    validate_worker_endpoint(&candidate_endpoint, &candidate.hello)?;
+    let compatibility_failures =
+        validate_worker_pair(&baseline.hello, &candidate.hello, calibration);
+    if !compatibility_failures.is_empty() {
+        return Err(compatibility_failures.join("; "));
+    }
+    let baseline_cases = baseline.hello.cases.clone();
+    let candidate_cases = candidate.hello.cases.clone();
+    let case_count = baseline_cases.len();
+    let mut case_reports = Vec::with_capacity(case_count);
+    let mut sequence = 0;
+    for (baseline_case, candidate_case) in baseline_cases.iter().zip(&candidate_cases) {
+        let batch_count = calibrate_batch_count(baseline_case.baseline_warmup_ns, 5_000_000);
+        let seed = u64::from_le_bytes(
+            Sha256::digest(baseline_case.name.as_bytes())[..8]
+                .try_into()
+                .map_err(|_| "case seed length")?,
+        );
+        let generated_order = balanced_pair_schedule(seed, samples);
+        let mut actual_order = Vec::with_capacity(samples);
+        let mut raw_samples = Vec::with_capacity(samples);
+        for (block, order) in generated_order.iter().copied().enumerate() {
+            let request = WorkerRequest {
+                sequence,
+                case_fingerprint: baseline_case.case_fingerprint.clone(),
+                batch_count,
+                measurement_kind: MeasurementKind::TimedBatch,
+            };
+            sequence += 1;
+            let (baseline_response, candidate_response) = match order {
+                PairOrder::AB => (baseline.request(&request)?, candidate.request(&request)?),
+                PairOrder::BA => {
+                    let candidate_response = candidate.request(&request)?;
+                    let baseline_response = baseline.request(&request)?;
+                    (baseline_response, candidate_response)
+                }
+            };
+            validate_worker_response(&baseline.hello, baseline_case, &request, &baseline_response)?;
+            validate_worker_response(
+                &candidate.hello,
+                candidate_case,
+                &request,
+                &candidate_response,
+            )?;
+            if !observations_match(
+                &baseline_response.semantic_observation,
+                &candidate_response.semantic_observation,
+            ) {
+                return Err(format!(
+                    "{} exact semantic observation mismatch",
+                    baseline_case.name
+                ));
+            }
+            actual_order.push(order);
+            raw_samples.push(PairedSample {
+                block,
+                generated_order: order,
+                actual_order: order,
+                batch_count,
+                baseline_batch_ns: baseline_response.raw_batch_ns,
+                candidate_batch_ns: candidate_response.raw_batch_ns,
+            });
+        }
+        let semantic_match = observations_match(
+            &baseline_case.semantic_observation,
+            &candidate_case.semantic_observation,
+        );
+        case_reports.push(PairedCaseReport {
+            name: baseline_case.name.clone(),
+            family: baseline_case.family.clone(),
+            stage: baseline_case.stage.clone(),
+            seed,
+            generated_order,
+            actual_order,
+            batch_count,
+            analysis: analyze_paired_samples(&raw_samples, case_count),
+            raw_paired_batch_samples: raw_samples,
+            baseline_semantic_observation: baseline_case.semantic_observation.clone(),
+            candidate_semantic_observation: candidate_case.semantic_observation.clone(),
+            semantic_match,
+            baseline_logical_counters: baseline_case.logical_counters.clone(),
+            candidate_logical_counters: candidate_case.logical_counters.clone(),
+            baseline_attribution: None,
+            candidate_attribution: None,
+        });
+    }
+    let collect_attributions = |cases: &[WorkerCaseManifest]| {
+        let mut out = Vec::new();
+        for larger in cases {
+            let Some(prerequisite) = larger.declared_direct_prerequisite.as_deref() else {
+                continue;
+            };
+            if let Some(smaller) = cases.iter().find(|case| {
+                case.family == larger.family
+                    && case.size == larger.size
+                    && case.stage == prerequisite
+            }) {
+                out.push(stage_attribution(smaller, larger));
+            }
+        }
+        out
+    };
+    let baseline_attributions = collect_attributions(&baseline.hello.cases);
+    let candidate_attributions = collect_attributions(&candidate.hello.cases);
+    for report in &mut case_reports {
+        let binding = baseline
+            .hello
+            .cases
+            .iter()
+            .find(|case| case.name == report.name)
+            .map(|case| case.forced_terminal_binding.as_str())
+            .unwrap_or("");
+        report.baseline_attribution = baseline_attributions
+            .iter()
+            .find(|attribution| attribution.forced_terminal_binding == binding)
+            .cloned();
+        report.candidate_attribution = candidate_attributions
+            .iter()
+            .find(|attribution| attribution.forced_terminal_binding == binding)
+            .cloned();
+    }
+    let semantic_pass = case_reports.iter().all(|case| case.semantic_match)
+        && baseline.hello.oracles.len() == candidate.hello.oracles.len()
+        && baseline
+            .hello
+            .oracles
+            .iter()
+            .zip(&candidate.hello.oracles)
+            .all(|(left, right)| {
+                left.name == right.name
+                    && left.policy == right.policy
+                    && left.observation == right.observation
+            });
+    let performance_pass = case_reports
+        .iter()
+        .all(|case| case.analysis.verdict == ConfidenceVerdict::Pass);
+    let selected_target = target_case
+        .as_deref()
+        .and_then(|name| case_reports.iter().find(|case| case.name == name));
+    let (target_median, target_logical_counter) =
+        paired_target_verdicts(selected_target, target_counter.as_deref());
+    let compatibility = GateVerdict { passed: true, detail: "clean source roots, executables, worker protocols, workloads, fixtures, and policies match".into() };
+    let semantic = GateVerdict {
+        passed: semantic_pass,
+        detail: if semantic_pass {
+            "all exact timed and oracle observations match"
+        } else {
+            "one or more exact timed or oracle observations differ"
+        }
+        .into(),
+    };
+    let performance = GateVerdict {
+        passed: performance_pass,
+        detail: if performance_pass {
+            "every simultaneous upper p90 bound is <= 1.10"
+        } else {
+            "one or more p90 bounds are regression or inconclusive"
+        }
+        .into(),
+    };
+    let authoritative = gate && !calibration;
+    let overall_pass = authoritative
+        && semantic_pass
+        && performance_pass
+        && target_median.passed
+        && target_logical_counter.passed;
+    let report = PairedWorkerReport {
+        schema_version: SCHEMA_VERSION,
+        report_kind: if calibration {
+            "a0_self_calibration"
+        } else {
+            "same_version_optimization_gate"
+        }
+        .into(),
+        authoritative,
+        status: if calibration {
+            "calibration_only_non_authoritative"
+        } else if overall_pass {
+            "pass"
+        } else {
+            "failed"
+        }
+        .into(),
+        protocol_version: WORKER_PROTOCOL_VERSION.into(),
+        benchmark_definition_identity: baseline.hello.benchmark_definition_identity.clone(),
+        statistics_policy: statistics_policy(),
+        baseline: baseline.hello.clone(),
+        candidate: candidate.hello.clone(),
+        compatibility,
+        semantic,
+        performance,
+        target_case,
+        target_counter,
+        target_median,
+        target_logical_counter,
+        cases: case_reports,
+        baseline_stage_attributions: baseline_attributions,
+        candidate_stage_attributions: candidate_attributions,
+        overall: GateVerdict {
+            passed: overall_pass,
+            detail: if calibration {
+                "A0 self-comparison is calibration only and can never create an optimization pass"
+            } else if overall_pass {
+                "distinct clean baseline and candidate satisfy every paired gate"
+            } else {
+                "candidate failed one or more required paired gates"
+            }
+            .into(),
+        },
+    };
+    if let Some(path) = value_after(args, "--output") {
+        write_json(&root, &path, &report, "paired worker report");
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?
+        );
+    }
+    if gate && !report.overall.passed {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+fn worker_main(args: &[String]) -> Result<(), String> {
+    validate_args(args, &["--worker", "--source-root"], &["--source-root"]);
+    let root =
+        PathBuf::from(value_after(args, "--source-root").ok_or("--worker requires --source-root")?)
+            .canonicalize()
+            .map_err(|error| format!("canonicalize worker source root: {error}"))?;
+    let source_identity = worker_source_identity(&root)?;
+    validate_embedded_build_source(&source_identity)?;
+    let executable_identity = executable_identity(
+        &std::env::current_exe().map_err(|error| format!("current executable: {error}"))?,
+    )?;
+    let warmups = positive_env("MAG_BENCH_WARMUPS", DEFAULT_WARMUPS);
+    let scratch = fresh_scratch(&root);
+    let contracts = load_runtime_contracts(&root.join("plugins/mag/lua/mag-kernel/init.lua"));
+    let mut timed = timed_cases(&root, &scratch, &contracts);
+    let mut oracle_fixtures = oracle_cases(&root, &scratch, &contracts);
+    refresh_fixture_fingerprints(&mut timed);
+    refresh_fixture_fingerprints(&mut oracle_fixtures);
+    let inherited_count = timed.len().saturating_sub(12);
+    let parent = catalog_fingerprint(&timed[..inherited_count]);
+    let workload = catalog_fingerprint(&timed);
+    let oracle = catalog_fingerprint(&oracle_fixtures);
+    if parent != CURRENT_MAIN_A0_WORKLOAD_FINGERPRINT
+        || workload != PHASE0_WORKLOAD_FINGERPRINT
+        || oracle != CURRENT_MAIN_A0_ORACLE_FINGERPRINT
+    {
+        return Err("compiled benchmark catalog identity does not match worker fixtures".into());
+    }
+    let benchmark_definition_identity = definition_hash(&timed, &oracle_fixtures);
+    let mut cases = Vec::with_capacity(timed.len());
+    for case in &timed {
+        let semantic_observation = worker_case_observation(case);
+        let logical_counters = worker_case_counters(case);
+        let baseline_warmup_ns = warm_worker_case(case, warmups);
+        let boundary_fingerprint = stage_fixture_source_fingerprint(case);
+        cases.push(WorkerCaseManifest {
+            name: case.name.clone(),
+            family: case.family.clone(),
+            stage: case.stage.clone(),
+            policy: case.policy.clone(),
+            size: case.size,
+            case_fingerprint: case.fixture_fingerprint.clone(),
+            workload_fingerprint: workload.clone(),
+            fixture_source_fingerprint: boundary_fingerprint,
+            topology_fingerprint: case.topology_fingerprint.clone(),
+            forced_terminal_binding: forced_terminal_binding(&case.stage).into(),
+            forcing_dependency_proof: forcing_dependency_proof(case),
+            declared_direct_prerequisite: declared_direct_prerequisite(&case.stage)
+                .map(str::to_owned),
+            expected_semantic_artifact_fingerprint: semantic_fingerprint(&semantic_observation),
+            semantic_observation,
+            logical_counters,
+            baseline_warmup_ns,
+        });
+    }
+    let oracles = oracle_fixtures.iter().map(observe).collect::<Vec<_>>();
+    let hello = WorkerHello {
+        protocol_version: WORKER_PROTOCOL_VERSION.into(),
+        executable_identity: executable_identity.clone(),
+        source_identity: source_identity.clone(),
+        benchmark_definition_identity,
+        workload_catalog_version: PHASE0_WORKLOAD_CATALOG_VERSION.into(),
+        oracle_catalog_version: ORACLE_CATALOG_VERSION.into(),
+        statistics_policy_version: STATISTICS_POLICY_VERSION.into(),
+        warmup_iterations: warmups,
+        cases,
+        oracles,
+    };
+    let stdout = std::io::stdout();
+    let mut output = BufWriter::new(stdout.lock());
+    serde_json::to_writer(&mut output, &hello)
+        .map_err(|error| format!("serialize worker hello: {error}"))?;
+    output
+        .write_all(b"\n")
+        .map_err(|error| format!("write worker hello: {error}"))?;
+    output
+        .flush()
+        .map_err(|error| format!("flush worker hello: {error}"))?;
+    let stdin = std::io::stdin();
+    for line in stdin.lock().lines() {
+        let line = line.map_err(|error| format!("read worker request: {error}"))?;
+        let request: WorkerRequest = serde_json::from_str(&line)
+            .map_err(|error| format!("malformed worker request: {error}"))?;
+        let (index, manifest) = hello
+            .cases
+            .iter()
+            .enumerate()
+            .find(|(_, case)| case.case_fingerprint == request.case_fingerprint)
+            .ok_or_else(|| format!("missing case {}", request.case_fingerprint))?;
+        let raw_batch_ns = match request.measurement_kind {
+            MeasurementKind::TimedBatch => measure_worker_batch(&timed[index], request.batch_count),
+        };
+        let response = WorkerResponse {
+            sequence: request.sequence,
+            case_name: manifest.name.clone(),
+            case_fingerprint: manifest.case_fingerprint.clone(),
+            executable_identity: executable_identity.clone(),
+            source_identity: source_identity.clone(),
+            semantic_observation: manifest.semantic_observation.clone(),
+            logical_counters: manifest.logical_counters.clone(),
+            raw_batch_ns,
+        };
+        serde_json::to_writer(&mut output, &response)
+            .map_err(|error| format!("serialize worker response: {error}"))?;
+        output
+            .write_all(b"\n")
+            .map_err(|error| format!("write worker response: {error}"))?;
+        output
+            .flush()
+            .map_err(|error| format!("flush worker response: {error}"))?;
+    }
+    fs::remove_dir_all(scratch).ok();
+    Ok(())
+}
+
+fn validate_embedded_build_source(runtime: &WorkerSourceIdentity) -> Result<(), String> {
+    let build_root =
+        BUILD_SOURCE_ROOT.ok_or("worker executable lacks embedded build source root")?;
+    let build_ref = BUILD_SOURCE_REF.ok_or("worker executable lacks embedded build source ref")?;
+    let build_tree =
+        BUILD_SOURCE_TREE.ok_or("worker executable lacks embedded build source tree")?;
+    let build_dirty =
+        BUILD_SOURCE_DIRTY.ok_or("worker executable lacks embedded build dirty state")?;
+    let canonical_build_root = PathBuf::from(build_root)
+        .canonicalize()
+        .map_err(|error| format!("canonicalize embedded build source root: {error}"))?;
+    if build_dirty != "false" || runtime.dirty {
+        return Err("worker executable and source root must come from a clean tree".into());
+    }
+    if canonical_build_root != runtime.source_root
+        || build_ref != runtime.source_ref
+        || build_tree != runtime.tree
+    {
+        return Err("worker executable provenance does not match its clean source identity".into());
+    }
+    Ok(())
+}
+
+fn worker_source_identity(root: &Path) -> Result<WorkerSourceIdentity, String> {
+    let source_ref = checked_command(root, &["git", "rev-parse", "HEAD"])?;
+    let tree = checked_command(root, &["git", "rev-parse", "HEAD^{tree}"])?;
+    let dirty = !checked_command(root, &["git", "status", "--porcelain"])?.is_empty();
+    Ok(WorkerSourceIdentity {
+        source_root: root.to_path_buf(),
+        source_ref,
+        tree,
+        dirty,
+    })
+}
+
+fn checked_command(root: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new(args[0])
+        .args(&args[1..])
+        .current_dir(root)
+        .output()
+        .map_err(|error| format!("run {}: {error}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().into())
+}
+
+fn validate_args(args: &[String], flags: &[&str], value_flags: &[&str]) {
+    for (index, arg) in args.iter().enumerate() {
+        if flags.contains(&arg.as_str()) {
+            continue;
+        }
+        if index > 0 && value_flags.contains(&args[index - 1].as_str()) {
+            continue;
+        }
+        panic!("unknown benchmark argument: {arg}");
+    }
+}
+
+fn absolute_from(root: &Path, path: &str) -> PathBuf {
+    if Path::new(path).is_absolute() {
         PathBuf::from(path)
     } else {
         root.join(path)
-    };
+    }
+}
+
+fn write_json(root: &Path, path: &str, value: &impl Serialize, label: &str) {
+    let path = absolute_from(root, path);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create artifact directory");
     }
@@ -132,7 +713,6 @@ fn write_json(root: &Path, path: &str, value: &impl serde::Serialize, label: &st
     fs::write(&path, format!("{encoded}\n")).expect("write artifact");
     eprintln!("wrote {label} {}", path.display());
 }
-
 fn nefor_module_roots(root: &Path) -> Vec<ModuleRoot> {
     vec![
         ModuleRoot::implementation("nefor-mag", root.join("mag/lib")),
@@ -269,12 +849,7 @@ fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
                 nefor_inputs.clone(),
                 None,
                 "timed",
-                Some(json!({
-                    "nodes": width * (depth + 1) + 1,
-                    "edges": width * (depth + 1),
-                    "sources": width,
-                    "outputs": 1,
-                })),
+                None,
                 vec![],
             );
             generated.topology_fingerprint = Some(topology_fingerprint);
@@ -571,11 +1146,11 @@ fn broad_frontier_graph(width: usize, depth: usize, stage: &str) -> (String, Str
     source.push_str("]))\n");
     let topology_fingerprint = fingerprint(source.as_bytes());
     source.push_str("(let analysis (nefor.graph.analyze-graph topology))\n");
-    source.push_str("(let summary {:nodes (count (get analysis \"nodes\")) :edges (count (get analysis \"edges\")) :sources (count (get analysis \"sources\")) :outputs (count (get analysis \"outputs\"))})\n");
+    source.push_str("(let summary {:nodes (count (get analysis \"nodes\")) :edges (count (get analysis \"edges\")) :roots (count (get analysis \"roots\")) :outputs (count (get analysis \"outputs\"))})\n");
     match stage {
         "analysis" => {}
         "forward-reachability" => source.push_str(&format!("(let forward (nefor.graph.forward-reachable analysis))\n(let forward-count (count (keys forward)))\n(let forward-proof (if (= forward-count {}) true (fail \"broad-frontier forward reachability changed\")))\n", width * (depth + 1) + 1)),
-        "both-reachability" => source.push_str(&format!("(let forward (nefor.graph.forward-reachable analysis))\n(let forward-count (count (keys forward)))\n(let forward-proof (if (= forward-count {}) true (fail \"broad-frontier forward reachability changed\")))\n(let reverse (nefor.graph.reverse-reachable analysis (first (get analysis \"outputs\"))))\n(let reverse-count (count (keys reverse)))\n(let reverse-proof (if (= reverse-count {}) true (fail \"broad-frontier reverse reachability changed\")))\n", width * (depth + 1) + 1, width * (depth + 1) + 1)),
+        "both-reachability" => source.push_str(&format!("(let forward (nefor.graph.forward-reachable analysis))\n(let forward-count (count (keys forward)))\n(let forward-proof (if (= forward-count {}) true (fail \"broad-frontier forward reachability changed\")))\n(let force-reverse (fn [[proof Bool]] -> (Map String Bool) (nefor.graph.reverse-reachable analysis (first (get analysis \"outputs\")))))\n(let reverse (force-reverse forward-proof))\n(let reverse-count (count (keys reverse)))\n(let reverse-proof (if (= reverse-count {}) true (fail \"broad-frontier reverse reachability changed\")))\n", width * (depth + 1) + 1, width * (depth + 1) + 1)),
         "lower" => {
             let selected = (0..width)
                 .map(|chain| format!("(= (get candidate \"id\") \"n{chain}_{}\")", depth - 1))
@@ -589,7 +1164,17 @@ fn broad_frontier_graph(width: usize, depth: usize, stage: &str) -> (String, Str
         }
         _ => unreachable!(),
     }
-    source.push_str("(artifact summary)");
+    match stage {
+        "analysis" => source.push_str("(artifact summary)"),
+        "forward-reachability" => {
+            source.push_str("(artifact {:summary summary :forced forward-proof})")
+        }
+        "both-reachability" => {
+            source.push_str("(artifact {:summary summary :forced reverse-proof})")
+        }
+        "lower" => source.push_str("(artifact {:summary summary :lowered lowered :forced forced})"),
+        _ => unreachable!(),
+    }
     (source, topology_fingerprint)
 }
 

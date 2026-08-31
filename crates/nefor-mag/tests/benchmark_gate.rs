@@ -131,33 +131,33 @@ fn resident_probe_expectation_mismatch_aborts_report_creation() {
 }
 
 #[test]
-fn gate_artifact_rejects_performance_semantics_and_workload_independently() {
+fn marginal_comparison_reports_performance_semantics_and_workload_independently() {
     let baseline = report(100, 100, "artifact", "workload");
 
     let slow = report(100, 100, "artifact", "workload");
-    let comparison = compare_reports(&baseline, &slow, true);
+    let comparison = compare_reports(&baseline, &slow, false);
     assert!(comparison.semantic.passed);
     assert!(!comparison.target_median.passed);
     assert!(!comparison.target_logical_counter.passed);
     assert!(!comparison.overall.passed);
 
     let semantic_mismatch = report(80, 50, "different", "workload");
-    let comparison = compare_reports(&baseline, &semantic_mismatch, true);
+    let comparison = compare_reports(&baseline, &semantic_mismatch, false);
     assert!(!comparison.semantic.passed);
     assert!(!comparison.overall.passed);
 
     let workload_mismatch = report(80, 50, "artifact", "changed-workload");
-    let comparison = compare_reports(&baseline, &workload_mismatch, true);
+    let comparison = compare_reports(&baseline, &workload_mismatch, false);
     assert!(!comparison.compatibility.passed);
     assert!(!comparison.overall.passed);
 }
 
 #[test]
-fn gate_rejects_p90_regression_independently_of_target_median() {
+fn marginal_comparison_reports_p90_regression_independently_of_target_median() {
     let baseline = report_with_p90(100, 100, 100, "artifact", "workload");
     let candidate = report_with_p90(80, 111, 50, "artifact", "workload");
 
-    let comparison = compare_reports(&baseline, &candidate, true);
+    let comparison = compare_reports(&baseline, &candidate, false);
     assert!(comparison.target_median.passed);
     assert!(comparison.target_logical_counter.passed);
     assert!(!comparison.all_case_p90.passed);
@@ -183,6 +183,19 @@ fn report_with_p90(
     counters.value_equality_visits = equality_visits;
     Report {
         schema_version: SCHEMA_VERSION,
+        identity: Some(ReportIdentity {
+            report_schema_version: SCHEMA_VERSION,
+            workload_catalog_version: PHASE0_WORKLOAD_CATALOG_VERSION.into(),
+            workload_fingerprint: workload.into(),
+            parent_workload_catalog_version: CURRENT_MAIN_A0_WORKLOAD_CATALOG_VERSION.into(),
+            parent_workload_fingerprint: CURRENT_MAIN_A0_WORKLOAD_FINGERPRINT.into(),
+            oracle_catalog_version: ORACLE_CATALOG_VERSION.into(),
+            oracle_fingerprint: CURRENT_MAIN_A0_ORACLE_FINGERPRINT.into(),
+            profiler_schema_version: PROFILER_SCHEMA_VERSION.into(),
+            statistics_policy_version: STATISTICS_POLICY_VERSION.into(),
+            source_ref: "source".into(),
+            executable_digest: "binary".into(),
+        }),
         metadata: Metadata {
             git_commit: "commit".into(),
             git_dirty: false,
@@ -202,12 +215,14 @@ fn report_with_p90(
             size_replacements: BTreeMap::new(),
         },
         counter_semantics: BTreeMap::new(),
+        statistics_policy: statistics_policy(),
         cases: vec![CaseReport {
             name: "nefor-linear-validate-12".into(),
             family: "nefor-linear".into(),
             stage: "validate".into(),
             size: Some(12),
             fixture_fingerprint: "fixture".into(),
+            topology_fingerprint: None,
             outcome: "success".into(),
             expected_error: None,
             artifact_hash: Some(artifact_hash.into()),
@@ -224,8 +239,10 @@ fn report_with_p90(
             derived: None,
             profiled_phase_median_ns: None,
             profiled_invocations_are_separate: true,
+            self_comparison: None,
         }],
         oracles: vec![],
+        exclusive_sections: vec![],
         recommendation: Recommendation {
             candidate: Some("Nefor graph validation".into()),
             evidence: "test".into(),

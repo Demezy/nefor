@@ -232,7 +232,11 @@ test-build-version:
 
 # Opt-in optimized MAG compiler benchmark; writes a metadata-rich JSON report to stdout.
 bench-mag *args:
-    cargo bench -p nefor-mag --bench mag_compile -- {{args}}
+    NEFOR_MAG_BENCH_BUILD_SOURCE_ROOT="$PWD" \
+    NEFOR_MAG_BENCH_BUILD_SOURCE_REF="$(git rev-parse HEAD)" \
+    NEFOR_MAG_BENCH_BUILD_SOURCE_TREE="$(git rev-parse 'HEAD^{tree}')" \
+    NEFOR_MAG_BENCH_BUILD_SOURCE_DIRTY="$(if test -n "$(git status --porcelain)"; then echo true; else echo false; fi)" \
+      cargo bench -p nefor-mag --bench mag_compile -- {{args}}
 
 # MAG language/compiler tests, optionally filtered by ordinary Cargo test arguments.
 test-mag *args:
