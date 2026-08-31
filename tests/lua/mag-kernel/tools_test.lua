@@ -309,6 +309,37 @@ do
   assert_eq(unchanged.messages[1].content, below, "below-limit output is unchanged")
   assert_eq(unchanged.messages[2].content, exact, "the exact 32768-byte boundary is unchanged")
 
+  local image = {
+    type = "media",
+    media_type = "image/png",
+    data = string.rep("i", 40000),
+  }
+  local image_out = project({ { id = "image", name = "read_image", output = image } })
+  assert_eq(image_out.messages[1].content, image,
+    "image media above the textual item limit remains structured")
+  assert_eq(#image_out.messages[1].content.data, 40000,
+    "structured image data is not truncated")
+
+  local oversized_text = {}
+  for i = 1, 4 do
+    oversized_text[i] = {
+      id = "text-" .. i,
+      name = "read",
+      output = string.rep(tostring(i), 40000),
+      output_path = "/runs/r1/nodes/read-" .. i .. "/output.json",
+    }
+  end
+  local text_only = project(oversized_text)
+  local image_and_text = { { id = "image", name = "read_image", output = image } }
+  for i, result in ipairs(oversized_text) do image_and_text[i + 1] = result end
+  local mixed_media = project(image_and_text)
+  assert_eq(mixed_media.messages[1].content, image,
+    "mixed batches preserve image media as structured content")
+  for i = 1, #oversized_text do
+    assert_eq(mixed_media.messages[i + 1].content, text_only.messages[i].content,
+      "image media does not consume textual batch allocation for result " .. i)
+  end
+
   local path = "/runs/r1/nodes/read/output.json"
   local huge = string.rep("H", 20000) .. string.rep("T", 20000)
   local bounded = project({ { id = "huge", name = "read", output = huge, output_path = path } })

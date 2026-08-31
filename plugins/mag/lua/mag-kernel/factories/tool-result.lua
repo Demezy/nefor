@@ -23,9 +23,10 @@
 --       messages = { { role="tool", tool_call_id=<id>, name=<tool>,
 --                      content=<string|structured>, error=<e?> }, … } }
 --   `content` is the tool output projected as bounded provider text: strings pass
---   through unchanged while structured output is JSON-encoded. An errored call
---   carries a readable `[tool error] …` content plus the raw `error`. No shape
---   sniffing: the per-field handling is output FORMATTING, not input SELECTION.
+--   through unchanged while structured output is JSON-encoded. Recognized image
+--   media remains structured so the provider can consume it as media. An errored
+--   call carries a readable `[tool error] …` content plus the raw `error`. No
+--   shape sniffing: the per-field handling is output FORMATTING, not input SELECTION.
 --
 -- No signal handlers: adaptation is synchronous over an already-arrived batch;
 -- the node holds no in-flight external work to abort or flush (actor-model.md,
@@ -35,6 +36,15 @@ local kinds = require("kinds")
 local model_context = require("model-context")
 
 local M = {}
+
+local function is_image_media(value)
+  return type(value) == "table"
+    and value.type == "media"
+    and type(value.media_type) == "string"
+    and value.media_type:sub(1, 6) == "image/"
+    and type(value.data) == "string"
+    and value.data ~= ""
+end
 
 M.declaration = {
   name = "tool-result",
@@ -104,7 +114,7 @@ function M.construct(id, params, emit, deps)
     local message = ((activation.messages or {})[1] or {}).message or {}
     local value = type(message.value) == "table" and message.value or {}
     local results = message.results or value.results or {}
-    local entries = {}
+    local contents, projectable, positions = {}, {}, {}
     for i, r in ipairs(results) do
       r = r or {}
       local value
@@ -115,9 +125,16 @@ function M.construct(id, params, emit, deps)
       else
         value = ""
       end
-      entries[i] = { value = value, output_path = r.output_path }
+      if is_image_media(value) then
+        contents[i] = value
+      else
+        projectable[#projectable + 1] = { value = value, output_path = r.output_path }
+        positions[#positions + 1] = i
+      end
     end
-    local contents = model_context.project(entries)
+    for index, content in ipairs(model_context.project(projectable)) do
+      contents[positions[index]] = content
+    end
     local messages = {}
     for i, r in ipairs(results) do
       local message = to_message(r)
