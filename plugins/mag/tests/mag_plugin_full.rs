@@ -361,6 +361,29 @@ pub mod kernel {
                     "(type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))",
                     "(type-tag (| Answer nefor.contracts.AgentError))",
                 );
+            let dynamic = direct
+                .replace(
+                    "(require \"nefor.graph\")",
+                    "(require \"nefor.graph\")\n    (require \"nefor.dynamic\")",
+                )
+                .replace("nefor.actors.profile-agent", "nefor.actors.dynamic-profile-agent")
+                .replace(
+                    "(type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))",
+                    "(type-tag (| (nefor.dynamic.DynamicList nefor.contracts.TextAnswer) nefor.contracts.AgentError))))",
+                );
+            let dynamic_modification = compile_mag_source(&host, "profile-dynamic", &dynamic);
+            assert_eq!(
+                dynamic_modification["actors"]
+                    .as_array()
+                    .and_then(|actors| actors.iter().find(|actor| actor["id"] == "worker.llm"))
+                    .and_then(|actor| actor["factory"].as_str()),
+                Some("nefor.factory.structured-output"),
+                "dynamic profile agents retain the structured-output boundary"
+            );
+            assert_eq!(
+                actor_params(&dynamic_modification, "worker.llm")["model_profile"],
+                serde_json::json!({"present": true, "value": "fast"})
+            );
 
             for (run_id, source, factory) in [
                 ("snapshot-direct", direct.to_owned(), "nefor.factory.llm"),
@@ -375,6 +398,7 @@ pub mod kernel {
                     provider: "snapshot-provider".to_owned(),
                     model: "snapshot-model".to_owned(),
                     reasoning_effort: None,
+                    profiles: Default::default(),
                 };
                 let begun = host
                     .begin_run_with_principal(
@@ -416,6 +440,7 @@ pub mod kernel {
                         provider: "later-provider".to_owned(),
                         model: "later-model".to_owned(),
                         reasoning_effort: Some("low".to_owned()),
+                        profiles: Default::default(),
                     };
                     let begun = host
                         .begin_run_with_principal(
@@ -478,6 +503,7 @@ pub mod kernel {
                 provider: "snapshot-provider".to_owned(),
                 model: "snapshot-model".to_owned(),
                 reasoning_effort: Some("high".to_owned()),
+                profiles: Default::default(),
             };
             let begun = host
                 .begin_run_with_principal(
@@ -544,6 +570,156 @@ pub mod kernel {
             assert!(host
                 .drain_emits()
                 .expect("drain malformed failure")
+                .iter()
+                .all(|event| event["kind"] != "tool.invoke"));
+        }
+
+        #[test]
+        fn authored_model_profiles_resolve_from_the_owned_run_snapshot() {
+            let host = shipped_host();
+            let direct = r#"
+    (require "nefor.actors")
+    (require "nefor.artifact")
+    (require "nefor.contracts")
+    (require "nefor.graph")
+    (type Fast {})
+    (let fast (as Fast {}))
+    (let resolve-profile (fn [[model Fast]] -> nefor.actors.ModelProfile
+      (nefor.actors.model-profile "fast")))
+    (let start (nefor.actors.task-source "task" "answer"))
+    (let worker (nefor.actors.profile-agent resolve-profile
+      (as (nefor.actors.AgentConfig Fast)
+        {:id "worker" :model fast :system "" :tools []
+         :da-policy (nefor.contracts.no-da-policy) :max-corrections 2})
+      (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer)))
+    (let result (nefor.graph.output "result"
+      (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+    (nefor.artifact.compile (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+      (nefor.graph.add-edges graph
+        [(nefor.graph.edge start worker) (nefor.graph.edge worker result)])))
+    "#;
+            let structured = direct
+                .replace(
+                    "(require \"nefor.actors\")",
+                    "(require \"nefor.actors\")\n    (type Answer {:answer String})",
+                )
+                .replace("nefor.contracts.TextAnswer)))", "Answer)))")
+                .replace(
+                    "(type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))",
+                    "(type-tag (| Answer nefor.contracts.AgentError))",
+                );
+
+            for (run_id, source, factory) in [
+                ("profile-direct", direct.to_owned(), "nefor.factory.llm"),
+                (
+                    "profile-structured",
+                    structured,
+                    "nefor.factory.structured-output",
+                ),
+            ] {
+                let modification = compile_mag_source(&host, run_id, &source);
+                assert_eq!(
+                    actor_params(&modification, "worker.llm")["model_profile"],
+                    serde_json::json!({"present": true, "value": "fast"}),
+                    "the compiled actor carries the typed authored selector"
+                );
+                let mut profiles = BTreeMap::new();
+                profiles.insert(
+                    "fast".to_owned(),
+                    ExecutionResolvedModel {
+                        provider: "fast-provider".to_owned(),
+                        model: "fast-model".to_owned(),
+                        reasoning_effort: Some("low".to_owned()),
+                    },
+                );
+                let snapshot = ExecutionModelSnapshot {
+                    provider: "current-provider".to_owned(),
+                    model: "current-model".to_owned(),
+                    reasoning_effort: Some("high".to_owned()),
+                    profiles,
+                };
+                let begun = host
+                    .begin_run_with_principal(
+                        run_id,
+                        run_id,
+                        Some("session"),
+                        Some("subagent"),
+                        Some("conversation"),
+                        Some(&snapshot),
+                    )
+                    .expect("begin profiled run");
+                assert!(begun.ok, "begin failed: {:?}", begun.error);
+                host.drain_emits().expect("drain begin");
+                let outcome = host
+                    .start(run_id, &modification)
+                    .expect("start profiled run");
+                assert!(outcome.ok, "start failed: {:?}", outcome.error);
+                let emits = host.drain_emits().expect("drain profiled invoke");
+                let spawned = emits
+                    .iter()
+                    .find(|event| {
+                        event["kind"] == "mag.actor_spawned" && event["id"] == "worker.llm"
+                    })
+                    .expect("profiled llm spawn");
+                assert_eq!(spawned["factory"], factory);
+                let invoke = tool_invoke(&emits, "fast-provider");
+                assert_eq!(invoke["args"]["model"], "fast-model");
+                assert_eq!(invoke["args"]["reasoning_effort"], "low");
+                assert!(invoke["args"].get("model_profile").is_none());
+
+                if run_id == "profile-direct" {
+                    let patch_source = direct
+                        .replace("\"task\"", "\"patch-task\"")
+                        .replace("\"worker\"", "\"patch\"")
+                        .replace("\"result\"", "\"patch-result\"");
+                    let mut patch = compile_mag_source(&host, "profile-patch", &patch_source);
+                    patch
+                        .as_object_mut()
+                        .expect("patch object")
+                        .remove("result");
+                    let outcome = host.apply(run_id, &patch).expect("apply profiled patch");
+                    assert!(outcome.ok, "patch failed: {:?}", outcome.error);
+                    let patch_emits = host.drain_emits().expect("drain profiled patch");
+                    let patch_invoke = tool_invoke(&patch_emits, "fast-provider");
+                    assert_eq!(patch_invoke["args"]["model"], "fast-model");
+                }
+
+                host.end_run(run_id, TeardownReason::Killed)
+                    .expect("end profiled run");
+                host.drain_emits().expect("drain profiled end");
+            }
+
+            let modification = compile_mag_source(&host, "missing-profile", direct);
+            let snapshot = ExecutionModelSnapshot {
+                provider: "current-provider".to_owned(),
+                model: "current-model".to_owned(),
+                reasoning_effort: None,
+                profiles: Default::default(),
+            };
+            let begun = host
+                .begin_run_with_principal(
+                    "missing-profile",
+                    "missing-profile",
+                    Some("session"),
+                    Some("subagent"),
+                    Some("conversation"),
+                    Some(&snapshot),
+                )
+                .expect("begin missing-profile run");
+            assert!(begun.ok);
+            host.drain_emits().expect("drain missing-profile begin");
+            let outcome = host
+                .start("missing-profile", &modification)
+                .expect("start missing-profile run");
+            assert!(outcome.ok, "initial modification still applies");
+            let failure = host
+                .take_run_failed("missing-profile")
+                .expect("take missing-profile failure")
+                .expect("missing profile fails construction");
+            assert!(failure.contains("model profile \"fast\" is absent"));
+            assert!(host
+                .drain_emits()
+                .expect("drain missing-profile failure")
                 .iter()
                 .all(|event| event["kind"] != "tool.invoke"));
         }

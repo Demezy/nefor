@@ -411,6 +411,31 @@ mod tests {
         assert_eq!(parsed.provider, "p");
         assert_eq!(parsed.model, "m");
         assert_eq!(parsed.reasoning_effort.as_deref(), Some("high"));
+        assert!(parsed.profiles.is_empty());
+
+        let with_profiles = serde_json::json!({
+            "model_snapshot": {
+                "provider": "current-provider",
+                "model": "current-model",
+                "profiles": {
+                    "fast": {"provider": "fast-provider", "model": "fast-model"},
+                    "standard": {
+                        "provider": "standard-provider",
+                        "model": "standard-model",
+                        "reasoning_effort": "medium"
+                    }
+                }
+            }
+        });
+        let parsed =
+            parse_model_snapshot(with_profiles.as_object().unwrap(), RunPrincipal::Subagent)
+                .unwrap()
+                .unwrap();
+        assert_eq!(parsed.profiles["fast"].provider, "fast-provider");
+        assert_eq!(
+            parsed.profiles["standard"].reasoning_effort.as_deref(),
+            Some("medium")
+        );
 
         let absent_effort = serde_json::json!({
             "model_snapshot": {"provider": "p", "model": "m"}
@@ -436,6 +461,13 @@ mod tests {
             serde_json::json!({"provider": "p", "model": ""}),
             serde_json::json!({"provider": "p", "model": "m", "reasoning_effort": null}),
             serde_json::json!({"provider": "p", "model": "m", "reasoning_effort": ""}),
+            serde_json::json!({"provider": "p", "model": "m", "profiles": null}),
+            serde_json::json!({"provider": "p", "model": "m", "profiles": {"": {"provider": "p", "model": "m"}}}),
+            serde_json::json!({"provider": "p", "model": "m", "profiles": {"fast": {"provider": "", "model": "m"}}}),
+            serde_json::json!({"provider": "p", "model": "m", "profiles": {"fast": {"provider": "p", "model": ""}}}),
+            serde_json::json!({"provider": "p", "model": "m", "profiles": {"fast": {"provider": "p", "model": "m", "reasoning_effort": null}}}),
+            serde_json::json!({"provider": "p", "model": "m", "profiles": {"fast": {"provider": "p", "model": "m", "reasoning_effort": ""}}}),
+            serde_json::json!({"provider": "p", "model": "m", "profiles": {"fast": {"provider": "p", "model": "m", "extra": true}}}),
             serde_json::json!({"provider": "p", "model": "m", "extra": true}),
         ] {
             let body = serde_json::json!({"model_snapshot": malformed});
@@ -661,6 +693,13 @@ mod tests {
                         "provider_error_type": "provider-id",
                         "validation_error_type": "validation-id"
                     }
+                },
+                {
+                    "id": "direct",
+                    "factory": "nefor.factory.llm",
+                    "params": {
+                        "model_profile": {"present": true, "value": "fast"}
+                    }
                 }
             ]
         });
@@ -677,6 +716,16 @@ mod tests {
                 "typed",
                 "validation_error_type",
                 serde_json::json!("forged"),
+            ),
+            (
+                "typed",
+                "model_profile",
+                serde_json::json!({"present": true, "value": "other"}),
+            ),
+            (
+                "direct",
+                "model_profile",
+                serde_json::json!({"present": true, "value": "other"}),
             ),
         ] {
             let overlay = serde_json::json!({(actor): {(param): value}});

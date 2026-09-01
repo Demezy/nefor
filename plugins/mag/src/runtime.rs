@@ -832,6 +832,22 @@ fn parse_model_snapshot(
     {
         return Err("model_snapshot.reasoning_effort cannot be null".to_owned());
     }
+    if let Some((name, _)) = raw
+        .as_object()
+        .and_then(|snapshot| snapshot.get("profiles"))
+        .and_then(Value::as_object)
+        .and_then(|profiles| {
+            profiles.iter().find(|(_, model)| {
+                model
+                    .as_object()
+                    .is_some_and(|model| model.get("reasoning_effort") == Some(&Value::Null))
+            })
+        })
+    {
+        return Err(format!(
+            "model_snapshot.profiles[{name:?}].reasoning_effort cannot be null"
+        ));
+    }
     serde_json::from_value::<ExecutionModelSnapshot>(raw.clone())
         .map_err(|error| format!("invalid mag.execute model_snapshot: {error}"))?
         .validate()
@@ -923,9 +939,8 @@ async fn handle_execute(
 
     // Apply the control plane's per-actor params overlay before spawn. Actor
     // params are kernel-opaque data owned by the factory (docs/ir.md), so an
-    // overlay patched at apply time is legitimate control-plane input — it is
-    // how the lead threads resolved profile params (provider/model/reasoning)
-    // into the program without re-authoring the modification. Shallow per-actor
+    // overlay patched at apply time is legitimate control-plane input for
+    // ambient runtime values such as system context. Shallow per-actor
     // top-level merge; unknown ids are ignored (a race artifact, not an error).
     if let Some(overlay) = body.get("params_overlay").and_then(Value::as_object) {
         if let Err(error) = apply_params_overlay(&mut modification, overlay) {
@@ -1131,12 +1146,14 @@ fn apply_params_overlay(
         let factory = obj.get("factory").and_then(Value::as_str);
         let protected_params: &[&str] = match factory {
             Some("structured-output" | "nefor.factory.structured-output") => &[
+                "model_profile",
                 "schema",
                 "output_type",
                 "error_type",
                 "provider_error_type",
                 "validation_error_type",
             ],
+            Some("llm" | "nefor.factory.llm") => &["model_profile"],
             _ => &[],
         };
         if let Some(param) = protected_params

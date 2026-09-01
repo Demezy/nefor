@@ -383,15 +383,30 @@ path unless both the bridge and the provider schema add them; use
 knobs.
 
 A fresh delegated execution may carry an immutable `model_snapshot` with a
-non-empty provider/model and optional non-empty reasoning effort. The kernel
-stores one owned copy in the run context and applies it only while constructing
-`llm` and `structured-output` actors. It therefore covers initial actors,
-resident-rule expansion, and actors added through `mag.apply` without rewriting
-their inventory specs. Snapshot provider/model/effort override authored and
-overlaid values; omitting snapshot effort explicitly clears authored effort.
-Runs without a snapshot retain authored behavior, while authoritative
-`subagent` executions fail closed if the snapshot is absent. A live
-`mag.apply` cannot replace the target run's snapshot.
+non-empty current provider/model, optional non-empty reasoning effort, and a
+closed `profiles` map from configuration-owned names to the same concrete
+fields. The control plane resolves that whole value once; the kernel stores one
+owned copy in the run context and applies it only while constructing `llm` and
+`structured-output` actors. It therefore covers initial actors, resident-rule
+expansion, and actors added through `mag.apply` without rewriting their
+inventory specs or consulting live catalog state.
+
+Ordinary `nefor.actors.agent` actors use the snapshot's current model, preserving
+the current-only behavior. A configuration may instead keep a finite typed model
+vocabulary, resolve it exhaustively to `nefor.actors.model-profile("name")`, and
+construct the actor with `nefor.actors.profile-agent` (or
+`dynamic-profile-agent`). The compiled actor then carries that authored selector;
+lazy construction resolves it from the run snapshot's `profiles` map. An absent
+profile fails actor construction before any provider invocation. Profile names
+and their concrete provider policy belong to the configuration; Nefor treats
+them as opaque exact keys.
+
+Selected provider/model/effort override authored and overlaid values; omitting
+selected effort explicitly clears authored effort. Runs without a snapshot
+retain authored concrete-model behavior, while a profile-authored actor requires
+a snapshot and authoritative `subagent` executions fail closed if the snapshot
+is absent. A live `mag.apply` cannot replace the target run's snapshot or an
+actor's compiler-derived profile selector.
 
 ### Structured output boundary
 

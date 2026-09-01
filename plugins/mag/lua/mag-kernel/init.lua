@@ -182,6 +182,34 @@ local function lower_reasoning_effort(value)
   return nil
 end
 
+local function lower_model_profile(value)
+  if value == nil then return nil end
+  if type(value) ~= "table" or type(value.present) ~= "boolean"
+      or type(value.value) ~= "string" then
+    return nil, "model_profile must be { present = Bool, value = String }"
+  end
+  local fields = 0
+  for key in pairs(value) do
+    if key ~= "present" and key ~= "value" then
+      return nil, "model_profile record has unknown field " .. tostring(key)
+    end
+    fields = fields + 1
+  end
+  if fields ~= 2 then
+    return nil, "model_profile record must contain exactly present and value"
+  end
+  if value.present then
+    if value.value == "" then
+      return nil, "model_profile present=true requires a non-empty value"
+    end
+    return value.value
+  end
+  if value.value ~= "" then
+    return nil, "model_profile present=false requires an empty value"
+  end
+  return nil
+end
+
 -- Build one run context. `meta` carries the host-provided run identity
 -- (run_id/run_name/session_id/model_snapshot) — injected, never ambient
 -- (docs/ir.md).
@@ -427,14 +455,29 @@ local function new_run_context(meta)
       local effective = {}
       for key, value in pairs(actor_params) do effective[key] = value end
       actor_params = effective
+      local profile, profile_error = lower_model_profile(actor_params.model_profile)
+      if profile_error then return nil, profile_error end
+      actor_params.model_profile = nil
       local effort, effort_error = lower_reasoning_effort(actor_params.reasoning_effort)
       if effort_error then return nil, effort_error end
       actor_params.reasoning_effort = effort
       local snapshot = ctx.model_snapshot
-      if snapshot ~= nil then
-        actor_params.provider = snapshot.provider
-        actor_params.model = snapshot.model
-        actor_params.reasoning_effort = snapshot.reasoning_effort
+      local selected = snapshot
+      if profile ~= nil then
+        if snapshot == nil then
+          return nil, "model profile " .. string.format("%q", profile)
+            .. " requires a run model_snapshot"
+        end
+        selected = type(snapshot.profiles) == "table" and snapshot.profiles[profile] or nil
+        if selected == nil then
+          return nil, "model profile " .. string.format("%q", profile)
+            .. " is absent from the run model_snapshot"
+        end
+      end
+      if selected ~= nil then
+        actor_params.provider = selected.provider
+        actor_params.model = selected.model
+        actor_params.reasoning_effort = selected.reasoning_effort
       end
     end
     local explicit_conversation_id = type(actor_params.conversation_id) == "string"

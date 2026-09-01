@@ -785,6 +785,17 @@ do
     { label = "empty-provider", value = { provider = "", model = "m" } },
     { label = "empty-model", value = { provider = "p", model = "" } },
     { label = "empty-effort", value = { provider = "p", model = "m", reasoning_effort = "" } },
+    { label = "scalar-profiles", value = { provider = "p", model = "m", profiles = "bad" } },
+    { label = "empty-profile-name", value = {
+      provider = "p", model = "m", profiles = { [""] = { provider = "p", model = "m" } },
+    } },
+    { label = "invalid-profile", value = {
+      provider = "p", model = "m", profiles = { fast = { provider = "", model = "m" } },
+    } },
+    { label = "unknown-profile-field", value = {
+      provider = "p", model = "m",
+      profiles = { fast = { provider = "p", model = "m", extra = true } },
+    } },
     { label = "unknown-field", value = { provider = "p", model = "m", extra = true } },
   }
   for _, case in ipairs(invalid_snapshots) do
@@ -864,6 +875,9 @@ do
 
   selected_model_snapshot = {
     provider = "snapshot-provider-b", model = "snapshot-model-b", reasoning_effort = "high",
+    profiles = {
+      fast = { provider = "fast-provider", model = "fast-model" },
+    },
   }
   _test.calls_clear()
   feed("mag", {
@@ -892,6 +906,13 @@ do
     "fresh execution samples the acknowledged model after loading finishes")
   assert_eq(exec.body.model_snapshot.reasoning_effort, "high",
     "fresh execution forwards explicit acknowledged effort")
+  assert_eq(exec.body.model_snapshot.profiles.fast.provider, "fast-provider",
+    "fresh execution forwards config-resolved model profiles")
+  assert_eq(exec.body.model_snapshot.profiles.fast.model, "fast-model",
+    "fresh execution preserves the resolved profile model")
+  selected_model_snapshot.profiles.fast.provider = "mutated-provider"
+  assert_eq(exec.body.model_snapshot.profiles.fast.provider, "fast-provider",
+    "fresh execution owns a deep copy of the profile snapshot")
   assert_eq(model_snapshot_resolutions, 1,
     "fresh execution resolves its model snapshot exactly once after validation")
 

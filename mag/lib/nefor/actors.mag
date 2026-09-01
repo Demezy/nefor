@@ -12,6 +12,7 @@
 
 (type AdapterParams {:seed String :schema TypeSchema})
 (type OptionalReasoningEffort {:present Bool :value String})
+(type OptionalModelProfile {:present Bool :value String})
 
 (let reasoning-effort
   (fn [[value String]] -> OptionalReasoningEffort
@@ -19,12 +20,25 @@
 (let no-reasoning-effort
   (as OptionalReasoningEffort {:present false :value ""}))
 
+(type ModelProfile {:name String})
+(let model-profile
+  (fn [[name String]] -> ModelProfile
+    (as ModelProfile {:name name})))
+(let no-model-profile
+  (as OptionalModelProfile {:present false :value ""}))
+(let selected-model-profile
+  (fn [[profile ModelProfile]] -> OptionalModelProfile
+    (as OptionalModelProfile
+      {:present true :value (get profile "name")})))
+
 (type ResolvedModel {:provider String
                      :model String
                      :reasoning-effort OptionalReasoningEffort})
+(type AuthoredModel (| ResolvedModel ModelProfile))
 (type LlmParams {:model String
                  :provider String
                  :reasoning_effort OptionalReasoningEffort
+                 :model_profile OptionalModelProfile
                  :system String
                  :tools (List String)
                  :output_type SemanticTypeId
@@ -33,6 +47,7 @@
 (type StructuredOutputParams {:model String
                               :provider String
                               :reasoning_effort OptionalReasoningEffort
+                              :model_profile OptionalModelProfile
                               :system String
                               :tools (List String)
                               :schema TypeSchema
@@ -44,6 +59,7 @@
 (type DynamicStructuredOutputParams {:model String
                                      :provider String
                                      :reasoning_effort OptionalReasoningEffort
+                                     :model_profile OptionalModelProfile
                                      :system String
                                      :tools (List String)
                                      :schema TypeSchema
@@ -79,14 +95,25 @@
 ;; The stable result wire carries the selected constructor identity. Ordinary
 ;; edges route compatible arms directly; `result-arm` creates a typed resident
 ;; subscription on that same actor/wire without inserting a selector actor.
-(let agent-with-schema (fn [M I O] [[resolve-model (Fn M ResolvedModel)]
+(let agent-with-schema (fn [M I O] [[resolve-model (Fn M AuthoredModel)]
                 [config (AgentConfig M)] [input-type (TypeTag I)]
                 [output-type (TypeTag O)] [schema TypeSchema]
                 [dynamic Bool] [dynamic-item-type SemanticTypeId]
                 [dynamic-item-descriptor TypeDescriptor]]
   -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
   (let id (get config "id"))
-  (let resolved-model (resolve-model (get config "model")))
+  (let authored-model (resolve-model (get config "model")))
+  (let resolved-model
+    (match authored-model
+      [ResolvedModel value value]
+      [ModelProfile value
+        (as ResolvedModel
+          {:provider "" :model ""
+           :reasoning-effort no-reasoning-effort})]))
+  (let selected-profile
+    (match authored-model
+      [ResolvedModel value no-model-profile]
+      [ModelProfile value (selected-model-profile value)]))
   (let entry-id (str id ".entry"))
   (let llm-id (str id ".llm"))
   (let run-tool-id (str id ".run-tool"))
@@ -139,6 +166,7 @@
            (as LlmParams {:model (get resolved-model "model")
             :provider (get resolved-model "provider")
             :reasoning_effort (get resolved-model "reasoning-effort")
+            :model_profile selected-profile
             :system (get config "system")
             :tools (or (get config "tools") (as (List String) []))
             :output_type (type-id (type-evidence output-type))
@@ -156,6 +184,7 @@
                {:model (get resolved-model "model")
                 :provider (get resolved-model "provider")
                 :reasoning_effort (get resolved-model "reasoning-effort")
+                :model_profile selected-profile
                 :system (get config "system")
                 :tools (or (get config "tools") (as (List String) []))
                 :schema schema
@@ -173,6 +202,7 @@
              (as StructuredOutputParams {:model (get resolved-model "model")
             :provider (get resolved-model "provider")
             :reasoning_effort (get resolved-model "reasoning-effort")
+            :model_profile selected-profile
             :system (get config "system")
             :tools (or (get config "tools") (as (List String) []))
             :schema schema
@@ -215,7 +245,21 @@
                 [config (AgentConfig M)] [input-type (TypeTag I)]
                 [output-type (TypeTag O)]]
   -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
-  (agent-with-schema resolve-model config input-type output-type
+  (agent-with-schema
+    (fn [[model M]] -> AuthoredModel
+      (as AuthoredModel (resolve-model model)))
+    config input-type output-type
+    (type-schema output-type) false
+    (type-id (type-evidence output-type)) (type-evidence output-type))))
+
+(let profile-agent (fn [M I O] [[resolve-profile (Fn M ModelProfile)]
+                        [config (AgentConfig M)] [input-type (TypeTag I)]
+                        [output-type (TypeTag O)]]
+  -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
+  (agent-with-schema
+    (fn [[model M]] -> AuthoredModel
+      (as AuthoredModel (resolve-profile model)))
+    config input-type output-type
     (type-schema output-type) false
     (type-id (type-evidence output-type)) (type-evidence output-type))))
 
@@ -224,10 +268,27 @@
                         [item-type (TypeTag O)]]
   -> (nefor.graph.Node I
        (| (nefor.dynamic.DynamicList O) nefor.contracts.AgentError))
-  (agent-with-schema resolve-model config input-type
+  (agent-with-schema
+    (fn [[model M]] -> AuthoredModel
+      (as AuthoredModel (resolve-model model)))
+    config input-type
     (type-tag (nefor.dynamic.DynamicList O))
     (type-schema (type-tag (List O))) true
     (type-id (type-evidence item-type)) (type-evidence item-type))))
+
+(let dynamic-profile-agent
+  (fn [M I O] [[resolve-profile (Fn M ModelProfile)]
+                [config (AgentConfig M)] [input-type (TypeTag I)]
+                [item-type (TypeTag O)]]
+    -> (nefor.graph.Node I
+         (| (nefor.dynamic.DynamicList O) nefor.contracts.AgentError))
+    (agent-with-schema
+      (fn [[model M]] -> AuthoredModel
+        (as AuthoredModel (resolve-profile model)))
+      config input-type
+      (type-tag (nefor.dynamic.DynamicList O))
+      (type-schema (type-tag (List O))) true
+      (type-id (type-evidence item-type)) (type-evidence item-type))))
 
 ;; Base toolset shorthands for common delegated-agent capability profiles.
 ;; Explicit custom :tools lists remain the right shape for narrower

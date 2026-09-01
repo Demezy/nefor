@@ -14,6 +14,7 @@
 // kernel call and forwards to the NCP writer. This mirrors the nefor-tui
 // plugin's emit-drain pattern.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,26 +48,56 @@ pub struct BeginRunOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionModelSnapshot {
+pub struct ExecutionResolvedModel {
     pub provider: String,
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 }
 
-impl ExecutionModelSnapshot {
-    pub fn validate(self) -> Result<Self, String> {
+impl ExecutionResolvedModel {
+    fn validate(self, field: &str) -> Result<Self, String> {
         if self.provider.is_empty() {
-            return Err("model_snapshot.provider must be a non-empty string".to_owned());
+            return Err(format!("{field}.provider must be a non-empty string"));
         }
         if self.model.is_empty() {
-            return Err("model_snapshot.model must be a non-empty string".to_owned());
+            return Err(format!("{field}.model must be a non-empty string"));
         }
         if self.reasoning_effort.as_deref() == Some("") {
-            return Err(
-                "model_snapshot.reasoning_effort must be a non-empty string when present"
-                    .to_owned(),
-            );
+            return Err(format!(
+                "{field}.reasoning_effort must be a non-empty string when present"
+            ));
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionModelSnapshot {
+    pub provider: String,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, ExecutionResolvedModel>,
+}
+
+impl ExecutionModelSnapshot {
+    pub fn validate(self) -> Result<Self, String> {
+        ExecutionResolvedModel {
+            provider: self.provider.clone(),
+            model: self.model.clone(),
+            reasoning_effort: self.reasoning_effort.clone(),
+        }
+        .validate("model_snapshot")?;
+        for (name, model) in &self.profiles {
+            if name.is_empty() {
+                return Err("model_snapshot.profiles keys must be non-empty strings".to_owned());
+            }
+            model
+                .clone()
+                .validate(&format!("model_snapshot.profiles[{name:?}]"))?;
         }
         Ok(self)
     }

@@ -120,6 +120,13 @@ instead of sampling again. The MAG kernel applies that immutable snapshot at
 lazy LLM construction, so runtime expansion cannot observe a later `/model`
 selection.
 
+The snapshot may also contain a configuration-resolved map of named model
+profiles. MAG exposes a typed profile selector, but the names and their concrete
+provider/model/effort mappings remain composition policy. Profile-authored LLM
+actors resolve only against the map owned by their run; missing profiles fail
+construction before provider invocation, and actors added later inherit the
+same snapshot. Ordinary actors continue to use the snapshot's current model.
+
 Route enforcement is deliberately out of scope: the composition targets a
 selection at a provider actor, and that actor decides what it will serve. Nefor
 does not template per-model endpoints or carry routing metadata that would let
