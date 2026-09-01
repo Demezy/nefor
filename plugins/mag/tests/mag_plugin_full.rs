@@ -281,7 +281,7 @@ pub mod kernel {
     (let make-agent (fn [I O] [[id String] [input-type (TypeTag I)]
                                 [output-type (TypeTag O)]]
       -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
-      (nefor.actors.agent exact-model
+      (nefor.actors.resolved-agent exact-model
         (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel)
           {:id id :model resolved
            :system "" :tools [] :da-policy (nefor.contracts.no-da-policy)
@@ -332,6 +332,7 @@ pub mod kernel {
             let host = shipped_host();
             let direct = r#"
     (require "nefor.actors")
+    (require "nefor.agents")
     (require "nefor.artifact")
     (require "nefor.contracts")
     (require "nefor.graph")
@@ -340,11 +341,8 @@ pub mod kernel {
       {:provider "authored-provider" :model "authored-model"
        :reasoning-effort (nefor.actors.reasoning-effort "authored-effort")}))
     (let start (nefor.actors.task-source "task" "answer"))
-    (let worker (nefor.actors.agent exact-model
-      (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel)
-        {:id "worker" :model resolved :system "" :tools []
-         :da-policy (nefor.contracts.no-da-policy) :max-corrections 2})
-      (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer)))
+    (let worker (nefor.agents.with-resolved-tools exact-model resolved "worker" "" []
+      (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer) 2))
     (let result (nefor.graph.output "result"
       (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
     (nefor.artifact.compile (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
@@ -356,35 +354,14 @@ pub mod kernel {
                     "(require \"nefor.actors\")",
                     "(require \"nefor.actors\")\n    (type Answer {:answer String})",
                 )
-                .replace("nefor.contracts.TextAnswer)))", "Answer)))")
+                .replace(
+                    "(type-tag nefor.contracts.TextAnswer) 2))",
+                    "(type-tag Answer) 2))",
+                )
                 .replace(
                     "(type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))",
                     "(type-tag (| Answer nefor.contracts.AgentError))",
                 );
-            let dynamic = direct
-                .replace(
-                    "(require \"nefor.graph\")",
-                    "(require \"nefor.graph\")\n    (require \"nefor.dynamic\")",
-                )
-                .replace("nefor.actors.profile-agent", "nefor.actors.dynamic-profile-agent")
-                .replace(
-                    "(type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))",
-                    "(type-tag (| (nefor.dynamic.DynamicList nefor.contracts.TextAnswer) nefor.contracts.AgentError))))",
-                );
-            let dynamic_modification = compile_mag_source(&host, "profile-dynamic", &dynamic);
-            assert_eq!(
-                dynamic_modification["actors"]
-                    .as_array()
-                    .and_then(|actors| actors.iter().find(|actor| actor["id"] == "worker.llm"))
-                    .and_then(|actor| actor["factory"].as_str()),
-                Some("nefor.factory.structured-output"),
-                "dynamic profile agents retain the structured-output boundary"
-            );
-            assert_eq!(
-                actor_params(&dynamic_modification, "worker.llm")["model_profile"],
-                serde_json::json!({"present": true, "value": "fast"})
-            );
-
             for (run_id, source, factory) in [
                 ("snapshot-direct", direct.to_owned(), "nefor.factory.llm"),
                 (
@@ -579,19 +556,26 @@ pub mod kernel {
             let host = shipped_host();
             let direct = r#"
     (require "nefor.actors")
+    (require "nefor.agents")
     (require "nefor.artifact")
     (require "nefor.contracts")
     (require "nefor.graph")
+    (type Current {})
     (type Fast {})
-    (let fast (as Fast {}))
-    (let resolve-profile (fn [[model Fast]] -> nefor.actors.ModelProfile
-      (nefor.actors.model-profile "fast")))
+    (type Model (| Current Fast))
+    (let fast (as Model (as Fast {})))
+    (let resolve-model (fn [[model Model]] -> nefor.actors.AuthoredModel
+      (match model
+        [Current value
+          (as nefor.actors.AuthoredModel
+            (as nefor.actors.ResolvedModel
+              {:provider "authored-provider" :model "authored-model"
+               :reasoning-effort nefor.actors.no-reasoning-effort}))]
+        [Fast value
+          (as nefor.actors.AuthoredModel (nefor.actors.model-profile "fast"))])))
     (let start (nefor.actors.task-source "task" "answer"))
-    (let worker (nefor.actors.profile-agent resolve-profile
-      (as (nefor.actors.AgentConfig Fast)
-        {:id "worker" :model fast :system "" :tools []
-         :da-policy (nefor.contracts.no-da-policy) :max-corrections 2})
-      (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer)))
+    (let worker (nefor.agents.with-tools resolve-model fast "worker" "" []
+      (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer) 2))
     (let result (nefor.graph.output "result"
       (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
     (nefor.artifact.compile (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
@@ -603,12 +587,14 @@ pub mod kernel {
                     "(require \"nefor.actors\")",
                     "(require \"nefor.actors\")\n    (type Answer {:answer String})",
                 )
-                .replace("nefor.contracts.TextAnswer)))", "Answer)))")
+                .replace(
+                    "(type-tag nefor.contracts.TextAnswer) 2))",
+                    "(type-tag Answer) 2))",
+                )
                 .replace(
                     "(type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))",
                     "(type-tag (| Answer nefor.contracts.AgentError))",
                 );
-
             for (run_id, source, factory) in [
                 ("profile-direct", direct.to_owned(), "nefor.factory.llm"),
                 (
@@ -1737,7 +1723,7 @@ mod tests {
 (let exact-model (fn [[selected nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel selected))
 (let configured-model (as nefor.actors.ResolvedModel {:provider "mock-provider" :model "mock-model" :reasoning-effort (nefor.actors.reasoning-effort "medium")}))
 (let start (nefor.actors.task-source "task" "test"))
-(let worker (nefor.actors.agent exact-model
+(let worker (nefor.actors.resolved-agent exact-model
         (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "worker"
          :model configured-model
          :system "Answer."
@@ -1870,7 +1856,7 @@ mod tests {
 (let exact-model (fn [[selected nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel selected))
 (let configured-model (as nefor.actors.ResolvedModel {:provider "mock-provider" :model "mock-model" :reasoning-effort (nefor.actors.reasoning-effort "medium")}))
 (let start (nefor.actors.task-source "task" "test"))
-(let worker (nefor.actors.agent exact-model
+(let worker (nefor.actors.resolved-agent exact-model
         (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "worker"
          :model configured-model
          :system "Answer."

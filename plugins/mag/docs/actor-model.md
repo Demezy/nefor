@@ -370,10 +370,8 @@ The direct `llm` factory schema is the table above: `provider`, `model`,
 forwards `model`, `system`, `tools`, and `reasoning_effort` into the provider
 `chat.create` request. For typed agents it also places the converted
 `output_schema` on `chat.complete`; `provider` selects the provider actor at
-construction. Config-owned MAG libraries may define any typed model vocabulary
-they need and pass an exhaustive `Model -> ResolvedModel` function to
-`nefor.actors.agent`; the resulting artifact already contains the concrete
-provider, model, and reasoning effort. `ResolvedModel` represents effort with
+construction. For explicitly concrete authoring, `ResolvedModel` carries the
+provider, model, and reasoning effort and represents effort with
 `nefor.actors.reasoning-effort` or `nefor.actors.no-reasoning-effort`; the
 kernel lowers that closed record once to a non-empty string or field absence.
 Raw runtime artifacts may supply the already-lowered optional string.
@@ -391,15 +389,20 @@ owned copy in the run context and applies it only while constructing `llm` and
 expansion, and actors added through `mag.apply` without rewriting their
 inventory specs or consulting live catalog state.
 
-Ordinary `nefor.actors.agent` actors use the snapshot's current model, preserving
-the current-only behavior. A configuration may instead keep a finite typed model
-vocabulary, resolve it exhaustively to `nefor.actors.model-profile("name")`, and
-construct the actor with `nefor.actors.profile-agent` (or
-`dynamic-profile-agent`). The compiled actor then carries that authored selector;
-lazy construction resolves it from the run snapshot's `profiles` map. An absent
-profile fails actor construction before any provider invocation. Profile names
-and their concrete provider policy belong to the configuration; Nefor treats
-them as opaque exact keys.
+`nefor.actors.agent` and `dynamic-agent` accept one exhaustive resolver from a
+configuration's finite model vocabulary to `AuthoredModel`, the sum of a
+concrete `ResolvedModel` and `ModelProfile`. A concrete arm uses the snapshot's
+current model, preserving the current-only behavior. An arm may instead return
+`nefor.actors.model-profile("name")`; the compiled actor then carries that
+authored selector and lazy construction resolves it from the run snapshot's
+`profiles` map. The high-level `nefor.agents.with-tools` and
+`dynamic-with-tools` constructors use the same resolver contract, so a single
+configuration-owned `resolve-model` works in both direct and reusable graph
+forms. `resolved-agent` and the `with-resolved-tools` conveniences retain an
+explicit concrete-only boundary where useful. An absent profile fails actor
+construction before any provider invocation. Profile names and their concrete
+provider policy belong to the configuration; Nefor treats them as opaque exact
+keys.
 
 Selected provider/model/effort override authored and overlaid values; omitting
 selected effort explicitly clears authored effort. Runs without a snapshot

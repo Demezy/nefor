@@ -241,9 +241,17 @@
      :input entry-in
      :output result})))
 
-(let agent (fn [M I O] [[resolve-model (Fn M ResolvedModel)]
+(let agent (fn [M I O] [[resolve-model (Fn M AuthoredModel)]
                 [config (AgentConfig M)] [input-type (TypeTag I)]
                 [output-type (TypeTag O)]]
+  -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
+  (agent-with-schema resolve-model config input-type output-type
+    (type-schema output-type) false
+    (type-id (type-evidence output-type)) (type-evidence output-type))))
+
+(let resolved-agent (fn [M I O] [[resolve-model (Fn M ResolvedModel)]
+                         [config (AgentConfig M)] [input-type (TypeTag I)]
+                         [output-type (TypeTag O)]]
   -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
   (agent-with-schema
     (fn [[model M]] -> AuthoredModel
@@ -252,39 +260,25 @@
     (type-schema output-type) false
     (type-id (type-evidence output-type)) (type-evidence output-type))))
 
-(let profile-agent (fn [M I O] [[resolve-profile (Fn M ModelProfile)]
-                        [config (AgentConfig M)] [input-type (TypeTag I)]
-                        [output-type (TypeTag O)]]
-  -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
-  (agent-with-schema
-    (fn [[model M]] -> AuthoredModel
-      (as AuthoredModel (resolve-profile model)))
-    config input-type output-type
-    (type-schema output-type) false
-    (type-id (type-evidence output-type)) (type-evidence output-type))))
-
-(let dynamic-agent (fn [M I O] [[resolve-model (Fn M ResolvedModel)]
+(let dynamic-agent (fn [M I O] [[resolve-model (Fn M AuthoredModel)]
                         [config (AgentConfig M)] [input-type (TypeTag I)]
                         [item-type (TypeTag O)]]
   -> (nefor.graph.Node I
        (| (nefor.dynamic.DynamicList O) nefor.contracts.AgentError))
-  (agent-with-schema
-    (fn [[model M]] -> AuthoredModel
-      (as AuthoredModel (resolve-model model)))
-    config input-type
+  (agent-with-schema resolve-model config input-type
     (type-tag (nefor.dynamic.DynamicList O))
     (type-schema (type-tag (List O))) true
     (type-id (type-evidence item-type)) (type-evidence item-type))))
 
-(let dynamic-profile-agent
-  (fn [M I O] [[resolve-profile (Fn M ModelProfile)]
+(let dynamic-resolved-agent
+  (fn [M I O] [[resolve-model (Fn M ResolvedModel)]
                 [config (AgentConfig M)] [input-type (TypeTag I)]
                 [item-type (TypeTag O)]]
     -> (nefor.graph.Node I
          (| (nefor.dynamic.DynamicList O) nefor.contracts.AgentError))
     (agent-with-schema
       (fn [[model M]] -> AuthoredModel
-        (as AuthoredModel (resolve-profile model)))
+        (as AuthoredModel (resolve-model model)))
       config input-type
       (type-tag (nefor.dynamic.DynamicList O))
       (type-schema (type-tag (List O))) true

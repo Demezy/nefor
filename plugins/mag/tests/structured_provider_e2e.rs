@@ -484,7 +484,7 @@ async fn load_text_answer_program(
 (let start (nefor.graph.source "task"
               (type-tag nefor.contracts.Task)
               (as nefor.contracts.Task {:prompt "return done"})))
-(let answer (nefor.actors.agent exact-model
+(let answer (nefor.actors.resolved-agent exact-model
                (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "answer"
                 :model resolved
                 :system "Return the requested structured answer."

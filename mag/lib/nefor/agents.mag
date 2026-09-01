@@ -7,7 +7,7 @@
 ;; vocabulary. A consumer supplies only its typed resolver, selected model, and
 ;; tools; Nefor owns the graph construction once.
 (let with-tools
-  (fn [M I O] [[resolve-model (Fn M nefor.actors.ResolvedModel)]
+  (fn [M I O] [[resolve-model (Fn M nefor.actors.AuthoredModel)]
                 [model M]
                 [id String]
                 [system String]
@@ -26,8 +26,23 @@
          :max-corrections max-corrections})
       input-type output-type)))
 
-(let dynamic-with-tools
+(let with-resolved-tools
   (fn [M I O] [[resolve-model (Fn M nefor.actors.ResolvedModel)]
+                [model M]
+                [id String]
+                [system String]
+                [tools (List String)]
+                [input-type (TypeTag I)]
+                [output-type (TypeTag O)]
+                [max-corrections Int]]
+    -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
+    (with-tools
+      (fn [[selected M]] -> nefor.actors.AuthoredModel
+        (as nefor.actors.AuthoredModel (resolve-model selected)))
+      model id system tools input-type output-type max-corrections)))
+
+(let dynamic-with-tools
+  (fn [M I O] [[resolve-model (Fn M nefor.actors.AuthoredModel)]
                 [model M]
                 [id String]
                 [system String]
@@ -46,3 +61,19 @@
          :da-policy (nefor.contracts.no-da-policy)
          :max-corrections max-corrections})
       input-type item-type)))
+
+(let dynamic-with-resolved-tools
+  (fn [M I O] [[resolve-model (Fn M nefor.actors.ResolvedModel)]
+                [model M]
+                [id String]
+                [system String]
+                [tools (List String)]
+                [input-type (TypeTag I)]
+                [item-type (TypeTag O)]
+                [max-corrections Int]]
+    -> (nefor.graph.Node I
+         (| (nefor.dynamic.DynamicList O) nefor.contracts.AgentError))
+    (dynamic-with-tools
+      (fn [[selected M]] -> nefor.actors.AuthoredModel
+        (as nefor.actors.AuthoredModel (resolve-model selected)))
+      model id system tools input-type item-type max-corrections)))

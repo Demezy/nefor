@@ -1,7 +1,8 @@
 (require "nefor.actors")
 
 ;; This example configuration owns the finite model vocabulary. Nefor only
-;; asks for a typed resolver and receives concrete execution parameters.
+;; asks for one typed resolver; each arm may author a concrete model or a
+;; configuration-resolved run profile.
 (type Standard {})
 (type Mock {})
 (type Model (| Standard Mock))
@@ -9,13 +10,15 @@
 (let standard (as Model (as Standard {})))
 (let mock (as Model (as Mock {})))
 
-(let resolve-model (fn [[model Model]] -> nefor.actors.ResolvedModel
+(let resolve-model (fn [[model Model]] -> nefor.actors.AuthoredModel
   (match model
     [Standard value
-      (as nefor.actors.ResolvedModel
-        {:provider "chatgpt" :model "gpt-5.6-sol"
-         :reasoning-effort (nefor.actors.reasoning-effort "medium")})]
+      (as nefor.actors.AuthoredModel
+        (as nefor.actors.ResolvedModel
+          {:provider "chatgpt" :model "gpt-5.6-sol"
+           :reasoning-effort (nefor.actors.reasoning-effort "medium")}))]
     [Mock value
-      (as nefor.actors.ResolvedModel
-        {:provider "mock-provider" :model "mock-model"
-         :reasoning-effort (nefor.actors.reasoning-effort "medium")})])))
+      (as nefor.actors.AuthoredModel
+        (as nefor.actors.ResolvedModel
+          {:provider "mock-provider" :model "mock-model"
+           :reasoning-effort (nefor.actors.reasoning-effort "medium")}))])))

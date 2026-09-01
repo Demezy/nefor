@@ -228,7 +228,7 @@ async fn chatgpt_projects_stale_allowlist_and_returns_tool_result_through_gate()
 (let exact-model (fn [[model nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel model))
 (let resolved (as nefor.actors.ResolvedModel {:provider "provider" :model "test-model" :reasoning-effort (nefor.actors.reasoning-effort "medium")}))
 (let start (nefor.graph.source "task" (type-tag nefor.contracts.Task) (as nefor.contracts.Task {:prompt "read fixture"})))
-(let answer (nefor.actors.agent exact-model
+(let answer (nefor.actors.resolved-agent exact-model
                (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "answer" :model resolved
                 :system "Read fixture.txt, then answer."
                 :tools ["read_file" "python-read"] :da-policy (nefor.contracts.no-da-policy) :max-corrections 0})
