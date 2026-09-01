@@ -111,7 +111,10 @@ M.schema = {
     lifecycle = "delayed",
   },
   description =
-    "Evaluate one MAG node expression on the actor kernel. The tool submits a run and " ..
+    "Evaluate exactly one node-producing MAG expression on the actor kernel. Pass only " ..
+    "the expression: the runtime supplies imports, input/output nodes, topology, and " ..
+    "artifact compilation. Do not pass a complete MAG program with require, let, " ..
+    "output-for, topology, or artifact.compile forms. The tool submits a run and " ..
     "waits briefly for that exact run's canonical terminal result. A quick success or " ..
     "failure returns directly; otherwise it returns the existing asynchronous " ..
     "acknowledgment with a stable run_id, so commands " ..
@@ -141,7 +144,7 @@ M.schema = {
       intent = { type = "string", description = "Main operation in 1-5 words." },
       expr = {
         type        = "string",
-        description = "MAG expression source to evaluate.",
+        description = "Exactly one node-producing MAG expression; not a complete MAG program.",
       },
     },
     required = { "intent", "expr" },

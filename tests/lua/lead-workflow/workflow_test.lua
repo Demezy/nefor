@@ -181,6 +181,12 @@ do
     "await-run raw fallback is the exact addressed handle")
   assert_eq(mag_eval_schema.display.compact.label, "mag eval", "mag-eval has explicit display label")
   assert_eq(mag_eval_schema.display.compact.primary.select.path, "intent", "mag-eval display uses exact intent")
+  assert_true(mag_eval_schema.description:find("exactly one node-producing MAG expression", 1, true) ~= nil
+      and mag_eval_schema.description:find("Do not pass a complete MAG program", 1, true) ~= nil,
+    "mag-eval distinguishes its expression argument from a complete MAG program")
+  assert_eq(mag_eval_schema.parameters.properties.expr.description,
+    "Exactly one node-producing MAG expression; not a complete MAG program.",
+    "mag-eval keeps the expression-only contract next to the expr parameter")
   assert_true(mag_eval_schema.description:find("Commands run until process exit", 1, true) ~= nil
       and mag_eval_schema.description:find("Never launch a server as a normal run", 1, true) ~= nil,
     "mag-eval canonically warns that persistent commands cannot be awaited to completion")
