@@ -223,6 +223,71 @@ async fn chat_stream_retries_transient_500_then_succeeds() {
 }
 
 #[tokio::test]
+async fn chat_stream_retries_sse_transport_loss_before_output() {
+    let (listener, addr) = bind_local().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_server = attempts.clone();
+
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let _ = read_request(&mut stream).await;
+            let attempt = attempts_server.fetch_add(1, Ordering::SeqCst) + 1;
+            if attempt == 1 {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("truncated response headers");
+            } else {
+                let body = "data: {\"choices\":[{\"delta\":{\"content\":\"Recovered\"}}]}\n\n\
+                            data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n\
+                            data: [DONE]\n\n";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("recovery response");
+            }
+            stream.shutdown().await.expect("shutdown");
+        }
+    });
+
+    let mut deltas = Vec::new();
+    let mut progress = Vec::new();
+    let outcome = run_chat_stream_with_retry_progress(
+        &reqwest::Client::new(),
+        &format!("http://{addr}/v1/chat/completions"),
+        None,
+        "Authorization",
+        "fixture-model",
+        &[Message::user("fixture")],
+        None,
+        None,
+        CancellationToken::new(),
+        |text| deltas.push(text.to_owned()),
+        |_| {},
+        |retry| progress.push(retry),
+    )
+    .await
+    .expect("pre-output stream failure is replayed");
+    server.await.expect("server");
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(deltas, vec!["Recovered"]);
+    assert_eq!(outcome.full_text, "Recovered");
+    assert_eq!(outcome.finish_reason.as_deref(), Some("stop"));
+    assert_eq!(progress.len(), 1);
+    assert_eq!(progress[0].status, None);
+    assert_eq!(progress[0].retry_index(), 1);
+}
+
+#[tokio::test]
 async fn chat_stream_retries_429_then_succeeds_and_reports_progress() {
     let (listener, addr) = bind_local().await;
     let attempts = Arc::new(AtomicUsize::new(0));

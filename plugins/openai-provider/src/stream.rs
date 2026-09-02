@@ -26,11 +26,12 @@ use crate::openai::{
 };
 use crate::wire::WireTrace;
 
-// Retry budget sized for rate-limited internal gateways (429 storms that
-// last tens of seconds): 8 attempts = 7 retries at 0.5s, 1s, 2s, 4s, 8s,
-// 16s, 30s (doubling, capped) ≈ 60s of patience before the turn fails.
-// A `Retry-After` header always overrides the computed delay, and every
-// retry surfaces through RetryProgress so the chat shows what's happening.
+// Retry budget sized for overloaded internal gateways: 8 attempts = 7 retries
+// at 0.5s, 1s, 2s, 4s, 8s, 16s, 30s (doubling, capped) ≈ 60s of patience
+// before the turn fails. It covers connection failures, 429/all 5xx responses,
+// and SSE transport loss before any text, reasoning, or tool-call state exists.
+// A `Retry-After` header overrides the computed delay, and every retry surfaces
+// through RetryProgress so the chat shows what's happening.
 const CHAT_STREAM_MAX_ATTEMPTS: usize = 8;
 const CHAT_STREAM_INITIAL_RETRY_DELAY: Duration = Duration::from_millis(500);
 const CHAT_STREAM_MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -404,159 +405,235 @@ where
     }
     wire.begin("POST", endpoint);
 
-    let (response, successful_attempt) = {
-        let mut attempt = 1usize;
-        loop {
-            wire.request(attempt, "POST", endpoint, &body_json);
-            let mut builder = client
-                .post(endpoint)
-                .header(ACCEPT, "text/event-stream")
-                .header(ACCEPT_ENCODING, "identity")
-                .json(&request_value);
-            if let Some(k) = api_key {
-                builder = apply_auth(builder, auth_header, k);
-            }
-
-            let sent = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    wire.cancel(Some(attempt));
-                    return Ok(StreamOutcome {
-                        interrupted: true,
-                        ..Default::default()
-                    });
+    let mut attempt = 1usize;
+    'attempts: loop {
+        let (response, successful_attempt) = {
+            loop {
+                wire.request(attempt, "POST", endpoint, &body_json);
+                let mut builder = client
+                    .post(endpoint)
+                    .header(ACCEPT, "text/event-stream")
+                    .header(ACCEPT_ENCODING, "identity")
+                    .json(&request_value);
+                if let Some(k) = api_key {
+                    builder = apply_auth(builder, auth_header, k);
                 }
-                r = tokio::time::timeout(Duration::from_secs(120), builder.send()) => match r {
-                    Ok(Ok(r)) => Ok(r),
-                    Ok(Err(e)) => Err(StreamError::Request(reqwest_error_detail(&e))),
-                    Err(_) => Err(StreamError::Request(
-                        "timed out waiting for response headers after 120s".to_owned(),
-                    )),
-                },
-            };
 
-            let response = match sent {
-                Ok(response) => response,
-                Err(e) => {
-                    wire.error(Some(attempt), e.to_string());
-                    if attempt < CHAT_STREAM_MAX_ATTEMPTS && stream_error_is_retriable(&e) {
-                        let delay = retry_delay(attempt, None);
-                        wire.retry(attempt, format!("delay_ms={} error={e}", delay.as_millis()));
-                        tracing::warn!(
-                            attempt,
-                            max_attempts = CHAT_STREAM_MAX_ATTEMPTS,
-                            delay_ms = delay.as_millis(),
-                            error = %e,
-                            "chat completion request failed; retrying"
-                        );
-                        on_retry_progress(RetryProgress {
-                            status: None,
-                            failed_attempt: attempt,
-                            max_attempts: CHAT_STREAM_MAX_ATTEMPTS,
-                            next_delay: delay,
+                let sent = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        wire.cancel(Some(attempt));
+                        return Ok(StreamOutcome {
+                            interrupted: true,
+                            ..Default::default()
                         });
-                        if !sleep_before_retry(&cancel, delay).await {
-                            wire.cancel(Some(attempt));
-                            return Ok(StreamOutcome {
-                                interrupted: true,
-                                ..Default::default()
-                            });
-                        }
-                        attempt += 1;
-                        continue;
                     }
-                    return Err(e);
-                }
-            };
+                    r = tokio::time::timeout(Duration::from_secs(120), builder.send()) => match r {
+                        Ok(Ok(r)) => Ok(r),
+                        Ok(Err(e)) => Err(StreamError::Request(reqwest_error_detail(&e))),
+                        Err(_) => Err(StreamError::Request(
+                            "timed out waiting for response headers after 120s".to_owned(),
+                        )),
+                    },
+                };
 
-            let status = response.status().as_u16();
-            wire.response(attempt, status, response.headers());
-            if response.status().is_success() {
-                let content_type = response
-                    .headers()
-                    .get(CONTENT_TYPE)
-                    .and_then(|value| value.to_str().ok())
-                    .unwrap_or("<missing>")
-                    .to_owned();
-                if !content_type.split(';').next().is_some_and(|media_type| {
-                    media_type.trim().eq_ignore_ascii_case("text/event-stream")
-                }) {
-                    let body_bytes = response
-                        .bytes()
-                        .await
-                        .map(|bytes| bytes.to_vec())
-                        .unwrap_or_else(|_| b"<unreadable response body>".to_vec());
-                    wire.response_body(attempt, &body_bytes);
-                    let body = String::from_utf8_lossy(&body_bytes);
-                    let error = StreamError::Malformed(format!(
-                        "expected streaming SSE response with Content-Type text/event-stream, got {content_type:?}: {}",
-                        response_snippet(&body)
-                    ));
-                    wire.error(Some(attempt), error.to_string());
-                    return Err(error);
-                }
-                break (response, attempt);
-            }
+                let response = match sent {
+                    Ok(response) => response,
+                    Err(e) => {
+                        wire.error(Some(attempt), e.to_string());
+                        if attempt < CHAT_STREAM_MAX_ATTEMPTS && stream_error_is_retriable(&e) {
+                            let delay = retry_delay(attempt, None);
+                            wire.retry(
+                                attempt,
+                                format!("delay_ms={} error={e}", delay.as_millis()),
+                            );
+                            tracing::warn!(
+                                attempt,
+                                max_attempts = CHAT_STREAM_MAX_ATTEMPTS,
+                                delay_ms = delay.as_millis(),
+                                error = %e,
+                                "chat completion request failed; retrying"
+                            );
+                            on_retry_progress(RetryProgress {
+                                status: None,
+                                failed_attempt: attempt,
+                                max_attempts: CHAT_STREAM_MAX_ATTEMPTS,
+                                next_delay: delay,
+                            });
+                            if !sleep_before_retry(&cancel, delay).await {
+                                wire.cancel(Some(attempt));
+                                return Ok(StreamOutcome {
+                                    interrupted: true,
+                                    ..Default::default()
+                                });
+                            }
+                            attempt += 1;
+                            continue;
+                        }
+                        return Err(e);
+                    }
+                };
 
-            let retry_after = retry_after_delay(response.headers());
-            let body_bytes = match response.bytes().await {
-                Ok(bytes) => bytes.to_vec(),
-                Err(_) => b"<unreadable response body>".to_vec(),
-            };
-            wire.response_body(attempt, &body_bytes);
-            let body = String::from_utf8_lossy(&body_bytes).into_owned();
-            if status == 401 {
-                wire.error(Some(attempt), format!("HTTP {status}"));
-                return Err(StreamError::Unauthorized { body });
-            }
-            // Reactive fallback: only meaningful when the request actually
-            // carried tools. If we sent no tools and still got the signature,
-            // the server is telling us something else — fall through to Http.
-            if status == 400 && tools.is_some() && body_signals_tools_unsupported(&body) {
-                wire.error(Some(attempt), "HTTP 400 tools unsupported".to_owned());
-                return Err(StreamError::ToolsUnsupported { body });
-            }
-            let err = StreamError::Http { status, body };
-            if attempt < CHAT_STREAM_MAX_ATTEMPTS && stream_error_is_retriable(&err) {
-                let delay = retry_delay(attempt, retry_after);
-                wire.retry(
-                    attempt,
-                    format!("delay_ms={} HTTP {status}", delay.as_millis()),
-                );
-                tracing::warn!(
-                    attempt,
-                    max_attempts = CHAT_STREAM_MAX_ATTEMPTS,
-                    delay_ms = delay.as_millis(),
-                    error = %err,
-                    "chat completion returned retriable HTTP status; retrying"
-                );
-                on_retry_progress(RetryProgress {
-                    status: Some(status),
-                    failed_attempt: attempt,
-                    max_attempts: CHAT_STREAM_MAX_ATTEMPTS,
-                    next_delay: delay,
-                });
-                if !sleep_before_retry(&cancel, delay).await {
-                    wire.cancel(Some(attempt));
-                    return Ok(StreamOutcome {
-                        interrupted: true,
-                        ..Default::default()
+                let status = response.status().as_u16();
+                wire.response(attempt, status, response.headers());
+                if response.status().is_success() {
+                    let content_type = response
+                        .headers()
+                        .get(CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("<missing>")
+                        .to_owned();
+                    if !content_type.split(';').next().is_some_and(|media_type| {
+                        media_type.trim().eq_ignore_ascii_case("text/event-stream")
+                    }) {
+                        let body_bytes = response
+                            .bytes()
+                            .await
+                            .map(|bytes| bytes.to_vec())
+                            .unwrap_or_else(|_| b"<unreadable response body>".to_vec());
+                        wire.response_body(attempt, &body_bytes);
+                        let body = String::from_utf8_lossy(&body_bytes);
+                        let error = StreamError::Malformed(format!(
+                            "expected streaming SSE response with Content-Type text/event-stream, got {content_type:?}: {}",
+                            response_snippet(&body)
+                        ));
+                        wire.error(Some(attempt), error.to_string());
+                        return Err(error);
+                    }
+                    break (response, attempt);
+                }
+
+                let retry_after = retry_after_delay(response.headers());
+                let body_bytes = match response.bytes().await {
+                    Ok(bytes) => bytes.to_vec(),
+                    Err(_) => b"<unreadable response body>".to_vec(),
+                };
+                wire.response_body(attempt, &body_bytes);
+                let body = String::from_utf8_lossy(&body_bytes).into_owned();
+                if status == 401 {
+                    wire.error(Some(attempt), format!("HTTP {status}"));
+                    return Err(StreamError::Unauthorized { body });
+                }
+                // Reactive fallback: only meaningful when the request actually
+                // carried tools. If we sent no tools and still got the signature,
+                // the server is telling us something else — fall through to Http.
+                if status == 400 && tools.is_some() && body_signals_tools_unsupported(&body) {
+                    wire.error(Some(attempt), "HTTP 400 tools unsupported".to_owned());
+                    return Err(StreamError::ToolsUnsupported { body });
+                }
+                let err = StreamError::Http { status, body };
+                if attempt < CHAT_STREAM_MAX_ATTEMPTS && stream_error_is_retriable(&err) {
+                    let delay = retry_delay(attempt, retry_after);
+                    wire.retry(
+                        attempt,
+                        format!("delay_ms={} HTTP {status}", delay.as_millis()),
+                    );
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = CHAT_STREAM_MAX_ATTEMPTS,
+                        delay_ms = delay.as_millis(),
+                        error = %err,
+                        "chat completion returned retriable HTTP status; retrying"
+                    );
+                    on_retry_progress(RetryProgress {
+                        status: Some(status),
+                        failed_attempt: attempt,
+                        max_attempts: CHAT_STREAM_MAX_ATTEMPTS,
+                        next_delay: delay,
                     });
+                    if !sleep_before_retry(&cancel, delay).await {
+                        wire.cancel(Some(attempt));
+                        return Ok(StreamOutcome {
+                            interrupted: true,
+                            ..Default::default()
+                        });
+                    }
+                    attempt += 1;
+                    continue;
                 }
-                attempt += 1;
-                continue;
+                wire.error(Some(attempt), err.to_string());
+                return Err(err);
             }
-            wire.error(Some(attempt), err.to_string());
-            return Err(err);
-        }
-    };
+        };
 
+        match consume_response_stream(
+            response,
+            successful_attempt,
+            &cancel,
+            &mut on_delta,
+            &mut on_reasoning,
+            &mut wire,
+        )
+        .await
+        {
+            Ok(outcome) => return Ok(outcome),
+            Err(failure) => {
+                wire.error(Some(successful_attempt), failure.error.to_string());
+                if failure.replay_safe && attempt < CHAT_STREAM_MAX_ATTEMPTS {
+                    let delay = retry_delay(attempt, None);
+                    wire.retry(
+                        attempt,
+                        format!("delay_ms={} error={}", delay.as_millis(), failure.error),
+                    );
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = CHAT_STREAM_MAX_ATTEMPTS,
+                        delay_ms = delay.as_millis(),
+                        error = %failure.error,
+                        "chat completion stream failed before output; retrying"
+                    );
+                    on_retry_progress(RetryProgress {
+                        status: None,
+                        failed_attempt: attempt,
+                        max_attempts: CHAT_STREAM_MAX_ATTEMPTS,
+                        next_delay: delay,
+                    });
+                    if !sleep_before_retry(&cancel, delay).await {
+                        wire.cancel(Some(attempt));
+                        return Ok(StreamOutcome {
+                            interrupted: true,
+                            ..Default::default()
+                        });
+                    }
+                    attempt += 1;
+                    continue 'attempts;
+                }
+                return Err(failure.error);
+            }
+        }
+    }
+}
+
+struct StreamAttemptFailure {
+    error: StreamError,
+    replay_safe: bool,
+}
+
+impl StreamAttemptFailure {
+    fn new(error: StreamError, outcome: &StreamOutcome, tool_calls: &ToolCallAccumulator) -> Self {
+        let replay_safe = matches!(error, StreamError::Body(_))
+            && outcome.full_text.is_empty()
+            && outcome.reasoning_text.is_empty()
+            && tool_calls.is_empty();
+        Self { error, replay_safe }
+    }
+}
+
+async fn consume_response_stream<F, R>(
+    response: reqwest::Response,
+    successful_attempt: usize,
+    cancel: &CancellationToken,
+    on_delta: &mut F,
+    on_reasoning: &mut R,
+    wire: &mut WireTrace,
+) -> Result<StreamOutcome, StreamAttemptFailure>
+where
+    F: FnMut(&str),
+    R: FnMut(ReasoningEvent<'_>),
+{
     let mut outcome = StreamOutcome::default();
     let mut buffer = SseBuffer::new();
-    let mut tc_acc = ToolCallAccumulator::new();
-    // Latch flipped once we've fired ReasoningEvent::End — at the
-    // boundary where reasoning stops and content/finish/usage takes
-    // over. Prevents duplicate end events if frames arrive interleaved.
+    let mut tool_calls = ToolCallAccumulator::new();
     let mut reasoning_ended = false;
     let mut byte_stream = response.bytes_stream();
 
@@ -565,20 +642,22 @@ where
             _ = cancel.cancelled() => {
                 wire.cancel(Some(successful_attempt));
                 outcome.interrupted = true;
-                outcome.tool_calls = tc_acc.finalize().unwrap_or_default();
-                maybe_end_reasoning(&outcome, &mut reasoning_ended, &mut on_reasoning);
+                outcome.tool_calls = tool_calls.finalize().unwrap_or_default();
+                maybe_end_reasoning(&outcome, &mut reasoning_ended, on_reasoning);
                 return Ok(outcome);
             }
             next = byte_stream.next() => {
                 match next {
                     None => break,
-                    Some(Err(e)) => {
+                    Some(Err(error)) => {
                         if stream_semantically_complete(&outcome) && buffer.is_empty() {
                             break;
                         }
-                        let error = StreamError::Body(reqwest_error_detail(&e));
-                        wire.error(Some(successful_attempt), error.to_string());
-                        return Err(error);
+                        return Err(StreamAttemptFailure::new(
+                            StreamError::Body(reqwest_error_detail(&error)),
+                            &outcome,
+                            &tool_calls,
+                        ));
                     }
                     Some(Ok(bytes)) => {
                         wire.stream_data(successful_attempt, &bytes);
@@ -586,39 +665,39 @@ where
                         if let Err(error) = drain_complete_frames(
                             &mut buffer,
                             &mut outcome,
-                            &mut tc_acc,
+                            &mut tool_calls,
                             &mut reasoning_ended,
-                            &mut on_delta,
-                            &mut on_reasoning,
+                            on_delta,
+                            on_reasoning,
                         ) {
-                            wire.error(Some(successful_attempt), error.to_string());
-                            return Err(error);
+                            return Err(StreamAttemptFailure::new(error, &outcome, &tool_calls));
                         }
                     }
                 }
             }
         }
     }
-    // Drain any leftover frame the server didn't terminate with `\n\n`.
+
     if let Err(error) = drain_complete_frames(
         &mut buffer,
         &mut outcome,
-        &mut tc_acc,
+        &mut tool_calls,
         &mut reasoning_ended,
-        &mut on_delta,
-        &mut on_reasoning,
+        on_delta,
+        on_reasoning,
     ) {
-        wire.error(Some(successful_attempt), error.to_string());
-        return Err(error);
+        return Err(StreamAttemptFailure::new(error, &outcome, &tool_calls));
     }
-    outcome.tool_calls = match tc_acc.finalize() {
+    outcome.tool_calls = match tool_calls.finalize() {
         Ok(tool_calls) => tool_calls,
         Err(error) => {
-            wire.error(Some(successful_attempt), error.to_string());
-            return Err(error);
+            return Err(StreamAttemptFailure {
+                error,
+                replay_safe: false,
+            });
         }
     };
-    maybe_end_reasoning(&outcome, &mut reasoning_ended, &mut on_reasoning);
+    maybe_end_reasoning(&outcome, &mut reasoning_ended, on_reasoning);
     wire.end(Some(successful_attempt), "stream_complete");
     Ok(outcome)
 }
@@ -956,6 +1035,10 @@ impl ToolCallAccumulator {
         Self::default()
     }
 
+    fn is_empty(&self) -> bool {
+        self.by_index.is_empty()
+    }
+
     #[cfg(test)]
     fn start(&mut self, index: usize, id: String, name: String, arguments: String) {
         self.apply(
@@ -1068,6 +1151,38 @@ mod tests {
             r#"{"error":{"message":"model not found"}}"#
         ));
         assert!(!body_signals_tools_unsupported("invalid api key"));
+    }
+
+    #[test]
+    fn sse_transport_replay_requires_an_empty_attempt() {
+        let body_error = || StreamError::Body("connection reset".to_owned());
+        let empty = StreamOutcome::default();
+        let no_tools = ToolCallAccumulator::new();
+        assert!(StreamAttemptFailure::new(body_error(), &empty, &no_tools).replay_safe);
+
+        let with_text = StreamOutcome {
+            full_text: "partial".to_owned(),
+            ..Default::default()
+        };
+        assert!(!StreamAttemptFailure::new(body_error(), &with_text, &no_tools).replay_safe);
+
+        let with_reasoning = StreamOutcome {
+            reasoning_text: "partial".to_owned(),
+            ..Default::default()
+        };
+        assert!(!StreamAttemptFailure::new(body_error(), &with_reasoning, &no_tools).replay_safe);
+
+        let mut with_tools = ToolCallAccumulator::new();
+        with_tools.apply(0, Some("call".to_owned()), None, None, None);
+        assert!(!StreamAttemptFailure::new(body_error(), &empty, &with_tools).replay_safe);
+        assert!(
+            !StreamAttemptFailure::new(
+                StreamError::Malformed("bad frame".to_owned()),
+                &empty,
+                &no_tools,
+            )
+            .replay_safe
+        );
     }
 
     #[test]
