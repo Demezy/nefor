@@ -755,6 +755,55 @@ pub mod kernel {
             );
         }
 
+        #[test]
+        fn fixed_sequence_of_task_sources_bootstraps_once_at_its_outer_unit_boundary() {
+            let host = shipped_host();
+            let source = r#"
+    (require "nefor.actors")
+    (require "nefor.artifact")
+    (require "nefor.graph")
+    (require "nefor.node")
+    (let first (nefor.actors.task-source "first" "first task"))
+    (let second (nefor.actors.task-source "second" "second task"))
+    (let tasks (nefor.node.sequence "tasks" [first second]))
+    (let result (nefor.graph.output-for "result" tasks))
+    (nefor.artifact.compile
+      (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+        (nefor.graph.add-edges graph [(nefor.graph.edge tasks result)])))
+    "#;
+            let modification = compile_mag_source(&host, "task-source-sequence", source);
+            assert_eq!(
+                modification["messages"].as_array().map(Vec::len),
+                Some(1),
+                "only the completed sequence root receives initial activation"
+            );
+            assert_eq!(modification["messages"][0]["to"], "tasks.input");
+
+            let begun = host
+                .begin_run("task-source-sequence", "task-source-sequence", None)
+                .expect("begin source sequence run");
+            assert!(begun.ok, "begin failed: {:?}", begun.error);
+            host.drain_emits().expect("drain begin event");
+            let outcome = host
+                .start("task-source-sequence", &modification)
+                .expect("start source sequence run");
+            assert!(outcome.ok, "start failed: {:?}", outcome.error);
+            let completion = host
+                .take_run_complete("task-source-sequence")
+                .expect("take source sequence completion")
+                .expect("source sequence completed");
+            assert_eq!(
+                completion
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("value")),
+                Some(&serde_json::json!([
+                    {"prompt": "first task"},
+                    {"prompt": "second task"}
+                ]))
+            );
+        }
+
         fn start_shell_expression(
             host: &LuaHost,
             run_id: &str,

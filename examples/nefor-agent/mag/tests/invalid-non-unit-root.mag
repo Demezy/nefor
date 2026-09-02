@@ -1,0 +1,10 @@
+(require "nefor.artifact")
+(require "nefor.graph")
+
+;; A root has no upstream value. Only Unit input can therefore receive the
+;; topology-derived initial activation.
+(let unfed (nefor.graph.identity "unfed" (type-tag String)))
+(let result (nefor.graph.output-for "result" unfed))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph [(nefor.graph.edge unfed result)])))

@@ -211,7 +211,7 @@
                          {:value value :value_type (value-type-id value type)})
                        (store-port input) [(store-port output)]))
   (node id "source" [source-actor] (as (List StoredRoute) [])
-      [(message input {:kind "mag.Unit"})] input output)))
+      (as (List Message) []) input output)))
 
 (let output-factory "nefor.factory.output")
 (let output (fn [T] [[id String] [type (TypeTag T)]] -> (Node T T)
@@ -319,10 +319,38 @@
   (flat-map (fn [[candidate StoredNode]] -> (List Actor)
               (get candidate "actors"))
             (graph-nodes value))))
-(let graph-messages (fn [[value Graph]] -> (List Message)
+(let authored-graph-messages (fn [[value Graph]] -> (List Message)
   (flat-map (fn [[candidate StoredNode]] -> (List Message)
               (get candidate "messages"))
             (graph-nodes value))))
+(let route-feeds-actor? (fn [[candidate StoredRoute] [value Actor]] -> Bool
+  (= (get (get candidate "to") "actor") (get value "id"))))
+(let message-feeds-actor? (fn [[candidate Message] [value Actor]] -> Bool
+  (= (get (get candidate "to") "actor") (get value "id"))))
+(let unit-input? (fn [[input StoredPort]] -> Bool
+  (= (get input "type") (type-evidence (type-tag Unit)))))
+(let actor-needs-bootstrap?
+  (fn [[routes (List StoredRoute)] [messages (List Message)] [value Actor]] -> Bool
+    (if (unit-input? (get value "input"))
+      (if (= (count (filter (fn [[candidate StoredRoute]] -> Bool
+                              (route-feeds-actor? candidate value)) routes)) 0)
+        (= (count (filter (fn [[candidate Message]] -> Bool
+                            (message-feeds-actor? candidate value)) messages)) 0)
+        false)
+      false)))
+(let bootstrap-message (fn [[value Actor]] -> Message
+  (let input (get value "input"))
+  (stored-message input {:kind (get input "wire") :value nil})))
+(let bootstrap-messages
+  (fn [[actors (List Actor)] [routes (List StoredRoute)]
+       [messages (List Message)]] -> (List Message)
+    (map bootstrap-message
+      (filter (fn [[candidate Actor]] -> Bool
+                (actor-needs-bootstrap? routes messages candidate)) actors))))
+(let graph-messages (fn [[value Graph]] -> (List Message)
+  (let authored (authored-graph-messages value))
+  (concat authored
+    (bootstrap-messages (graph-actors value) (graph-routes value) authored))))
 (let graph-logical-nodes (fn [[value Graph]] -> (List LogicalNode)
   (flat-map (fn [[candidate StoredNode]] -> (List LogicalNode)
               (get candidate "nodes"))
@@ -369,16 +397,17 @@
                  (get value "edges")))))
 (let role? (fn [[candidate StoredNode] [role String]] -> Bool
   (= (get candidate "role") role)))
-(let sources (fn [[value Graph]] -> (List StoredNode)
-  (filter (fn [[candidate StoredNode]] -> Bool (role? candidate "source"))
+(let roots (fn [[value Graph]] -> (List StoredNode)
+  (filter (fn [[candidate StoredNode]] -> Bool
+            (= (incoming-count value (get candidate "id")) 0))
           (graph-nodes value))))
 (let outputs (fn [[value Graph]] -> (List StoredNode)
   (filter (fn [[candidate StoredNode]] -> Bool (role? candidate "output"))
           (graph-nodes value))))
-(let source-shape-valid? (fn [[value Graph] [candidate StoredNode]] -> Bool
+(let root-shape-valid? (fn [[value Graph] [candidate StoredNode]] -> Bool
   (if (= (incoming-count value (get candidate "id")) 0)
-    (role? candidate "source")
-    (not (role? candidate "source")))))
+    (unit-input? (get candidate "input"))
+    true)))
 (let output-shape-valid? (fn [[value Graph] [candidate StoredNode]] -> Bool
   (if (role? candidate "output")
     (if (not (= (incoming-count value (get candidate "id")) 0))
@@ -401,12 +430,12 @@
         (filter (fn [[next String]] -> Bool
                   (path-to? value next target (concat visited [id])))
                 (next-node-ids value id))) 0))))))
-(let reachable-from-source? (fn [[value Graph] [candidate StoredNode]] -> Bool
+(let reachable-from-root? (fn [[value Graph] [candidate StoredNode]] -> Bool
   (not (= (count
     (filter (fn [[start StoredNode]] -> Bool
               (path-to? value (get start "id") (get candidate "id")
                         (as (List String) [])))
-            (sources value))) 0))))
+            (roots value))) 0))))
 (let reaches-output? (fn [[value Graph] [candidate StoredNode]] -> Bool
   (let result (first (outputs value)))
   (path-to? value (get candidate "id") (get result "id")
@@ -460,8 +489,7 @@
                     (if (one-type-argument? boundary (get output "type"))
                       (if (one-port? (get boundary "outputs") output)
                         (if (= (count (get candidate "routes")) 0)
-                          (if (= (get candidate "messages")
-                                 [(stored-message input {:kind "mag.Unit"})])
+                          (if (= (count (get candidate "messages")) 0)
                             (if (source-params-valid? (get boundary "params"))
                               (source-value-valid? boundary output) false)
                             false)
@@ -491,8 +519,7 @@
         ((fn [] -> Bool
           (let source-output (first outputs))
           (if (one-type-argument? boundary (get source-output "type"))
-            (if (= (get candidate "messages")
-                   [(stored-message input {:kind "mag.Unit"})])
+            (if (= (count (get candidate "messages")) 0)
               (if (source-params-valid? (get boundary "params"))
                 (source-value-valid? boundary source-output)
                 false)
@@ -681,11 +708,12 @@
   (let all-rules (concat (graph-rules value) rules))
   (let nodes (graph-nodes value))
     (let actors (graph-actors value))
-    (let bad-shapes (filter (fn [[candidate StoredNode]] -> Bool
-                       (not (if (source-shape-valid? value candidate)
-                              (output-shape-valid? value candidate) false))) nodes))
+    (let bad-roots (filter (fn [[candidate StoredNode]] -> Bool
+                       (not (root-shape-valid? value candidate))) nodes))
+    (let bad-outputs (filter (fn [[candidate StoredNode]] -> Bool
+                         (not (output-shape-valid? value candidate))) nodes))
     (let unreachable (filter (fn [[candidate StoredNode]] -> Bool
-                        (not (reachable-from-source? value candidate))) nodes))
+                        (not (reachable-from-root? value candidate))) nodes))
     (let dead (if (= (count (outputs value)) 1)
                  (filter (fn [[candidate StoredNode]] -> Bool
                            (not (reaches-output? value candidate))) nodes)
@@ -725,8 +753,9 @@
                   (core.validated.invalid ["every runtime actor must belong to exactly one logical node"])
                   (if (not (= (count (outputs value)) 1))
               (core.validated.invalid ["graph needs exactly one concrete output node"])
-              (if (= (count bad-shapes) 0)
-                (if (= (count bad-boundaries) 0)
+              (if (= (count bad-boundaries) 0)
+                (if (= (count bad-roots) 0)
+                  (if (= (count bad-outputs) 0)
                   (if (= (count bad-input-coverage) 0)
                     (if (= (count bad-output-coverage) 0)
                       (if (= (count unreachable) 0)
@@ -737,11 +766,12 @@
                               (core.validated.invalid ["graph contains an unknown or incompatible edge"]))
                             (core.validated.invalid contract-errors))
                           (core.validated.invalid ["every node must have a path to the output node"]))
-                        (core.validated.invalid ["every node must be reachable from a source node"]))
+                        (core.validated.invalid ["every node must be reachable from a Unit-input root node"]))
                       (core.validated.invalid output-coverage-errors))
                     (core.validated.invalid input-coverage-errors))
-                  (core.validated.invalid ["boundary node roles require their concrete source/output factory shape, and ordinary nodes cannot contain initial messages"]))
-                (core.validated.invalid ["only source nodes may have zero incoming edges, and output nodes are terminal"])))))))))))
+                  (core.validated.invalid ["output nodes require an incoming edge and are terminal"]))
+                (core.validated.invalid ["only Unit-input nodes may have zero incoming edges"]))
+              (core.validated.invalid ["boundary node roles require their concrete source/output factory shape, and ordinary nodes cannot contain initial messages"])))))))))))
 
 (let validate (fn [[value Graph] [contracts (List FactoryContract)]]
   -> (core.validated.Validated String Graph)
@@ -911,11 +941,14 @@
 (let lower-delta (fn [[value Delta]] -> LowerDelta
   (let actors (get value "actors"))
   (let routes (assigned-routes (get value "routes")))
+  (let authored-messages (get value "messages"))
   (as LowerDelta
     {:actors (map (fn [[candidate Actor]] -> LowerActor
                     (lower-actor-with-routes routes candidate))
                   actors)
-     :messages (map lower-message (get value "messages"))
+     :messages (map lower-message
+                 (concat authored-messages
+                   (bootstrap-messages actors (get value "routes") authored-messages)))
      :kills (get value "kills")
      :rules (as (List LowerRule) [])
      :types (descriptor-table (delta-descriptors value))

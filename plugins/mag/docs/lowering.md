@@ -60,10 +60,12 @@ lowering.
 
 `nefor.graph.lower` produces the raw graph-modification value consumed by the
 kernel: actors, typed routes, typed initial messages, kills, rules, and
-structural result metadata. Each authored initial message retains its
+structural result metadata. Each explicit initial message retains its
 destination descriptor as `semantic_type` even though the current factory
-protocol still consumes `content.kind`. A `source<T>` node owns initial
-activation. A concrete
+protocol still consumes `content.kind`. Lowering also gives every `Unit` actor
+input with no incoming route and no explicit message exactly one typed
+bootstrap message. Consequently any unfed `Node Unit T` is a source boundary;
+the same node behind an incoming edge remains dependency-driven. A concrete
 `output<T>` identity actor is the unique terminal, and the structural result
 metadata selects that actor's output port.
 
@@ -87,7 +89,9 @@ typed source value -> pure unary MAG function -> nefor.graph.Delta
 
 A delta has no result boundary. Its routes may target actors already live in
 the run; the runtime registry validates those references against the combined
-live-plus-new inventory before applying anything.
+live-plus-new inventory before applying anything. Delta lowering applies the
+same bootstrap rule to newly introduced actors, so an unfed `Unit` input starts
+once whether it was introduced in the initial graph or by resident expansion.
 
 ## One-off command expressions
 

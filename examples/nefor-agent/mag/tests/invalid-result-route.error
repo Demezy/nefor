@@ -1,1 +1,1 @@
-only source nodes may have zero incoming edges, and output nodes are terminal
+output nodes require an incoming edge and are terminal

@@ -542,6 +542,79 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     assert!(sequence_paths.contains(&json!(["workers", "second"])));
 
     fs::write(
+        temp_root.join("node-sequence-sources.mag"),
+        r#"(require "nefor.artifact")
+(require "nefor.graph")
+(require "nefor.node")
+(let first (nefor.graph.source "first" (type-tag String) "first"))
+(let second (nefor.graph.source "second" (type-tag String) "second"))
+(let workers (nefor.node.sequence "workers" [first second]))
+(let result (nefor.graph.output-for "result" workers))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph
+      [(nefor.graph.edge workers result)])))"#,
+    )
+    .expect("write nested source sequence regression");
+    let source_sequence = load(
+        &mut reader,
+        &mut stdin,
+        "node-sequence-sources",
+        &temp_root,
+        Path::new("node-sequence-sources.mag"),
+        &module_roots,
+    )
+    .await;
+    assert_eq!(
+        source_sequence.get("kind").and_then(Value::as_str),
+        Some("mag.loaded"),
+        "fixed sequence must accept independently authored Unit sources: {source_sequence:#?}"
+    );
+    let source_messages = source_sequence
+        .get("artifact")
+        .and_then(|artifact| artifact.get("messages"))
+        .and_then(Value::as_array)
+        .expect("source sequence initial messages");
+    assert_eq!(
+        source_messages.len(),
+        1,
+        "the completed graph must bootstrap exactly one outer Unit root"
+    );
+    assert_eq!(source_messages[0]["to"], "workers.input");
+    assert_eq!(source_messages[0]["content"]["kind"], "nefor.graph.Value");
+
+    fs::write(
+        temp_root.join("source-delta.mag"),
+        r#"(require "nefor.artifact")
+(require "nefor.graph")
+(let start (nefor.graph.source "start" (type-tag String) "started"))
+(nefor.artifact.delta (nefor.graph.node-delta start))"#,
+    )
+    .expect("write source delta bootstrap regression");
+    let source_delta = load(
+        &mut reader,
+        &mut stdin,
+        "source-delta",
+        &temp_root,
+        Path::new("source-delta.mag"),
+        &module_roots,
+    )
+    .await;
+    assert_eq!(
+        source_delta.get("kind").and_then(Value::as_str),
+        Some("mag.loaded"),
+        "a Unit-input node introduced by a delta must bootstrap: {source_delta:#?}"
+    );
+    let delta_messages = source_delta
+        .get("artifact")
+        .and_then(|artifact| artifact.get("messages"))
+        .and_then(Value::as_array)
+        .expect("source delta initial messages");
+    assert_eq!(delta_messages.len(), 1);
+    assert_eq!(delta_messages[0]["to"], "start");
+    assert_eq!(delta_messages[0]["content"]["kind"], "mag.Unit");
+
+    fs::write(
         temp_root.join("node-products.mag"),
         r#"(require "nefor.artifact")
 (require "nefor.graph")

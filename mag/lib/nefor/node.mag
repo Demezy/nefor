@@ -60,9 +60,10 @@
            (get value "nodes"))
       (get value "input") (get value "output"))))
 
-;; Sequential composition preserves an initial source boundary on the left.
-;; The composite still has exactly that source's Unit input and initial message;
-;; everything to its right is ordinary downstream work.
+;; Sequential composition preserves a source constructor boundary on the left
+;; so validation can still verify its packed constant. Activation itself is
+;; derived later from the completed topology: an unfed Unit input bootstraps,
+;; while the same composite behind an incoming edge remains dependency-driven.
 (let sequential-role
   (fn [A B C]
     [[left (nefor.graph.Node A B)] [right (nefor.graph.Node B C)]] -> String
