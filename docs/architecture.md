@@ -113,12 +113,14 @@ behind every entry point — the `/model` picker, `/model <provider> <model>`, a
 execution policy. A `chat.model.set` records only a pending pair; the effective
 provider/model changes only on the matching `chat.model.set_ack`, and rejection
 leaves the prior pair intact. Its `model_snapshot()` accessor returns an owned
-copy of that acknowledged state. `lua/libs/lead-workflow` samples the accessor
-exactly once after a fresh delegated program finishes validation and puts the
-closed snapshot on `mag.execute`; `mag.apply` inherits the target run context
-instead of sampling again. The MAG kernel applies that immutable snapshot at
-lazy LLM construction, so runtime expansion cannot observe a later `/model`
-selection.
+copy of that acknowledged state. A composition may provide both
+`agentic-loop` and `lead-workflow` with a resolver that expands this current
+selection into its complete model/profile policy. Each mechanism samples its
+resolver exactly once before a fresh root or delegated `mag.execute` and puts a
+validated owned snapshot on that run. `mag.apply` inherits the target run
+context instead of sampling again. The MAG kernel applies the immutable
+snapshot at lazy LLM construction, so runtime expansion cannot observe a later
+`/model` selection.
 
 The snapshot may also contain a configuration-resolved map of named model
 profiles. MAG exposes a typed profile selector, but the names and their concrete

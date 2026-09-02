@@ -82,6 +82,7 @@ local envelope       = require("core.envelope")
 local replay_window  = require("core.replay_window")
 local results_lib    = require("libs.agentic-loop.results")
 local tool_display   = require("libs.chat.tool_display")
+local model_snapshot = require("libs.model-snapshot")
 
 local function display_field(label, source, path, kind, extra)
   local value = { label = label, select = { source = source, path = path }, kind = kind }
@@ -408,63 +409,6 @@ end
 local function is_llm_actor(actor)
   return actor.factory == "nefor.factory.llm"
       or actor.factory == "nefor.factory.structured-output"
-end
-
--- Model selection is captured separately at fresh-run submission. Actor
--- overlays remain responsible only for ambient/system composition.
-local function copy_resolved_model(model, label)
-  if type(model) ~= "table" then
-    return nil, label .. " must be a table"
-  end
-  local copy = {}
-  for key, value in pairs(model) do
-    if key ~= "provider" and key ~= "model" and key ~= "reasoning_effort" then
-      return nil, label .. " has unknown field " .. tostring(key)
-    end
-    copy[key] = value
-  end
-  if type(copy.provider) ~= "string" or copy.provider == "" then
-    return nil, label .. " provider must be a non-empty string"
-  end
-  if type(copy.model) ~= "string" or copy.model == "" then
-    return nil, label .. " model must be a non-empty string"
-  end
-  if copy.reasoning_effort ~= nil
-      and (type(copy.reasoning_effort) ~= "string" or copy.reasoning_effort == "") then
-    return nil, label .. " reasoning_effort must be a non-empty string when present"
-  end
-  return copy
-end
-
-local function copy_model_snapshot(snapshot)
-  if type(snapshot) ~= "table" then
-    return nil, "model snapshot callback must return a table"
-  end
-  local current = {}
-  for key, value in pairs(snapshot) do
-    if key ~= "provider" and key ~= "model" and key ~= "reasoning_effort"
-        and key ~= "profiles" then
-      return nil, "model snapshot has unknown field " .. tostring(key)
-    end
-    if key ~= "profiles" then current[key] = value end
-  end
-  local copy, current_error = copy_resolved_model(current, "model snapshot")
-  if copy == nil then return nil, current_error end
-  if snapshot.profiles == nil then return copy end
-  if type(snapshot.profiles) ~= "table" then
-    return nil, "model snapshot profiles must be a table when present"
-  end
-  copy.profiles = {}
-  for name, model in pairs(snapshot.profiles) do
-    if type(name) ~= "string" or name == "" then
-      return nil, "model snapshot profile names must be non-empty strings"
-    end
-    local resolved, profile_error = copy_resolved_model(
-      model, "model snapshot profile " .. string.format("%q", name))
-    if resolved == nil then return nil, profile_error end
-    copy.profiles[name] = resolved
-  end
-  return copy
 end
 
 local function compose_agent_params(actors, session_id)
@@ -2005,7 +1949,7 @@ submit_loaded_run = function(pending, body, error_prefix)
     return reject(error_prefix .. ": model snapshot resolver failed: " .. tostring(snapshot))
   end
   local snapshot_error
-  snapshot, snapshot_error = copy_model_snapshot(snapshot)
+  snapshot, snapshot_error = model_snapshot.copy(snapshot)
   if snapshot == nil then
     return reject(error_prefix .. ": invalid model snapshot: " .. tostring(snapshot_error))
   end

@@ -55,6 +55,7 @@ local results_lib     = require("libs.agentic-loop.results")
 local error_value     = require("core.error")
 local replay_window   = require("core.replay_window")
 local conversation_projection = require("libs.agentic-loop.conversation_projection")
+local model_snapshot_data = require("libs.model-snapshot")
 
 local state = {
   -- Orchestrator config — mutated by configure() / chat.model.set.
@@ -64,6 +65,7 @@ local state = {
     reasoning_effort = nil,
     system           = nil,
     ambient_context  = nil,
+    resolve_model_snapshot = nil,
   },
   pending_model_selection = nil, ---@type table|nil { provider, model }
 
@@ -145,6 +147,20 @@ local function model_snapshot()
     snapshot.reasoning_effort = state.config.reasoning_effort
   end
   return snapshot
+end
+
+local function resolve_run_model_snapshot()
+  local resolver = state.config.resolve_model_snapshot
+  if resolver == nil then return nil, nil end
+  local resolved, snapshot = pcall(resolver)
+  if not resolved then
+    return nil, "model snapshot resolver failed: " .. tostring(snapshot)
+  end
+  local copy, snapshot_error = model_snapshot_data.copy(snapshot)
+  if copy == nil then
+    return nil, "invalid model snapshot: " .. tostring(snapshot_error)
+  end
+  return copy, nil
 end
 
 local function configuration_provenance()
@@ -536,6 +552,17 @@ local function submit_orchestrator_run(user_text, submission_ids, input_cause)
   if type(state.config.reasoning_effort) == "string" and #state.config.reasoning_effort > 0 then
     overlay_params.reasoning_effort = state.config.reasoning_effort
   end
+  local run_model_snapshot, snapshot_error = resolve_run_model_snapshot()
+  if snapshot_error ~= nil then
+    emit("nefor-tui", {
+      kind = "chat.error.append",
+      title = "Lead model unavailable",
+      message = snapshot_error,
+      retryable = true,
+    })
+    emit_idle_state("lead-model-snapshot-unavailable")
+    return nil
+  end
   local run_id = ids.mint_chat_run_id()
   state.current_run_id = run_id
   state.current_turn = {
@@ -549,7 +576,7 @@ local function submit_orchestrator_run(user_text, submission_ids, input_cause)
   emit_runtime_state("agentic_loop.run_start", { run_id = run_id })
 
   local sessions = require("libs.sessions")
-  envelope.emit_as("agentic-loop", "mag", {
+  local execute = {
     kind           = "mag.execute",
     id             = run_id,
     run_id         = run_id,
@@ -563,7 +590,11 @@ local function submit_orchestrator_run(user_text, submission_ids, input_cause)
       [p.source_actor] = { value = { prompt = user_text } },
       [p.llm_actor] = overlay_params,
     },
-  })
+  }
+  if run_model_snapshot ~= nil then
+    execute.model_snapshot = run_model_snapshot
+  end
+  envelope.emit_as("agentic-loop", "mag", execute)
   nefor.log.info("agentic-loop: lead turn submitted to mag kernel", {
     run_id = run_id,
     text_preview = string.sub(user_text or "", 1, 80),
@@ -1464,6 +1495,12 @@ function M.configure(opts)
     end
     state.config.ambient_context = opts.ambient_context
   end
+  if opts.resolve_model_snapshot ~= nil then
+    if type(opts.resolve_model_snapshot) ~= "function" then
+      error("configure: resolve_model_snapshot must be a function")
+    end
+    state.config.resolve_model_snapshot = opts.resolve_model_snapshot
+  end
   -- lead_program: where the shipped turn-program lives. `source_dir`
   -- defaults to the config dir (NEFOR_CONFIG_DIR); compositions whose
   -- config dir is not the starter (cli-config) pass it explicitly.
@@ -1678,6 +1715,7 @@ M._internals  = {
       reasoning_effort = nil,
       system = nil,
       ambient_context = nil,
+      resolve_model_snapshot = nil,
     }
     state.pending_model_selection = nil
     state.lead_program = {

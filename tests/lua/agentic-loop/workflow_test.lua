@@ -311,10 +311,22 @@ local function task_prompt(execute_body)
   return nil
 end
 
+local selected_run_model_snapshot
+local run_model_snapshot_resolutions
+
 local function fresh_loop()
   manager_sequence = 0
   manager_conversation_id = nil
   agentic_loop._internals.reset()
+  selected_run_model_snapshot = {
+    provider = "mock",
+    model = "test-model",
+    reasoning_effort = "high",
+    profiles = {
+      current = { provider = "mock", model = "test-model", reasoning_effort = "high" },
+    },
+  }
+  run_model_snapshot_resolutions = 0
   local mag_root = _starter_dir .. "/../../mag"
   local context = require("libs.mag-context").new {
     guides = {
@@ -332,6 +344,10 @@ local function fresh_loop()
     provider = "mock", model = "test-model",
     reasoning_effort = "high", system = "lead system prompt",
     ambient_context = context,
+    resolve_model_snapshot = function()
+      run_model_snapshot_resolutions = run_model_snapshot_resolutions + 1
+      return selected_run_model_snapshot
+    end,
     lead_program = {
       source_dir = _starter_dir,
       module_roots = { mag_root .. "/lib", _starter_dir .. "/mag/lib" },
@@ -447,6 +463,12 @@ do
     assert(type(err) == "string" and err:find("module_roots", 1, true),
       "invalid module roots error identifies the field")
   end
+  local ok, err = pcall(function()
+    agentic_loop.configure { resolve_model_snapshot = "not-a-function" }
+  end)
+  assert_eq(ok, false, "invalid model snapshot resolver rejected")
+  assert(type(err) == "string" and err:find("resolve_model_snapshot", 1, true),
+    "invalid model snapshot resolver error identifies the field")
 end
 
 -- Submit `text`; drive the load handshake when the program isn't cached
@@ -489,6 +511,26 @@ local function begin_bound_turn(text, scope)
     scope = scope,
   })
   return exec
+end
+
+-- Every fresh root run captures the composition-owned model/profile mapping
+-- exactly once and puts an owned copy on mag.execute. Profile-authored lead
+-- actors therefore resolve against the same immutable run boundary as
+-- delegated actors.
+do
+  fresh_loop()
+  local exec = begin_turn("profiled root lead")
+  assert_eq(run_model_snapshot_resolutions, 1,
+    "a fresh root run resolves its model snapshot exactly once")
+  assert_eq(exec.body.model_snapshot.provider, "mock",
+    "root run carries the current provider")
+  assert_eq(exec.body.model_snapshot.model, "test-model",
+    "root run carries the current model")
+  assert_eq(exec.body.model_snapshot.profiles.current.model, "test-model",
+    "root run carries the current named profile")
+  selected_run_model_snapshot.profiles.current.model = "mutated-after-submit"
+  assert_eq(exec.body.model_snapshot.profiles.current.model, "test-model",
+    "root run owns its captured profile mapping")
 end
 
 -- A terminal entry failure can precede every provider/conversation-manager
