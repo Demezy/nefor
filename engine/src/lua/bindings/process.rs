@@ -145,7 +145,7 @@ pub fn install_process(
         let (tx, mut rx) = mpsc::unbounded_channel::<DispatchMsg>();
 
         // stdout reader.
-        if let Some(stdout) = child.stdout.take() {
+        let stdout_reader = child.stdout.take().map(|stdout| {
             let tx = tx.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stdout).lines();
@@ -163,11 +163,11 @@ pub fn install_process(
                         }
                     }
                 }
-            });
-        }
+            })
+        });
 
         // stderr reader.
-        if let Some(stderr) = child.stderr.take() {
+        let stderr_reader = child.stderr.take().map(|stderr| {
             let tx = tx.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr).lines();
@@ -185,8 +185,8 @@ pub fn install_process(
                         }
                     }
                 }
-            });
-        }
+            })
+        });
 
         // Optional stdin pre-write: write `stdin_string` and drop stdin to
         // close the pipe. Callers who want interactive write-multiple use
@@ -212,18 +212,25 @@ pub fn install_process(
         let (exit_tx_user, exit_rx_user) = oneshot::channel::<i32>();
         let tx_exit = tx.clone();
         let exit_waiter: JoinHandle<()> = tokio::spawn(async move {
-            match child.wait().await {
-                Ok(status) => {
-                    let code = status.code().unwrap_or(-1);
-                    let _ = exit_tx_user.send(code);
-                    let _ = tx_exit.send(DispatchMsg::Exit(code));
-                }
+            let code = match child.wait().await {
+                Ok(status) => status.code().unwrap_or(-1),
                 Err(e) => {
                     tracing::warn!(error = %e, "process wait failed");
-                    let _ = exit_tx_user.send(-1);
-                    let _ = tx_exit.send(DispatchMsg::Exit(-1));
+                    -1
                 }
+            };
+
+            // Child exit and pipe EOF are separate async observations. Publish
+            // Exit only after both readers have drained every preceding line.
+            if let Some(reader) = stdout_reader {
+                let _ = reader.await;
             }
+            if let Some(reader) = stderr_reader {
+                let _ = reader.await;
+            }
+
+            let _ = exit_tx_user.send(code);
+            let _ = tx_exit.send(DispatchMsg::Exit(code));
         });
         // The waiter owns `child`; to kill we use tokio's built-in kill, which
         // takes `&mut Child` we no longer have. Workaround: put the pid-based
@@ -573,6 +580,81 @@ mod tests {
         let exit = *exit.lock().unwrap();
         assert_eq!(lines, vec!["hello".to_string()]);
         assert_eq!(exit, Some(0));
+    }
+
+    #[tokio::test]
+    async fn exit_callback_follows_all_short_lived_multiline_output() {
+        type Observed = (Vec<String>, Vec<String>, Option<(i32, usize, usize)>);
+
+        let (lua, mut callback_rx) = setup();
+        let observed = Arc::new(StdMutex::new(Observed::default()));
+
+        let stdout_observed = Arc::clone(&observed);
+        let on_stdout = lua
+            .create_function(move |_, line: String| {
+                stdout_observed.lock().unwrap().0.push(line);
+                Ok(())
+            })
+            .unwrap();
+        let stderr_observed = Arc::clone(&observed);
+        let on_stderr = lua
+            .create_function(move |_, line: String| {
+                stderr_observed.lock().unwrap().1.push(line);
+                Ok(())
+            })
+            .unwrap();
+        let exit_observed = Arc::clone(&observed);
+        let on_exit = lua
+            .create_function(move |_, code: i32| {
+                let mut observed = exit_observed.lock().unwrap();
+                observed.2 = Some((code, observed.0.len(), observed.1.len()));
+                Ok(())
+            })
+            .unwrap();
+        lua.globals().set("on_stdout", on_stdout).unwrap();
+        lua.globals().set("on_stderr", on_stderr).unwrap();
+        lua.globals().set("on_exit", on_exit).unwrap();
+
+        lua.load(
+            r#"
+            proc = nefor.process.spawn({
+                cmd = "sh",
+                args = { "-c", [[
+                    i=1
+                    while [ "$i" -le 64 ]; do
+                        printf 'out-%s\n' "$i"
+                        printf 'err-%s\n' "$i" >&2
+                        i=$((i + 1))
+                    done
+                ]] },
+                on_stdout = on_stdout,
+                on_stderr = on_stderr,
+                on_exit = on_exit,
+            })
+            return proc:wait()
+            "#,
+        )
+        .eval_async::<i32>()
+        .await
+        .expect("wait ok");
+
+        while observed.lock().unwrap().2.is_none() {
+            let callback =
+                tokio::time::timeout(std::time::Duration::from_secs(1), callback_rx.recv())
+                    .await
+                    .expect("process callbacks stalled")
+                    .expect("process callback channel closed");
+            invoke_runtime_callback(&lua, callback);
+        }
+
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.0.len(), 64);
+        assert_eq!(observed.1.len(), 64);
+        assert_eq!(observed.2, Some((0, 64, 64)));
+        assert_eq!(observed.0.first().map(String::as_str), Some("out-1"));
+        assert_eq!(observed.0.last().map(String::as_str), Some("out-64"));
+        assert_eq!(observed.1.first().map(String::as_str), Some("err-1"));
+        assert_eq!(observed.1.last().map(String::as_str), Some("err-64"));
     }
 
     #[tokio::test]
