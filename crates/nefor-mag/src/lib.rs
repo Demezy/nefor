@@ -9,6 +9,7 @@ pub mod lexer;
 pub mod parser;
 pub mod profile;
 pub mod schema;
+pub mod session;
 pub mod types;
 
 use ast::Value;
@@ -16,6 +17,7 @@ use env::Env;
 use error::MagError;
 use profile::{CompileProfile, CompileProfiler, Phase};
 use serde::{Deserialize, Serialize};
+pub use session::{CompileRequest, CompilerSession, CompilerSessionTelemetry, LoadRequest};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
@@ -119,7 +121,13 @@ pub fn compile_with_inputs_and_module_roots_and_options(
     module_roots: &[std::path::PathBuf],
     options: CompilerOptions,
 ) -> Result<serde_json::Value, MagError> {
-    compile_impl(source, source_dir, inputs, module_roots, options, None)
+    CompilerSession::new().compile(CompileRequest {
+        source,
+        source_dir,
+        inputs,
+        module_roots,
+        options,
+    })
 }
 
 pub fn compile_profiled(
@@ -144,27 +152,26 @@ pub fn compile_profiled_with_options(
     module_roots: &[std::path::PathBuf],
     options: CompilerOptions,
 ) -> Result<(serde_json::Value, CompileProfile), MagError> {
-    let profiler = CompileProfiler::new();
-    let artifact = compile_impl(
+    CompilerSession::new().compile_profiled(CompileRequest {
         source,
         source_dir,
         inputs,
         module_roots,
         options,
-        Some(&profiler),
-    )?;
-    let profile = profiler.snapshot();
-    Ok((artifact, profile))
+    })
 }
 
-fn compile_impl(
-    source: &str,
-    source_dir: &Path,
-    inputs: serde_json::Value,
-    module_roots: &[std::path::PathBuf],
-    options: CompilerOptions,
+pub(crate) fn compile_cold(
+    request: CompileRequest<'_>,
     profiler: Option<&CompileProfiler>,
 ) -> Result<serde_json::Value, MagError> {
+    let CompileRequest {
+        source,
+        source_dir,
+        inputs,
+        module_roots,
+        options,
+    } = request;
     let _fuel = eval::fuel::install(options.limits);
     let mut env = Env::new_with_stdlib_source_dir_module_roots_profiler_and_limits(
         source_dir,
@@ -267,7 +274,13 @@ pub fn load_with_inputs_and_module_roots_and_options(
     module_roots: &[std::path::PathBuf],
     options: CompilerOptions,
 ) -> Result<LoadedProgram, MagError> {
-    load_impl(source_dir, entry, inputs, module_roots, options, None)
+    CompilerSession::new().load(LoadRequest {
+        source_dir,
+        entry,
+        inputs,
+        module_roots,
+        options,
+    })
 }
 
 pub fn load_profiled(
@@ -292,17 +305,13 @@ pub fn load_profiled_with_options(
     module_roots: &[std::path::PathBuf],
     options: CompilerOptions,
 ) -> Result<(LoadedProgram, CompileProfile), MagError> {
-    let profiler = CompileProfiler::new();
-    let program = load_with_profiler_and_options(
+    CompilerSession::new().load_profiled(LoadRequest {
         source_dir,
         entry,
         inputs,
         module_roots,
-        &profiler,
         options,
-    )?;
-    let profile = profiler.snapshot();
-    Ok((program, profile))
+    })
 }
 
 pub fn load_with_profiler(
@@ -330,24 +339,29 @@ pub fn load_with_profiler_and_options(
     profiler: &CompileProfiler,
     options: CompilerOptions,
 ) -> Result<LoadedProgram, MagError> {
-    load_impl(
+    CompilerSession::new().load_with_profiler(
+        LoadRequest {
+            source_dir,
+            entry,
+            inputs,
+            module_roots,
+            options,
+        },
+        profiler,
+    )
+}
+
+pub(crate) fn load_cold(
+    request: LoadRequest<'_>,
+    profiler: Option<&CompileProfiler>,
+) -> Result<LoadedProgram, MagError> {
+    let LoadRequest {
         source_dir,
         entry,
         inputs,
         module_roots,
         options,
-        Some(profiler),
-    )
-}
-
-fn load_impl(
-    source_dir: &Path,
-    entry: &str,
-    inputs: serde_json::Value,
-    module_roots: &[std::path::PathBuf],
-    options: CompilerOptions,
-    profiler: Option<&CompileProfiler>,
-) -> Result<LoadedProgram, MagError> {
+    } = request;
     let _fuel = eval::fuel::install(options.limits);
     let path = eval::resolve_workspace_path(source_dir, entry)?;
     let started = phase_started(profiler);
