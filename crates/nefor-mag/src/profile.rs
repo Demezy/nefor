@@ -1,14 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompileProfile {
+    /// Wall-clock time for the complete compile or load attempt, including failures.
+    pub total_duration_ns: u64,
     pub phases: PhaseDurations,
     pub counters: OperationCounters,
 }
 
+/// Inclusive wall-clock durations for work that began during a compile attempt.
+///
+/// Phases may be nested: entry or module evaluation includes checking and any
+/// required-module work it triggers. Consequently, phase values must not be
+/// summed to derive [`CompileProfile::total_duration_ns`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PhaseDurations {
     pub entry_read_ns: u64,
@@ -73,6 +80,8 @@ pub struct OperationCounters {
     pub environment_snapshots: u64,
     pub environment_snapshot_bindings: u64,
     pub module_requests: u64,
+    /// Requests served by the current program's module table after an earlier
+    /// `require` in the same compilation. This is not a cross-compilation hit.
     pub module_cache_hits: u64,
     pub modules_loaded: u64,
     pub file_read_requests: u64,
@@ -104,6 +113,23 @@ pub(crate) enum Phase {
     ArtifactSerializeHash,
 }
 
+#[derive(Debug)]
+pub(crate) struct ProfileTimer {
+    profiler: CompileProfiler,
+    started: Instant,
+    phase: Option<Phase>,
+}
+
+impl Drop for ProfileTimer {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        match self.phase {
+            Some(phase) => self.profiler.add_phase(phase, elapsed),
+            None => self.profiler.add_total(elapsed),
+        }
+    }
+}
+
 impl CompileProfiler {
     pub fn new() -> Self {
         Self::default()
@@ -118,6 +144,28 @@ impl CompileProfiler {
 
     pub fn reset(&self) {
         *self.inner.lock().unwrap_or_else(|error| error.into_inner()) = CompileProfile::default();
+    }
+
+    pub(crate) fn start_total(&self) -> ProfileTimer {
+        ProfileTimer {
+            profiler: self.clone(),
+            started: Instant::now(),
+            phase: None,
+        }
+    }
+
+    pub(crate) fn start_phase(&self, phase: Phase) -> ProfileTimer {
+        ProfileTimer {
+            profiler: self.clone(),
+            started: Instant::now(),
+            phase: Some(phase),
+        }
+    }
+
+    fn add_total(&self, elapsed: Duration) {
+        let ns = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let mut profile = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+        profile.total_duration_ns = profile.total_duration_ns.saturating_add(ns);
     }
 
     pub(crate) fn add_phase(&self, phase: Phase, elapsed: Duration) {

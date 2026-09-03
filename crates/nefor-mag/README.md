@@ -19,6 +19,18 @@ state, every load owns a distinct resident program, and session telemetry
 accounts for requests without implying a cache. Existing free `compile_*` and
 `load_*` functions remain available and use the same cold implementation.
 
+`CompileProfiler` records deterministic operation counts plus inclusive
+wall-clock phase durations. Evaluation durations include nested checking and
+module work, so phases may overlap and must not be summed. `total_duration_ns`
+is the complete compile/load attempt on both success and failure. A profiler
+passed to `CompilerSession::compile_with_profiler` or `load_with_profiler` can be snapshotted
+after an error without changing the returned `MagError`; profiling likewise
+does not alter successful artifacts or the CLI's artifact stdout.
+
+`module_cache_hits` counts repeated `require` requests served by the module
+table of the program currently being compiled. It is deterministic per-program
+work accounting, not a hit from a future cache shared across compilations.
+
 ## Documentation
 
 - [The MAG Book](../../mag/book/README.md)

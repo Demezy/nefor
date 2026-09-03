@@ -166,6 +166,28 @@ fn syntax_type_and_evaluation_failures_are_structured() {
 }
 
 #[test]
+fn profiling_does_not_change_failure_stdout_or_diagnostic() {
+    let fixture = Fixture::new("profile-failure");
+    fixture.write("main.mag", "(artifact {:bad (+ 1 \"x\")})");
+
+    let ordinary = run(&compile_args(&fixture.root, &[]));
+    let profiled = run(&compile_args(&fixture.root, &["--profile"]));
+
+    assert!(!ordinary.status.success());
+    assert!(!profiled.status.success());
+    assert!(ordinary.stdout.is_empty());
+    assert_eq!(profiled.stdout, ordinary.stdout);
+    let ordinary_diagnostic = json_stderr(&ordinary);
+    let profiled_diagnostic = json_stderr(&profiled);
+    for field in ["code", "stage", "message", "path", "diagnostic"] {
+        assert_eq!(profiled_diagnostic[field], ordinary_diagnostic[field]);
+    }
+    assert!(ordinary_diagnostic.get("profile").is_none());
+    assert!(profiled_diagnostic["profile"]["total_duration_ns"].is_u64());
+    assert!(profiled_diagnostic["profile"]["phases"]["checking_ns"].is_u64());
+}
+
+#[test]
 fn required_module_syntax_diagnostic_owns_its_snapshot() {
     let fixture = Fixture::new("module-diagnostic");
     let module = fixture.write("bad.mag", "[λ]");

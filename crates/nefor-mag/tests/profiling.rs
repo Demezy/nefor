@@ -58,7 +58,150 @@ fn profiled_load_reports_phases_and_deterministic_work() {
     assert!(first.phases.module_parse_ns > 0);
     assert!(first.phases.module_evaluate_ns > 0);
     assert!(first.phases.checking_ns > 0);
+    assert!(first.total_duration_ns > 0);
     assert!(first.phases.artifact_serialize_hash_ns > 0);
+    assert!(first.total_duration_ns >= first.phases.entry_evaluate_ns);
+    assert!(first.phases.entry_evaluate_ns >= first.phases.module_evaluate_ns);
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn failed_in_memory_compile_preserves_error_and_profile() {
+    let root = temp_dir("compile-failure");
+    let roots = [root.clone()];
+    let source = "(artifact {:bad (+ 1 \"x\")})";
+    let ordinary_error =
+        nefor_mag::compile_with_inputs_and_module_roots(source, &root, json!({}), &roots)
+            .expect_err("fixture must fail without profiling");
+    let profiler = CompileProfiler::new();
+    let error = nefor_mag::CompilerSession::new()
+        .compile_with_profiler(
+            nefor_mag::CompileRequest {
+                source,
+                source_dir: &root,
+                inputs: json!({}),
+                module_roots: &roots,
+                options: nefor_mag::CompilerOptions::default(),
+            },
+            &profiler,
+        )
+        .expect_err("fixture must fail");
+    let profile = profiler.snapshot();
+
+    assert_eq!(
+        std::mem::discriminant(&error),
+        std::mem::discriminant(&ordinary_error)
+    );
+    assert_eq!(error.to_string(), ordinary_error.to_string());
+    assert!(profile.total_duration_ns > 0);
+    assert!(profile.phases.entry_evaluate_ns > 0);
+    assert!(profile.phases.checking_ns > 0);
+    fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn failed_load_records_total_and_every_started_entry_phase() {
+    let cases = [
+        ("missing", None, "missing.mag", "entry_read_ns"),
+        ("lex", Some("[λ]"), "main.mag", "entry_lex_ns"),
+        ("parse", Some("(artifact"), "main.mag", "entry_parse_ns"),
+        (
+            "checking",
+            Some("(artifact {:bad (+ 1 \"x\")})"),
+            "main.mag",
+            "checking_ns",
+        ),
+        (
+            "evaluate",
+            Some("(fail {:kind \"test\" :message \"stop\"})"),
+            "main.mag",
+            "entry_evaluate_ns",
+        ),
+        (
+            "artifact",
+            Some("(let value 1)"),
+            "main.mag",
+            "artifact_conversion_ns",
+        ),
+    ];
+
+    for (label, source, entry, expected_phase) in cases {
+        let root = temp_dir(label);
+        if let Some(source) = source {
+            fs::write(root.join("main.mag"), source).expect("entry");
+        }
+        let profiler = CompileProfiler::new();
+        let error =
+            nefor_mag::load_with_profiler(&root, entry, json!({}), &[root.clone()], &profiler)
+                .expect_err("fixture must fail");
+        let profile = profiler.snapshot();
+        let phases = serde_json::to_value(&profile.phases).expect("phase json");
+
+        assert!(profile.total_duration_ns > 0, "{label}: {error}");
+        assert!(
+            phases[expected_phase]
+                .as_u64()
+                .is_some_and(|value| value > 0),
+            "{label}: phase {expected_phase} was not recorded after {error}"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+}
+
+#[test]
+fn failed_module_work_records_started_nested_phases() {
+    let cases = [
+        ("resolve", None, "module_resolve_ns"),
+        ("lex", Some("[λ]"), "module_lex_ns"),
+        ("parse", Some("(let broken"), "module_parse_ns"),
+        (
+            "evaluate",
+            Some("(let bad (+ 1 \"x\"))"),
+            "module_evaluate_ns",
+        ),
+    ];
+
+    for (label, module_source, expected_phase) in cases {
+        let root = temp_dir(&format!("module-{label}"));
+        fs::write(
+            root.join("main.mag"),
+            "(require \"support\")\n(artifact {})",
+        )
+        .expect("entry");
+        if let Some(source) = module_source {
+            fs::write(root.join("support.mag"), source).expect("module");
+        }
+        let profiler = CompileProfiler::new();
+        let error =
+            nefor_mag::load_with_profiler(&root, "main.mag", json!({}), &[root.clone()], &profiler)
+                .expect_err("fixture must fail");
+        let profile = profiler.snapshot();
+        let phases = serde_json::to_value(&profile.phases).expect("phase json");
+
+        assert!(profile.total_duration_ns > 0, "{label}: {error}");
+        assert!(profile.phases.entry_evaluate_ns > 0, "{label}: {error}");
+        assert!(
+            phases[expected_phase]
+                .as_u64()
+                .is_some_and(|value| value > 0),
+            "{label}: phase {expected_phase} was not recorded after {error}"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+}
+
+#[test]
+fn module_cache_hits_mean_reuse_within_one_program() {
+    let root = temp_dir("module-cache-scope");
+    fs::write(root.join("support.mag"), "(let value 7)").expect("module");
+    let profile = profile(
+        &root,
+        "(require \"support\")\n(require \"support\")\n(artifact support.value)",
+    );
+
+    assert_eq!(profile.counters.module_requests, 2);
+    assert_eq!(profile.counters.modules_loaded, 1);
+    assert_eq!(profile.counters.module_cache_hits, 1);
     fs::remove_dir_all(root).ok();
 }
 

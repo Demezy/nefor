@@ -21,7 +21,6 @@ pub use session::{CompileRequest, CompilerSession, CompilerSessionTelemetry, Loa
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 
 /// Resource bounds applied to initial compilation and resident function calls.
 /// These limits bound cost and failure; they do not alter successful values.
@@ -165,6 +164,7 @@ pub(crate) fn compile_cold(
     request: CompileRequest<'_>,
     profiler: Option<&CompileProfiler>,
 ) -> Result<serde_json::Value, MagError> {
+    let _total = profiler.map(CompileProfiler::start_total);
     let CompileRequest {
         source,
         source_dir,
@@ -180,19 +180,23 @@ pub(crate) fn compile_cold(
         options.limits,
     );
     env.define("inputs", Value::HostInputs(inputs));
-    let started = phase_started(profiler);
+    let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryLex));
     let source_snapshot = diagnostic::SourceSnapshot::named("<memory>", source);
     let tokens = lexer::tokenize_source(&source_snapshot)?;
-    record_phase(profiler, Phase::EntryLex, started);
-    let started = phase_started(profiler);
+    drop(phase);
+
+    let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryParse));
     let exprs = parser::parse_source(&tokens, &source_snapshot)?;
-    record_phase(profiler, Phase::EntryParse, started);
-    let started = phase_started(profiler);
+    drop(phase);
+
+    let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryEvaluate));
     let value = eval::eval_program(&mut env, &exprs)?;
-    record_phase(profiler, Phase::EntryEvaluate, started);
-    let started = phase_started(profiler);
+    drop(phase);
+
+    let phase = profiler.map(|profiler| profiler.start_phase(Phase::ArtifactConversion));
     let artifact = extract_artifact(value, "top-level program")?;
-    record_phase(profiler, Phase::ArtifactConversion, started);
+    drop(phase);
+
     Ok(artifact)
 }
 
@@ -355,6 +359,7 @@ pub(crate) fn load_cold(
     request: LoadRequest<'_>,
     profiler: Option<&CompileProfiler>,
 ) -> Result<LoadedProgram, MagError> {
+    let _total = profiler.map(CompileProfiler::start_total);
     let LoadRequest {
         source_dir,
         entry,
@@ -364,10 +369,11 @@ pub(crate) fn load_cold(
     } = request;
     let _fuel = eval::fuel::install(options.limits);
     let path = eval::resolve_workspace_path(source_dir, entry)?;
-    let started = phase_started(profiler);
+    let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryRead));
     let source = std::fs::read_to_string(&path)
         .map_err(|e| MagError::Eval(format!("cannot read program {}: {e}", path.display())))?;
-    record_phase(profiler, Phase::EntryRead, started);
+    drop(phase);
+
     let mut env = Env::new_with_stdlib_source_dir_module_roots_profiler_and_limits(
         source_dir,
         module_roots.to_vec(),
@@ -375,39 +381,34 @@ pub(crate) fn load_cold(
         options.limits,
     );
     env.define("inputs", Value::HostInputs(inputs));
-    let started = phase_started(profiler);
+    let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryLex));
     let source_snapshot = diagnostic::SourceSnapshot::file(&path, &source);
     let tokens = lexer::tokenize_source(&source_snapshot)?;
-    record_phase(profiler, Phase::EntryLex, started);
-    let started = phase_started(profiler);
+    drop(phase);
+
+    let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryParse));
     let exprs = parser::parse_source(&tokens, &source_snapshot)?;
-    record_phase(profiler, Phase::EntryParse, started);
-    let started = phase_started(profiler);
+    drop(phase);
+
+    let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryEvaluate));
     let value = eval::eval_program(&mut env, &exprs)?;
-    record_phase(profiler, Phase::EntryEvaluate, started);
-    let started = phase_started(profiler);
+    drop(phase);
+
+    let phase = profiler.map(|profiler| profiler.start_phase(Phase::ArtifactConversion));
     let artifact = extract_artifact(value, "top-level program")?;
-    record_phase(profiler, Phase::ArtifactConversion, started);
-    let started = phase_started(profiler);
+    drop(phase);
+
+    let phase = profiler.map(|profiler| profiler.start_phase(Phase::ArtifactSerializeHash));
     let encoded = serde_json::to_vec(&artifact)
         .map_err(|e| MagError::Eval(format!("serialize artifact: {e}")))?;
     let hash = format!("{:x}", Sha256::digest(encoded));
-    record_phase(profiler, Phase::ArtifactSerializeHash, started);
+    drop(phase);
+
     Ok(LoadedProgram {
         env,
         artifact,
         hash,
     })
-}
-
-fn phase_started(profiler: Option<&CompileProfiler>) -> Option<Instant> {
-    profiler.map(|_| Instant::now())
-}
-
-fn record_phase(profiler: Option<&CompileProfiler>, phase: Phase, started: Option<Instant>) {
-    if let (Some(profiler), Some(started)) = (profiler, started) {
-        profiler.add_phase(phase, started.elapsed());
-    }
 }
 
 pub fn eval_fn(

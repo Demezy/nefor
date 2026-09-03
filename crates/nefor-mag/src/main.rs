@@ -69,6 +69,8 @@ struct Diagnostic {
     path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostic: Option<Box<nefor_mag::diagnostic::SyntaxDiagnostic>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<nefor_mag::profile::CompileProfile>,
 }
 
 fn main() {
@@ -133,12 +135,18 @@ fn compile(
             &module_roots,
             options,
         )
+    };
+    match loaded {
+        Ok(loaded) => Ok((
+            loaded.artifact,
+            profiler.map(|profiler| profiler.snapshot()),
+        )),
+        Err(error) => {
+            let mut diagnostic = mag_diagnostic(error);
+            diagnostic.profile = profiler.map(|profiler| profiler.snapshot());
+            Err(diagnostic)
+        }
     }
-    .map_err(mag_diagnostic)?;
-    Ok((
-        loaded.artifact,
-        profiler.map(|profiler| profiler.snapshot()),
-    ))
 }
 
 fn require_directory(path: &Path, kind: &'static str) -> Result<(), Diagnostic> {
@@ -166,6 +174,7 @@ fn load_inputs(specs: &[String]) -> Result<Value, Diagnostic> {
             message: format!("host input must be NAME=PATH, got {spec}"),
             path: None,
             diagnostic: None,
+            profile: None,
         })?;
         if name.is_empty() || raw_path.is_empty() {
             return Err(Diagnostic {
@@ -174,6 +183,7 @@ fn load_inputs(specs: &[String]) -> Result<Value, Diagnostic> {
                 message: format!("host input must have a non-empty name and path, got {spec}"),
                 path: None,
                 diagnostic: None,
+                profile: None,
             });
         }
         if inputs.contains_key(name) {
@@ -183,6 +193,7 @@ fn load_inputs(specs: &[String]) -> Result<Value, Diagnostic> {
                 message: format!("host input {name:?} was supplied more than once"),
                 path: None,
                 diagnostic: None,
+                profile: None,
             });
         }
         let path = PathBuf::from(raw_path);
@@ -213,6 +224,7 @@ fn mag_diagnostic(error: MagError) -> Diagnostic {
             message: syntax.message.clone(),
             path: syntax.path.clone(),
             diagnostic: Some(syntax),
+            profile: None,
         };
     }
     let (code, stage) = match error {
@@ -231,6 +243,7 @@ fn mag_diagnostic(error: MagError) -> Diagnostic {
         message: error.to_string(),
         path: None,
         diagnostic: None,
+        profile: None,
     }
 }
 
@@ -241,6 +254,7 @@ fn path_diagnostic(code: &'static str, path: &Path, message: String) -> Diagnost
         message,
         path: Some(path.display().to_string()),
         diagnostic: None,
+        profile: None,
     }
 }
 

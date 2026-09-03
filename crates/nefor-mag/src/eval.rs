@@ -201,9 +201,9 @@ pub fn eval_program(env: &mut Env, exprs: &[Expr]) -> Result<Value, MagError> {
         .zip(&declarations)
         .filter_map(|(expr, declaration)| (!declaration).then_some(expr.clone()))
         .collect::<Vec<_>>();
-    let checking_started = env.profile_started();
+    let checking_phase = env.profile_phase(Phase::Checking);
     let checked = crate::checker::compile_block(env, &source)?;
-    env.profile_elapsed(Phase::Checking, checking_started);
+    drop(checking_phase);
     let evaluated = eval_checked_block(env, &checked);
     match &evaluated {
         Ok(result) => {
@@ -527,7 +527,7 @@ fn eval_fn_form_with_binding(
     let Value::Fn(function) = &value else {
         unreachable!()
     };
-    let checking_started = env.profile_started();
+    let checking_phase = env.profile_phase(Phase::Checking);
     crate::checker::check_function_with_binding(
         env,
         binding,
@@ -536,7 +536,7 @@ fn eval_fn_form_with_binding(
         &function.return_type,
         &function.body,
     )?;
-    env.profile_elapsed(Phase::Checking, checking_started);
+    drop(checking_phase);
     Ok(value)
 }
 
@@ -1706,7 +1706,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 "descriptor-input-assignments expects a descriptor list",
             )?;
             let result = target.assign_input_sources(&sources);
-            let (compatibility_checks, search_branches) = if env.profile_started().is_some() {
+            let (compatibility_checks, search_branches) = if env.profiling_enabled() {
                 descriptor_assignment_search_profile(target, &sources)
             } else {
                 (0, 0)
@@ -2296,7 +2296,7 @@ fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
         return Ok(Value::Map(std::sync::Arc::new(module_value_map(&defs))));
     }
     env.begin_module(name)?;
-    let resolve_started = env.profile_started();
+    let resolve_phase = env.profile_phase(Phase::ModuleResolve);
     let relative = module_path(name)?;
     let mut matches = env
         .module_roots()
@@ -2326,22 +2326,22 @@ fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
             )))
         }
     };
-    env.profile_elapsed(Phase::ModuleResolve, resolve_started);
-    let read_started = env.profile_started();
+    drop(resolve_phase);
+    let read_phase = env.profile_phase(Phase::ModuleRead);
     let content = std::fs::read_to_string(&path)
         .map_err(|e| MagError::Eval(format!("cannot read module {name}: {e}")))?;
-    env.profile_elapsed(Phase::ModuleRead, read_started);
-    let lex_started = env.profile_started();
+    drop(read_phase);
+    let lex_phase = env.profile_phase(Phase::ModuleLex);
     let source_snapshot = crate::diagnostic::SourceSnapshot::file(&path, &content);
     let tokens = crate::lexer::tokenize_source(&source_snapshot)?;
-    env.profile_elapsed(Phase::ModuleLex, lex_started);
-    let parse_started = env.profile_started();
+    drop(lex_phase);
+    let parse_phase = env.profile_phase(Phase::ModuleParse);
     let exprs = crate::parser::parse_source(&tokens, &source_snapshot)?;
-    env.profile_elapsed(Phase::ModuleParse, parse_started);
+    drop(parse_phase);
     let mut module = env.module_env(name);
-    let eval_started = env.profile_started();
+    let eval_phase = env.profile_phase(Phase::ModuleEvaluate);
     let result = eval_program(&mut module, &exprs);
-    env.profile_elapsed(Phase::ModuleEvaluate, eval_started);
+    drop(eval_phase);
     match result {
         Ok(_) => {
             let defs = module.user_defs();

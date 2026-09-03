@@ -2,12 +2,11 @@ use crate::ast::{
     BindingId, BindingSlot, CheckedExpr, FnValue, FrameId, Scope, ScopeFrame, TypeDecl, Value,
 };
 use crate::error::MagError;
-use crate::profile::{CompileProfiler, Phase};
+use crate::profile::{CompileProfiler, Phase, ProfileTimer};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Instant;
 
 const FRAME_COLLECTION_THRESHOLD: usize = 1_024;
 
@@ -1102,13 +1101,14 @@ impl Env {
         let key = path.to_path_buf();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let hit = state.file_reads.contains_key(&key);
-        let started = self.profile_started();
+        let phase = self.profile_phase(Phase::ModuleRead);
         let result = state.file_reads.entry(key.clone()).or_insert_with(|| {
             std::fs::read_to_string(&key)
                 .map_err(|error| format!("cannot read {requested}: {error}"))
         });
         let result = result.clone().map_err(MagError::Eval);
         drop(state);
+        drop(phase);
         self.profile_counters(|counters| {
             counters.file_read_requests = counters.file_read_requests.saturating_add(1);
             if hit {
@@ -1117,7 +1117,6 @@ impl Env {
                 counters.file_read_cache_misses = counters.file_read_cache_misses.saturating_add(1);
             }
         });
-        self.profile_elapsed(Phase::ModuleRead, started);
         result
     }
 
@@ -1198,14 +1197,14 @@ impl Env {
         }
     }
 
-    pub(crate) fn profile_started(&self) -> Option<Instant> {
-        self.profiler.as_ref().map(|_| Instant::now())
+    pub(crate) fn profiling_enabled(&self) -> bool {
+        self.profiler.is_some()
     }
 
-    pub(crate) fn profile_elapsed(&self, phase: Phase, started: Option<Instant>) {
-        if let (Some(profiler), Some(started)) = (&self.profiler, started) {
-            profiler.add_phase(phase, started.elapsed());
-        }
+    pub(crate) fn profile_phase(&self, phase: Phase) -> Option<ProfileTimer> {
+        self.profiler
+            .as_ref()
+            .map(|profiler| profiler.start_phase(phase))
     }
 }
 
