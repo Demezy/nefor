@@ -36,7 +36,7 @@ The report/statistics policy is fail-closed. Reports with the previous schema, m
 
 The cache-transition suite is separate from the frozen cycle-3 authority. It has
 protocol `mag-cache-scenario-worker-v1` and ordered catalog
-`cycle-4-pre-cache-v1`; it does not append to the cycle-3 timed cases or change
+`cycle-4-pre-cache-v2`; it does not append to the cycle-3 timed cases or change
 any cycle-3 fingerprint or manifest.
 
 ```sh
@@ -48,6 +48,10 @@ Every reported sample creates a fresh isolated fixture and cold
 `CompilerSession`. Population, prior loads, and filesystem/context mutations
 happen before the one profiled and timed target load. Each sample reports its
 semantic outcome, complete `CompileProfile`, `CompilerSessionStats`, and target
-duration. The suite is calibration-only until a cache implementation and its
-gate policy are separately pinned; it cannot satisfy the cycle-3 optimization
-gate. Progress is written to stderr while stdout remains protocol JSON.
+duration. Paired workers must return identical semantic observations; profile
+and session-stat differences remain in the report as optimization evidence.
+Request/result accounting is checked independently, and the identical broken
+module scenario requires the repeated failure to perform cold work. The suite
+is calibration-only until a cache implementation and its gate policy are
+separately pinned; it cannot satisfy the cycle-3 optimization gate. Progress is
+written to stderr while stdout remains protocol JSON.

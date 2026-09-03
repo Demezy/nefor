@@ -28,6 +28,7 @@ pub struct LoadRequest<'a> {
 
 /// Cache-neutral accounting for work submitted through one compiler session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CompilerSessionStats {
     pub compile_requests: u64,
     pub load_requests: u64,

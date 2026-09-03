@@ -186,6 +186,26 @@ fn session_stats_accounts_for_cold_successes_and_failures() {
 }
 
 #[test]
+fn session_stats_accept_older_wire_shapes() {
+    let stats: CompilerSessionStats = serde_json::from_value(json!({
+        "compile_requests": 1,
+        "load_requests": 2,
+        "cold_compilations": 3
+    }))
+    .unwrap();
+    assert_eq!(
+        stats,
+        CompilerSessionStats {
+            compile_requests: 1,
+            load_requests: 2,
+            cold_compilations: 3,
+            successful_compilations: 0,
+            failed_compilations: 0,
+        }
+    );
+}
+
+#[test]
 fn repeated_session_loads_keep_resident_owners_isolated() {
     let root = workspace("resident-owner");
     let source = r#"
@@ -276,7 +296,11 @@ fn source_versions_remain_owned_by_the_program_that_loaded_them() {
         eval_artifact_fn(&second, &second_run, json!(7)).unwrap(),
         json!({"version":2,"value":7})
     );
-    assert!(eval_artifact_fn(&second, &first_run, json!(7)).is_err());
+    assert!(matches!(
+        eval_artifact_fn(&second, &first_run, json!(7)),
+        Err(nefor_mag::error::MagError::Eval(message))
+            if message.contains("different loaded program")
+    ));
     drop(first);
     assert_eq!(
         eval_artifact_fn(&second, &second_run, json!(8)).unwrap(),

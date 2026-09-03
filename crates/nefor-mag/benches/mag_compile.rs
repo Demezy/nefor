@@ -327,11 +327,9 @@ fn cache_paired_main(args: &[String]) -> Result<(), String> {
             validate_response(&candidate.hello, &right, &request, &candidate_response)?;
             if baseline_response.samples[0].semantic_observation
                 != candidate_response.samples[0].semantic_observation
-                || baseline_response.samples[0].session_stats
-                    != candidate_response.samples[0].session_stats
             {
                 return Err(format!(
-                    "{} semantic or session-stat mismatch",
+                    "{} exact semantic observation mismatch",
                     left.definition.name
                 ));
             }

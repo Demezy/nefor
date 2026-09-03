@@ -30,6 +30,7 @@ fn cache_catalog_is_ordered_and_has_an_independent_identity() {
             "cold-shipped-lead-turn",
             "populate-module-chain",
             "identical-repeat-module-chain",
+            "identical-repeat-broken-module",
             "entry-bytes-changed",
             "transitive-module-changed",
             "module-ambiguity-introduced",
@@ -50,7 +51,7 @@ fn cache_catalog_is_ordered_and_has_an_independent_identity() {
         CACHE_SCENARIO_PROTOCOL_VERSION,
         "mag-cache-scenario-worker-v1"
     );
-    assert_eq!(CACHE_SCENARIO_CATALOG_VERSION, "cycle-4-pre-cache-v1");
+    assert_eq!(CACHE_SCENARIO_CATALOG_VERSION, "cycle-4-pre-cache-v2");
     assert_ne!(
         CACHE_SCENARIO_PROTOCOL_VERSION,
         bench_support::WORKER_PROTOCOL_VERSION
@@ -59,7 +60,7 @@ fn cache_catalog_is_ordered_and_has_an_independent_identity() {
 }
 
 #[test]
-fn cold_transition_scenarios_report_semantics_profile_and_session_stats() {
+fn pre_cache_baseline_scenarios_report_only_cold_compilations() {
     let root = source_root();
     for definition in definitions() {
         if definition.name == "cold-shipped-lead-turn" {
@@ -77,6 +78,11 @@ fn cold_transition_scenarios_report_semantics_profile_and_session_stats() {
             sample.session_stats.successful_compilations + sample.session_stats.failed_compilations,
             sample.session_stats.load_requests
         );
+        assert_eq!(
+            sample.session_stats.cold_compilations, sample.session_stats.load_requests,
+            "{}",
+            definition.name
+        );
     }
 }
 
@@ -86,9 +92,10 @@ fn repeat_setup_is_outside_the_single_profiled_target_operation() {
     assert_eq!(samples.len(), 2);
     for sample in &samples {
         assert_eq!(sample.session_stats.load_requests, 2);
-        assert_eq!(sample.session_stats.cold_compilations, 2);
         assert_eq!(sample.session_stats.successful_compilations, 2);
-        assert_eq!(sample.compile_profile.counters.modules_loaded, 2);
+        assert_eq!(sample.session_stats.failed_compilations, 0);
+        assert!(sample.session_stats.cold_compilations <= 2);
+        assert!(sample.compile_profile.counters.modules_loaded <= 2);
     }
     assert!(
         raw_batch_ns
@@ -98,6 +105,15 @@ fn repeat_setup_is_outside_the_single_profiled_target_operation() {
                 .sum::<u64>(),
         "batch timing contains the target operations but excludes preparation"
     );
+}
+
+#[test]
+fn identical_failure_is_recomputed_without_caching() {
+    let sample = run_sample(&source_root(), "identical-repeat-broken-module");
+    assert_eq!(sample.session_stats.load_requests, 2);
+    assert_eq!(sample.session_stats.failed_compilations, 2);
+    assert_eq!(sample.session_stats.cold_compilations, 2);
+    assert!(sample.compile_profile.phases.module_read_ns > 0);
 }
 
 #[test]

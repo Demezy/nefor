@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 pub const CACHE_SCENARIO_PROTOCOL_VERSION: &str = "mag-cache-scenario-worker-v1";
-pub const CACHE_SCENARIO_CATALOG_VERSION: &str = "cycle-4-pre-cache-v1";
+pub const CACHE_SCENARIO_CATALOG_VERSION: &str = "cycle-4-pre-cache-v2";
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
@@ -97,6 +97,11 @@ pub fn definitions() -> Vec<CacheScenarioDefinition> {
         ("cold-shipped-lead-turn", "cold", "none"),
         ("populate-module-chain", "population", "empty-session"),
         ("identical-repeat-module-chain", "repeat", "successful-load"),
+        (
+            "identical-repeat-broken-module",
+            "failure",
+            "identical-failure",
+        ),
         ("entry-bytes-changed", "invalidation", "entry-v1-to-v2"),
         (
             "transitive-module-changed",
@@ -374,6 +379,10 @@ impl PreparedScenario {
     fn setup(&mut self, name: &str) {
         match name {
             "identical-repeat-module-chain" => self.load_setup_success(),
+            "identical-repeat-broken-module" => {
+                self.write("b.mag", "(let value missing)");
+                self.load_setup_unresolved("missing");
+            }
             "entry-bytes-changed" => {
                 self.load_setup_success();
                 self.write("main.mag", "(require \"a\")\n(artifact 2)");
@@ -408,7 +417,7 @@ impl PreparedScenario {
             }
             "broken-module-repaired" => {
                 self.write("b.mag", "(let value missing)");
-                self.load_setup_failure();
+                self.load_setup_unresolved("missing");
                 self.write("b.mag", "(let value 2)");
             }
             "entry-lex-precedes-module-ambiguity" => {
@@ -458,10 +467,14 @@ impl PreparedScenario {
             .expect("scenario setup succeeds");
     }
 
-    fn load_setup_failure(&self) {
+    fn load_setup_unresolved(&self, expected_symbol: &str) {
+        let error = self
+            .session
+            .load(self.request())
+            .expect_err("scenario setup fails");
         assert!(
-            self.session.load(self.request()).is_err(),
-            "scenario setup fails"
+            matches!(error, MagError::Unresolved(symbol) if symbol == expected_symbol),
+            "scenario setup must fail on unresolved symbol {expected_symbol:?}"
         );
     }
 
@@ -536,6 +549,15 @@ fn assert_expected(name: &str, sample: &CacheScenarioSample) {
         "cold-module-chain" | "populate-module-chain" | "identical-repeat-module-chain" => {
             assert_eq!(success_value, Some(&json!(1)))
         }
+        "identical-repeat-broken-module" => {
+            assert_error_class(sample, "unresolved");
+            assert_error_message(sample, "unresolved symbol: missing");
+            assert_eq!(
+                sample.session_stats.cold_compilations, sample.session_stats.load_requests,
+                "identical failures must perform cold work rather than be cached"
+            );
+            assert!(sample.compile_profile.phases.module_read_ns > 0);
+        }
         "cold-shipped-lead-turn" => assert!(success_value.is_some()),
         "entry-bytes-changed" | "transitive-module-changed" | "broken-module-repaired" => {
             assert_eq!(success_value, Some(&json!(2)))
@@ -550,15 +572,25 @@ fn assert_expected(name: &str, sample: &CacheScenarioSample) {
         | "module-ambiguity-precedes-host-input" => assert_error_contains(sample, "ambiguous"),
         "compiler-options-changed" => assert_error_contains(sample, "budget exceeded"),
         "entry-lex-precedes-module-ambiguity" => assert_error_class(sample, "syntax"),
-        "required-module-precedes-entry-error" => assert_error_contains(sample, "missing"),
+        "required-module-precedes-entry-error" => {
+            assert_error_class(sample, "unresolved");
+            assert_error_message(sample, "unresolved symbol: missing");
+        }
         "entry-deleted-after-success" => assert_error_contains(sample, "cannot read program"),
         other => panic!("unknown cache scenario {other}"),
     }
     assert!(sample.compile_profile.total_duration_ns > 0);
+    assert_session_accounting(sample);
+}
+
+fn assert_session_accounting(sample: &CacheScenarioSample) {
+    let stats = sample.session_stats;
+    let requests = stats.compile_requests + stats.load_requests;
     assert_eq!(
-        sample.session_stats.cold_compilations,
-        sample.session_stats.load_requests
+        stats.successful_compilations + stats.failed_compilations,
+        requests
     );
+    assert!(stats.cold_compilations <= requests);
 }
 
 fn assert_error_class(sample: &CacheScenarioSample, expected: &str) {
@@ -566,6 +598,13 @@ fn assert_error_class(sample: &CacheScenarioSample, expected: &str) {
         panic!("expected {expected} error, got success")
     };
     assert_eq!(class, expected);
+}
+
+fn assert_error_message(sample: &CacheScenarioSample, expected: &str) {
+    let SemanticOutcome::Error { message, .. } = &sample.semantic_observation else {
+        panic!("expected error {expected:?}, got success")
+    };
+    assert_eq!(message, expected);
 }
 
 fn assert_error_contains(sample: &CacheScenarioSample, expected: &str) {
