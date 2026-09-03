@@ -1,6 +1,9 @@
 mod bench_support;
+#[path = "support/cache_scenarios.rs"]
+mod cache_scenarios;
 
 use bench_support::*;
+use cache_scenarios::*;
 use mlua::{Lua, LuaSerdeExt, Table, Value as LuaValue};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -21,6 +24,21 @@ const BUILD_SOURCE_DIRTY: Option<&str> = option_env!("NEFOR_MAG_BENCH_BUILD_SOUR
 
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let cache_suite = value_after(&args, "--suite").as_deref() == Some("cache");
+    if cache_suite && args.iter().any(|arg| arg == "--worker") {
+        if let Err(error) = cache_worker_main(&args) {
+            eprintln!("MAG cache-scenario worker failed: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
+    if cache_suite && args.iter().any(|arg| arg == "--paired") {
+        if let Err(error) = cache_paired_main(&args) {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     if args.iter().any(|arg| arg == "--worker") {
         if let Err(error) = worker_main(&args) {
             eprintln!("MAG benchmark worker failed: {error}");
@@ -144,6 +162,283 @@ fn marginal_main(args: &[String]) {
     {
         std::process::exit(2);
     }
+}
+
+struct CacheWorkerProcess {
+    child: Child,
+    input: BufWriter<ChildStdin>,
+    output: BufReader<ChildStdout>,
+    hello: CacheWorkerHello,
+}
+
+impl CacheWorkerProcess {
+    fn spawn(endpoint: &WorkerEndpoint) -> Result<Self, String> {
+        let mut child = Command::new(&endpoint.executable_path)
+            .args(["--worker", "--suite", "cache", "--source-root"])
+            .arg(&endpoint.clean_source_root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| format!("spawn cache-scenario worker: {error}"))?;
+        let input = BufWriter::new(child.stdin.take().ok_or("worker stdin unavailable")?);
+        let mut output = BufReader::new(child.stdout.take().ok_or("worker stdout unavailable")?);
+        let mut line = String::new();
+        if output
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?
+            == 0
+        {
+            return Err("cache-scenario worker exited before protocol hello".into());
+        }
+        let hello = serde_json::from_str(&line)
+            .map_err(|error| format!("malformed cache-scenario worker hello: {error}"))?;
+        Ok(Self {
+            child,
+            input,
+            output,
+            hello,
+        })
+    }
+
+    fn request(&mut self, request: &CacheWorkerRequest) -> Result<CacheWorkerResponse, String> {
+        serde_json::to_writer(&mut self.input, request).map_err(|error| error.to_string())?;
+        self.input
+            .write_all(b"\n")
+            .map_err(|error| error.to_string())?;
+        self.input.flush().map_err(|error| error.to_string())?;
+        let mut line = String::new();
+        if self
+            .output
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?
+            == 0
+        {
+            return Err("cache-scenario worker closed before response".into());
+        }
+        serde_json::from_str(&line)
+            .map_err(|error| format!("malformed cache-scenario response: {error}"))
+    }
+}
+
+impl Drop for CacheWorkerProcess {
+    fn drop(&mut self) {
+        drop(self.input.flush());
+        drop(self.child.kill());
+        drop(self.child.wait());
+    }
+}
+
+fn cache_paired_main(args: &[String]) -> Result<(), String> {
+    validate_args(
+        args,
+        &[
+            "--bench",
+            "--paired",
+            "--suite",
+            "--calibration",
+            "--baseline-worker",
+            "--baseline-root",
+            "--candidate-worker",
+            "--candidate-root",
+            "--output",
+        ],
+        &[
+            "--suite",
+            "--baseline-worker",
+            "--baseline-root",
+            "--candidate-worker",
+            "--candidate-root",
+            "--output",
+        ],
+    );
+    let root = workspace_root();
+    let calibration = args.iter().any(|arg| arg == "--calibration");
+    let current_exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let endpoint = |worker_flag: &str, root_flag: &str| -> Result<WorkerEndpoint, String> {
+        match (value_after(args, worker_flag), value_after(args, root_flag)) {
+            (Some(worker), Some(source)) => Ok(WorkerEndpoint {
+                executable_path: worker.into(),
+                clean_source_root: source.into(),
+            }),
+            (None, None) if calibration => Ok(WorkerEndpoint {
+                executable_path: current_exe.clone(),
+                clean_source_root: root.clone(),
+            }),
+            (None, None) => {
+                Err("cache suite requires explicit distinct workers outside calibration".into())
+            }
+            _ => Err(format!(
+                "{worker_flag} and {root_flag} must be supplied together"
+            )),
+        }
+    };
+    let baseline_endpoint = endpoint("--baseline-worker", "--baseline-root")?;
+    let candidate_endpoint = endpoint("--candidate-worker", "--candidate-root")?;
+    let mut baseline = CacheWorkerProcess::spawn(&baseline_endpoint)?;
+    let mut candidate = CacheWorkerProcess::spawn(&candidate_endpoint)?;
+    validate_cache_worker_endpoint(&baseline_endpoint, &baseline.hello)?;
+    validate_cache_worker_endpoint(&candidate_endpoint, &candidate.hello)?;
+    validate_hello_pair(&baseline.hello, &candidate.hello)?;
+    let identical = baseline.hello.executable_identity.sha256
+        == candidate.hello.executable_identity.sha256
+        || (baseline.hello.source_identity.source_ref
+            == candidate.hello.source_identity.source_ref
+            && baseline.hello.source_identity.tree == candidate.hello.source_identity.tree);
+    if identical && !calibration {
+        return Err("identical cache-scenario endpoints are calibration-only".into());
+    }
+    let samples = positive_env("MAG_BENCH_SAMPLES", DEFAULT_SAMPLES);
+    let mut reports = Vec::new();
+    let mut sequence = 0;
+    for (index, (left, right)) in baseline
+        .hello
+        .cases
+        .clone()
+        .into_iter()
+        .zip(candidate.hello.cases.clone())
+        .enumerate()
+    {
+        eprintln!(
+            "cache scenario {}/{}: {}",
+            index + 1,
+            baseline.hello.cases.len(),
+            left.definition.name
+        );
+        let mut baseline_samples = Vec::new();
+        let mut candidate_samples = Vec::new();
+        let mut baseline_batch_ns = Vec::new();
+        let mut candidate_batch_ns = Vec::new();
+        for block in 0..samples {
+            let request = CacheWorkerRequest {
+                sequence,
+                scenario_fingerprint: left.definition_fingerprint.clone(),
+                batch_count: 1,
+            };
+            sequence += 1;
+            let (baseline_response, candidate_response) = if (index + block) % 2 == 0 {
+                (baseline.request(&request)?, candidate.request(&request)?)
+            } else {
+                let candidate_response = candidate.request(&request)?;
+                let baseline_response = baseline.request(&request)?;
+                (baseline_response, candidate_response)
+            };
+            validate_response(&baseline.hello, &left, &request, &baseline_response)?;
+            validate_response(&candidate.hello, &right, &request, &candidate_response)?;
+            if baseline_response.samples[0].semantic_observation
+                != candidate_response.samples[0].semantic_observation
+                || baseline_response.samples[0].session_stats
+                    != candidate_response.samples[0].session_stats
+            {
+                return Err(format!(
+                    "{} semantic or session-stat mismatch",
+                    left.definition.name
+                ));
+            }
+            baseline_batch_ns.push(baseline_response.raw_batch_ns);
+            candidate_batch_ns.push(candidate_response.raw_batch_ns);
+            baseline_samples.extend(baseline_response.samples);
+            candidate_samples.extend(candidate_response.samples);
+        }
+        reports.push(CachePairedCaseReport {
+            name: left.definition.name,
+            baseline_samples,
+            candidate_samples,
+            baseline_batch_ns,
+            candidate_batch_ns,
+        });
+    }
+    let report = CachePairedReport {
+        schema_version: 1,
+        report_kind: "cache_scenario_calibration".into(),
+        authoritative: false,
+        protocol_version: CACHE_SCENARIO_PROTOCOL_VERSION.into(),
+        catalog_version: CACHE_SCENARIO_CATALOG_VERSION.into(),
+        catalog_fingerprint: baseline.hello.catalog_fingerprint.clone(),
+        samples_per_case: samples,
+        baseline: baseline.hello.clone(),
+        candidate: candidate.hello.clone(),
+        cases: reports,
+    };
+    if let Some(path) = value_after(args, "--output") {
+        write_json(&root, &path, &report, "cache-scenario calibration");
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
+    }
+    Ok(())
+}
+
+fn validate_cache_worker_endpoint(
+    endpoint: &WorkerEndpoint,
+    hello: &CacheWorkerHello,
+) -> Result<(), String> {
+    if executable_identity(&endpoint.executable_path)? != hello.executable_identity {
+        return Err("cache worker executable identity does not match endpoint".into());
+    }
+    let root = endpoint
+        .clean_source_root
+        .canonicalize()
+        .map_err(|error| format!("canonicalize cache worker source root: {error}"))?;
+    if root != hello.source_identity.source_root || hello.source_identity.dirty {
+        return Err("cache worker source identity does not match clean endpoint".into());
+    }
+    Ok(())
+}
+
+fn cache_worker_main(args: &[String]) -> Result<(), String> {
+    validate_args(
+        args,
+        &["--worker", "--suite", "--source-root"],
+        &["--suite", "--source-root"],
+    );
+    let root = PathBuf::from(value_after(args, "--source-root").ok_or("missing source root")?)
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    let source_identity = worker_source_identity(&root)?;
+    validate_embedded_build_source(&source_identity)?;
+    let executable_identity =
+        executable_identity(&std::env::current_exe().map_err(|error| error.to_string())?)?;
+    let cases = manifests(&root);
+    let hello = CacheWorkerHello {
+        protocol_version: CACHE_SCENARIO_PROTOCOL_VERSION.into(),
+        catalog_version: CACHE_SCENARIO_CATALOG_VERSION.into(),
+        catalog_fingerprint: cache_catalog_fingerprint(),
+        executable_identity: executable_identity.clone(),
+        source_identity: source_identity.clone(),
+        cases,
+    };
+    let stdout = std::io::stdout();
+    let mut output = BufWriter::new(stdout.lock());
+    serde_json::to_writer(&mut output, &hello).map_err(|error| error.to_string())?;
+    output.write_all(b"\n").map_err(|error| error.to_string())?;
+    output.flush().map_err(|error| error.to_string())?;
+    for line in std::io::stdin().lock().lines() {
+        let request: CacheWorkerRequest = serde_json::from_str(&line.map_err(|e| e.to_string())?)
+            .map_err(|error| error.to_string())?;
+        let manifest = hello
+            .cases
+            .iter()
+            .find(|case| case.definition_fingerprint == request.scenario_fingerprint)
+            .ok_or("missing cache scenario")?;
+        let (samples, raw_batch_ns) =
+            run_batch(&root, &manifest.definition.name, request.batch_count);
+        let response = CacheWorkerResponse {
+            sequence: request.sequence,
+            scenario_name: manifest.definition.name.clone(),
+            scenario_fingerprint: manifest.definition_fingerprint.clone(),
+            executable_identity: executable_identity.clone(),
+            source_identity: source_identity.clone(),
+            samples,
+            raw_batch_ns,
+        };
+        serde_json::to_writer(&mut output, &response).map_err(|error| error.to_string())?;
+        output.write_all(b"\n").map_err(|error| error.to_string())?;
+        output.flush().map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 struct WorkerProcess {

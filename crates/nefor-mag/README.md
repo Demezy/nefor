@@ -15,7 +15,7 @@ mag compile main.mag --source-dir .
 source and `LoadRequest` values for file-backed entry programs. Both requests
 carry the source directory, host inputs, module roots, and compiler options.
 The session is currently cold-only: every call creates independent compiler
-state, every load owns a distinct resident program, and session telemetry
+state, every load owns a distinct resident program, and `CompilerSessionStats`
 accounts for requests without implying a cache. Existing free `compile_*` and
 `load_*` functions remain available and use the same cold implementation.
 

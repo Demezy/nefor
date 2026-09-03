@@ -17,7 +17,7 @@ use env::Env;
 use error::MagError;
 use profile::{CompileProfile, CompileProfiler, Phase};
 use serde::{Deserialize, Serialize};
-pub use session::{CompileRequest, CompilerSession, CompilerSessionTelemetry, LoadRequest};
+pub use session::{CompileRequest, CompilerSession, CompilerSessionStats, LoadRequest};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;

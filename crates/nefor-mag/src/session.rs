@@ -28,7 +28,7 @@ pub struct LoadRequest<'a> {
 
 /// Cache-neutral accounting for work submitted through one compiler session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompilerSessionTelemetry {
+pub struct CompilerSessionStats {
     pub compile_requests: u64,
     pub load_requests: u64,
     pub cold_compilations: u64,
@@ -44,7 +44,7 @@ pub struct CompilerSessionTelemetry {
 /// load returns a separately owned [`LoadedProgram`].
 #[derive(Debug, Default)]
 pub struct CompilerSession {
-    telemetry: Mutex<CompilerSessionTelemetry>,
+    stats: Mutex<CompilerSessionStats>,
 }
 
 impl CompilerSession {
@@ -98,43 +98,30 @@ impl CompilerSession {
         self.record_result(crate::load_cold(request, Some(profiler)))
     }
 
-    pub fn telemetry(&self) -> CompilerSessionTelemetry {
-        *self
-            .telemetry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+    pub fn stats(&self) -> CompilerSessionStats {
+        *self.stats.lock().unwrap_or_else(|error| error.into_inner())
     }
 
     fn record_compile_request(&self) {
-        let mut telemetry = self
-            .telemetry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        telemetry.compile_requests = telemetry.compile_requests.saturating_add(1);
-        telemetry.cold_compilations = telemetry.cold_compilations.saturating_add(1);
+        let mut stats = self.stats.lock().unwrap_or_else(|error| error.into_inner());
+        stats.compile_requests = stats.compile_requests.saturating_add(1);
+        stats.cold_compilations = stats.cold_compilations.saturating_add(1);
     }
 
     fn record_load_request(&self) {
-        let mut telemetry = self
-            .telemetry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        telemetry.load_requests = telemetry.load_requests.saturating_add(1);
-        telemetry.cold_compilations = telemetry.cold_compilations.saturating_add(1);
+        let mut stats = self.stats.lock().unwrap_or_else(|error| error.into_inner());
+        stats.load_requests = stats.load_requests.saturating_add(1);
+        stats.cold_compilations = stats.cold_compilations.saturating_add(1);
     }
 
     fn record_result<T>(&self, result: Result<T, MagError>) -> Result<T, MagError> {
-        let mut telemetry = self
-            .telemetry
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut stats = self.stats.lock().unwrap_or_else(|error| error.into_inner());
         match &result {
             Ok(_) => {
-                telemetry.successful_compilations =
-                    telemetry.successful_compilations.saturating_add(1);
+                stats.successful_compilations = stats.successful_compilations.saturating_add(1);
             }
             Err(_) => {
-                telemetry.failed_compilations = telemetry.failed_compilations.saturating_add(1);
+                stats.failed_compilations = stats.failed_compilations.saturating_add(1);
             }
         }
         result

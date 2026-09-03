@@ -31,3 +31,23 @@ Stage evidence retains workload, fixture/source, topology, forced-terminal, dire
 `legacy_cycle2_manifest.json` remains the immutable pre-cycle-3 historical oracle. `current_main_a0_manifest.json` records the exact inherited fixture and artifact identities after the experiment is semantically rebased over current main. A current-main change to config-owned MAG sources advances the current A0 workload and oracle fingerprints without rewriting that historical manifest; inherited case/oracle membership, order, and the 25-oracle policy remain fixed.
 
 The report/statistics policy is fail-closed. Reports with the previous schema, median-bootstrap bounds, absent worker-pair identity, or old exclusive-section evidence are incompatible and remain diagnostic evidence only.
+
+## Cycle-4 pre-cache scenarios
+
+The cache-transition suite is separate from the frozen cycle-3 authority. It has
+protocol `mag-cache-scenario-worker-v1` and ordered catalog
+`cycle-4-pre-cache-v1`; it does not append to the cycle-3 timed cases or change
+any cycle-3 fingerprint or manifest.
+
+```sh
+MAG_BENCH_SAMPLES=3 just bench-mag --paired --calibration --suite cache \
+  --output tmp/mag-optimization-cycle-4/cache-scenario-calibration.json
+```
+
+Every reported sample creates a fresh isolated fixture and cold
+`CompilerSession`. Population, prior loads, and filesystem/context mutations
+happen before the one profiled and timed target load. Each sample reports its
+semantic outcome, complete `CompileProfile`, `CompilerSessionStats`, and target
+duration. The suite is calibration-only until a cache implementation and its
+gate policy are separately pinned; it cannot satisfy the cycle-3 optimization
+gate. Progress is written to stderr while stdout remains protocol JSON.

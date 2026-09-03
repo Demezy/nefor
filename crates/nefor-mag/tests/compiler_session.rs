@@ -1,7 +1,7 @@
 use nefor_mag::{
     compile_profiled_with_options, compile_with_inputs_and_module_roots_and_options,
     eval_artifact_fn, load_with_inputs_and_module_roots_and_options, resolve_artifact_fn,
-    CompileRequest, CompilerLimits, CompilerOptions, CompilerSession, CompilerSessionTelemetry,
+    CompileRequest, CompilerLimits, CompilerOptions, CompilerSession, CompilerSessionStats,
     LoadRequest,
 };
 use serde_json::json;
@@ -144,8 +144,8 @@ fn session_preserves_structured_syntax_errors() {
 }
 
 #[test]
-fn session_telemetry_accounts_for_cold_successes_and_failures() {
-    let root = workspace("telemetry");
+fn session_stats_accounts_for_cold_successes_and_failures() {
+    let root = workspace("stats");
     let roots = [root.clone()];
     let session = CompilerSession::new();
 
@@ -172,8 +172,8 @@ fn session_telemetry_accounts_for_cold_successes_and_failures() {
     session.load(load_request(&root, &roots)).unwrap();
 
     assert_eq!(
-        session.telemetry(),
-        CompilerSessionTelemetry {
+        session.stats(),
+        CompilerSessionStats {
             compile_requests: 1,
             load_requests: 2,
             cold_compilations: 3,
@@ -237,6 +237,50 @@ fn repeated_session_loads_keep_resident_owners_isolated() {
             if message.contains("different loaded program")
     ));
 
-    assert_eq!(session.telemetry().cold_compilations, 2);
+    assert_eq!(session.stats().cold_compilations, 2);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn source_versions_remain_owned_by_the_program_that_loaded_them() {
+    let root = workspace("resident-version");
+    let roots = [root.clone()];
+    let source = |version| {
+        format!(
+            "(let run (fn [[value Int]] -> Artifact (artifact {{:version {version} :value value}})))\n(artifact {version})"
+        )
+    };
+    std::fs::write(root.join("main.mag"), source(1)).unwrap();
+    let session = CompilerSession::new();
+    let request = || LoadRequest {
+        source_dir: &root,
+        entry: "main.mag",
+        inputs: json!({}),
+        module_roots: &roots,
+        options: CompilerOptions::default(),
+    };
+
+    let first = session.load(request()).unwrap();
+    let first_run =
+        resolve_artifact_fn(&first, "run", &json!({"kind":"primitive","name":"Int"})).unwrap();
+    std::fs::write(root.join("main.mag"), source(2)).unwrap();
+    let second = session.load(request()).unwrap();
+    let second_run =
+        resolve_artifact_fn(&second, "run", &json!({"kind":"primitive","name":"Int"})).unwrap();
+
+    assert_eq!(
+        eval_artifact_fn(&first, &first_run, json!(7)).unwrap(),
+        json!({"version":1,"value":7})
+    );
+    assert_eq!(
+        eval_artifact_fn(&second, &second_run, json!(7)).unwrap(),
+        json!({"version":2,"value":7})
+    );
+    assert!(eval_artifact_fn(&second, &first_run, json!(7)).is_err());
+    drop(first);
+    assert_eq!(
+        eval_artifact_fn(&second, &second_run, json!(8)).unwrap(),
+        json!({"version":2,"value":8})
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
