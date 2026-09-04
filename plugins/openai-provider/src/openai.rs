@@ -477,10 +477,12 @@ pub fn parse_sse_chunk(payload: &str) -> SseEvent {
             events.push(SseEvent::Refusal(refusal.to_owned()));
         }
     }
-    if let Some(reasoning) = delta
-        .and_then(|delta| delta.get("reasoning"))
-        .and_then(|v| v.as_str())
-    {
+    if let Some(reasoning) = delta.and_then(|delta| {
+        delta
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .or_else(|| delta.get("reasoning").and_then(Value::as_str))
+    }) {
         if !reasoning.is_empty() {
             events.push(SseEvent::ReasoningDelta(reasoning.to_owned()));
         }
@@ -701,6 +703,19 @@ mod tests {
                     total_tokens: Some(3),
                     extensions: BTreeMap::new(),
                 }),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_sse_chunk_accepts_reasoning_content_without_reclassifying_content() {
+        let payload =
+            r#"{"choices":[{"delta":{"content":"answer","reasoning_content":"thought"}}]}"#;
+        assert_eq!(
+            parse_sse_chunk(payload),
+            SseEvent::Batch(vec![
+                SseEvent::Delta("answer".into()),
+                SseEvent::ReasoningDelta("thought".into()),
             ])
         );
     }

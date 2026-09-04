@@ -1794,6 +1794,22 @@ async fn mixed_frames_preserve_content_reasoning_tools_finish_and_usage() {
 }
 
 #[tokio::test]
+async fn reasoning_content_reaches_the_reasoning_stream_accumulator() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thought\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .to_owned();
+    let (result, deltas, reasoning) = run_scripted_stream(body).await;
+    let outcome = result.expect("valid reasoning_content stream");
+    assert_eq!(deltas, ["answer"]);
+    assert_eq!(reasoning, ["thought"]);
+    assert_eq!(outcome.full_text, "answer");
+    assert_eq!(outcome.reasoning_text, "thought");
+}
+
+#[tokio::test]
 async fn pairwise_mixed_frames_reach_downstream_accumulators() {
     let frames = [
         (
