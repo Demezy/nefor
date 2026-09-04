@@ -1,4 +1,4 @@
-use nefor_mag::load_with_inputs_and_module_roots;
+use nefor_mag::compile_file_with_inputs_and_module_roots;
 use serde_json::{json, Value};
 use std::fs;
 
@@ -37,18 +37,22 @@ fn run(name: &str, source: &str, inputs: Value) -> Value {
     let root = workspace(name);
     fs::write(root.join("main.mag"), source).unwrap();
     let mag_lib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
-    load_with_inputs_and_module_roots(&root, "main.mag", inputs, &[root.clone(), mag_lib])
+    compile_file_with_inputs_and_module_roots(&root, "main.mag", inputs, &[root.clone(), mag_lib])
         .unwrap()
-        .artifact
 }
 
 fn run_error(name: &str, source: &str) -> String {
     let root = workspace(name);
     fs::write(root.join("main.mag"), source).unwrap();
     let mag_lib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
-    load_with_inputs_and_module_roots(&root, "main.mag", json!({}), &[root.clone(), mag_lib])
-        .unwrap_err()
-        .to_string()
+    compile_file_with_inputs_and_module_roots(
+        &root,
+        "main.mag",
+        json!({}),
+        &[root.clone(), mag_lib],
+    )
+    .unwrap_err()
+    .to_string()
 }
 
 #[test]
@@ -59,6 +63,16 @@ fn analysis_preserves_normalized_first_occurrence_and_flattening_order() {
           (require "core.validated")
           (require "nefor.graph")
           (require "nefor.mag")
+
+          (let test-operation
+            (fn [T] [[id String] [on (nefor.graph.Port T)]] -> nefor.mag.ProgramOperation
+              (nefor.graph.instantiate-delta-template id on
+                (as (Map String nefor.mag.TypedCapture) {})
+                (as (List nefor.mag.Expression) [])
+                (as nefor.mag.DeltaTemplate
+                  {:types (as (Map String TypeDescriptor) {})
+                   :actors [] :routes [] :messages [] :nodes []
+                   :actor_reference_relocations []}))))
 
           (let validation-message
             (fn [[checked (core.validated.Validated String nefor.graph.Graph)]] -> String
@@ -74,20 +88,20 @@ fn analysis_preserves_normalized_first_occurrence_and_flattening_order() {
           (let result
             (nefor.graph.output "a-result" (type-tag nefor.contracts.Text)))
           (let middle
-            (nefor.graph.with-rule
-              (nefor.graph.with-rule middle-base
-                (nefor.graph.rule "middle-1" (get middle-base "output") "middle-1"))
-              (nefor.graph.rule "middle-2" (get middle-base "output") "middle-2")))
+            (nefor.graph.with-operation
+              (nefor.graph.with-operation middle-base
+                (test-operation "middle-1" (get middle-base "output")))
+              (test-operation "middle-2" (get middle-base "output"))))
           (let start
-            (nefor.graph.with-rule start-base
-              (nefor.graph.rule "start-1" (get start-base "output") "start-1")))
+            (nefor.graph.with-operation start-base
+              (test-operation "start-1" (get start-base "output"))))
           (let first-edge (nefor.graph.edge start middle))
           (let second-edge (nefor.graph.edge middle result))
           (let topology (nefor.graph.graph [first-edge second-edge first-edge]))
           (let analysis (nefor.graph.analyze-graph topology))
           (let changed-middle
-            (nefor.graph.with-rule middle
-              (nefor.graph.rule "changed" (get middle "output") "changed")))
+            (nefor.graph.with-operation middle
+              (test-operation "changed" (get middle "output"))))
           (let conflict
             (nefor.graph.graph
               [first-edge (nefor.graph.edge start changed-middle) second-edge]))
@@ -316,6 +330,17 @@ fn indexed_reachability_handles_cycles_and_preserves_dead_path_diagnostics() {
         r#"
           (require "core.validated")
           (require "nefor.graph")
+          (require "nefor.mag")
+
+          (let test-operation
+            (fn [T] [[id String] [on (nefor.graph.Port T)]] -> nefor.mag.ProgramOperation
+              (nefor.graph.instantiate-delta-template id on
+                (as (Map String nefor.mag.TypedCapture) {})
+                (as (List nefor.mag.Expression) [])
+                (as nefor.mag.DeltaTemplate
+                  {:types (as (Map String TypeDescriptor) {})
+                   :actors [] :routes [] :messages [] :nodes []
+                   :actor_reference_relocations []}))))
 
           (let validation-message
             (fn [[checked (core.validated.Validated String nefor.graph.Graph)]] -> String
@@ -368,9 +393,9 @@ fn indexed_reachability_handles_cycles_and_preserves_dead_path_diagnostics() {
           (let branch-base
             (nefor.graph.identity "branch" (type-tag nefor.contracts.Text)))
           (let branch
-            (nefor.graph.with-rule branch-base
-              (nefor.graph.rule "observe-branch"
-                (get branch-base "output") "observe-branch")))
+            (nefor.graph.with-operation branch-base
+              (test-operation "observe-branch"
+                (get branch-base "output"))))
           (let dead-branch
             (nefor.graph.graph
               [(nefor.graph.edge start result)
@@ -514,7 +539,7 @@ fn duplicate_precedence_contract_selection_and_sequence_order_are_stable() {
         ])
     );
     assert_eq!(
-        artifact["collector-params"]["expected_senders"],
+        artifact["collector-params"]["value"]["expected_senders"],
         json!(["first-child", "second-child"])
     );
 }
@@ -540,7 +565,7 @@ fn nefor_artifact_emits_exact_versioned_program_and_delta_envelopes() {
     assert_eq!(program["kind"], "program");
     assert_eq!(program["program"]["operations"], json!([]));
     let initial = &program["program"]["initial"];
-    assert_eq!(initial["rules"], json!([]));
+    assert!(initial.get("rules").is_none());
     assert!(initial.get("result").is_some());
     assert!(program.get("actors").is_none());
 
@@ -559,5 +584,5 @@ fn nefor_artifact_emits_exact_versioned_program_and_delta_envelopes() {
     assert_eq!(delta["kind"], "delta");
     assert!(delta["delta"].get("result").is_none());
     assert!(delta["delta"].get("operations").is_none());
-    assert_eq!(delta["delta"]["rules"], json!([]));
+    assert!(delta["delta"].get("rules").is_none());
 }

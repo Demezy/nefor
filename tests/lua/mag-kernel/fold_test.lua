@@ -67,7 +67,6 @@ do
       { to = "docs-explorer.entry", content = { kind = "task", prompt = "go" } },
     },
     kills = {},
-    rules = {},
   })
 
   assert_true(res.ok, "normal modification applies")
@@ -223,27 +222,17 @@ do
   assert_eq(inv.state_of("dup"), "never-existed", "rejected modification spawned nothing")
 end
 
--- ------------------------------------------------------------------
--- non-empty rules — rejected because subscriptions are immutable after start
--- ------------------------------------------------------------------
-
+-- Removed rule fields are rejected rather than interpreted as runtime state.
 do
   local inv = new_inv()
   local res = inv.apply({
     actors = { actor_spec("a", "llm", {}, {}) },
     rules = { { on = "a", fn = "handle" } },
   })
-  assert_true(not res.ok, "non-empty rules are rejected")
-  assert_contains(res.error, "immutable initial subscriptions",
-    "rules rejection names the immutable-subscription contract")
+  assert_true(not res.ok, "removed rules are rejected")
+  assert_contains(res.error, "not a supported modification field",
+    "rules rejection names the removed field")
   assert_eq(inv.state_of("a"), "never-existed", "rules rejection applied nothing")
-end
-
--- an empty rules list is accepted (the static-graph case)
-do
-  local inv = new_inv()
-  local res = inv.apply({ actors = { actor_spec("a", "llm", {}, {}) }, rules = {} })
-  assert_true(res.ok, "empty rules list is accepted")
 end
 
 -- ------------------------------------------------------------------

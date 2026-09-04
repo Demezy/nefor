@@ -1,8 +1,7 @@
 use nefor_mag::{
-    compile_profiled_with_options, compile_with_inputs_and_module_roots_and_options,
-    eval_artifact_fn, load_with_inputs_and_module_roots_and_options, resolve_artifact_fn,
-    CompileRequest, CompilerLimits, CompilerOptions, CompilerSession, CompilerSessionStats,
-    LoadRequest,
+    compile_file_with_inputs_and_module_roots_and_options, compile_profiled_with_options,
+    compile_with_inputs_and_module_roots_and_options, CompileRequest, CompilerLimits,
+    CompilerOptions, CompilerSession, CompilerSessionStats, FileCompileRequest,
 };
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -45,8 +44,11 @@ fn compile_request<'a>(
     }
 }
 
-fn load_request<'a>(source_dir: &'a Path, module_roots: &'a [PathBuf]) -> LoadRequest<'a> {
-    LoadRequest {
+fn file_compile_request<'a>(
+    source_dir: &'a Path,
+    module_roots: &'a [PathBuf],
+) -> FileCompileRequest<'a> {
+    FileCompileRequest {
         source_dir,
         entry: "main.mag",
         inputs: json!({"answer": 41}),
@@ -56,7 +58,7 @@ fn load_request<'a>(source_dir: &'a Path, module_roots: &'a [PathBuf]) -> LoadRe
 }
 
 #[test]
-fn session_and_free_apis_have_cold_compile_and_load_parity() {
+fn session_and_free_apis_have_cold_memory_and_file_compile_parity() {
     let root = workspace("parity");
     std::fs::write(
         root.join("support.mag"),
@@ -94,7 +96,7 @@ fn session_and_free_apis_have_cold_compile_and_load_parity() {
     assert_eq!(session_profiled_artifact, free_profiled_artifact);
     assert_eq!(session_profile.counters, free_profile.counters);
 
-    let free_program = load_with_inputs_and_module_roots_and_options(
+    let free_program = compile_file_with_inputs_and_module_roots_and_options(
         &root,
         "main.mag",
         json!({"answer": 41}),
@@ -102,9 +104,10 @@ fn session_and_free_apis_have_cold_compile_and_load_parity() {
         options(),
     )
     .unwrap();
-    let session_program = session.load(load_request(&root, &roots)).unwrap();
-    assert_eq!(session_program.artifact, free_program.artifact);
-    assert_eq!(session_program.hash, free_program.hash);
+    let session_program = session
+        .compile_file(file_compile_request(&root, &roots))
+        .unwrap();
+    assert_eq!(session_program, free_program);
 
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -159,7 +162,7 @@ fn session_stats_accounts_for_cold_successes_and_failures() {
         })
         .unwrap();
     let error = session
-        .load(LoadRequest {
+        .compile_file(FileCompileRequest {
             source_dir: &root,
             entry: "missing.mag",
             inputs: json!({}),
@@ -169,13 +172,15 @@ fn session_stats_accounts_for_cold_successes_and_failures() {
         .unwrap_err();
     assert!(matches!(error, nefor_mag::error::MagError::Eval(_)));
     std::fs::write(root.join("main.mag"), "(artifact 2)").unwrap();
-    session.load(load_request(&root, &roots)).unwrap();
+    session
+        .compile_file(file_compile_request(&root, &roots))
+        .unwrap();
 
     assert_eq!(
         session.stats(),
         CompilerSessionStats {
-            compile_requests: 1,
-            load_requests: 2,
+            memory_compile_requests: 1,
+            file_compile_requests: 2,
             cold_compilations: 3,
             successful_compilations: 2,
             failed_compilations: 1,
@@ -186,125 +191,21 @@ fn session_stats_accounts_for_cold_successes_and_failures() {
 }
 
 #[test]
-fn session_stats_accept_older_wire_shapes() {
+fn session_stats_accept_incomplete_wire_shapes() {
     let stats: CompilerSessionStats = serde_json::from_value(json!({
-        "compile_requests": 1,
-        "load_requests": 2,
+        "memory_compile_requests": 1,
+        "file_compile_requests": 2,
         "cold_compilations": 3
     }))
     .unwrap();
     assert_eq!(
         stats,
         CompilerSessionStats {
-            compile_requests: 1,
-            load_requests: 2,
+            memory_compile_requests: 1,
+            file_compile_requests: 2,
             cold_compilations: 3,
             successful_compilations: 0,
             failed_compilations: 0,
         }
     );
-}
-
-#[test]
-fn repeated_session_loads_keep_resident_owners_isolated() {
-    let root = workspace("resident-owner");
-    let source = r#"
-        (type Input {:value Int})
-        (let captured (host-input "owner" (type-tag String)))
-        (let run (fn [[input Input]] -> Artifact
-          (artifact {:owner captured :value (get input "value")})))
-        (artifact {:owner captured})
-    "#;
-    std::fs::write(root.join("main.mag"), source).unwrap();
-    let roots = [root.clone()];
-    let session = CompilerSession::new();
-    let request = |owner| LoadRequest {
-        source_dir: root.as_path(),
-        entry: "main.mag",
-        inputs: json!({"owner": owner}),
-        module_roots: roots.as_slice(),
-        options: CompilerOptions::default(),
-    };
-
-    let first = session.load(request("first")).unwrap();
-    let second = session.load(request("second")).unwrap();
-    let input_type = json!({
-        "kind": "named",
-        "name": "main.Input",
-        "arguments": [],
-        "body": {
-            "kind": "record",
-            "fields": [{
-                "name": "value",
-                "type": {"kind": "primitive", "name": "Int"}
-            }]
-        }
-    });
-    let first_run = resolve_artifact_fn(&first, "run", &input_type).unwrap();
-    let second_run = resolve_artifact_fn(&second, "run", &input_type).unwrap();
-
-    assert_eq!(
-        eval_artifact_fn(&first, &first_run, json!({"value": 1})).unwrap(),
-        json!({"owner": "first", "value": 1})
-    );
-    assert_eq!(
-        eval_artifact_fn(&second, &second_run, json!({"value": 2})).unwrap(),
-        json!({"owner": "second", "value": 2})
-    );
-    assert!(matches!(
-        eval_artifact_fn(&second, &first_run, json!({"value": 3})),
-        Err(nefor_mag::error::MagError::Eval(message))
-            if message.contains("different loaded program")
-    ));
-
-    assert_eq!(session.stats().cold_compilations, 2);
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn source_versions_remain_owned_by_the_program_that_loaded_them() {
-    let root = workspace("resident-version");
-    let roots = [root.clone()];
-    let source = |version| {
-        format!(
-            "(let run (fn [[value Int]] -> Artifact (artifact {{:version {version} :value value}})))\n(artifact {version})"
-        )
-    };
-    std::fs::write(root.join("main.mag"), source(1)).unwrap();
-    let session = CompilerSession::new();
-    let request = || LoadRequest {
-        source_dir: &root,
-        entry: "main.mag",
-        inputs: json!({}),
-        module_roots: &roots,
-        options: CompilerOptions::default(),
-    };
-
-    let first = session.load(request()).unwrap();
-    let first_run =
-        resolve_artifact_fn(&first, "run", &json!({"kind":"primitive","name":"Int"})).unwrap();
-    std::fs::write(root.join("main.mag"), source(2)).unwrap();
-    let second = session.load(request()).unwrap();
-    let second_run =
-        resolve_artifact_fn(&second, "run", &json!({"kind":"primitive","name":"Int"})).unwrap();
-
-    assert_eq!(
-        eval_artifact_fn(&first, &first_run, json!(7)).unwrap(),
-        json!({"version":1,"value":7})
-    );
-    assert_eq!(
-        eval_artifact_fn(&second, &second_run, json!(7)).unwrap(),
-        json!({"version":2,"value":7})
-    );
-    assert!(matches!(
-        eval_artifact_fn(&second, &first_run, json!(7)),
-        Err(nefor_mag::error::MagError::Eval(message))
-            if message.contains("different loaded program")
-    ));
-    drop(first);
-    assert_eq!(
-        eval_artifact_fn(&second, &second_run, json!(8)).unwrap(),
-        json!({"version":2,"value":8})
-    );
-    std::fs::remove_dir_all(root).unwrap();
 }

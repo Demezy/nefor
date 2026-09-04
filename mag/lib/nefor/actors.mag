@@ -94,7 +94,7 @@
 
 ;; Every agent has one public result port with semantic type `O | AgentError`.
 ;; The stable result wire carries the selected constructor identity. Ordinary
-;; edges route compatible arms directly; `result-arm` creates a typed resident
+;; edges route compatible arms directly; `result-arm` creates a typed operation
 ;; subscription on that same actor/wire without inserting a selector actor.
 (let agent-with-schema (fn [M I O] [[resolve-model (Fn M AuthoredModel)]
                 [config (AgentConfig M)] [input-type (TypeTag I)]

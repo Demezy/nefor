@@ -1255,10 +1255,6 @@ pub fn apply_named(env: &Env, name: &str, arg: Value) -> Result<Value, MagError>
     }
 }
 
-pub(crate) fn apply_value(env: &Env, function: &Value, args: &[Value]) -> Result<Value, MagError> {
-    apply(env, function, args)
-}
-
 fn collection_len(value: &Value) -> Option<u64> {
     match raw(value) {
         Value::List(values) | Value::Vector(values) | Value::Product(values) => {
@@ -1379,7 +1375,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             match raw(&args[0]) {
                 Value::Fn(function) => function.name.clone().map(Value::Str).ok_or_else(|| {
                     MagError::Eval(
-                        "function-name requires a function bound by let; anonymous closures have no resident identity"
+                        "function-name requires a function bound by let; anonymous closures have no authored identity"
                             .into(),
                     )
                 }),

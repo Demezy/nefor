@@ -17,7 +17,7 @@ fn temp_dir(label: &str) -> PathBuf {
 fn profile(root: &Path, source: &str) -> CompileProfile {
     fs::write(root.join("main.mag"), source).expect("entry");
     let profiler = CompileProfiler::new();
-    nefor_mag::load_with_profiler(
+    nefor_mag::compile_file_with_profiler(
         root,
         "main.mag",
         json!({}),
@@ -29,7 +29,7 @@ fn profile(root: &Path, source: &str) -> CompileProfile {
 }
 
 #[test]
-fn profiled_load_reports_phases_and_deterministic_work() {
+fn profiled_file_compile_reports_phases_and_deterministic_work() {
     let root = temp_dir("profile");
     fs::write(
         root.join("library.mag"),
@@ -59,7 +59,6 @@ fn profiled_load_reports_phases_and_deterministic_work() {
     assert!(first.phases.module_evaluate_ns > 0);
     assert!(first.phases.checking_ns > 0);
     assert!(first.total_duration_ns > 0);
-    assert!(first.phases.artifact_serialize_hash_ns > 0);
     assert!(first.total_duration_ns >= first.phases.entry_evaluate_ns);
     assert!(first.phases.entry_evaluate_ns >= first.phases.module_evaluate_ns);
     fs::remove_dir_all(root).ok();
@@ -100,7 +99,7 @@ fn failed_in_memory_compile_preserves_error_and_profile() {
 }
 
 #[test]
-fn failed_load_records_total_and_every_started_entry_phase() {
+fn failed_file_compile_records_total_and_every_started_entry_phase() {
     let cases = [
         ("missing", None, "missing.mag", "entry_read_ns"),
         ("lex", Some("[λ]"), "main.mag", "entry_lex_ns"),
@@ -131,9 +130,14 @@ fn failed_load_records_total_and_every_started_entry_phase() {
             fs::write(root.join("main.mag"), source).expect("entry");
         }
         let profiler = CompileProfiler::new();
-        let error =
-            nefor_mag::load_with_profiler(&root, entry, json!({}), &[root.clone()], &profiler)
-                .expect_err("fixture must fail");
+        let error = nefor_mag::compile_file_with_profiler(
+            &root,
+            entry,
+            json!({}),
+            &[root.clone()],
+            &profiler,
+        )
+        .expect_err("fixture must fail");
         let profile = profiler.snapshot();
         let phases = serde_json::to_value(&profile.phases).expect("phase json");
 
@@ -172,9 +176,14 @@ fn failed_module_work_records_started_nested_phases() {
             fs::write(root.join("support.mag"), source).expect("module");
         }
         let profiler = CompileProfiler::new();
-        let error =
-            nefor_mag::load_with_profiler(&root, "main.mag", json!({}), &[root.clone()], &profiler)
-                .expect_err("fixture must fail");
+        let error = nefor_mag::compile_file_with_profiler(
+            &root,
+            "main.mag",
+            json!({}),
+            &[root.clone()],
+            &profiler,
+        )
+        .expect_err("fixture must fail");
         let profile = profiler.snapshot();
         let phases = serde_json::to_value(&profile.phases).expect("phase json");
 

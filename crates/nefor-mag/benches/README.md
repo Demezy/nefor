@@ -28,16 +28,18 @@ For adjacent paired batch observations, the report analyzes
 
 Stage evidence retains workload, fixture/source, topology, forced-terminal, direct-prerequisite, and expected semantic/artifact fingerprints. Counter subtraction is `exclusive` only when the complete boundary matches, direct forcing is proved, and every counter delta is nonnegative. Lowering is never labeled exclusive: it is **inclusive after a proven analysis prefix** only when the implementation still exposes that prefix, and otherwise remains plainly inclusive. Broad lowering also retains the full untimed lowered artifact observation.
 
-`legacy_cycle2_manifest.json` remains the immutable pre-cycle-3 historical oracle. `current_main_a0_manifest.json` records the exact inherited fixture and artifact identities after the experiment is semantically rebased over current main. A current-main change to config-owned MAG sources advances the current A0 workload and oracle fingerprints without rewriting that historical manifest; inherited case/oracle membership, order, and the 25-oracle policy remain fixed.
+`legacy_cycle2_manifest.json` remains the immutable pre-cycle-3 historical oracle with its original 25 entries. `current_main_a0_manifest.json` records the exact inherited fixture and artifact identities after the experiment is semantically rebased over current main. The current artifact-only catalog retains the 22 applicable entries in their historical order and explicitly retires the three post-compilation resident-function oracles whose public behavior was removed. A current-main change to config-owned MAG sources advances the current A0 workload and oracle fingerprints without rewriting the historical manifest.
 
 The report/statistics policy is fail-closed. Reports with the previous schema, median-bootstrap bounds, absent worker-pair identity, or old exclusive-section evidence are incompatible and remain diagnostic evidence only.
 
-## Cycle-4 pre-cache scenarios
+## Cycle-4 cache-scenario measurements (no runtime artifact cache)
 
-The cache-transition suite is separate from the frozen cycle-3 authority. It has
-protocol `mag-cache-scenario-worker-v1` and ordered catalog
-`cycle-4-pre-cache-v2`; it does not append to the cycle-3 timed cases or change
-any cycle-3 fingerprint or manifest.
+The cache-scenario suite is separate from the frozen cycle-3 authority. `cache`
+names the invalidation workloads this measurement suite preserves; the suite is
+measurement-only and neither adds nor exercises a runtime artifact cache. It has
+protocol `mag-cache-scenario-worker-v2` and ordered catalog
+`cycle-4-artifact-only-v3`; it does not append to the cycle-3 timed cases or
+change any cycle-3 fingerprint or manifest.
 
 ```sh
 MAG_BENCH_SAMPLES=3 just bench-mag --paired --calibration --suite cache \

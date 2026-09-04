@@ -19,7 +19,7 @@ M.declaration = {
   -- constructor accepts. Opaque to the kernel (params belong to the factory).
   params = {
     greeting = "string?", -- optional label echoed on output
-    value = "data?", -- optional canonical payload for rule-kernel tests
+    value = "data?", -- optional canonical payload for operation-kernel tests
     canonical_from_message = "bool?",
   },
   template = { relocations = {} },

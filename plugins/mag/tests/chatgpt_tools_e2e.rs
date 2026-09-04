@@ -257,7 +257,7 @@ async fn chatgpt_projects_stale_allowlist_and_returns_tool_result_through_gate()
     send(&mut mag_in, "agentic-loop", object(json!({
         "kind": "mag.execute", "id": "execute", "run_id": "tool-run", "session_id": "tool-session",
         "principal": "lead", "conversation_id": "chatgpt-tools-conversation",
-        "artifact": artifact, "params_overlay": {"answer.llm": {"provider": PROVIDER}}
+        "artifact": artifact, "params_overlay": {"actor:10:answer.llm": {"provider": PROVIDER}}
     }))).await;
 
     for round in 0..2 {

@@ -23,7 +23,7 @@ how to execute Lua, nothing more.
 From the runtime's point of view an actor is used as a function: fire its
 input message, black box until it returns its output. Completion is
 returning — per activation; a node activated twice returns twice. What the
-runtime does with the returned output (routing, rules) is described in
+runtime does with the returned output (routing, operations) is described in
 ir.md.
 
 The kernel holds one actor inventory **per run**: a single map from actor id
@@ -43,11 +43,11 @@ the bus underneath.
 
 **Actors hold no lifecycle authority.** Composing, spawning, and killing are
 environment operations — actors never spawn actors. Composition that depends
-on runtime results comes through immutable environment-side rule bindings and
-their pure resident MAG functions (see ir.md). An actor receives
-messages and emits messages, nothing else.
+on runtime results comes through immutable environment-side declarative
+operations (see ir.md). An actor receives messages and emits messages, nothing
+else.
 
-Rule-capable outputs use the same ordinary output envelope as routing. Their
+Operation triggers use the same ordinary output envelope as routing. Their
 declared wire is `kind`; `value` is the complete semantic value of the port.
 For example, an agent result carries either the complete `T` or complete
 `AgentError` under `value`, with its compiler-issued constructor identity in
@@ -283,16 +283,16 @@ code today. Every outbound message is id-signed (`from = <actor id>`, omitted
 below). These are pinned contracts: a producer emits exactly this, a consumer
 reads exactly this — no alias fallbacks, no shape sniffing.
 
-| Kind                          | Emitter → consumer            | Payload (beyond `kind`, `from`)                                                                                                             |
-| ----------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `generic-tool.ToolCalls`      | llm → run-tool                | `calls = { { id, name, args }, … }`                                                                                                         |
-| `generic-tool.ToolHandle`     | run-tool → tool-result        | `results = { { id, name, output, error }, … }` (index-ordered to the calls)                                                                 |
-| `generic-provider.TextAnswer` | llm → result boundary / human | `result` (raw provider result); `text?`, `text_answer?` (lifted when result is a table)                                                     |
-| `mag.ApprovalRequest`         | human → control plane         | intercepted emit, surfaced as the `mag.approval_request` event: `correlation = <id>`, `prompt?`, `subject` (the input message)              |
-| `mag.ApprovalReply`           | control plane → human         | injected via a `mag.apply` message; delivered as a graph activation tagged `mag.ApprovalReply`, `message = { approved, content?, reason? }` |
-| `mag.ApprovalCancel`          | human (drain) → control plane | intercepted emit, surfaced as the `mag.approval_cancel` event: `correlation = <id>`                                                         |
-| `human.Approved`              | human → downstream            | `subject`, `content`                                                                                                                        |
-| `human.Rejected`              | human → downstream            | `subject`, `reason`                                                                                                                         |
+| Kind                          | Emitter → consumer            | Payload (beyond `kind`, `from`)                                                                                                   |
+| ----------------------------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `generic-tool.ToolCalls`      | llm → run-tool                | `calls = { { id, name, args }, … }`                                                                                               |
+| `generic-tool.ToolHandle`     | run-tool → tool-result        | `results = { { id, name, output, error }, … }` (index-ordered to the calls)                                                       |
+| `generic-provider.TextAnswer` | llm → result boundary / human | `result` (raw provider result); `text?`, `text_answer?` (lifted when result is a table)                                           |
+| `mag.ApprovalRequest`         | human → control plane         | intercepted emit, surfaced as `mag.approval_request`: `correlation = <id>`, `prompt?`, `subject`, `reply_type`, `reply_type_id`   |
+| `mag.ApprovalReply`           | control plane → human         | typed `mag.apply` message using the request's reply metadata; payload `{ approved, content, kind = "mag.ApprovalReply", reason }` |
+| `mag.ApprovalCancel`          | human (drain) → control plane | intercepted emit, surfaced as the `mag.approval_cancel` event: `correlation = <id>`                                               |
+| `human.Approved`              | human → downstream            | `subject`, `content`                                                                                                              |
+| `human.Rejected`              | human → downstream            | `subject`, `reason`                                                                                                               |
 
 The llm factory is the provider boundary: it normalizes the provider's native
 tool-call shape (`name`/`arguments`, or a nested `function`) into the pinned
@@ -308,14 +308,17 @@ directions travel two different channels — neither is graph routing:
   (there is no downstream actor — the consumer is the control plane) and
   surfaces it as the `mag.approval_request` control-plane event, run_id-stamped
   like every lifecycle event, carrying `from` (the gate's actor id),
-  `correlation`, `prompt?`, and `subject`. The chat surface renders it; the
-  gate's activation defers (`pending`).
+  `correlation`, `prompt?`, `subject`, and the kernel-owned `reply_type` plus
+  `reply_type_id`. The chat surface renders it; the gate's activation defers
+  (`pending`).
 - **Reply in.** The reply originates at the chat surface, not an upstream
   actor: it has no sender edge for a firing slot to bind to, so no factory
-  declares an input port for it. The control plane injects it as a `mag.apply`
-  modification message — to the gate's id, content
-  `{ kind = "mag.ApprovalReply", approved, content?, reason? }`, addressed by
-  the event's `run_id` + `from` — and the kernel delivers it by tag past the
+  declares an input port for it. The control plane reflects the request's
+  semantic metadata into a canonical typed `mag.apply` delta message addressed
+  to the gate's id. Its payload is
+  `{ kind = "mag.ApprovalReply", approved, content, reason }`; unused strings
+  are empty rather than omitted. The kernel validates that payload and delivers
+  it by tag past the
   declared ports, directly to the CONSTRUCTED instance (the port bypass). The
   resolved gate emits its typed exit (`human.Approved` / `human.Rejected`,
   ordinary routed outputs) and acks with `mag.complete`.

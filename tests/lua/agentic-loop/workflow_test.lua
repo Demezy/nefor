@@ -268,29 +268,34 @@ local function lead_artifact()
     actors = {
       {
         id = "lead.source", factory = "nefor.factory.source", type_arguments = { task_type },
-        params = { value = { prompt = "<initial task text>" } },
+        params = { ["$mag"] = "packed-value", value = {
+          value = { prompt = "<initial task text>" },
+        } },
         routes = { ["nefor.graph.Value"] = {
           { actor = "lead.entry", wire = "nefor.agent.Input" },
         } },
       },
       {
         id = "lead.entry", factory = "nefor.factory.adapter", type_arguments = { task_type },
-        params = { seed = "provider-in" },
+        params = { ["$mag"] = "packed-value", value = { seed = "provider-in" } },
         routes = { ["generic-provider.ProviderOut"] = { { actor = "lead.llm", wire = "generic-provider.ProviderOut" } } },
       },
       {
         id = "lead.llm", factory = "nefor.factory.llm", type_arguments = {},
-        params = { tools = { "read_file", "mag" } },
+        params = { ["$mag"] = "packed-value", value = {
+          tools = { "read_file", "mag" },
+        } },
         routes = {
           ["generic-tool.ToolCalls"] = { { actor = "lead.run-tool", wire = "generic-tool.ToolCalls" } },
         },
       },
     },
     messages = {
-      { to = "lead.source", content = { kind = "mag.Unit" } },
+      { to = "lead.source", content = {
+        ["$mag"] = "packed-value", value = { kind = "mag.Unit" },
+      } },
     },
     kills = {},
-    rules = {},
     result = { from = {
       actor = "lead.llm",
       type = "nefor.contracts.TextAnswer",
@@ -299,13 +304,18 @@ local function lead_artifact()
   }
 end
 
+local function program_artifact()
+  return { format = "nefor.mag", version = 1, kind = "program",
+    program = { initial = lead_artifact(), operations = {} } }
+end
+
 local function task_prompt(execute_body)
   local source = type(execute_body.params_overlay) == "table"
-      and execute_body.params_overlay["lead.source"] or nil
+      and execute_body.params_overlay["actor:11:lead.source"] or nil
   if type(source) == "table" and type(source.value) == "table" then
     return source.value.prompt
   end
-  for _, actor in ipairs(execute_body.artifact and execute_body.artifact.actors or {}) do
+  for _, actor in ipairs(execute_body.artifact and execute_body.artifact.program.initial.actors or {}) do
     if actor.id == "lead.source" then return actor.params.value.prompt end
   end
   return nil
@@ -483,16 +493,14 @@ local function begin_turn(text)
   local load = find_kind(calls, "mag.load")
   if load ~= nil then
     assert_eq(load.target, "mag", "mag.load targets the mag plugin")
-    assert_eq(load.body.resident, true, "lead program load requests a retained handle")
     assert_eq(load.body.entry, "agentic-loop/lead-turn.mag",
       "the shipped turn-program is the load entry")
     _test.calls_clear()
     send_to_loop("mag", {
       kind = "mag.loaded",
       in_reply_to = load.body.id,
-      program_id = load.body.id,
       hash = "sha256:test",
-      artifact = lead_artifact(),
+      artifact = program_artifact(),
     })
     calls = decode_calls()
   end
@@ -609,8 +617,7 @@ do
   _test.calls_clear()
   send_to_loop("mag", {
     kind = "mag.loaded", in_reply_to = load.body.id,
-    program_id = load.body.id,
-    hash = "sha256:cold", artifact = lead_artifact(),
+    hash = "sha256:cold", artifact = program_artifact(),
   })
   calls = decode_calls()
   local exec = find_kind(calls, "mag.execute")
@@ -676,17 +683,18 @@ do
   assert_eq(agentic_loop._internals.state.conversation_id, manager_conversation_id,
     "derived child creation cannot replace the active root")
   local mod = lead_artifact()
-  assert_eq(exec.body.program_id, agentic_loop._internals.state.lead_program.program_id,
-    "lead execution addresses the exact retained program")
-  assert_eq(exec.body.artifact, nil, "lead execution does not copy the artifact inline")
+  assert_eq(exec.body.artifact.format, "nefor.mag",
+    "lead execution carries the cached immutable artifact inline")
+  assert_eq(exec.body.artifact.program.initial.actors[1].params.value.value.prompt,
+    "<initial task text>", "execute overlays do not mutate the cached artifact")
   assert_eq(mod.messages[1].to, "lead.source", "Unit activation targets the source actor")
-  assert_eq(mod.messages[1].content.kind, "mag.Unit",
+  assert_eq(mod.messages[1].content.value.kind, "mag.Unit",
     "the source activation remains a Unit message")
   assert_eq(task_prompt(exec.body), "hello lead",
     "the literal first user message replaces the source's typed task value")
   assert(json.is_array(mod.types.task.arguments),
     "cloning the compiled artifact preserves empty descriptor arrays")
-  local overlay = exec.body.params_overlay["lead.llm"]
+  local overlay = exec.body.params_overlay["actor:8:lead.llm"]
   assert(type(overlay) == "table", "params overlay keys the derived llm actor")
   assert_eq(overlay.system, nil,
     "system content is canonical conversation state, not an execute overlay")
@@ -776,7 +784,7 @@ do
   local exec2 = find_kind(calls, "mag.execute")
   assert(exec2 ~= nil, "second turn executes")
   assert_eq(task_prompt(exec2.body), "and more?")
-  assert_eq(exec2.body.params_overlay["lead.llm"].history, nil,
+  assert_eq(exec2.body.params_overlay["actor:8:lead.llm"].history, nil,
     "second turn does not persist the prior transcript in MAG")
 end
 
@@ -810,7 +818,7 @@ do
   })
   local promoted = find_kind(decode_calls(), "mag.execute")
   assert(promoted ~= nil, "matching terminal projection promotes queued input")
-  assert_eq(promoted.body.params_overlay["lead.llm"].history, nil,
+  assert_eq(promoted.body.params_overlay["actor:8:lead.llm"].history, nil,
     "promoted turn leaves context reconstruction to the provider")
 end
 
@@ -871,7 +879,7 @@ do
   })
 
   local second = begin_turn("after compaction")
-  local second_overlay = second.body.params_overlay["lead.llm"]
+  local second_overlay = second.body.params_overlay["actor:8:lead.llm"]
   assert_eq(second_overlay.conversation_context, nil,
     "opaque provider checkpoints never enter MAG overlays")
   assert_eq(second_overlay.history, nil,
@@ -952,7 +960,7 @@ do
     "the loop emits no competing durable history marker")
 
   local exec2 = begin_turn("and the model?")
-  assert_eq(exec2.body.params_overlay["lead.llm"].history, nil,
+  assert_eq(exec2.body.params_overlay["actor:8:lead.llm"].history, nil,
     "the next turn reconstructs the tool transcript through the provider")
 end
 
@@ -961,14 +969,14 @@ end
 do
   fresh_loop()
   local exec1 = begin_turn("first ambient")
-  assert_eq(exec1.body.params_overlay["lead.llm"].system, nil,
+  assert_eq(exec1.body.params_overlay["actor:8:lead.llm"].system, nil,
     "turn 1 does not duplicate the canonical system message")
   send_to_loop("mag", {
     kind = "mag.run_result", run_id = exec1.body.run_id,
     status = "completed", result = { text = "a1" },
   })
   local exec2 = begin_turn("second ambient")
-  assert_eq(exec2.body.params_overlay["lead.llm"].system, nil,
+  assert_eq(exec2.body.params_overlay["actor:8:lead.llm"].system, nil,
     "turn 2 does not duplicate the canonical system message")
 end
 
@@ -1172,7 +1180,7 @@ do
   -- The loop is free again, and the next turn seeds the preserved context.
   local exec_after = begin_turn("after kill")
   assert(exec_after ~= nil, "a killed turn releases the slot")
-  assert_eq(exec_after.body.params_overlay["lead.llm"].history, nil,
+  assert_eq(exec_after.body.params_overlay["actor:8:lead.llm"].history, nil,
     "the turn after a kill reconstructs preserved context outside MAG")
 end
 
@@ -1201,7 +1209,7 @@ do
   assert(exec2 ~= nil, "queued input promotes into a fresh turn on close")
   assert_eq(task_prompt(exec2.body), "second",
     "the promoted turn carries the queued text")
-  assert_eq(exec2.body.params_overlay["lead.llm"].history, nil,
+  assert_eq(exec2.body.params_overlay["actor:8:lead.llm"].history, nil,
     "the promoted turn reconstructs finished context outside MAG")
 end
 
@@ -1338,7 +1346,7 @@ do
   local exec2 = find_kind(calls, "mag.execute")
   assert(exec2 ~= nil, "an idle lead relays the completion immediately")
   local prompt = task_prompt(exec2.body)
-  assert_eq(exec2.body.params_overlay["lead.llm"].input_cause,
+  assert_eq(exec2.body.params_overlay["actor:8:lead.llm"].input_cause,
     "internal_async_completion",
     "the relay persists its causal identity separately from user authorship")
   assert(string.find(prompt, "mag-sub-1", 1, true) ~= nil,
@@ -1448,7 +1456,7 @@ do
   assert_eq(history[5].role, "tool", "the replayed tool result keeps its role")
 
   local exec = begin_turn("post-resume")
-  local overlay = exec.body.params_overlay["lead.llm"]
+  local overlay = exec.body.params_overlay["actor:8:lead.llm"]
   assert_eq(overlay.conversation_context, nil,
     "the post-resume turn does not forward provider-private checkpoints")
   assert_eq(overlay.history, nil,
@@ -1469,7 +1477,7 @@ do
   assert_eq(#agentic_loop.history(), 0, "chat.reset clears canonical history")
   project_pending_conversation(decode_calls())
   local exec2 = begin_turn("fresh start")
-  assert_eq(exec2.body.params_overlay["lead.llm"].history, nil,
+  assert_eq(exec2.body.params_overlay["actor:8:lead.llm"].history, nil,
     "post-/new turn leaves history reconstruction to the provider")
 end
 

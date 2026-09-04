@@ -1,8 +1,9 @@
 # mag (plugin)
 
-Hosts the MAG runtime: loads `.mag` programs (via `crates/nefor-mag`) into a
-resident evaluator and runs them as constellations of lightweight in-memory
-actors, folding graph modifications over an initially empty graph. The lead
+Hosts the MAG runtime: compiles `.mag` programs (via `crates/nefor-mag`) into
+immutable versioned inline envelopes and runs them as constellations of
+lightweight in-memory actors, folding graph modifications over an initially
+empty graph. The lead
 writes tiny MAG programs ad-hoc during sessions; this plugin turns them into
 running workflows.
 
@@ -44,6 +45,6 @@ carry a kernel copy. Resolution order, highest precedence first:
 - [MAG inside Nefor](<../../mag/book/02. nefor/README.md>) — MAG as applied inside Nefor
 - [../../docs/architecture.md](../../docs/architecture.md) — the four execution layers and what lives where
 - [docs/actor-model.md](docs/actor-model.md) — actors, factories, lifecycle, contracts, signals
-- [docs/ir.md](docs/ir.md) — graph modifications, the fold, firing, rules, application semantics
+- [docs/ir.md](docs/ir.md) — program/delta envelopes, the fold, firing, operations, application semantics
 - [docs/lowering.md](docs/lowering.md) — MAG graph libraries → modification: edges into routes, namespacing, shell defaults
 - [docs/patterns.md](docs/patterns.md) — canonical shipped shapes for MAG programs (dependencies, joins, cycles, failure repair, fanout/timeouts)

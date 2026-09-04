@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompileProfile {
-    /// Wall-clock time for the complete compile or load attempt, including failures.
+    /// Wall-clock time for the complete compilation attempt, including failures.
     pub total_duration_ns: u64,
     pub phases: PhaseDurations,
     pub counters: OperationCounters,
@@ -29,7 +29,6 @@ pub struct PhaseDurations {
     pub module_evaluate_ns: u64,
     pub checking_ns: u64,
     pub artifact_conversion_ns: u64,
-    pub artifact_serialize_hash_ns: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -110,7 +109,6 @@ pub(crate) enum Phase {
     ModuleEvaluate,
     Checking,
     ArtifactConversion,
-    ArtifactSerializeHash,
 }
 
 #[derive(Debug)]
@@ -183,7 +181,6 @@ impl CompileProfiler {
             Phase::ModuleEvaluate => &mut profile.phases.module_evaluate_ns,
             Phase::Checking => &mut profile.phases.checking_ns,
             Phase::ArtifactConversion => &mut profile.phases.artifact_conversion_ns,
-            Phase::ArtifactSerializeHash => &mut profile.phases.artifact_serialize_hash_ns,
         };
         *target = target.saturating_add(ns);
     }

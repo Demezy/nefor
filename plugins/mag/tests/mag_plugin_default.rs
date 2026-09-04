@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn versioned_program_envelope_unwraps_and_rejects_wrong_discriminators() {
-        let initial = serde_json::json!({"actors": [], "rules": [], "result": {}});
+        let initial = serde_json::json!({"actors": [], "result": {}});
         let operation = serde_json::json!({"id":"expand","template":{}});
         let envelope = serde_json::json!({
             "format": "nefor.mag", "version": 1, "kind": "program",
@@ -362,9 +362,13 @@ mod tests {
                 }
             }]
         });
-        let error = preflight_provider_schemas(&modification).expect_err("JsonValue rejected");
+        let error = preflight_provider_schemas(&DecodedProgram {
+            initial: modification,
+            operations: Vec::new(),
+        })
+        .expect_err("JsonValue rejected");
         assert!(
-            error.contains("structured-output actor \"answer\""),
+            error.contains("structured-output actor \"actor:6:answer\""),
             "{error}"
         );
         assert!(error.contains("no faithful"), "{error}");
@@ -387,7 +391,11 @@ mod tests {
                 "params": {}
             }]
         });
-        preflight_provider_schemas(&modification).expect("supported schema lowers");
+        preflight_provider_schemas(&DecodedProgram {
+            initial: modification,
+            operations: Vec::new(),
+        })
+        .expect("supported schema lowers");
     }
 
     #[test]
@@ -563,7 +571,6 @@ mod tests {
             Some("load-1"),
             "sha256:abc",
             serde_json::json!({"actors": []}),
-            None,
             &["stub".to_owned(), "sink".to_owned()],
             serde_json::json!([{"identity": "nefor.factory.stub"}]),
         );
@@ -631,10 +638,13 @@ mod tests {
     #[test]
     fn artifact_boundary_preserves_factory_identity() {
         let artifact = serde_json::json!({
-            "actors": [{"id": "answer", "factory": "nefor.factory.llm", "type_arguments": []}],
-            "messages": [], "kills": [], "rules": []
+            "actors": [{"id": "answer", "factory": "nefor.factory.llm", "type_arguments": [],
+                "params": {"$mag": "packed-value", "value": {}}}],
+            "messages": [], "kills": []
         });
-        let modification = artifact_modification(&artifact).expect("valid artifact");
+        let envelope = serde_json::json!({"format":"nefor.mag","version":1,"kind":"program",
+            "program":{"initial":artifact,"operations":[]}});
+        let modification = artifact_modification(&envelope).expect("valid artifact");
         assert_eq!(modification["actors"][0]["factory"], "nefor.factory.llm");
         assert_eq!(
             modification["actors"][0]["type_arguments"],
@@ -645,15 +655,18 @@ mod tests {
     #[test]
     fn artifact_boundary_preserves_structural_result_metadata() {
         let artifact = serde_json::json!({
-            "actors": [{"id": "answer", "factory": "nefor.factory.llm", "type_arguments": [], "routes": {}}],
-            "messages": [], "kills": [], "rules": [],
+            "actors": [{"id": "answer", "factory": "nefor.factory.llm", "type_arguments": [],
+                "params": {"$mag": "packed-value", "value": {}}, "routes": {}}],
+            "messages": [], "kills": [],
             "result": {"from": {
                 "actor": "answer",
                 "type": "audit.CodeAudit",
                 "wire": "generic-provider.TextAnswer"
             }}
         });
-        let modification = artifact_modification(&artifact).expect("valid artifact");
+        let envelope = serde_json::json!({"format":"nefor.mag","version":1,"kind":"program",
+            "program":{"initial":artifact,"operations":[]}});
+        let modification = artifact_modification(&envelope).expect("valid artifact");
         assert_eq!(modification["result"]["from"]["actor"], "answer");
         assert_eq!(
             modification["result"]["from"]["wire"],
@@ -679,9 +692,14 @@ mod tests {
             ]
         });
         let overlay = serde_json::json!({
-            "build": { "provider": "chatgpt", "model": "gpt-5.5", "reasoning_effort": "high" }
+            "actor:5:build": { "provider": "chatgpt", "model": "gpt-5.5", "reasoning_effort": "high" }
         });
-        apply_params_overlay(&mut modification, overlay.as_object().unwrap()).unwrap();
+        let mut program = DecodedProgram {
+            initial: modification,
+            operations: Vec::new(),
+        };
+        apply_params_overlay(&mut program, overlay.as_object().unwrap()).unwrap();
+        modification = program.initial;
 
         let actors = modification["actors"].as_array().unwrap();
         let build = &actors[0]["params"];
@@ -701,8 +719,13 @@ mod tests {
         let mut modification = serde_json::json!({
             "actors": [ { "id": "a", "factory": "llm" } ]
         });
-        let overlay = serde_json::json!({ "a": { "model": "m" } });
-        apply_params_overlay(&mut modification, overlay.as_object().unwrap()).unwrap();
+        let overlay = serde_json::json!({ "actor:1:a": { "model": "m" } });
+        let mut program = DecodedProgram {
+            initial: modification,
+            operations: Vec::new(),
+        };
+        apply_params_overlay(&mut program, overlay.as_object().unwrap()).unwrap();
+        modification = program.initial;
         assert_eq!(
             modification["actors"][0]["params"]["model"].as_str(),
             Some("m")
@@ -712,7 +735,7 @@ mod tests {
     #[test]
     fn params_overlay_cannot_replace_compiler_derived_params() {
         let original = serde_json::json!({"version": 1, "root": {"kind": "string"}});
-        let mut modification = serde_json::json!({
+        let modification = serde_json::json!({
             "actors": [
                 {
                     "id": "typed",
@@ -760,9 +783,15 @@ mod tests {
                 serde_json::json!({"present": true, "value": "other"}),
             ),
         ] {
-            let overlay = serde_json::json!({(actor): {(param): value}});
-            let error =
-                apply_params_overlay(&mut modification, overlay.as_object().unwrap()).unwrap_err();
+            let overlay = serde_json::json!({(initial_actor_address(actor)): {(param): value}});
+            let error = apply_params_overlay(
+                &mut DecodedProgram {
+                    initial: modification.clone(),
+                    operations: Vec::new(),
+                },
+                overlay.as_object().unwrap(),
+            )
+            .unwrap_err();
             assert!(error.contains(&format!("protected compiler-derived param {param:?}")));
         }
         assert_eq!(modification["actors"][0]["params"]["schema"], original);
@@ -781,6 +810,133 @@ mod tests {
         assert_eq!(
             modification["actors"][0]["params"]["error_type"],
             "agent-error-id"
+        );
+    }
+
+    #[test]
+    fn delta_envelope_is_required_and_wrong_variants_are_rejected() {
+        let delta = serde_json::json!({"types": {}, "actors": [], "messages": [], "kills": [], "nodes": []});
+        let envelope = serde_json::json!({
+            "format": "nefor.mag", "version": 1, "kind": "delta", "delta": delta
+        });
+        assert_eq!(artifact_delta(&envelope).unwrap(), delta);
+        for invalid in [
+            delta,
+            serde_json::json!({"format":"nefor.mag","version":1,"kind":"program","program":{"initial":{},"operations":[]}}),
+            serde_json::json!({"format":"other","version":1,"kind":"delta","delta":{}}),
+        ] {
+            assert!(artifact_delta(&invalid).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn packed_value_unwrap_preserves_user_records_with_the_same_field_names() {
+        let authored = serde_json::json!({
+            "type": "sha256:user-authored",
+            "value": {"nested": true}
+        });
+        let mut packed = serde_json::json!({
+            "$mag": "packed-value",
+            "value": authored
+        });
+
+        unpack_packed(&mut packed, "test packed value").unwrap();
+
+        assert_eq!(packed, authored);
+    }
+
+    #[test]
+    fn artifact_decode_unpacks_only_known_outer_boundaries() {
+        let authored = serde_json::json!({
+            "type": "sha256:user-authored",
+            "value": {"nested": true}
+        });
+        let packed = |value: Value| {
+            serde_json::json!({
+                "$mag": "packed-value", "value": value
+            })
+        };
+        let artifact = serde_json::json!({
+            "format": "nefor.mag", "version": 1, "kind": "program", "program": {
+                "initial": {
+                    "types": {},
+                    "actors": [{"id": "initial", "factory": "stub", "params": packed(authored.clone())}],
+                    "messages": [{"to": "initial", "content": packed(authored.clone())}],
+                    "kills": [], "nodes": [], "result": {"from": {"actor": "initial", "wire": "out"}}
+                },
+                "operations": [{
+                    "captures": {"saved": {"value": packed(authored.clone())}},
+                    "template": {
+                        "types": {},
+                        "actors": [{"slot": "worker", "factory": "stub", "params": packed(authored.clone())}],
+                        "messages": [{"to": {}, "content": packed(authored.clone())}],
+                        "kills": [], "nodes": []
+                    }
+                }]
+            }
+        });
+
+        let mut unwrapped = artifact.clone();
+        unwrapped["program"]["initial"]["actors"][0]["params"] = authored.clone();
+        let error = match artifact_program(&unwrapped) {
+            Ok(_) => panic!("raw user record was mistaken for a packed value"),
+            Err(error) => error,
+        };
+        assert!(error.contains("must be a compiler-owned packed value"));
+
+        let decoded = artifact_program(&artifact).unwrap();
+        assert_eq!(decoded.initial["actors"][0]["params"], authored);
+        assert_eq!(decoded.initial["messages"][0]["content"], authored);
+        assert_eq!(
+            decoded.operations[0]["captures"]["saved"]["value"],
+            authored
+        );
+        assert_eq!(
+            decoded.operations[0]["template"]["actors"][0]["params"],
+            authored
+        );
+        assert_eq!(
+            decoded.operations[0]["template"]["messages"][0]["content"],
+            authored
+        );
+    }
+
+    #[test]
+    fn template_actor_overlays_use_collision_free_addresses_and_preserve_artifact() {
+        let artifact = serde_json::json!({
+            "format":"nefor.mag", "version":1, "kind":"program", "program":{
+                "initial":{"actors":[{"id":"same","factory":"llm","params":{
+                    "$mag":"packed-value","value":{"model":"authored"}
+                }}]},
+                "operations":[{"id":"expand","template":{"actors":[
+                    {"slot":"same","factory":"llm","params":{
+                        "$mag":"packed-value","value":{"model":"template"}
+                    }}
+                ]}}]
+            }
+        });
+        let original = artifact.clone();
+        let mut decoded = artifact_program(&artifact).unwrap();
+        let inventory = actor_inventory(&decoded);
+        assert_eq!(inventory[0].0, "actor:4:same");
+        assert_eq!(inventory[1].0, "operation:6:expand:template:4:same");
+        assert_ne!(inventory[0].0, inventory[1].0);
+        let overlay = serde_json::json!({
+            "operation:6:expand:template:4:same": {"model":"overlaid"}
+        });
+        apply_params_overlay(&mut decoded, overlay.as_object().unwrap()).unwrap();
+        assert_eq!(
+            decoded.operations[0]["template"]["actors"][0]["params"]["model"],
+            "overlaid"
+        );
+        assert_eq!(decoded.initial["actors"][0]["params"]["model"], "authored");
+        assert_eq!(
+            artifact, original,
+            "execution material must not mutate the immutable artifact"
+        );
+        assert_eq!(
+            immutable_artifact_hash(&artifact),
+            immutable_artifact_hash(&original)
         );
     }
 

@@ -49,7 +49,7 @@ For input `A + B`, incoming edge types must exactly cover every occurrence. `T +
 
 ### Union coverage
 
-Every possible output alternative needs an ordinary route, a typed resident subscription, or the terminal output path. An agent's result is `O | AgentError`; routing only `O` leaves an uncovered error arm. Connect the whole union or handle both arms. The diagnostic names the offending output boundary and type and lists the ordinary routes and resident rules currently available as handlers.
+Every possible output alternative needs an ordinary route, a typed operation subscription, or the terminal output path. An agent's result is `O | AgentError`; routing only `O` leaves an uncovered error arm. Connect the whole union or handle both arms. The diagnostic names the offending output boundary and type and lists the ordinary routes and declarative operations currently available as handlers.
 
 ### Sum construction
 
@@ -67,7 +67,7 @@ A structured agent's declared result is `O | nefor.contracts.AgentError`.
 - `OutputValidationError` reports one or more path-specific schema violations.
 - `last_output` retains the latest raw model output for diagnosis or a recovery agent.
 
-The agent requests correction up to `:max-corrections`. When the budget is exhausted, `AgentError` is emitted as an ordinary typed result. Route it to the output, a reviewer/fixer that accepts the union, or a resident error rule. Do not claim `O` was produced and do not parse provider prose as a substitute.
+The agent requests correction up to `:max-corrections`. When the budget is exhausted, `AgentError` is emitted as an ordinary typed result. Route it to the output or to a reviewer/fixer that accepts the union. Do not claim `O` was produced and do not parse provider prose as a substitute.
 
 ## Shell failures and hangs
 
@@ -98,9 +98,9 @@ Run ids are opaque and session-scoped. Common outcomes include:
 
 Use the exact `run_id` returned by a fresh `mag apply` or lead `mag-eval`. Call `await-run` once when dependent work needs completion; use `graph-status` only as a one-shot snapshot. Canceling an await detaches that waiter but leaves the run alive. Use `terminate-graph(run_id)` to request termination, then wait for canonical confirmation rather than assuming the request itself killed the run.
 
-## Dynamic-rule errors
+## Declarative-operation errors
 
-Dynamic expansion is validated before its change is applied. Keep each rule's subscribed port and function result typed, return the proper delta artifact, and make the delta atomic.
+Dynamic expansion is validated before execution and materialized atomically at each trigger. Version 1 admits only `instantiate-delta-template`, with ordered trigger, capture, field, integer-to-decimal-string, and string-concatenation expressions. Actor references, parameter bindings, relocations, routes, and logical paths must resolve within the closed template; an invalid or conflicting materialization fails the run without applying a partial delta.
 
 For `nefor.node.sequence`, expected sender ids are derived from the supplied nodes. Unexpected senders, duplicate delivery, or an incomplete drain fail rather than silently reorder results. An empty node list produces `[]` after its input activation.
 
@@ -113,7 +113,7 @@ A successful worktree survives the run. Do not interpret run completion as merge
 ## Correction sequence
 
 1. Identify whether failure occurred during language checking, concrete graph validation, runtime execution, approval, or run control.
-2. Name the failed node, type, rule, or handle from the diagnostic.
+2. Name the failed node, type, operation, or run from the diagnostic.
 3. Change the source or plan; do not blindly resubmit the same artifact.
 4. Compile and inspect the new preview.
 5. Re-obtain approval if the write-capable plan changed or its approval expired.

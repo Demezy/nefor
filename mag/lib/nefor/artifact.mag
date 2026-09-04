@@ -3,12 +3,11 @@
 (require "nefor.mag")
 
 (let emit-program
-  (fn [[graph nefor.graph.Graph] [legacy-rules (List nefor.graph.LegacyRule)]] -> Artifact
-    (let authored (nefor.graph.program graph legacy-rules))
-    (let initial (nefor.graph.lower-program authored))
+  (fn [[graph nefor.graph.Graph]] -> Artifact
+    (let initial (nefor.graph.lower-program graph))
     (artifact
       (nefor.mag.program-envelope
-        initial (get authored "operations")))))
+        initial (get (nefor.graph.analyze-graph graph) "graph_operations")))))
 
 (let compile
   (fn [[transform (Fn nefor.graph.Graph nefor.graph.Graph)]] -> Artifact
@@ -17,29 +16,10 @@
       (host-input "factory_contracts" (type-tag (List nefor.graph.FactoryContract)))))
     (match checked
       [(core.validated.Valid nefor.graph.Graph) valid
-        (emit-program (get valid "value") (as (List nefor.graph.LegacyRule) []))]
-      [(core.validated.Invalid String) invalid (fail invalid)])))
-
-;; Temporary staged seam. The canonical envelope contains only declarative
-;; operations; these named rules are retained solely in its initial runtime
-;; payload until InstantiateDeltaTemplate execution replaces resident MAG.
-(let compile-program
-  (fn [[transform (Fn nefor.graph.Graph nefor.graph.Graph)]
-       [legacy-rules (List nefor.graph.LegacyRule)]] -> Artifact
-    (let graph (transform nefor.graph.empty-graph))
-    (let checked (nefor.graph.validate graph
-      (host-input "factory_contracts" (type-tag (List nefor.graph.FactoryContract)))))
-    (match checked
-      [(core.validated.Valid nefor.graph.Graph) valid
-        (emit-program (get valid "value") legacy-rules)]
+        (emit-program (get valid "value"))]
       [(core.validated.Invalid String) invalid (fail invalid)])))
 
 (let delta (fn [[change nefor.graph.Delta]] -> Artifact
   (artifact
     (nefor.mag.delta-envelope
       (nefor.graph.lower-delta change)))))
-
-;; Only resident function execution uses the pre-envelope delta during this
-;; staged unit. New authoring must use `delta`.
-(let legacy-delta (fn [[change nefor.graph.Delta]] -> Artifact
-  (artifact (nefor.graph.lower-delta change))))

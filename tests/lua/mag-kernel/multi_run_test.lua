@@ -96,7 +96,6 @@ local function program()
       } },
     },
     kills = {},
-    rules = {},
     nodes = { { path = { "agent" }, members = { "agent" } } },
     result = { from = {
       actor = "agent",
@@ -165,7 +164,7 @@ assert_eq(by_kind(a_wire, "mag.modification_applied")[1].run_id, "run-A",
   "modification_applied carries run_id")
 
 local duplicate_node = kernel.apply("run-A", {
-  actors = {}, messages = {}, kills = {}, rules = {},
+  actors = {}, messages = {}, kills = {},
   nodes = { { path = { "agent" }, members = {} } },
 })
 assert_true(not duplicate_node.ok, "a duplicate full logical path rejects")

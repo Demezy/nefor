@@ -163,14 +163,6 @@ local function tool_err(firing_id, err)
   emit_as(SOURCE_NAME, nil, { kind = "tool.result", id = firing_id, error = tostring(err) })
 end
 
-local function release_loaded_program(program_id)
-  if type(program_id) ~= "string" or #program_id == 0 then return end
-  emit_as(SOURCE_NAME, "mag", {
-    kind = "mag.unload",
-    id = "mag-unload-" .. envelope.uuid_lite(),
-    program_id = program_id,
-  })
-end
 
 local function sh_quote(value)
   return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
@@ -326,7 +318,6 @@ function M.handle(firing_id, args, metadata)
   emit_as(SOURCE_NAME, "mag", {
     kind       = "mag.load",
     id         = load_id,
-    resident   = true,
     source_dir = ws,
     module_roots = module_roots_for(ws),
     entry      = rel,
@@ -378,7 +369,6 @@ function M.cancel(firing_id)
   for load_id, pending in pairs(state.pending_loads) do
     if pending.firing_id == firing_id then
       state.pending_loads[load_id] = nil
-      release_loaded_program(load_id)
       hit = true
     end
   end
@@ -390,7 +380,6 @@ end
 local function on_session_end()
   for load_id, pending in pairs(state.pending_loads) do
     tool_err(pending.firing_id, "mag-eval: session ended before the run settled")
-    release_loaded_program(load_id)
   end
   state.pending_loads = {}
   return false

@@ -3,7 +3,7 @@ use crate::bench_support::{
 };
 use nefor_mag::error::MagError;
 use nefor_mag::profile::{CompileProfile, CompileProfiler};
-use nefor_mag::{CompilerOptions, CompilerSession, CompilerSessionStats, LoadRequest};
+use nefor_mag::{CompilerOptions, CompilerSession, CompilerSessionStats, FileCompileRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-pub const CACHE_SCENARIO_PROTOCOL_VERSION: &str = "mag-cache-scenario-worker-v1";
-pub const CACHE_SCENARIO_CATALOG_VERSION: &str = "cycle-4-pre-cache-v2";
+pub const CACHE_SCENARIO_PROTOCOL_VERSION: &str = "mag-cache-scenario-worker-v2";
+pub const CACHE_SCENARIO_CATALOG_VERSION: &str = "cycle-4-artifact-only-v3";
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
@@ -96,7 +96,11 @@ pub fn definitions() -> Vec<CacheScenarioDefinition> {
         ("cold-module-chain", "cold", "none"),
         ("cold-shipped-lead-turn", "cold", "none"),
         ("populate-module-chain", "population", "empty-session"),
-        ("identical-repeat-module-chain", "repeat", "successful-load"),
+        (
+            "identical-repeat-module-chain",
+            "repeat",
+            "successful-file-compile",
+        ),
         (
             "identical-repeat-broken-module",
             "failure",
@@ -158,7 +162,7 @@ pub fn definitions() -> Vec<CacheScenarioDefinition> {
         name: name.into(),
         family: family.into(),
         transition: transition.into(),
-        timed_operation: "CompilerSession::load_with_profiler exactly once".into(),
+        timed_operation: "CompilerSession::compile_file_with_profiler exactly once".into(),
     })
     .collect()
 }
@@ -203,7 +207,7 @@ fn execute_prepared(prepared: &PreparedScenario, name: &str) -> CacheScenarioSam
     let started = Instant::now();
     let result = prepared
         .session
-        .load_with_profiler(prepared.request(), &profiler);
+        .compile_file_with_profiler(prepared.request(), &profiler);
     let target_duration_ns = nanos(started.elapsed());
     let semantic_observation = observe(result, &prepared.root);
     let sample = CacheScenarioSample {
@@ -378,81 +382,81 @@ impl PreparedScenario {
 
     fn setup(&mut self, name: &str) {
         match name {
-            "identical-repeat-module-chain" => self.load_setup_success(),
+            "identical-repeat-module-chain" => self.compile_setup_success(),
             "identical-repeat-broken-module" => {
                 self.write("b.mag", "(let value missing)");
-                self.load_setup_unresolved("missing");
+                self.compile_setup_unresolved("missing");
             }
             "entry-bytes-changed" => {
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.write("main.mag", "(require \"a\")\n(artifact 2)");
             }
             "transitive-module-changed" => {
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.write("b.mag", "(let value 2)");
             }
             "module-ambiguity-introduced" => {
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.add_ambiguous_module("a.mag", "(let value 2)");
             }
             "read-target-changed" => {
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.write("note.txt", "v2");
             }
             "read-json-target-changed" => {
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.write("data/value.json", "{\"version\":2}");
             }
             "read-json-ambiguity-introduced" => {
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.add_ambiguous_module("data/value.json", "{\"version\":2}");
             }
             "host-input-changed" => {
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.inputs = json!({"value": 2});
             }
             "compiler-options-changed" => {
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.options.limits.evaluation_steps = 1;
             }
             "broken-module-repaired" => {
                 self.write("b.mag", "(let value missing)");
-                self.load_setup_unresolved("missing");
+                self.compile_setup_unresolved("missing");
                 self.write("b.mag", "(let value 2)");
             }
             "entry-lex-precedes-module-ambiguity" => {
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.add_ambiguous_module("a.mag", "(let value 2)");
                 self.write("main.mag", "(require \"a\")\n(artifact @)");
             }
             "module-ambiguity-precedes-host-input" => {
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.inputs = json!({});
                 self.add_ambiguous_module("a.mag", "(let value 2)");
             }
             "required-module-precedes-entry-error" => {
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.write("a.mag", "(let value missing)");
                 self.write("main.mag", "(require \"a\")\n(artifact later_missing)");
             }
             "entry-deleted-after-success" => {
-                self.load_setup_success();
+                self.compile_setup_success();
                 fs::remove_file(self.source_dir.join("main.mag")).expect("delete entry");
             }
             "alternating-context-a-b-a-b" => {
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.inputs = json!({"value": 2});
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.inputs = json!({"value": 1});
-                self.load_setup_success();
+                self.compile_setup_success();
                 self.inputs = json!({"value": 2});
             }
             _ => {}
         }
     }
 
-    fn request(&self) -> LoadRequest<'_> {
-        LoadRequest {
+    fn request(&self) -> FileCompileRequest<'_> {
+        FileCompileRequest {
             source_dir: &self.source_dir,
             entry: &self.entry,
             inputs: self.inputs.clone(),
@@ -461,16 +465,16 @@ impl PreparedScenario {
         }
     }
 
-    fn load_setup_success(&self) {
+    fn compile_setup_success(&self) {
         self.session
-            .load(self.request())
+            .compile_file(self.request())
             .expect("scenario setup succeeds");
     }
 
-    fn load_setup_unresolved(&self, expected_symbol: &str) {
+    fn compile_setup_unresolved(&self, expected_symbol: &str) {
         let error = self
             .session
-            .load(self.request())
+            .compile_file(self.request())
             .expect_err("scenario setup fails");
         assert!(
             matches!(error, MagError::Unresolved(symbol) if symbol == expected_symbol),
@@ -504,15 +508,11 @@ impl Drop for PreparedScenario {
     }
 }
 
-fn observe(
-    result: Result<nefor_mag::LoadedProgram, MagError>,
-    fixture_root: &Path,
-) -> SemanticOutcome {
+fn observe(result: Result<Value, MagError>, fixture_root: &Path) -> SemanticOutcome {
     match result {
-        Ok(program) => SemanticOutcome::Success {
-            artifact_json: program.artifact,
-            artifact_hash: program.hash,
-            resident_probe_results: vec![],
+        Ok(artifact) => SemanticOutcome::Success {
+            artifact_hash: fingerprint(&serde_json::to_vec(&artifact).expect("serialize artifact")),
+            artifact_json: artifact,
         },
         Err(error) => {
             let message = normalize_fixture_path(&error.to_string(), fixture_root);
@@ -553,7 +553,7 @@ fn assert_expected(name: &str, sample: &CacheScenarioSample) {
             assert_error_class(sample, "unresolved");
             assert_error_message(sample, "unresolved symbol: missing");
             assert_eq!(
-                sample.session_stats.cold_compilations, sample.session_stats.load_requests,
+                sample.session_stats.cold_compilations, sample.session_stats.file_compile_requests,
                 "identical failures must perform cold work rather than be cached"
             );
             assert!(sample.compile_profile.phases.module_read_ns > 0);
@@ -585,7 +585,7 @@ fn assert_expected(name: &str, sample: &CacheScenarioSample) {
 
 fn assert_session_accounting(sample: &CacheScenarioSample) {
     let stats = sample.session_stats;
-    let requests = stats.compile_requests + stats.load_requests;
+    let requests = stats.memory_compile_requests + stats.file_compile_requests;
     assert_eq!(
         stats.successful_compilations + stats.failed_compilations,
         requests

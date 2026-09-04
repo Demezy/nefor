@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use nefor_mag::load_with_inputs;
+use nefor_mag::compile_file_with_inputs;
 
 fn book_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/examples")
@@ -29,7 +29,7 @@ fn mag_book_examples_compile() {
     ];
 
     for entry in examples {
-        load_with_inputs(&root, entry, serde_json::json!({}))
+        compile_file_with_inputs(&root, entry, serde_json::json!({}))
             .unwrap_or_else(|error| panic!("MAG Book example {entry} failed: {error}"));
     }
 }

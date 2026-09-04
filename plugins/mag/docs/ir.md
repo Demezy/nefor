@@ -48,13 +48,12 @@ Nefor's MAG library owns an explicit versioned application envelope:
           "id": "answer",
           "factory": "nefor.factory.llm",
           "type_arguments": [],
-          "params": {},
+          "params": { "$mag": "packed-value", "value": {} },
           "routes": {}
         }
       ],
       "messages": [],
       "kills": [],
-      "rules": [],
       "nodes": [{ "path": ["answer"], "members": ["answer"] }],
       "result": { "from": { "actor": "answer", "wire": "nefor.agent.Result" } }
     },
@@ -66,6 +65,12 @@ Nefor's MAG library owns an explicit versioned application envelope:
 A delta uses the same format/version with `kind: "delta"` and a `delta`
 payload. It has no result boundary or operations. The core compiler remains
 schema-opaque.
+
+Fields typed as MAG `PackedValue` cross this immutable boundary as
+`{"$mag":"packed-value","value":...}`. The plugin removes exactly that outer
+compiler-owned envelope at the declared actor-param, message-content, capture,
+and template positions. It never recursively interprets the payload, so an
+authored record such as `{"type":"sha256:...","value":...}` remains data.
 
 `factory` is the qualified registry identity and `type_arguments` supplies its
 concrete generic specialization. The plugin passes both fields through
@@ -87,22 +92,20 @@ module search path. Absolute roots are accepted as explicit host inputs;
 relative roots resolve beneath `source_dir` and may not escape it. The plugin
 does not infer library locations from its installation or configuration.
 
-MAG is a scripting language for the runtime hosted by this plugin. A program
-is loaded once — parsed, definitions evaluated, initial modification validated,
-and every concrete structured-output schema lowered through the provider's
-strict schema subset. `resident:true` retains that exact environment under the
-opaque `program_id` returned by `mag.loaded`; a compile-only load retains
-nothing. Provider
-schema lowering is repeated defensively at execute after control-plane overlays
-and before `begin_run`; a failure at either boundary emits `mag.error`. A load
-failure has no run lifecycle. The execute backstop can only reject before
-`begin_run`, so it likewise emits no `mag.run_started`; its correlated control
-plane must settle any pre-registered invocation as failed. The shipped control-plane can still explicitly call resident functions with
-`mag.eval` for older `compile-program` artifacts. That retained evaluator and
-legacy `rules` are bounded compatibility seams. Canonical authoring uses the
-executed `InstantiateDeltaTemplate` operation described in
-[lowering](lowering.md), and the same immutable artifact can execute inline
-after its source and resident compiler environment are gone.
+MAG is a compilation language for the runtime hosted by this plugin. Each
+`mag.load` request parses and evaluates the supplied source in a fresh compiler
+session, validates the resulting application envelope, preflights provider
+schemas and declarative operations, and returns the exact immutable envelope
+with its content hash. No source environment, cache entry, or callable function
+handle survives compilation.
+
+Execution and apply are distinct closed boundaries. `mag.execute` accepts only
+a version-1 program envelope; `mag.apply` accepts only a version-1 delta
+envelope. Raw unversioned modifications and crossed envelope kinds are rejected
+before application. A program can carry only the version-1
+`InstantiateDeltaTemplate` operation and its closed expression vocabulary; it
+cannot carry source, bytecode, arbitrary MAG functions, or a general runtime
+expression language.
 
 The concrete modification remains the data the kernel folds. It is minimal and
 contains only kernel operations; the declarative operation schema stays in the
@@ -115,13 +118,6 @@ Nefor MAG envelope.
   "actors": [{ "id": "...", "factory": "...", "params": {}, "routes": {} }],
   "messages": [{ "to": "...", "semantic_type": {}, "content": {} }],
   "kills": ["..."],
-  "rules": [
-    {
-      "id": "expand",
-      "on": { "actor": "planner", "wire": "tasks.Valid" },
-      "fn": "expand"
-    }
-  ],
   "nodes": [
     { "path": ["stage"], "members": [] },
     { "path": ["stage", "agent"], "members": ["agent.llm"] }
@@ -130,45 +126,34 @@ Nefor MAG envelope.
 ```
 
 - `actors` — instances to spawn: which resolved factory, with which params,
-  under which id.
-  Ids are human-readable and namespaced per library fragment
-  instantiation: an agent named `docs-explorer` prefixes its internal
-  actors, so its provider loop is `docs-explorer.llm` — each instance gets
-  its own subtree of names.
-- `routes` — kernel-owned typed wiring, sibling of `params` by design:
-  params belong to the factory, routes belong to the kernel, and an actor
-  never reads its own routes. A map from fully-qualified output type to an
-  array of destination ids; the authoring graph's edges dissolve here. A
-  union exit becomes multiple keys; one type to many targets is fanout with
-  no special casing. See lowering.md for the authoring-to-artifact mapping.
-- `messages` — sends: initial activation for new actors, inputs for existing
-  ones. Compiler-authored messages retain the concrete destination descriptor;
-  the current runtime still delivers the private protocol `content`.
+  under which id. Ids are namespaced per library fragment instantiation.
+- `routes` — kernel-owned typed wiring, sibling of `params`: params belong to
+  the factory, routes belong to the kernel, and an actor never reads its own
+  routes. A map from fully qualified output wire to destinations; the authored
+  graph's edges dissolve here.
+- `messages` — typed sends: initial activation for new actors or inputs for
+  existing ones.
 - `kills` — ids to remove. Kill removes actors and voids late outputs; it is
-  not currently a general routeable failure output.
-- `rules` — immutable initial subscriptions. Each names a concrete source
-  actor/output port and a unary pure function in the resident MAG snapshot.
-  Deltas cannot add subscriptions or replace the result boundary.
-- `nodes` — presentation-only logical hierarchy. Each entry owns a non-empty
-  path of local name segments plus the runtime actor ids directly represented
-  at that level. Parent paths must exist, complete paths are unique within the
-  run, and every actor in a declaring modification has exactly one logical
-  owner. Actor ids remain opaque;
-  dots in them carry no hierarchy semantics. A validated declaration emits
-  `mag.nodes_declared` before any corresponding `mag.actor_spawned` event.
+  not a general routeable failure output.
+- `nodes` — presentation-only logical hierarchy. Parent paths must exist,
+  complete paths are unique, and every actor in a declaring modification has
+  exactly one logical owner. Dots in actor ids have no hierarchy semantics.
 
-Consumers reconstruct the recursive tree from these flat paths. Siblings use a
-deterministic best-effort linearization of their actor routes for display: an
-acyclic region reads entry-to-exit, while declaration order breaks cyclic or
-otherwise underconstrained ties and leaves feedback edges pointing backward.
-This projection never changes firing, routing, or scheduling.
+A program's `initial` modification additionally has one structural `result`
+boundary. A delta has neither a result boundary nor operations. Declarative
+operations are siblings of `initial` in the program envelope, not fields in a
+concrete modification.
+
+Consumers reconstruct the recursive presentation tree from flat paths.
+Deterministic best-effort route order affects display only, never firing,
+routing, or scheduling.
 
 ## The fold
 
-Runtime state is a graph; the initial state is NullGraph — empty. Loading a
+Runtime state is a graph; the initial state is NullGraph — empty. Executing a
 program registers its immutable operations and applies its initial modification.
-Later modifications come from explicit control-plane apply/eval paths,
-declarative operation firing, or the bounded legacy resident-rule path:
+Later modifications come from explicit control-plane delta application or
+`InstantiateDeltaTemplate` operation firing:
 
 ```
 Graph(0)   = NullGraph
@@ -182,10 +167,10 @@ modifications — running a workflow _is_ this fold.
 
 ## Running a program — registration, then lazy firing
 
-Program start is one fold application, no barrier. A rule produces a `Delta`
-artifact: it may spawn, send, kill, and route against
-actors already live in the run, but has no result boundary. Applying a program's
-_initial_ modification:
+Program start is one fold application, no barrier. An operation materializes a
+concrete delta: it may spawn, send, kill, and route against actors already live
+in the run, but has no result boundary or nested operations. Applying a
+program's _initial_ modification:
 
 1. **Register** every actor in the initial constellation — id, factory,
    params, routes. Registration puts every route and input contract in place
@@ -231,7 +216,7 @@ only.
   explicit end) reaps that run's live actors through the fold — kill
   handlers run, abort/cancel envelopes reach the bus — and drops the
   context. Other runs are untouched.
-- **Session-boundary reaping.** The engine (and the resident kernel) outlive
+- **Session-boundary reaping.** The engine and long-lived kernel outlive
   TUI sessions. Beginning a run under a new `session_id` reaps every live
   context left by a different session — the scoped analogue of a global
   reset; concurrent runs of the current session are never touched.
@@ -368,42 +353,27 @@ control-plane results:
 Thus observers may see the same rejection event in both cases, but only the
 initial-execute rejection is itself terminal.
 
-## Rules are names, not code
+## Declarative operations are closed data
 
-A rule's `fn` is a reference to a function defined in the program's source
-snapshot, with declared shape `T -> Artifact`. The Nefor host interprets the
-returned raw value as a delta. Load rejects missing, non-unary, or non-Artifact
-functions. A source emission is an ordinary output envelope that must contain
-the matching non-empty `kind` and a non-null `value`; extra transport fields
-are allowed. The host never guesses from `result`, `content`, or
-factory-specific fields. The `value` alone becomes the function argument and
-is reified against the function's declared MAG input type before evaluation.
+Version 1 defines one operation: `InstantiateDeltaTemplate`. It subscribes to a
+concrete typed source output, captures immutable values, and materializes a
+structural delta template from exactly five expression forms: `Trigger`,
+`Capture`, `Field`, `IntToDecimalString`, and `ConcatStrings`.
 
-Each run owns a FIFO trigger queue. A source emission is consumed once under
-the key `(rule id, source emission sequence)`. The host evaluates a trigger
-under the normal MAG fuel budget, validates and atomically applies its delta,
-then continues with any nested triggers until quiescence. Evaluation errors,
-non-object or malformed/rejected deltas, and noncanonical source
-payloads fail the run explicitly. Terminal settlement waits for this drain.
+Each run registers its ordered operation list before initial application. A
+matching canonical output contributes one trigger occurrence to a run-local
+FIFO. The kernel evaluates that occurrence against the exact emitted value,
+clones and relocates the template, regenerates canonical route identities,
+validates the resulting delta, and applies it atomically. Synchronous nested
+emissions append work to the same FIFO rather than re-entering the fold.
+Terminal success waits for the FIFO to become quiescent, and an operation
+failure defeats a success that raced ahead of it.
 
-- Name-plus-snapshot instead of embedded code: a MAG function closes over
-  its defining environment, and re-entering the source snapshot provides
-  that environment deterministically — no closure serialization, ever.
-- A retained environment is evaluated once at load and addressed by its exact
-  `program_id`; purity makes reuse exact. `mag.unload` releases the handle,
-  while each live run keeps the environment it already pinned.
-- **Bounded evaluation**: rule evaluation runs under a step budget;
-  exceeding it rejects the modification with an error. Purity means a
-  killed evaluation leaves nothing to clean up.
-- Load-time checks: every rule's `fn` exists, takes one argument, and
-  returns `Artifact`. A typo'd name is a load error, not a
-  runtime surprise.
-- Inline artifacts cannot invent rule bindings: rule-bearing execution must
-  use the retained source snapshot that declared their functions. Rule
-  evaluation addresses that live run (or an explicit retained `program_id`),
-  never a process-global current program.
-- A modification is a plain map — MAG builds it with ordinary data
-  constructors and the standard validator checks its shape.
+The representation is intentionally not extensible at runtime. There is no
+general AST, arbitrary object construction, condition, loop, source/bytecode,
+post-compilation function application, or artifact cache. Adding another
+operation or expression form is a versioned contract change, not dynamic code
+loading.
 
 ## Kernel operations
 
@@ -425,7 +395,7 @@ kind.
 
 | Concern                                                                                                                                  | Owner                           |
 | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| Parsing, load-time evaluation, semantic descriptor/protocol helpers, bounded legacy rule evaluation                                      | Rust host / MAG evaluator       |
+| Parsing, compilation, semantic descriptor/protocol helpers, immutable-envelope validation                                                | Rust host / MAG evaluator       |
 | Operation preflight, expression evaluation, template materialization/relocation, the atomic fold, firing, routing, lifecycle, settlement | Kernel (this plugin's Lua)      |
 | What an actor actually does with a message                                                                                               | The factory, entirely           |
 | Capability quirks (provider protocols, aborts)                                                                                           | The capability plugin's own API |

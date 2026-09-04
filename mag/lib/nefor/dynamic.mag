@@ -181,20 +181,6 @@
          (nefor.graph.store-port input) [(nefor.graph.store-port output)])]
       [] [] input output)))
 
-;; Temporary implementation seam: resident MAG evaluation still materializes
-;; the same concrete delta while the runtime operation executor is staged.
-(let expand
-  (fn [T O] [[traversal-id String] [entry (Indexed T)] [worker (nefor.graph.Node Unit O)]] -> Artifact
-    (let indexed (indexed-result (str traversal-id (str ".result." (get entry "index"))) entry (type-tag O)))
-    (let item (nefor.node.named (str traversal-id (str "-" (get entry "index")))
-      (nefor.node.>>> (nefor.node.rename "worker" worker) (nefor.node.rename "result" indexed))))
-    (let output-input (nefor.graph.port (str traversal-id ".output")
-      (type-tag (| (Indexed O) DynamicCount)) "nefor.dynamic.Collect"))
-    (nefor.artifact.legacy-delta
-      (nefor.graph.delta-message-front
-        (nefor.graph.delta-route (nefor.graph.node-delta item) (get item "output") output-input)
-        (get item "input") nil))))
-
 (let traverse-template
   (fn [T O] [[id String] [worker (TemplateNode Unit O)]
              [input-type (TypeTag T)] [output-type (TypeTag O)]]

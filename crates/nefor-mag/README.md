@@ -14,9 +14,9 @@ mag compile main.mag --source-dir .
 `CompilerSession` accepts explicit `CompileRequest` values for in-memory entry
 source and `LoadRequest` values for file-backed entry programs. Both requests
 carry the source directory, host inputs, module roots, and compiler options.
-The session is currently cold-only: every call creates independent compiler
-state, every load owns a distinct resident program, and `CompilerSessionStats`
-accounts for requests without implying a cache. Existing free `compile_*` and
+The session is cold-only: every call creates independent compiler state and
+`CompilerSessionStats` accounts for requests without implying a cache. No
+compiled artifact retains an evaluator or callable function handle. Existing free `compile_*` and
 `load_*` functions remain available and use the same cold implementation.
 
 `CompileProfiler` records deterministic operation counts plus inclusive

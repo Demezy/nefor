@@ -1,7 +1,7 @@
 // Embedded Lua VM that hosts the MAG kernel.
 //
 // The kernel proper (actor inventory, lazy construction, routing, the fold
-// over graph modifications) is Lua-resident — see
+// over graph modifications) is Lua-hosted — see
 // `plugins/mag/docs/actor-model.md` and `docs/ir.md`. This module is the
 // Rust host: it creates the VM, installs the native surface the kernel
 // needs (log, json, fs, a millisecond clock, and a bus-emit queue), loads
@@ -141,15 +141,6 @@ pub struct RunCompletion {
     pub output_path: Option<String>,
     pub persisted: bool,
     pub result: Option<JsonValue>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RuleTrigger {
-    pub rule_id: String,
-    pub source_actor: String,
-    pub source_wire: String,
-    pub emission_seq: u64,
-    pub value: JsonValue,
 }
 
 /// Owns the Lua VM and the kernel table it produced.
@@ -303,6 +294,7 @@ impl LuaHost {
         apply_outcome(&res)
     }
 
+    #[cfg(test)]
     pub fn start(&self, run_id: &str, modification: &JsonValue) -> Result<ApplyOutcome, MagError> {
         self.start_program(run_id, modification, &[])
     }
@@ -332,28 +324,6 @@ impl LuaHost {
         let f: Function = self.kernel.get("apply")?;
         let res: Table = f.call::<Table>((run_id, mod_val))?;
         apply_outcome(&res)
-    }
-
-    pub fn take_rule_trigger(&self, run_id: &str) -> Result<Option<RuleTrigger>, MagError> {
-        let f: Function = self.kernel.get("take_rule_trigger")?;
-        let trigger: Option<Table> = f.call::<Option<Table>>(run_id)?;
-        trigger
-            .map(|trigger| {
-                let source: Table = trigger.get("source")?;
-                Ok(RuleTrigger {
-                    rule_id: trigger.get("rule_id")?,
-                    source_actor: source.get("actor")?,
-                    source_wire: source.get("wire")?,
-                    emission_seq: trigger.get("emission_seq")?,
-                    value: self.lua.from_value(trigger.get::<Value>("value")?)?,
-                })
-            })
-            .transpose()
-    }
-
-    pub fn fail_run(&self, run_id: &str, error: &str) -> Result<bool, MagError> {
-        let f: Function = self.kernel.get("fail_run")?;
-        Ok(f.call::<bool>((run_id, error))?)
     }
 
     pub fn steer_run(

@@ -312,7 +312,9 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     let synthetic = libraries
         .iter()
         .map(|path| format!("(require \"{}\")", module_name(&lib_root, path)))
-        .chain(std::iter::once("(artifact {})".to_owned()))
+        .chain(std::iter::once(
+            "(nefor.artifact.delta (nefor.graph.delta [] [] [] []))".to_owned(),
+        ))
         .collect::<Vec<_>>()
         .join("\n");
     fs::write(temp_root.join("all-libraries.mag"), synthetic)
@@ -385,7 +387,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "the canonical example must construct its worktree inside the reusable SDLC function"
     );
     assert!(
-        canonical.contains("(nefor.dynamic.traverse \"followups\" expand-followup"),
+        canonical.contains("(nefor.dynamic.traverse-template \"followups\" worker-template"),
         "the canonical example must derive dynamic workers through a node boundary"
     );
     fs::write(temp_root.join("canonical-agent.mag"), canonical)
@@ -434,7 +436,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
     let task_artifact = task_source.get("artifact").expect("task source artifact");
     let task_actor = task_artifact
-        .pointer("/actors")
+        .pointer("/program/initial/actors")
         .and_then(Value::as_array)
         .and_then(|actors| {
             actors
@@ -448,12 +450,12 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
     assert_eq!(
         task_actor
-            .pointer("/params/value/prompt")
+            .pointer("/params/value/value/prompt")
             .and_then(Value::as_str),
         Some("preserve this prompt")
     );
     assert_eq!(
-        task_actor.pointer("/params/value_type"),
+        task_actor.pointer("/params/value/value_type"),
         task_actor.pointer("/outputs/0/type_id"),
         "the source value type id must match its Task output"
     );
@@ -531,7 +533,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
     let sequence_paths = node_sequence
         .get("artifact")
-        .and_then(|artifact| artifact.pointer("/nodes"))
+        .and_then(|artifact| artifact.pointer("/program/initial/nodes"))
         .and_then(Value::as_array)
         .expect("sequence logical node paths")
         .iter()
@@ -572,7 +574,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
     let source_messages = source_sequence
         .get("artifact")
-        .and_then(|artifact| artifact.get("messages"))
+        .and_then(|artifact| artifact.pointer("/program/initial/messages"))
         .and_then(Value::as_array)
         .expect("source sequence initial messages");
     assert_eq!(
@@ -581,7 +583,10 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "the completed graph must bootstrap exactly one outer Unit root"
     );
     assert_eq!(source_messages[0]["to"], "workers.input");
-    assert_eq!(source_messages[0]["content"]["kind"], "nefor.graph.Value");
+    assert_eq!(
+        source_messages[0]["content"]["value"]["kind"],
+        "nefor.graph.Value"
+    );
 
     fs::write(
         temp_root.join("source-delta.mag"),
@@ -607,12 +612,12 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
     let delta_messages = source_delta
         .get("artifact")
-        .and_then(|artifact| artifact.get("messages"))
+        .and_then(|artifact| artifact.pointer("/delta/messages"))
         .and_then(Value::as_array)
         .expect("source delta initial messages");
     assert_eq!(delta_messages.len(), 1);
     assert_eq!(delta_messages[0]["to"], "start");
-    assert_eq!(delta_messages[0]["content"]["kind"], "mag.Unit");
+    assert_eq!(delta_messages[0]["content"]["value"]["kind"], "mag.Unit");
 
     fs::write(
         temp_root.join("node-products.mag"),
@@ -651,7 +656,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
     let product_paths = node_products
         .get("artifact")
-        .and_then(|artifact| artifact.pointer("/nodes"))
+        .and_then(|artifact| artifact.pointer("/program/initial/nodes"))
         .and_then(Value::as_array)
         .expect("product logical node paths")
         .iter()
@@ -701,42 +706,6 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
             .is_some_and(
                 |message| message.contains("logical node paths must be non-empty and unique")
             )
-    );
-
-    fs::write(
-        temp_root.join("node-owned-rule.mag"),
-        r#"(require "nefor.artifact")
-(require "nefor.graph")
-(let start (nefor.graph.source "start" (type-tag String) "watched"))
-(let base (nefor.graph.identity "watched" (type-tag String)))
-(let observe
-  (fn [[value String]] -> Artifact
-    (nefor.artifact.delta
-      (nefor.graph.delta [] [] [] []))))
-(let watched
-  (nefor.graph.with-rule base
-    (nefor.graph.rule "observe" (get base "output") "observe")))
-(let result (nefor.graph.output-for "result" watched))
-(nefor.artifact.compile
-  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-    (nefor.graph.add-edges graph
-      [(nefor.graph.edge start watched)
-       (nefor.graph.edge watched result)])))"#,
-    )
-    .expect("write node-owned rule regression");
-    let node_owned_rule = load(
-        &mut reader,
-        &mut stdin,
-        "node-owned-rule",
-        &temp_root,
-        Path::new("node-owned-rule.mag"),
-        &module_roots,
-    )
-    .await;
-    assert_eq!(
-        node_owned_rule.get("kind").and_then(Value::as_str),
-        Some("mag.loaded"),
-        "a composite node's resident rules must survive graph compilation: {node_owned_rule:#?}"
     );
 
     fs::write(
@@ -849,7 +818,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     assert_eq!(
         process_path
             .get("artifact")
-            .and_then(|value| value.pointer("/actors/0/params/cwd")),
+            .and_then(|value| value.pointer("/program/initial/actors/0/params/value/cwd")),
         Some(&json!("./../outside")),
         "path.join remains lexical and nonconfining"
     );
@@ -950,7 +919,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     }
     let algebra_actors = algebra
         .get("artifact")
-        .and_then(|artifact| artifact.pointer("/actors"))
+        .and_then(|artifact| artifact.pointer("/program/initial/actors"))
         .and_then(Value::as_array)
         .expect("graph algebra artifact actors");
     assert_eq!(
@@ -1008,7 +977,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
     let create_actor = worktree
         .get("artifact")
-        .and_then(|artifact| artifact.pointer("/actors"))
+        .and_then(|artifact| artifact.pointer("/program/initial/actors"))
         .and_then(Value::as_array)
         .and_then(|actors| {
             actors
@@ -1021,20 +990,23 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         Some("nefor.factory.worktree-create")
     );
     assert_eq!(
-        create_actor.pointer("/params/repository"),
+        create_actor.pointer("/params/value/repository"),
         Some(&json!("/repo"))
     );
     assert_eq!(
-        create_actor.pointer("/params/path"),
+        create_actor.pointer("/params/value/path"),
         Some(&json!("/worktrees/topic"))
     );
     assert_eq!(
-        create_actor.pointer("/params/branch"),
+        create_actor.pointer("/params/value/branch"),
         Some(&json!("topic"))
     );
-    assert_eq!(create_actor.pointer("/params/base"), Some(&json!("main")));
+    assert_eq!(
+        create_actor.pointer("/params/value/base"),
+        Some(&json!("main"))
+    );
     assert!(
-        create_actor.pointer("/params/mode").is_none(),
+        create_actor.pointer("/params/value/mode").is_none(),
         "create and open remain distinct identities rather than a mode flag"
     );
 
@@ -1073,7 +1045,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     );
     let open_actor = open_worktree
         .get("artifact")
-        .and_then(|artifact| artifact.pointer("/actors"))
+        .and_then(|artifact| artifact.pointer("/program/initial/actors"))
         .and_then(Value::as_array)
         .and_then(|actors| {
             actors
@@ -1085,7 +1057,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         open_actor.get("factory").and_then(Value::as_str),
         Some("nefor.factory.worktree-open")
     );
-    assert!(open_actor.pointer("/params/base").is_none());
+    assert!(open_actor.pointer("/params/value/base").is_none());
 
     fs::write(
         temp_root.join("shell-output-unknown.mag"),
@@ -1107,7 +1079,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
                   :actors (as (List nefor.graph.Actor) [actor])
                   :routes (as (List nefor.graph.StoredRoute) [])
                   :messages (as (List nefor.graph.Message) [])
-                  :rules (as (List nefor.graph.Rule) [])
+                  :operations (as (List nefor.mag.ProgramOperation) [])
                   :nodes [(nefor.graph.logical-node ["x"] ["x"])]
                   :input input
                   :output output}))
@@ -1167,7 +1139,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
                   :actors (as (List nefor.graph.Actor) [actor])
                   :routes (as (List nefor.graph.StoredRoute) [])
                   :messages (as (List nefor.graph.Message) [])
-                  :rules (as (List nefor.graph.Rule) [])
+                  :operations (as (List nefor.mag.ProgramOperation) [])
                   :nodes [(nefor.graph.logical-node ["x"] ["x"])]
                   :input input
                   :output output}))
@@ -1227,7 +1199,7 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
                   :actors (as (List nefor.graph.Actor) [actor])
                   :routes (as (List nefor.graph.StoredRoute) [])
                   :messages (as (List nefor.graph.Message) [])
-                  :rules (as (List nefor.graph.Rule) [])
+                  :operations (as (List nefor.mag.ProgramOperation) [])
                   :nodes [(nefor.graph.logical-node ["x"] ["x"])]
                   :input input
                   :output output}))

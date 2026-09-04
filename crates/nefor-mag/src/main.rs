@@ -43,7 +43,7 @@ struct CompileArgs {
     #[arg(long)]
     profile: bool,
 
-    /// Maximum evaluator steps per compilation or resident function call
+    /// Maximum evaluator steps per compilation
     #[arg(long)]
     evaluation_step_limit: Option<u64>,
 
@@ -118,8 +118,8 @@ fn compile(
         },
     };
     let profiler = args.profile.then(nefor_mag::profile::CompileProfiler::new);
-    let loaded = if let Some(profiler) = &profiler {
-        nefor_mag::load_with_profiler_and_options(
+    let artifact = if let Some(profiler) = &profiler {
+        nefor_mag::compile_file_with_profiler_and_options(
             &args.source_dir,
             &args.entry,
             inputs,
@@ -128,7 +128,7 @@ fn compile(
             options,
         )
     } else {
-        nefor_mag::load_with_inputs_and_module_roots_and_options(
+        nefor_mag::compile_file_with_inputs_and_module_roots_and_options(
             &args.source_dir,
             &args.entry,
             inputs,
@@ -136,11 +136,8 @@ fn compile(
             options,
         )
     };
-    match loaded {
-        Ok(loaded) => Ok((
-            loaded.artifact,
-            profiler.map(|profiler| profiler.snapshot()),
-        )),
+    match artifact {
+        Ok(artifact) => Ok((artifact, profiler.map(|profiler| profiler.snapshot()))),
         Err(error) => {
             let mut diagnostic = mag_diagnostic(error);
             diagnostic.profile = profiler.map(|profiler| profiler.snapshot());

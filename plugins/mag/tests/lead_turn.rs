@@ -279,24 +279,29 @@ async fn load_lead_program<R: AsyncBufReadExt + Unpin>(
         loaded.get("in_reply_to").and_then(Value::as_str),
         Some("lead-turn-load")
     );
-    loaded
+    let artifact = loaded
         .get("artifact")
         .cloned()
-        .expect("mag.loaded carries the compiled artifact")
+        .expect("mag.loaded carries the compiled artifact");
+    assert_eq!(artifact.get("format"), Some(&json!("nefor.mag")));
+    assert_eq!(artifact.get("version"), Some(&json!(1)));
+    assert_eq!(artifact.get("kind"), Some(&json!("program")));
+    assert!(artifact.pointer("/program/initial").is_some());
+    assert!(artifact.pointer("/program/operations").is_some());
+    assert!(artifact.get("program_id").is_none());
+    artifact
 }
 
 fn program_initial(artifact: &Value) -> &Value {
-    artifact.pointer("/program/initial").unwrap_or(artifact)
+    artifact
+        .pointer("/program/initial")
+        .expect("nefor.mag v1 program.initial")
 }
 
 fn program_initial_mut(artifact: &mut Value) -> &mut Value {
-    if artifact.pointer("/program/initial").is_some() {
-        artifact
-            .pointer_mut("/program/initial")
-            .expect("program initial")
-    } else {
-        artifact
-    }
+    artifact
+        .pointer_mut("/program/initial")
+        .expect("nefor.mag v1 program.initial")
 }
 
 /// The spawner's per-turn clone: point the initial task at the user
@@ -310,10 +315,9 @@ fn turn_artifact(program: &Value, user_text: &str) -> Value {
     for actor in actors {
         if actor.get("factory").and_then(Value::as_str) == Some("nefor.factory.source") {
             let value = actor
-                .get_mut("params")
-                .and_then(|params| params.get_mut("value"))
+                .pointer_mut("/params/value/value")
                 .and_then(Value::as_object_mut)
-                .expect("source actor carries the typed task value");
+                .expect("source actor carries the packed typed task value");
             value.insert("prompt".to_owned(), Value::String(user_text.to_owned()));
         }
     }
@@ -338,7 +342,7 @@ fn execute_body(
         "conversation_id": CONVERSATION_ID,
         "artifact": artifact,
         "params_overlay": {
-            "lead.llm": {
+            "actor:8:lead.llm": {
                 "system": LEAD_SYSTEM,
                 "provider": PROVIDER,
                 "model": "test-model",
@@ -409,7 +413,7 @@ async fn typed_task_contract_lowers_and_corrects_mock_provider_json() {
         Some("nefor.factory.structured-output")
     );
     assert_eq!(
-        structured.pointer("/params/schema/version"),
+        structured.pointer("/params/value/schema/version"),
         Some(&json!(1))
     );
     assert_eq!(
@@ -431,7 +435,7 @@ async fn typed_task_contract_lowers_and_corrects_mock_provider_json() {
             "conversation_id": CONVERSATION_ID,
             "artifact": artifact.clone(),
             "params_overlay": {
-                "typed-task.llm": {
+                "actor:14:typed-task.llm": {
                     "schema": {"version": 1, "root": {"kind": "data"}}
                 }
             }
@@ -460,7 +464,7 @@ async fn typed_task_contract_lowers_and_corrects_mock_provider_json() {
             "conversation_id": CONVERSATION_ID,
             "artifact": artifact,
             "params_overlay": {
-                "typed-task.llm": { "provider": MOCK, "model": "mock-model" }
+                "actor:14:typed-task.llm": { "provider": MOCK, "model": "mock-model" }
             }
         })),
     )
@@ -599,87 +603,9 @@ async fn complete_chat<R: AsyncBufReadExt + Unpin>(
 
 fn dynamic_behavior_fixture() -> Value {
     serde_json::from_str(include_str!(
-        "fixtures/dynamic-resident-current-behavior.json"
+        "fixtures/dynamic-operations-current-behavior.json"
     ))
-    .expect("dynamic current-behavior fixture is valid JSON")
-}
-
-fn compact_modification(artifact: &Value) -> Value {
-    let artifact = artifact.pointer("/program/initial").unwrap_or(artifact);
-    let actors = artifact["actors"]
-        .as_array()
-        .expect("artifact actors")
-        .iter()
-        .map(|actor| {
-            let dynamic = (actor["factory"] == "nefor.factory.dynamic-index").then(|| {
-                json!({
-                    "collection": actor["params"]["collection"],
-                    "index": actor["params"]["index"],
-                })
-            });
-            json!({
-                "id": actor["id"],
-                "factory": actor["factory"],
-                "system": actor.pointer("/params/system").cloned().unwrap_or(Value::Null),
-                "dynamic": dynamic,
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut routes = Vec::new();
-    for actor in artifact["actors"].as_array().expect("artifact actors") {
-        for (from_wire, destinations) in actor["routes"].as_object().expect("actor routes") {
-            for destination in destinations.as_array().expect("route destinations") {
-                routes.push(json!({
-                    "from": actor["id"],
-                    "from_wire": from_wire,
-                    "to": destination["actor"],
-                    "to_wire": destination["wire"],
-                    "product_position": destination["product_position"],
-                }));
-            }
-        }
-    }
-    let messages = artifact["messages"]
-        .as_array()
-        .expect("artifact messages")
-        .iter()
-        .map(|message| json!({"to": message["to"], "kind": message["content"]["kind"]}))
-        .collect::<Vec<_>>();
-    let rules = artifact["rules"]
-        .as_array()
-        .expect("artifact rules")
-        .iter()
-        .map(|rule| {
-            json!({
-                "id": rule["id"],
-                "fn": rule["fn"],
-                "on": {
-                    "actor": rule["on"]["actor"],
-                    "wire": rule["on"]["wire"],
-                    "type_id": rule["on"]["type_id"],
-                },
-            })
-        })
-        .collect::<Vec<_>>();
-    let result = artifact
-        .get("result")
-        .filter(|value| !value.is_null())
-        .map(|result| {
-            json!({
-                "actor": result["from"]["actor"],
-                "wire": result["from"]["wire"],
-                "type_id": result["from"]["type_id"],
-            })
-        });
-    json!({
-        "actors": actors,
-        "routes": routes,
-        "nodes": artifact["nodes"],
-        "messages": messages,
-        "kills": artifact["kills"],
-        "rules": rules,
-        "result": result,
-    })
+    .expect("dynamic operations behavior fixture is valid JSON")
 }
 
 fn assert_dynamic_program_envelope(artifact: &Value) {
@@ -779,7 +705,6 @@ async fn load_dynamic_program<R: AsyncBufReadExt + Unpin>(
         obj(json!({
             "kind": "mag.load",
             "id": load_id,
-            "resident": true,
             "source_dir": starter_dir().to_string_lossy(),
             "module_roots": module_roots(),
             "entry": "agentic-loop/dynamic-tasks.mag",
@@ -789,16 +714,10 @@ async fn load_dynamic_program<R: AsyncBufReadExt + Unpin>(
     let loaded = next_event_of_kind(reader, "mag.loaded").await;
     let fixture = dynamic_behavior_fixture();
     assert_eq!(loaded["in_reply_to"], load_id);
-    assert_eq!(loaded["program_id"], load_id);
     assert_dynamic_program_envelope(&loaded["artifact"]);
     assert_eq!(
         loaded["hash"],
         fixture["identity"]["compiled_artifact_hash"]
-    );
-    assert_eq!(
-        compact_modification(&loaded["artifact"]),
-        fixture["initial_artifact"],
-        "the checked-in resident program changed its current declarative artifact"
     );
     loaded
 }
@@ -910,7 +829,7 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
     );
     assert_eq!(
         initial
-            .pointer("/messages/0/content/kind")
+            .pointer("/messages/0/content/value/kind")
             .and_then(Value::as_str),
         Some("mag.Unit")
     );
@@ -920,7 +839,7 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         &mut stdin,
         obj(json!({"kind":"mag.execute","id":"dynamic-exec",
       "run_id":"dynamic-run","run_name":"dynamic-tasks","session_id":SESSION_ID,
-      "principal":"lead","conversation_id":CONVERSATION_ID,"program_id":"dynamic-load",
+      "principal":"lead","conversation_id":CONVERSATION_ID,"artifact":loaded["artifact"].clone(),
       "model_snapshot":{"provider":"mock-provider","model":"snapshot-dynamic","reasoning_effort":"high"}})),
     )
     .await;
@@ -1084,13 +1003,13 @@ async fn dynamic_tasks_zero_uses_empty_collection_identity_and_reaches_summarize
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());
     handshake(&mut reader, &mut stdin).await;
-    load_dynamic_program(&mut reader, &mut stdin, "zero-load").await;
+    let loaded = load_dynamic_program(&mut reader, &mut stdin, "zero-load").await;
     send_event(
         &mut stdin,
         obj(
             json!({"kind":"mag.execute","id":"zero-exec","run_id":"zero-run",
       "run_name":"zero","session_id":SESSION_ID,"principal":"lead","conversation_id":CONVERSATION_ID,
-      "program_id":"zero-load"}),
+      "artifact":loaded["artifact"].clone(),}),
         ),
     )
     .await;
@@ -1166,13 +1085,6 @@ async fn dynamic_tasks_one_runs_one_real_worker_and_static_summarizer() {
     let artifact = loaded["artifact"].clone();
     send_event(
         &mut stdin,
-        obj(json!({"kind":"mag.unload","id":"one-unload","program_id":"one-load"})),
-    )
-    .await;
-    let unloaded = next_event_of_kind(&mut reader, "mag.unloaded").await;
-    assert_eq!(unloaded["released"], true);
-    send_event(
-        &mut stdin,
         obj(
             json!({"kind":"mag.execute","id":"one-exec","run_id":"one-run",
       "run_name":"one","session_id":SESSION_ID,"principal":"lead","conversation_id":CONVERSATION_ID,
@@ -1236,13 +1148,13 @@ async fn dynamic_tasks_invalid_planner_spawns_nothing_and_returns_typed_error() 
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());
     handshake(&mut reader, &mut stdin).await;
-    load_dynamic_program(&mut reader, &mut stdin, "invalid-load").await;
+    let loaded = load_dynamic_program(&mut reader, &mut stdin, "invalid-load").await;
     send_event(
         &mut stdin,
         obj(
             json!({"kind":"mag.execute","id":"invalid-exec","run_id":"invalid-run",
       "run_name":"invalid","session_id":SESSION_ID,"principal":"lead","conversation_id":CONVERSATION_ID,
-      "program_id":"invalid-load"}),
+      "artifact":loaded["artifact"].clone(),}),
         ),
     )
     .await;

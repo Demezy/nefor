@@ -46,7 +46,7 @@ copied into the session.
 Paths passed to the lead `mag` tool are relative to that workspace. Literal
 module imports such as `(require "nefor.graph")` resolve through the configured
 module roots. Files loaded with `(read ...)` are snapshotted on first access by
-a loaded program; recompile or reload after changing them. The ambient context
+one compilation; compile again after changing them. The ambient context
 names the canonical MAG Book and available module inventory.
 
 ## Run lifecycle and control

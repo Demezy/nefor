@@ -284,12 +284,12 @@ function registry:register(entry)
 end
 
 -- Look up a factory by name; nil if unknown.
-local function resident_factory(self, name)
+local function factory_entry(self, name)
   return self.factories[name] or self.factories[self.identities[name]]
 end
 
 function registry:lookup(name)
-  local found = resident_factory(self, name)
+  local found = factory_entry(self, name)
   if not found then return nil end
   return { declaration = plain_data.copy(found.declaration), construct = found.construct }
 end
@@ -307,7 +307,7 @@ function registry:names()
 end
 
 registry.declaration = function(self, name)
-  local f = resident_factory(self, name)
+  local f = factory_entry(self, name)
   return f and plain_data.copy(f.declaration) or nil
 end
 
@@ -371,7 +371,7 @@ end
 -- capabilities — plain data authored in `params`, runtime closures in `deps` —
 -- threaded through untouched to the factory. Rejects an unknown factory.
 function registry:construct(name, id, params, emit, deps)
-  local f = resident_factory(self, name)
+  local f = factory_entry(self, name)
   if not f then
     return nil, string.format("unknown factory %q", tostring(name))
   end
@@ -449,9 +449,6 @@ function registry:validate_modification(modification, resolve, existing_specs)
         validate_type_reference(
           { type = message.semantic_type, type_id = message.semantic_type_id },
           string.format("message %d", index))
-      end
-      for index, rule in ipairs(modification.rules or {}) do
-        validate_type_reference(rule.on, string.format("rule %d", index))
       end
       if modification.result ~= nil then
         validate_type_reference(modification.result.from, "result boundary")

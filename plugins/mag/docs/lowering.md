@@ -7,7 +7,7 @@ choose the wire protocol and generic functions preserve their typed relations.
 
 MAG has no graph syntax or graph-specific lowering pass. It evaluates pure,
 typed library code. The shipped Nefor libraries represent actors, ports,
-routes, messages, rules, and result selection as nominal data whose semantic
+routes, messages, operations, and result selection as nominal data whose semantic
 fields contain opaque compiler descriptors. Graph validation delegates
 compatibility and product coverage to the compiler rather than interpreting
 descriptor maps in MAG, then marks the lowered value as the compilation result:
@@ -55,10 +55,9 @@ A typed port records two identities:
 This lets an agent node expose `(CodeAudit | AgentError)` on the stable
 `nefor.agent.Result` wire. The success type is declared with
 `(type-tag CodeAudit)`; an undeclared or misspelled semantic type fails
-compilation. Compatible edges route each selected constructor directly.
-Resident rules use `nefor.actors.result-arm` to subscribe to one constructor
-on the same actor and wire. The compiler neither knows what an LLM is nor
-invents a coercion.
+compilation. Compatible edges route each selected constructor directly. Closed declarative
+operations may subscribe to a typed output on the same actor and wire. The
+compiler neither knows what an LLM is nor invents a coercion.
 
 Actor-specific constructors are ordinary typed functions. They select a
 factory identity, make generic arguments explicit as type descriptors, and
@@ -69,8 +68,8 @@ lowering.
 
 ## Runtime artifact
 
-`nefor.graph.lower` produces the raw graph-modification value consumed by the
-kernel: actors, typed routes, typed initial messages, kills, rules, and
+`nefor.graph.lower` produces the concrete initial modification placed inside
+the program envelope: actors, typed routes, typed initial messages, kills, and
 structural result metadata. Each explicit initial message retains its
 destination descriptor as `semantic_type` even though the current factory
 protocol still consumes `content.kind`. Lowering also gives every `Unit` actor
@@ -106,9 +105,8 @@ nested work rather than re-entering the fold. Success becomes visible only when
 the operation queue is quiescent; an operation failure defeats a success that
 raced ahead of it.
 
-Resident `mag.eval` and legacy rules remain only for older explicit
-`compile-program` callers. Declarative programs and inline artifact reuse do not
-retain or consult their compiler environment.
+The operation is fully represented by immutable data. Compilation retains no
+environment, and execution performs no later MAG function application.
 
 A concrete delta has no result boundary or nested operations. Its routes may
 target actors already live in the run; the runtime registry validates those

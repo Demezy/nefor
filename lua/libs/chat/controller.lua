@@ -501,15 +501,32 @@ end
 
 local function permission_response(popup, approved)
   if popup.permission_kind == "mag_approval" then
-    local reply = { kind = "mag.ApprovalReply", approved = approved }
-    if not approved then reply.reason = "Denied by user" end
+    local reply = {
+      kind = "mag.ApprovalReply",
+      approved = approved,
+      content = "",
+      reason = approved and "" or "Denied by user",
+    }
     return {
       kind = "send_to", target = "mag",
       body = {
         kind = "mag.apply",
         run_id = popup.run_id,
         source = "chat.human_approval",
-        modification = { messages = { { to = popup.gate_id, content = reply } } },
+        artifact = {
+          format = "nefor.mag", version = 1, kind = "delta",
+          delta = {
+            types = { [popup.reply_type_id] = popup.reply_type },
+            actors = {},
+            messages = { {
+              to = popup.gate_id,
+              semantic_type = popup.reply_type,
+              semantic_type_id = popup.reply_type_id,
+              content = { ["$mag"] = "packed-value", value = reply },
+            } },
+            kills = {}, nodes = {},
+          },
+        },
       },
     }
   end
@@ -1217,7 +1234,9 @@ local function handle_mag_approval_request(msg, state)
   if state.replay_mode then return state, {} end
   if type(msg.run_id) ~= "string" or msg.run_id == ""
       or type(msg.from) ~= "string" or msg.from == ""
-      or type(msg.correlation) ~= "string" or msg.correlation == "" then
+      or type(msg.correlation) ~= "string" or msg.correlation == ""
+      or type(msg.reply_type) ~= "table"
+      or type(msg.reply_type_id) ~= "string" or msg.reply_type_id == "" then
     return state, {}
   end
   local subject = msg.subject
@@ -1238,6 +1257,8 @@ local function handle_mag_approval_request(msg, state)
     run_id = msg.run_id,
     gate_id = msg.from,
     subject = msg.subject,
+    reply_type = msg.reply_type,
+    reply_type_id = msg.reply_type_id,
   }), {}
 end
 

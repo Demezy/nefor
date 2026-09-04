@@ -133,7 +133,7 @@ fn body_kind(body: &Map<String, Value>) -> Option<&str> {
 /// `aN.llm → aN.run-tool → aN.tool-result → aN.llm`. `a1.llm` is the declared
 /// result on `nefor.agent.Result`. Both `llm`s are seeded with a
 /// `generic-provider.ProviderOut` so they fire off the initial messages.
-fn two_agent_modification() -> Value {
+fn two_agent_program() -> Value {
     fn named(name: &str) -> Value {
         json!({"kind":"named","name":name,"arguments":[]})
     }
@@ -151,11 +151,11 @@ fn two_agent_modification() -> Value {
                 "type_arguments": [],
                 "input":{"wire":"generic-provider.ProviderOut","type":provider_input.clone()},
                 "outputs":[{"wire":"generic-tool.ToolCalls","type":tool_calls.clone()},{"wire":"nefor.agent.Result","type":result}],
-                "params": {
+                "params": {"$mag": "packed-value", "value": {
                     "model": "opus", "provider": PROVIDER, "system": "work",
                     "output_type": "text-answer", "error_type": "agent-error",
                     "provider_error_type": "provider-error"
-                },
+                }},
                 "routes": {
                     "generic-tool.ToolCalls": [{
                         "actor": format!("{prefix}.run-tool"),
@@ -170,7 +170,7 @@ fn two_agent_modification() -> Value {
                 "type_arguments": [],
                 "input":{"wire":"generic-tool.ToolCalls","type":tool_calls},
                 "outputs":[{"wire":"generic-tool.ToolHandle","type":tool_handle.clone()}],
-                "params": {},
+                "params": {"$mag": "packed-value", "value": {}},
                 "routes": { "generic-tool.ToolHandle": [{
                     "actor": format!("{prefix}.tool-result"),
                     "wire": "generic-tool.ToolHandle"
@@ -182,7 +182,7 @@ fn two_agent_modification() -> Value {
                 "type_arguments": [],
                 "input":{"wire":"generic-tool.ToolHandle","type":tool_handle},
                 "outputs":[{"wire":"generic-provider.ProviderOut","type":provider_input}],
-                "params": {},
+                "params": {"$mag": "packed-value", "value": {}},
                 "routes": { "generic-provider.ProviderOut": [{
                     "actor": format!("{prefix}.llm"),
                     "wire": "generic-provider.ProviderOut"
@@ -194,19 +194,26 @@ fn two_agent_modification() -> Value {
     let mut actors = agent("a1");
     actors.extend(agent("a2"));
     json!({
-        "actors": actors,
-        "messages": [
-            { "to": "a1.llm", "content": { "kind": "generic-provider.ProviderOut", "messages": [{ "role": "user", "content": "go-a1" }] } },
-            { "to": "a2.llm", "content": { "kind": "generic-provider.ProviderOut", "messages": [{ "role": "user", "content": "go-a2" }] } }
-        ],
-        "kills": [],
-        "rules": [],
-        "result": {
-            "from": {
-                "actor": "a1.llm",
-                "type": "nefor.agent.Result",
-                "wire": "nefor.agent.Result"
-            }
+        "format": "nefor.mag",
+        "version": 1,
+        "kind": "program",
+        "program": {
+            "initial": {
+                "actors": actors,
+                "messages": [
+                    { "to": "a1.llm", "content": { "$mag": "packed-value", "value": { "kind": "generic-provider.ProviderOut", "messages": [{ "role": "user", "content": "go-a1" }] } } },
+                    { "to": "a2.llm", "content": { "$mag": "packed-value", "value": { "kind": "generic-provider.ProviderOut", "messages": [{ "role": "user", "content": "go-a2" }] } } }
+                ],
+                "kills": [],
+                "result": {
+                    "from": {
+                        "actor": "a1.llm",
+                        "type": "nefor.agent.Result",
+                        "wire": "nefor.agent.Result"
+                    }
+                }
+            },
+            "operations": []
         }
     })
 }
@@ -306,7 +313,7 @@ async fn two_agents_one_killed_mid_flight_the_other_completes() {
     execute.insert("principal".into(), Value::String("lead".into()));
     execute.insert("run_id".into(), Value::String(RUN_NAME.into()));
     execute.insert("run_name".into(), Value::String(RUN_NAME.into()));
-    execute.insert("artifact".into(), two_agent_modification());
+    execute.insert("artifact".into(), two_agent_program());
     send_event(&mut stdin, execute).await;
 
     // Deterministic event loop. Every action is a reply to an observed event;
@@ -338,6 +345,7 @@ async fn two_agents_one_killed_mid_flight_the_other_completes() {
         seen.push(kind.clone());
 
         match kind.as_str() {
+            "mag.error" => panic!("mag rejected acceptance request: {body:#?}"),
             "mag.run_started" => {
                 assert_eq!(
                     body.get("principal").and_then(Value::as_str),
@@ -494,12 +502,18 @@ async fn two_agents_one_killed_mid_flight_the_other_completes() {
                             apply.insert("kind".into(), Value::String("mag.apply".into()));
                             apply.insert("id".into(), Value::String("kill-a2".into()));
                             apply.insert(
-                                "modification".into(),
+                                "artifact".into(),
                                 json!({
-                                    "actors": [],
-                                    "messages": [],
-                                    "kills": ["a2.llm", "a2.run-tool", "a2.tool-result"],
-                                    "rules": []
+                                    "format": "nefor.mag",
+                                    "version": 1,
+                                    "kind": "delta",
+                                    "delta": {
+                                        "types": {},
+                                        "actors": [],
+                                        "messages": [],
+                                        "kills": ["a2.llm", "a2.run-tool", "a2.tool-result"],
+                                        "nodes": []
+                                    }
                                 }),
                             );
                             send_event(&mut stdin, apply).await;
@@ -843,6 +857,284 @@ async fn execute_worktree_program<R: AsyncBufReadExt + Unpin>(
                 if body.get("in_reply_to").and_then(Value::as_str) == Some(id) =>
             {
                 return body.clone();
+            }
+            _ => {}
+        }
+    }
+}
+
+fn approval_program() -> &'static str {
+    r#"(require "nefor.actors")
+(require "nefor.artifact")
+(require "nefor.contracts")
+(require "nefor.graph")
+(require "nefor.node")
+(let subject
+  (nefor.graph.source "subject" (type-tag nefor.contracts.TextAnswer)
+    (as nefor.contracts.TextAnswer "draft")))
+(let approval
+  (nefor.actors.approval-gate
+    (as nefor.actors.ApprovalConfig {:id "approval" :prompt "Ship it?"})))
+(let flow (nefor.node.>>> subject approval))
+(let result (nefor.graph.output-for "result" flow))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph [(nefor.graph.edge flow result)])))"#
+}
+
+#[tokio::test]
+async fn canonical_chat_approval_delta_crosses_the_typed_plugin_boundary() {
+    let root = tempfile::tempdir().expect("approval tempdir");
+    let source_dir = root.path().join("source");
+    std::fs::create_dir_all(&source_dir).expect("approval source dir");
+    std::fs::write(source_dir.join("approval.mag"), approval_program())
+        .expect("write approval program");
+
+    let mut child = spawn_mag(root.path()).await;
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut reader = BufReader::new(child.stdout.take().expect("stdout"));
+    let stderr = child.stderr.take().expect("stderr");
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            eprintln!("[mag approval stderr] {line}");
+        }
+    });
+    let ready = read_outgoing(&mut reader, "system ready").await;
+    assert!(matches!(ready.body, Body::System(SystemBody::Ready { .. })));
+    write_env(
+        &mut stdin,
+        Envelope::system(
+            PluginName::engine(),
+            Timestamp::now(),
+            SystemBody::ReadyOk {
+                engine_version: "test".into(),
+            },
+        ),
+    )
+    .await;
+
+    let artifact = load_worktree_program(
+        &mut reader,
+        &mut stdin,
+        "load-approval",
+        &source_dir,
+        "approval.mag",
+    )
+    .await;
+    send_event(
+        &mut stdin,
+        json!({
+            "kind": "mag.execute",
+            "id": "execute-approval",
+            "session_id": "approval-acceptance",
+            "principal": "lead",
+            "run_id": "approval-run",
+            "run_name": "approval-run",
+            "artifact": artifact,
+        })
+        .as_object()
+        .expect("execute approval body")
+        .clone(),
+    )
+    .await;
+
+    let (reply_type, reply_type_id) = loop {
+        let outgoing = read_outgoing(&mut reader, "approval request").await;
+        let Some(body) = event_body(&outgoing) else {
+            continue;
+        };
+        if body_kind(body) == Some("mag.approval_request") {
+            assert_eq!(
+                body.get("run_id").and_then(Value::as_str),
+                Some("approval-run")
+            );
+            assert_eq!(
+                body.get("from").and_then(Value::as_str),
+                Some("approval.human")
+            );
+            break (
+                body.get("reply_type").expect("reply descriptor").clone(),
+                body.get("reply_type_id")
+                    .and_then(Value::as_str)
+                    .expect("reply type id")
+                    .to_owned(),
+            );
+        }
+    };
+
+    send_event(
+        &mut stdin,
+        json!({
+            "kind": "mag.apply",
+            "id": "untyped-chat-approval",
+            "run_id": "approval-run",
+            "source": "chat.human_approval",
+            "artifact": {
+                "format": "nefor.mag", "version": 1, "kind": "delta",
+                "delta": {
+                    "actors": [],
+                    "messages": [{
+                        "to": "approval.human",
+                        "content": {"$mag": "packed-value", "value": {
+                            "kind": "mag.ApprovalReply", "approved": true,
+                            "content": "untyped", "reason": ""
+                        }}
+                    }],
+                    "kills": [], "nodes": []
+                }
+            }
+        })
+        .as_object()
+        .expect("untyped chat approval body")
+        .clone(),
+    )
+    .await;
+    loop {
+        let outgoing = read_outgoing(&mut reader, "untyped approval rejection").await;
+        let Some(body) = event_body(&outgoing) else {
+            continue;
+        };
+        if body_kind(body) == Some("mag.applied")
+            && body.get("in_reply_to").and_then(Value::as_str) == Some("untyped-chat-approval")
+        {
+            assert_eq!(
+                body.get("ok").and_then(Value::as_bool),
+                Some(false),
+                "{body:#?}"
+            );
+            assert!(body
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|error| error.contains("requires delta semantic declarations")));
+            break;
+        }
+    }
+
+    send_event(
+        &mut stdin,
+        json!({
+            "kind": "mag.apply",
+            "id": "malformed-chat-approval",
+            "run_id": "approval-run",
+            "source": "chat.human_approval",
+            "artifact": {
+                "format": "nefor.mag", "version": 1, "kind": "delta",
+                "delta": {
+                    "types": {(reply_type_id.clone()): reply_type.clone()},
+                    "actors": [],
+                    "messages": [{
+                        "to": "approval.human",
+                        "semantic_type": reply_type.clone(),
+                        "semantic_type_id": reply_type_id.clone(),
+                        "content": {"$mag": "packed-value", "value": {
+                            "kind": "mag.ApprovalReply", "approved": true, "content": "malformed"
+                        }}
+                    }],
+                    "kills": [], "nodes": []
+                }
+            }
+        })
+        .as_object()
+        .expect("malformed chat approval body")
+        .clone(),
+    )
+    .await;
+    loop {
+        let outgoing = read_outgoing(&mut reader, "malformed approval rejection").await;
+        let Some(body) = event_body(&outgoing) else {
+            continue;
+        };
+        if body_kind(body) == Some("mag.applied")
+            && body.get("in_reply_to").and_then(Value::as_str) == Some("malformed-chat-approval")
+        {
+            assert_eq!(
+                body.get("ok").and_then(Value::as_bool),
+                Some(false),
+                "{body:#?}"
+            );
+            assert!(body
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|error| error.contains("malformed typed payload")));
+            break;
+        }
+    }
+
+    send_event(
+        &mut stdin,
+        json!({
+            "kind": "mag.apply",
+            "id": "chat-approval",
+            "run_id": "approval-run",
+            "source": "chat.human_approval",
+            "artifact": {
+                "format": "nefor.mag", "version": 1, "kind": "delta",
+                "delta": {
+                    "types": {(reply_type_id.clone()): reply_type.clone()},
+                    "actors": [],
+                    "messages": [{
+                        "to": "approval.human",
+                        "semantic_type": reply_type,
+                        "semantic_type_id": reply_type_id,
+                        "content": {
+                            "$mag": "packed-value",
+                            "value": {
+                                "kind": "mag.ApprovalReply",
+                                "approved": true,
+                                "content": "approved in chat",
+                                "reason": ""
+                            }
+                        }
+                    }],
+                    "kills": [], "nodes": []
+                }
+            }
+        })
+        .as_object()
+        .expect("chat approval apply body")
+        .clone(),
+    )
+    .await;
+
+    let mut applied = false;
+    loop {
+        let outgoing = read_outgoing(&mut reader, "approval completion").await;
+        let Some(body) = event_body(&outgoing) else {
+            continue;
+        };
+        match body_kind(body) {
+            Some("mag.applied")
+                if body.get("in_reply_to").and_then(Value::as_str) == Some("chat-approval") =>
+            {
+                assert_eq!(
+                    body.get("ok").and_then(Value::as_bool),
+                    Some(true),
+                    "{body:#?}"
+                );
+                applied = true;
+            }
+            Some("mag.run_result")
+                if body.get("in_reply_to").and_then(Value::as_str) == Some("execute-approval") =>
+            {
+                assert!(
+                    applied,
+                    "typed approval delta is acknowledged before terminal result"
+                );
+                assert_eq!(
+                    body.get("status").and_then(Value::as_str),
+                    Some("completed"),
+                    "{body:#?}"
+                );
+                assert_eq!(
+                    body.get("result")
+                        .and_then(|result| result.get("value"))
+                        .and_then(|value| value.get("content"))
+                        .and_then(Value::as_str),
+                    Some("approved in chat"),
+                    "{body:#?}"
+                );
+                break;
             }
             _ => {}
         }

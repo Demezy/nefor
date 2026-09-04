@@ -233,8 +233,8 @@ local state = {
 
   -- `mag` tool invocations awaiting their `mag.load` reply, keyed by the load
   -- request id. Compile and apply go through this handshake:
-  -- `mag.load` is sent, then the lowered artifact is previewed, its exact
-  -- resident handle starts a fresh run, or the artifact is applied as a delta
+  -- `mag.load` is sent, then the immutable envelope is previewed and either
+  -- executed inline as a fresh program or applied inline as a delta
   -- to one live run.
   pending_mag_load = {},
 
@@ -353,15 +353,14 @@ local function sorted_keys(set)
   return keys
 end
 
-local function validate_factories(actors, firing_id)
+local function validate_factories(inventory, firing_id)
   local set = state.kernel_factories
-  if type(set) ~= "table" or next(set) == nil then
-    return true -- no registry snapshot yet; runtime spawn is the backstop
-  end
-  for _, actor in ipairs(actors or {}) do
+  if type(set) ~= "table" or next(set) == nil then return true end
+  for _, entry in ipairs(inventory or {}) do
+    local actor = entry.actor
     if set[actor.factory] ~= true then
       emit_tool_result_err(firing_id,
-        "mag apply: actor '" .. tostring(actor.id) .. "' uses unknown factory '" ..
+        "mag apply: actor '" .. tostring(entry.address) .. "' uses unknown factory '" ..
         tostring(actor.factory) .. "'. Known factories: " ..
         table.concat(sorted_keys(set), ", ") .. ".")
       return false
@@ -376,8 +375,9 @@ end
 -- the tool-gate and da-policies enforce runtime permissions.
 local WRITE_TOOLS = { ["fs/edit"] = true, ["edit_file"] = true, ["write_file"] = true }
 
-local function actors_have_writers(actors)
-  for _, actor in ipairs(actors or {}) do
+local function actors_have_writers(inventory)
+  for _, entry in ipairs(inventory or {}) do
+    local actor = entry.actor
     local tools = type(actor.params) == "table" and actor.params.tools or nil
     if type(tools) == "table" then
       for _, t in ipairs(tools) do
@@ -411,13 +411,14 @@ local function is_llm_actor(actor)
       or actor.factory == "nefor.factory.structured-output"
 end
 
-local function compose_agent_params(actors, session_id)
+local function compose_agent_params(inventory, session_id)
   local overlay = {}
-  for _, actor in ipairs(actors or {}) do
+  for _, entry in ipairs(inventory or {}) do
+    local actor = entry.actor
     local params = type(actor.params) == "table" and actor.params or {}
     if is_llm_actor(actor) and agent_system ~= nil then
-      overlay[actor.id] = {}
-      overlay[actor.id].system = compose_agent_system(
+      overlay[entry.address] = {}
+      overlay[entry.address].system = compose_agent_system(
         agent_system, params.system, session_id)
     end
   end
@@ -805,15 +806,17 @@ now_ms = function()
   return os.time()
 end
 
--- Track a submitted run for graph-status. `actors` is the modification's
--- actor list ({ id, factory, … }); node summaries carry the factory under the
--- `reasoner` key, matching what the chat surface renders (chat/run_panel.lua
--- maps kernel factory → reasoner the same way).
-register_active_run = function(run_id, actors, terminal, firing_id, run_name, session_id,
+-- Track a submitted run for graph-status. Definition inventory is used for
+-- validation and overlays, but only concrete initial actors become runtime
+-- nodes here; operation templates appear only after materialization emits an
+-- actor lifecycle event. Node summaries carry the factory under `reasoner`,
+-- matching what the chat surface renders (chat/run_panel.lua).
+register_active_run = function(run_id, inventory, terminal, firing_id, run_name, session_id,
     dispatcher_id, owner_resume)
   local nodes_order, nodes = {}, {}
-  for _, actor in ipairs(actors or {}) do
-    local id = tostring(actor.id or "")
+  for _, entry in ipairs(inventory or {}) do
+    local actor = entry.actor
+    local id = entry.kind == "initial" and tostring(actor.id or "") or ""
     if id ~= "" then
       nodes_order[#nodes_order + 1] = id
       nodes[id] = {
@@ -910,7 +913,7 @@ end
 -- Track one kernel actor lifecycle transition against its run's node table —
 -- the same per-firing truth the chat surface tracks: spawned → pending,
 -- ready/busy → running, idle → done, killed → killed. A later firing moves a
--- resident done actor back to running. The event's run_id names the run. A
+-- idle actor back to running. The event's run_id names the run. A
 -- mid-run spawn (`mag.apply`) appends a node the dispatch-time modification
 -- didn't carry.
 local function mark_mag_actor(body, status)
@@ -1689,7 +1692,7 @@ local function lead_workflow_tool_schemas()
         "modification. Use action='apply' without run_id to compile, validate, and apply " ..
         "a complete graph to a fresh run. Supply run_id to compile a Delta artifact and " ..
         "atomically apply its spawns, messages, and kills to that directly dispatched live " ..
-        "run. A live-run delta cannot add rules or replace the result boundary. " ..
+        "run. A live-run delta cannot replace the result boundary. " ..
         "A fresh apply waits briefly for that exact run's canonical terminal result. A quick " ..
         "success or failure returns directly; otherwise the existing asynchronous " ..
         "acknowledgment with a stable run_id is returned and completion arrives later " ..
@@ -1773,9 +1776,9 @@ end
 
 -- Compile and apply both run a synchronous load handshake against the mag
 -- plugin: `mag.load` is sent, the `mag.loaded` reply carries the lowered
--- modification {actors, messages, kills, rules}, the hash, and the kernel
+-- versioned program or delta envelope, its hash, and the kernel
 -- registry's factory names. resume_pending_load then renders the compile
--- preview, submits a fresh internal `mag.execute` by resident handle, or
+-- preview, submits a fresh internal `mag.execute` with the inline program, or
 -- submits a live-run internal `mag.apply`.
 -- A `mag.error` reply (compile failure) fails the firing with the compiler message
 -- (fail_pending_load). Lifecycle events (mag.run_started, actor spawn/ready,
@@ -1807,21 +1810,12 @@ local function begin_mag_load(firing_id, action, args, ws, provenance)
   emit_as(SOURCE_NAME, "mag", {
     kind       = "mag.load",
     id         = load_id,
-    resident   = action == "apply" and args.run_id == nil,
     source_dir = ws,
     module_roots = module_roots_for(ws),
     entry      = args.file,
   })
 end
 
-local function release_loaded_program(program_id)
-  if type(program_id) ~= "string" or #program_id == 0 then return end
-  emit_as(SOURCE_NAME, "mag", {
-    kind = "mag.unload",
-    id = "mag-unload-" .. envelope.uuid_lite(),
-    program_id = program_id,
-  })
-end
 
 -- Invalidate file-based compile handshakes as one state transition. A firing
 -- id removes only that invocation's load; nil clears every pending file load
@@ -1832,7 +1826,6 @@ invalidate_pending_mag_loads = function(firing_id)
   for load_id, pending in pairs(state.pending_mag_load) do
     if firing_id == nil or pending.firing_id == firing_id then
       state.pending_mag_load[load_id] = nil
-      release_loaded_program(load_id)
       hit = true
     end
   end
@@ -1912,125 +1905,76 @@ end
 -- channel. Both a fresh file-based `mag apply` and `mag-eval` use this
 -- path, so lifecycle/control/rendering/archival/cleanup have one owner.
 submit_loaded_run = function(pending, body, error_prefix)
-  local artifact = body.artifact
-  local modification = type(artifact) == "table" and artifact or nil
-  local program_id = body.program_id
+  local decoded, decode_error = mag.decode_artifact(body.artifact)
   local function reject(message)
-    release_loaded_program(program_id)
     emit_tool_result_err(pending.firing_id, message)
     return false
   end
-  if type(modification) ~= "table" then
-    return reject(error_prefix .. ": mag.loaded reply carried no graph artifact")
+  if not decoded or decoded.kind ~= "program" then
+    return reject(error_prefix .. ": " .. tostring(decode_error or "requires a program envelope"))
   end
-  if type(program_id) ~= "string" or #program_id == 0 then
-    return reject(error_prefix .. ": resident mag.loaded reply carried no program_id")
-  end
-  local actors = modification.actors or {}
-  if not validate_factories(actors, pending.firing_id) then
-    release_loaded_program(program_id)
-    return false
-  end
-  if actors_have_writers(actors) and state.gate_mode == "safe"
-      and not has_approved_plan() then
-    return reject(
-      "Program contains write-capable agents. Submit a plan via write-review " ..
-      "and get approval before executing.")
+  local modification = decoded.modification
+  local inventory = mag.actor_inventory(decoded)
+  if not validate_factories(inventory, pending.firing_id) then return false end
+  if actors_have_writers(inventory) and state.gate_mode == "safe" and not has_approved_plan() then
+    return reject("Program contains write-capable agents. Submit a plan via write-review and get approval before executing.")
   end
   local terminal_id, result_err = result_actor(modification)
-  if not terminal_id then
-    return reject(error_prefix .. ": " .. result_err)
-  end
+  if not terminal_id then return reject(error_prefix .. ": " .. result_err) end
   if type(resolve_model_snapshot) ~= "function" then
     return reject(error_prefix .. ": no model snapshot resolver is configured")
   end
   local resolved, snapshot = pcall(resolve_model_snapshot)
-  if not resolved then
-    return reject(error_prefix .. ": model snapshot resolver failed: " .. tostring(snapshot))
-  end
+  if not resolved then return reject(error_prefix .. ": model snapshot resolver failed: " .. tostring(snapshot)) end
   local snapshot_error
   snapshot, snapshot_error = model_snapshot.copy(snapshot)
-  if snapshot == nil then
-    return reject(error_prefix .. ": invalid model snapshot: " .. tostring(snapshot_error))
-  end
-  local overlay = compose_agent_params(actors, pending.session_id)
+  if snapshot == nil then return reject(error_prefix .. ": invalid model snapshot: " .. tostring(snapshot_error)) end
+  local overlay = compose_agent_params(inventory, pending.session_id)
   local exec = {
-    kind = "mag.execute",
-    id = pending.run_id,
-    run_id = pending.run_id,
-    run_name = pending.run_name,
-    session_id = pending.session_id,
-    principal = "subagent",
-    invocation_kind = pending.invocation_kind,
-    invocation_label = pending.invocation_label,
-    conversation_id = pending.conversation_id,
-    program_id = program_id,
-    model_snapshot = snapshot,
+    kind = "mag.execute", id = pending.run_id, run_id = pending.run_id,
+    run_name = pending.run_name, session_id = pending.session_id,
+    principal = "subagent", invocation_kind = pending.invocation_kind,
+    invocation_label = pending.invocation_label, conversation_id = pending.conversation_id,
+    artifact = body.artifact, model_snapshot = snapshot,
   }
   if next(overlay) ~= nil then exec.params_overlay = overlay end
   local owner_resume
   if pending.dispatcher_id ~= nil then
     local owner_actor_id, replacements = pending.dispatcher_id:gsub("%.run%-tool$", ".llm")
-    owner_resume = {
-      run_id = pending.owner_run_id,
+    owner_resume = { run_id = pending.owner_run_id,
       actor_id = replacements == 1 and owner_actor_id or nil,
-      conversation_id = pending.conversation_id,
-    }
+      conversation_id = pending.conversation_id }
   end
-  local run = register_active_run(pending.run_id, actors, terminal_id,
-    pending.firing_id, pending.run_name, pending.session_id, pending.dispatcher_id,
-    owner_resume)
+  local run = register_active_run(pending.run_id, inventory, terminal_id,
+    pending.firing_id, pending.run_name, pending.session_id, pending.dispatcher_id, owner_resume)
   run.invocation_label = pending.invocation_label or pending.run_name
   run.invocation_kind = pending.invocation_kind
   begin_completion_grace(run, async_run_ack(pending, body))
   emit_as(SOURCE_NAME, "mag", exec)
-  -- Fresh file programs and mag-eval expressions are one-shot callers. The
-  -- run pins its source environment during mag.execute, so the retained handle
-  -- can be released immediately after submission.
-  release_loaded_program(program_id)
   return true
 end
 
 local function submit_loaded_apply(pending, body)
-  local modification = type(body.artifact) == "table" and body.artifact or nil
-  if type(modification) ~= "table" then
+  local decoded, decode_error = mag.decode_artifact(body.artifact)
+  if not decoded or decoded.kind ~= "delta" then
     emit_tool_result_err(pending.firing_id,
-      "mag apply: mag.loaded reply carried no graph artifact")
+      "mag apply: " .. tostring(decode_error or "requires a delta envelope"))
     return false
   end
-  if modification.result ~= nil then
+  local inventory = mag.actor_inventory(decoded)
+  if not validate_factories(inventory, pending.firing_id) then return false end
+  if actors_have_writers(inventory) and state.gate_mode == "safe" and not has_approved_plan() then
     emit_tool_result_err(pending.firing_id,
-      "mag apply: a delta cannot define or replace the result boundary")
+      "Modification contains write-capable agents. Submit a plan via write-review and get approval before applying it.")
     return false
   end
-  if type(modification.rules) == "table" and #modification.rules > 0 then
-    emit_tool_result_err(pending.firing_id,
-      "mag apply: rules are immutable initial subscriptions")
-    return false
-  end
-  local actors = modification.actors or {}
-  if not validate_factories(actors, pending.firing_id) then return false end
-  if actors_have_writers(actors) and state.gate_mode == "safe"
-      and not has_approved_plan() then
-    emit_tool_result_err(pending.firing_id,
-      "Modification contains write-capable agents. Submit a plan via write-review " ..
-      "and get approval before applying it.")
-    return false
-  end
-  local overlay = compose_agent_params(actors, pending.session_id)
+  local overlay = compose_agent_params(inventory, pending.session_id)
   local request_id = "mag-apply-" .. envelope.uuid_lite()
   state.pending_mag_apply[request_id] = {
-    firing_id = pending.firing_id,
-    run_id = pending.run_id,
-    hash = body.hash,
+    firing_id = pending.firing_id, run_id = pending.run_id, hash = body.hash,
   }
-  local apply = {
-    kind = "mag.apply",
-    id = request_id,
-    run_id = pending.run_id,
-    source = "lead-workflow.mag.apply",
-    modification = modification,
-  }
+  local apply = { kind = "mag.apply", id = request_id, run_id = pending.run_id,
+    source = "lead-workflow.mag.apply", artifact = body.artifact }
   if next(overlay) ~= nil then apply.params_overlay = overlay end
   emit_as(SOURCE_NAME, "mag", apply)
   return true
@@ -2085,18 +2029,17 @@ local function resume_pending_load(body)
   state.pending_mag_load[load_id] = nil
 
   local artifact = body.artifact
-  local modification = type(artifact) == "table" and artifact or nil
-  if type(modification) ~= "table" then
+  local decoded, decode_error = mag.decode_artifact(artifact)
+  if not decoded then
     emit_tool_result_err(pending.firing_id,
-      "mag " .. pending.action .. ": mag.loaded reply carried no graph artifact")
+      "mag " .. pending.action .. ": " .. tostring(decode_error))
     return
   end
-  local actors = modification.actors or {}
 
   if pending.action == "compile" then
     emit_tool_result_ok(pending.firing_id, {
       status  = "compiled",
-      preview = mag.preview(modification, body.hash, body.factories),
+      preview = mag.preview(artifact, body.hash, body.factories),
       hash    = body.hash,
       message = "Program compiled successfully. Review the preview above. " ..
         "Call mag with action='apply' to run it.",

@@ -84,6 +84,7 @@
    :route_input_addresses (List String)
    :routes_by_input (Map String (List StoredRoute))
    :messages (List Message)
+   :operations (List nefor.mag.ProgramOperation)
    :logical_nodes (List LogicalNode)
    :outputs (List StoredNode)})
 
@@ -92,13 +93,6 @@
 (type ReachabilityState
   {:visited (Map String Bool) :frontier (List String)})
 (type IndexedPosition {:index String :position Int})
-
-;; Runtime subscriptions remain program metadata. They observe a graph but are
-;; not vertices or edges and therefore do not participate in edge-set algebra.
-(type LegacyRule {:id String :on StoredPort :fn String})
-(type Program {:graph Graph
-               :operations (List nefor.mag.ProgramOperation)
-               :legacy_rules (List LegacyRule)})
 
 (type FactoryTypeScheme {:input_tags (List String)
                          :outputs (List String)})
@@ -124,19 +118,16 @@
                     :semantic_type TypeDescriptor
                     :semantic_type_id SemanticTypeId
                     :content PackedValue})
-(type LowerLegacyRule {:id String :on StoredPort :fn String})
 (type ResultBoundary {:from StoredPort})
 (type Modification {:actors (List LowerActor)
                     :messages (List LowerMessage)
                     :kills (List String)
-                    :rules (List LowerLegacyRule)
                     :types (Map String TypeDescriptor)
                     :nodes (List LogicalNode)
                     :result ResultBoundary})
 
-;; Dynamic rule artifacts remain an operation format over the running actor
-;; kernel. They are deliberately not Graph values and are not exposed as graph
-;; mutation. Authored graph changes are code changes to a pure Graph -> Graph
+;; Delta artifacts are an operation format over the running actor kernel. They
+;; are deliberately not Graph values and are not exposed as graph mutation. Authored graph changes are code changes to a pure Graph -> Graph
 ;; transformation and execute as a fresh run.
 (type Delta {:actors (List Actor)
              :routes (List StoredRoute)
@@ -146,7 +137,6 @@
 (type LowerDelta {:actors (List LowerActor)
                   :messages (List LowerMessage)
                   :kills (List String)
-                  :rules (List LowerLegacyRule)
                   :types (Map String TypeDescriptor)
                   :nodes (List LogicalNode)})
 
@@ -269,30 +259,11 @@
          :captures captures
          :expressions expressions
          :template template}))))
-(let legacy-rule (fn [T] [[id String] [on (Port T)] [fn-name String]] -> LegacyRule
-  (as LegacyRule {:id id :on (store-port on) :fn fn-name})))
 (let operation-port (fn [[value nefor.mag.ProgramOperation]] -> StoredPort
   (as StoredPort {:actor (get value "on_actor")
                   :type (get value "trigger_type")
                   :type_id (get value "trigger_type_id")
                   :wire (get value "on_wire")})))
-;; Transitional authoring alias for existing compile-time coverage tests. It
-;; creates the new sole operation shape and retains no callable function.
-(let rule (fn [T] [[id String] [on (Port T)] [ignored String]] -> nefor.mag.ProgramOperation
-  (let stored (store-port on))
-  (let trigger
-    (as nefor.mag.Expression
-      (as nefor.mag.Trigger
-        {:id "trigger" :result_type (get stored "type_id")})))
-  (instantiate-delta-template id on
-    (as (Map String nefor.mag.TypedCapture) {}) [trigger]
-    (as nefor.mag.DeltaTemplate
-      {:types (as (Map String TypeDescriptor) {}) :actors [] :routes []
-       :messages [] :nodes [] :actor_reference_relocations []}))))
-(let with-rule
-  (fn [I O] [[value (Node I O)] [operation nefor.mag.ProgramOperation]] -> (Node I O)
-    (with-operation value operation)))
-
 (let source-factory "nefor.factory.source")
 (let source (fn [T] [[id String] [type (TypeTag T)] [value T]] -> (Node Unit T)
   (let input (port id (type-tag Unit) "mag.Unit"))
@@ -505,6 +476,7 @@
            (port-address-key (get candidate "to")))
          (sort-by route-id routes))
      :messages (get projection "messages")
+     :operations (get projection "graph_operations")
      :logical_nodes (get projection "logical_nodes")
      :outputs (get projection "outputs")})))
 (let analyze-graph (fn [[value Graph]] -> GraphAnalysis
@@ -612,10 +584,7 @@
   (get (graph-projection value) "messages")))
 (let graph-operations (fn [[value Graph]] -> (List nefor.mag.ProgramOperation)
   (get (graph-projection value) "graph_operations")))
-(let program (fn [[value Graph] [legacy-rules (List LegacyRule)]] -> Program
-  (as Program {:graph value
-               :operations (graph-operations value)
-               :legacy_rules legacy-rules})))
+
 (let graph-logical-nodes (fn [[value Graph]] -> (List LogicalNode)
   (get (graph-projection value) "logical_nodes")))
 (let insert-string
@@ -1265,7 +1234,6 @@
 (let validate (fn [[value Graph] [contracts (List FactoryContract)]]
   -> (core.validated.Validated String Graph)
   (validate-with-operations value (as (List nefor.mag.ProgramOperation) []) contracts)))
-(let validate-with-rules validate-with-operations)
 
 (let zip-route-assignments
   (fn [[routes (List StoredRoute)] [positions (List Int)]]
@@ -1447,8 +1415,6 @@
                     :semantic_type (get value "semantic_type")
                     :semantic_type_id (get value "semantic_type_id")
                     :content (get value "content")})))
-(let lower-legacy-rule (fn [[value LegacyRule]] -> LowerLegacyRule
-  (as LowerLegacyRule {:id (get value "id") :on (get value "on") :fn (get value "fn")})))
 (let result-boundary (fn [[analysis LoweringAnalysis]] -> ResultBoundary
   (as ResultBoundary
     {:from (get (first (get analysis "outputs")) "output")})))
@@ -1471,11 +1437,8 @@
 (let operation-descriptors (fn [[operations (List nefor.mag.ProgramOperation)]] -> (List TypeDescriptor)
   (map (fn [[candidate nefor.mag.ProgramOperation]] -> TypeDescriptor
          (get (operation-port candidate) "type")) operations)))
-(let legacy-rule-descriptors (fn [[rules (List LegacyRule)]] -> (List TypeDescriptor)
-  (map (fn [[candidate LegacyRule]] -> TypeDescriptor
-         (get (get candidate "on") "type")) rules)))
 (let program-descriptors
-  (fn [[analysis LoweringAnalysis] [operations (List nefor.mag.ProgramOperation)] [legacy-rules (List LegacyRule)]]
+  (fn [[analysis LoweringAnalysis] [operations (List nefor.mag.ProgramOperation)]]
     -> (List TypeDescriptor)
     (concat
       (concat
@@ -1484,7 +1447,7 @@
           (route-descriptors (get analysis "routes")))
         (concat
           (message-descriptors (get analysis "messages"))
-          (concat (operation-descriptors operations) (legacy-rule-descriptors legacy-rules))))
+          (operation-descriptors operations)))
       [(get (get (first (get analysis "outputs")) "output") "type")])))
 (let delta-descriptors (fn [[value Delta]] -> (List TypeDescriptor)
   (concat
@@ -1492,14 +1455,12 @@
       (actor-descriptors (get value "actors"))
       (route-descriptors (get value "routes")))
     (message-descriptors (get value "messages")))))
-(let lower-program (fn [[value Program]] -> Modification
-  (let topology (get value "graph"))
+(let lower-program (fn [[topology Graph]] -> Modification
   (let analysis (analyze-for-lowering topology))
   (let assigned (assigned-lowering-routes analysis))
   (let assigned-by-source
     (group-by assigned-route-source-actor assigned))
-  (let operations (get value "operations"))
-  (let legacy-rules (get value "legacy_rules"))
+  (let operations (get analysis "operations"))
   (as Modification
     {:actors
        (map (fn [[candidate Actor]] -> LowerActor
@@ -1510,14 +1471,13 @@
             (get analysis "actors"))
      :messages (map lower-message (get analysis "messages"))
      :kills (as (List String) [])
-     :rules (map lower-legacy-rule legacy-rules)
-     :types (descriptor-table (program-descriptors analysis operations legacy-rules))
+     :types (descriptor-table (program-descriptors analysis operations))
      :nodes (get analysis "logical_nodes")
      :result (result-boundary analysis)})))
 (let lower (fn [[value Graph]] -> Modification
-  (lower-program (program value (as (List LegacyRule) [])))))
+  (lower-program value)))
 
-;; Resident rule deltas are operational artifacts, not graph values.
+;; Deltas are operational artifacts, not graph values.
 (let delta (fn [[actors (List Actor)] [routes (List StoredRoute)]
                 [messages (List Message)] [kills (List String)]] -> Delta
   (as Delta {:actors actors :routes routes :messages messages
@@ -1580,6 +1540,5 @@
                  (concat authored-messages
                    (bootstrap-messages unit-ports (get value "routes") authored-messages)))
      :kills (get value "kills")
-     :rules (as (List LowerLegacyRule) [])
      :types (descriptor-table (delta-descriptors value))
      :nodes (get value "nodes")})))

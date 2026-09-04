@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "NCP v0.1 plugin: MAG actor-kernel runtime. Hosts a Lua VM that loads the kernel/factory modules and (eventually) folds graph modifications produced by the resident nefor-mag evaluator."
+description = "NCP v0.1 plugin: MAG actor-kernel runtime for immutable versioned program and delta envelopes."
 
 # Binary is `mag-plugin`, not `mag`: the `nefor-mag` crate already owns a
 # `mag` binary (the compiler CLI), so the plugin gets a distinct name to
@@ -29,6 +29,7 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 mlua = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 tokio = { workspace = true }

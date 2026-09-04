@@ -64,6 +64,21 @@ fn dispatch_event(engine: &mut Engine, body: JsonValue) {
     chat_harness::dispatch_event(engine, body);
 }
 
+fn approval_reply_type() -> JsonValue {
+    json!({
+        "kind": "named", "name": "mag.ApprovalReply", "arguments": [], "body": {
+            "kind": "record", "fields": [
+                {"name": "approved", "type": {"kind": "primitive", "name": "Bool"}},
+                {"name": "content", "type": {"kind": "primitive", "name": "String"}},
+                {"name": "kind", "type": {"kind": "primitive", "name": "String"}},
+                {"name": "reason", "type": {"kind": "primitive", "name": "String"}}
+            ]
+        }
+    })
+}
+
+const APPROVAL_REPLY_TYPE_ID: &str = "sha256:approval-reply-test";
+
 fn activate_conversation(engine: &mut Engine, conversation_id: &str) {
     chat_harness::activate_conversation(engine, conversation_id);
 }
@@ -4477,7 +4492,8 @@ fn mag_human_approval_is_run_addressed_and_cancel_safe() {
         &mut engine,
         json!({
             "kind": "mag.approval_request", "run_id": "run-dead", "from": "gate-a",
-            "correlation": "approval-a", "prompt": "Ship it?", "subject": { "plan": "A" }
+            "correlation": "approval-a", "prompt": "Ship it?", "subject": { "plan": "A" },
+            "reply_type": approval_reply_type(), "reply_type_id": APPROVAL_REPLY_TYPE_ID
         }),
     );
     assert!(render_str(&mut engine).contains("Ship it?"));
@@ -4503,7 +4519,8 @@ fn mag_human_approval_is_run_addressed_and_cancel_safe() {
         &mut engine,
         json!({
             "kind": "mag.approval_request", "run_id": "run-live", "from": "gate-b",
-            "correlation": "approval-b", "prompt": "Continue?", "subject": { "plan": "B" }
+            "correlation": "approval-b", "prompt": "Continue?", "subject": { "plan": "B" },
+            "reply_type": approval_reply_type(), "reply_type_id": APPROVAL_REPLY_TYPE_ID
         }),
     );
     engine.handle_key(key("a")).expect("approve");
@@ -4516,17 +4533,31 @@ fn mag_human_approval_is_run_addressed_and_cancel_safe() {
         Some("run-live")
     );
     assert_eq!(
-        body.pointer("/modification/messages/0/to")
+        body.pointer("/artifact/delta/messages/0/to")
             .and_then(|v| v.as_str()),
         Some("gate-b")
     );
     assert_eq!(
-        body.pointer("/modification/messages/0/content/kind")
+        body.pointer("/artifact/delta/messages/0/semantic_type_id")
+            .and_then(|v| v.as_str()),
+        Some(APPROVAL_REPLY_TYPE_ID)
+    );
+    assert_eq!(
+        body.pointer("/artifact/delta/types/sha256:approval-reply-test"),
+        Some(&approval_reply_type())
+    );
+    assert_eq!(
+        body.pointer("/artifact/delta/messages/0/content/$mag")
+            .and_then(|v| v.as_str()),
+        Some("packed-value")
+    );
+    assert_eq!(
+        body.pointer("/artifact/delta/messages/0/content/value/kind")
             .and_then(|v| v.as_str()),
         Some("mag.ApprovalReply")
     );
     assert_eq!(
-        body.pointer("/modification/messages/0/content/approved")
+        body.pointer("/artifact/delta/messages/0/content/value/approved")
             .and_then(|v| v.as_bool()),
         Some(true)
     );
@@ -4546,7 +4577,8 @@ fn mag_approval_cancel_only_retracts_its_correlated_popup() {
             &mut engine,
             json!({
                 "kind": "mag.approval_request", "run_id": run, "from": gate,
-                "correlation": correlation, "prompt": prompt, "subject": {}
+                "correlation": correlation, "prompt": prompt, "subject": {},
+                "reply_type": approval_reply_type(), "reply_type_id": APPROVAL_REPLY_TYPE_ID
             }),
         );
     }
@@ -4571,7 +4603,7 @@ fn mag_approval_cancel_only_retracts_its_correlated_popup() {
     );
     let body = serde_json::Value::Object(emits[0].1.clone());
     assert_eq!(
-        body.pointer("/modification/messages/0/content/approved")
+        body.pointer("/artifact/delta/messages/0/content/value/approved")
             .and_then(|v| v.as_bool()),
         Some(false)
     );
@@ -4795,7 +4827,8 @@ fn terminal_run_and_session_cleanup_retract_mag_approvals() {
         &mut engine,
         json!({
             "kind": "mag.approval_request", "run_id": "run-terminal", "from": "gate",
-            "correlation": "approval", "prompt": "Stale", "subject": {}
+            "correlation": "approval", "prompt": "Stale", "subject": {},
+            "reply_type": approval_reply_type(), "reply_type_id": APPROVAL_REPLY_TYPE_ID
         }),
     );
     dispatch_event(
@@ -4810,7 +4843,8 @@ fn terminal_run_and_session_cleanup_retract_mag_approvals() {
         &mut engine,
         json!({
             "kind": "mag.approval_request", "run_id": "run-session", "from": "gate",
-            "correlation": "approval-session", "prompt": "Session stale", "subject": {}
+            "correlation": "approval-session", "prompt": "Session stale", "subject": {},
+            "reply_type": approval_reply_type(), "reply_type_id": APPROVAL_REPLY_TYPE_ID
         }),
     );
     dispatch_event(&mut engine, json!({ "kind": "sessions.session_end" }));

@@ -315,6 +315,8 @@ function M:on_emit(id, message, generation)
       correlation = message.correlation,
       prompt = message.prompt,
       subject = message.subject,
+      reply_type = message.reply_type,
+      reply_type_id = message.reply_type_id,
     })
   elseif kind == APPROVAL_CANCEL then
     -- The gate retracted an outstanding request (drain). Intercepted before
@@ -425,9 +427,12 @@ function M:factory_arrival(id, wire, payload)
   local actual_type = endpoint.type
   local actual_type_id = endpoint.type_id
   local constructor_id = endpoint.type_id
+  local semantic_value = payload.semantic_value
+  if semantic_value == nil then semantic_value = payload.value end
+  local routed_value = payload.value
   if endpoint.type.kind == "union" then
-    local selected = payload.semantic_type_id or
-      (type(payload.value) == "table" and payload.value.type or nil)
+    local wrapped = type(payload.value) == "table" and payload.value or nil
+    local selected = payload.semantic_type_id or (wrapped and wrapped.type or nil)
     local host = nefor and nefor.semantic_type
     if type(selected) ~= "string" or type(host) ~= "table" or type(host.id) ~= "function" then
       return nil, string.format(
@@ -444,6 +449,10 @@ function M:factory_arrival(id, wire, payload)
     end
     actual_type_id = selected
     constructor_id = selected
+    if payload.semantic_value == nil and wrapped and wrapped.type == selected then
+      semantic_value = wrapped.value
+      routed_value = wrapped.value
+    end
   end
   local dynamic_item = dynamic_item_type(actual_type)
   if actor.semantic_strict then
@@ -511,8 +520,6 @@ function M:factory_arrival(id, wire, payload)
         tostring(id), tostring(wire))
     end
     if dynamic_item == nil then
-      local semantic_value = payload.semantic_value
-      if semantic_value == nil then semantic_value = payload.value end
       local validation = host.validate_value(actual_type, semantic_value)
       if not validation.ok then
         local violation = (validation.violations or {})[1]
@@ -529,7 +536,7 @@ function M:factory_arrival(id, wire, payload)
   if actor.semantic_strict then
     routed_payload = {
       kind = wire,
-      value = payload.value,
+      value = routed_value,
     }
     -- Provider turns and tool-call handles carry correlation data which is not
     -- part of their semantic value but is required by the next runtime actor.
@@ -673,6 +680,21 @@ function M:deliver_initial(dest_id, from, message)
     ((message.content or {}).kind)
   local descriptor = message.semantic_type or dest.input.type or
     { kind = "named", name = "legacy." .. tostring(type_id), arguments = {} }
+  local content = message.content
+  if type(content) == "table" and content.kind == kinds.ApprovalReply then
+    return self:deliver(dest_id, typed_value.initial({
+      arrival_id = self:next_arrival_id(),
+      from = from,
+      type_id = type_id,
+      type = descriptor,
+      declared_type_id = type_id,
+      declared_type = descriptor,
+      constructor_id = type_id,
+      protocol_wire = kinds.ApprovalReply,
+      product_position = -1,
+      payload = content,
+    }))
+  end
   local host = nefor and nefor.semantic_type
   if dest.input.type_id and (type(host) ~= "table"
       or type(host.accepts) ~= "function"
@@ -683,7 +705,6 @@ function M:deliver_initial(dest_id, from, message)
     self.events({ kind = EVT_RUN_FAILED, from = dest_id, failure = "typed-input", error = detail })
     return
   end
-  local content = message.content
   if type(dest.input.type) == "table" and dest.input.type.kind == "union"
       and type(content) == "table" and type(content.value) == "table"
       and content.value.type == type_id and content.value.value ~= nil then

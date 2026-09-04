@@ -1,7 +1,7 @@
 use nefor_mag::{
-    compile as compile_artifact, compile_with_options, eval_fn, load_with_inputs,
-    load_with_inputs_and_module_roots, load_with_options, validate_fn, validate_fn_input,
-    CompilerLimits, CompilerOptions,
+    compile as compile_artifact, compile_file_with_inputs,
+    compile_file_with_inputs_and_module_roots, compile_with_options, CompilerLimits,
+    CompilerOptions,
 };
 use serde_json::json;
 use std::fs;
@@ -30,6 +30,27 @@ fn artifact_is_the_only_top_level_output() {
         .unwrap_err()
         .to_string()
         .contains("must return Artifact"));
+}
+
+#[test]
+fn packed_values_have_an_explicit_compiler_owned_envelope() {
+    let root = workspace("packed-value-envelope");
+    let artifact = compile(
+        r#"(artifact (pack {:type "sha256:user-authored" :value {:nested true}}))"#,
+        &root,
+    )
+    .unwrap();
+
+    assert_eq!(
+        artifact,
+        json!({
+            "$mag": "packed-value",
+            "value": {
+                "type": "sha256:user-authored",
+                "value": {"nested": true}
+            }
+        })
+    );
 }
 
 #[test]
@@ -84,34 +105,6 @@ fn rust_compilation_returns_the_artifact_directly() {
         },
     );
     assert!(constrained.is_err());
-}
-
-#[test]
-fn loaded_program_limits_apply_to_resident_function_evaluation() {
-    let root = workspace("resident-limits");
-    fs::write(
-        root.join("main.mag"),
-        r#"(let recurse (fn [[value Int]] -> Artifact
-  (recurse value)))
-(artifact {})"#,
-    )
-    .unwrap();
-    let program = load_with_options(
-        &root,
-        "main.mag",
-        CompilerOptions {
-            limits: CompilerLimits {
-                call_depth: 1,
-                ..CompilerLimits::default()
-            },
-        },
-    )
-    .unwrap();
-
-    assert!(eval_fn(&program, "recurse", json!(1))
-        .unwrap_err()
-        .to_string()
-        .contains("function call depth limit reached"));
 }
 
 #[test]
@@ -542,98 +535,6 @@ fn typed_library_functions_return_artifacts() {
 }
 
 #[test]
-fn rule_functions_are_named_unary_artifact_functions() {
-    let root = workspace("rule-functions");
-    fs::write(
-        root.join("main.mag"),
-        r#"
-          (let expand (fn [[value String]] -> Artifact
-            (artifact {:value value})))
-          (let binary (fn [[left String] [right String]] -> Artifact
-            (artifact {:left left :right right})))
-          (let wrong-output (fn [[value String]] -> String value))
-          (type Task {:task String :description String})
-          (let expand-tasks (fn [[tasks (List Task)]] -> Artifact
-            (artifact
-              {:names (map (fn [[task Task]] -> String (get task "task")) tasks)})))
-          (artifact {})
-        "#,
-    )
-    .unwrap();
-    let loaded = load_with_inputs(&root, "main.mag", json!({})).unwrap();
-    validate_fn(&loaded, "expand", 1, &nefor_mag::types::MagType::Artifact).unwrap();
-    let string = serde_json::json!({"kind":"primitive","name":"String"});
-    let int = serde_json::json!({"kind":"primitive","name":"Int"});
-    validate_fn_input(&loaded, "expand", 0, &string).unwrap();
-    assert!(validate_fn_input(&loaded, "expand", 0, &int)
-        .unwrap_err()
-        .to_string()
-        .contains("does not match its structural source type"));
-    assert!(
-        validate_fn(&loaded, "binary", 1, &nefor_mag::types::MagType::Artifact)
-            .unwrap_err()
-            .to_string()
-            .contains("must have 1 parameters")
-    );
-    assert!(validate_fn(
-        &loaded,
-        "wrong-output",
-        1,
-        &nefor_mag::types::MagType::Artifact
-    )
-    .unwrap_err()
-    .to_string()
-    .contains("must return Artifact"));
-    assert!(
-        validate_fn(&loaded, "missing", 1, &nefor_mag::types::MagType::Artifact)
-            .unwrap_err()
-            .to_string()
-            .contains("unresolved symbol")
-    );
-    let artifact = eval_fn(
-        &loaded,
-        "expand-tasks",
-        json!([{"task":"one", "description":"first"}]),
-    )
-    .unwrap();
-    assert_eq!(artifact["names"], json!(["one"]));
-    let mismatch = eval_fn(
-        &loaded,
-        "expand-tasks",
-        json!([{"task":"one", "description":7}]),
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(mismatch.contains("$[0].description"), "{mismatch}");
-}
-
-#[test]
-fn resident_rule_overloads_are_selected_by_semantic_input_type() {
-    let root = workspace("resident-overloads");
-    fs::write(
-        root.join("main.mag"),
-        r#"
-          (type IntTask {:id Int})
-          (type TextTask {:id String})
-          (let expand
-            (fn [[task IntTask]] -> Artifact
-              (artifact {:kind "int" :id (get task "id")})))
-          (let expand
-            (fn [[task TextTask]] -> Artifact
-              (artifact {:kind "text" :id (get task "id")})))
-          (artifact {})
-        "#,
-    )
-    .unwrap();
-
-    let loaded = load_with_inputs(&root, "main.mag", json!({})).unwrap();
-    let int = eval_fn(&loaded, "expand", json!({"id": 7})).unwrap();
-    let text = eval_fn(&loaded, "expand", json!({"id": "seven"})).unwrap();
-    assert_eq!(int, json!({"kind": "int", "id": 7}));
-    assert_eq!(text, json!({"kind": "text", "id": "seven"}));
-}
-
-#[test]
 fn namespaced_transitive_and_diamond_imports_are_stable() {
     let root = workspace("modules");
     fs::create_dir_all(root.join("app")).unwrap();
@@ -653,10 +554,10 @@ fn namespaced_transitive_and_diamond_imports_are_stable() {
     )
     .unwrap();
     fs::write(root.join("main.mag"),"(require \"app.left\")\n(require \"app.right\")\n(artifact {:left app.left.left :right app.right.right :type (str core.types.Validated)})").unwrap();
-    let loaded = load_with_inputs(&root, "main.mag", json!({})).unwrap();
-    assert_eq!(loaded.artifact["left"], 7);
-    assert_eq!(loaded.artifact["right"], 7);
-    assert_eq!(loaded.artifact["type"], "core.types.Validated");
+    let loaded = compile_file_with_inputs(&root, "main.mag", json!({})).unwrap();
+    assert_eq!(loaded["left"], 7);
+    assert_eq!(loaded["right"], 7);
+    assert_eq!(loaded["type"], "core.types.Validated");
 }
 
 #[test]
@@ -678,7 +579,7 @@ fn qualified_nominal_constructors_do_not_duck_type() {
     )
     .unwrap();
 
-    let error = load_with_inputs(&root, "main.mag", json!({}))
+    let error = compile_file_with_inputs(&root, "main.mag", json!({}))
         .unwrap_err()
         .to_string();
     assert!(
@@ -757,7 +658,7 @@ fn immutable_host_inputs_expose_only_typed_projections() {
         "(let inputs 1)\n(require \"core.input\")\n(artifact {:local (as Int inputs) :contracts core.input.contracts})",
     )
     .unwrap();
-    let loaded = load_with_inputs(
+    let loaded = compile_file_with_inputs(
         &root,
         "main.mag",
         json!({"factory_contracts":[{
@@ -774,7 +675,7 @@ fn immutable_host_inputs_expose_only_typed_projections() {
     )
     .unwrap();
     assert_eq!(
-        loaded.artifact,
+        loaded,
         json!({"local":1,"contracts":[{
             "identity":"x",
             "type_scheme":{"input_tags":["in"],"outputs":["out"]}
@@ -795,8 +696,8 @@ fn host_input_projection_selects_the_hidden_capability_by_type() {
     )
     .unwrap();
 
-    let loaded = load_with_inputs(&root, "main.mag", json!({"message":"hello"})).unwrap();
-    assert_eq!(loaded.artifact, json!({"local":1,"host":"hello"}));
+    let loaded = compile_file_with_inputs(&root, "main.mag", json!({"message":"hello"})).unwrap();
+    assert_eq!(loaded, json!({"local":1,"host":"hello"}));
 }
 
 #[test]
@@ -808,7 +709,7 @@ fn host_input_projection_reports_missing_and_mistyped_values() {
     )
     .unwrap();
 
-    let missing = load_with_inputs(&root, "main.mag", json!({}))
+    let missing = compile_file_with_inputs(&root, "main.mag", json!({}))
         .unwrap_err()
         .to_string();
     assert!(
@@ -816,7 +717,7 @@ fn host_input_projection_reports_missing_and_mistyped_values() {
         "{missing}"
     );
 
-    let mistyped = load_with_inputs(&root, "main.mag", json!({"count":"many"}))
+    let mistyped = compile_file_with_inputs(&root, "main.mag", json!({"count":"many"}))
         .unwrap_err()
         .to_string();
     assert!(
@@ -834,7 +735,7 @@ fn host_input_projection_reports_missing_and_mistyped_values() {
             format!("(artifact (host-input \"value\" (type-tag {ty})))"),
         )
         .unwrap();
-        let error = load_with_inputs(&root, "main.mag", json!({"value":value}))
+        let error = compile_file_with_inputs(&root, "main.mag", json!({"value":value}))
             .unwrap_err()
             .to_string();
         assert!(error.contains(&format!("expected {ty}")), "{error}");
@@ -845,7 +746,7 @@ fn host_input_projection_reports_missing_and_mistyped_values() {
         "(type Config {:steps (List {:enabled Bool :label String})})\n(artifact (host-input \"config\" (type-tag Config)))",
     )
     .unwrap();
-    let nested = load_with_inputs(
+    let nested = compile_file_with_inputs(
         &root,
         "main.mag",
         json!({"config":{"steps":[{"enabled":"yes","label":"build"}]}}),
@@ -869,40 +770,14 @@ fn json_data_files_are_parsed_into_mag_values() {
     )
     .unwrap();
 
-    let loaded = load_with_inputs(&root, "main.mag", json!({})).unwrap();
-    assert_eq!(loaded.artifact, json!(["read_file", "read_image"]));
+    let loaded = compile_file_with_inputs(&root, "main.mag", json!({})).unwrap();
+    assert_eq!(loaded, json!(["read_file", "read_image"]));
 
     fs::write(&file, "not json").unwrap();
-    let error = load_with_inputs(&root, "main.mag", json!({}))
+    let error = compile_file_with_inputs(&root, "main.mag", json!({}))
         .unwrap_err()
         .to_string();
     assert!(error.contains("cannot parse JSON toolsets.json"), "{error}");
-}
-
-#[test]
-fn file_reads_are_immutable_for_the_loaded_program() {
-    let root = workspace("file-read-snapshot");
-    fs::write(root.join("value.txt"), "first").unwrap();
-    fs::write(
-        root.join("main.mag"),
-        r#"
-          (let initial (read "value.txt"))
-          (let reread (fn [[ignored Unit]] -> Artifact
-            (artifact (read "value.txt"))))
-          (artifact initial)
-        "#,
-    )
-    .unwrap();
-
-    let loaded = load_with_inputs(&root, "main.mag", json!({})).unwrap();
-    assert_eq!(loaded.artifact, json!("first"));
-
-    fs::write(root.join("value.txt"), "second").unwrap();
-    let reread = eval_fn(&loaded, "reread", serde_json::Value::Null).unwrap();
-    assert_eq!(reread, json!("first"));
-
-    let reloaded = load_with_inputs(&root, "main.mag", json!({})).unwrap();
-    assert_eq!(reloaded.artifact, json!("second"));
 }
 
 #[test]
@@ -954,7 +829,7 @@ fn checker_rejects_bad_returns_and_calls() {
 fn host_inputs_are_opaque_outside_typed_projections() {
     let root = workspace("opaque-inputs");
     fs::write(root.join("main.mag"), "(artifact (get inputs :contracts))").unwrap();
-    let error = load_with_inputs(
+    let error = compile_file_with_inputs(
         &root,
         "main.mag",
         json!({"contracts":[{"identity":"worker"}]}),
@@ -1057,7 +932,7 @@ fn circular_modules_report_the_cycle() {
     fs::write(root.join("core/a.mag"), "(require \"core.b\")").unwrap();
     fs::write(root.join("core/b.mag"), "(require \"core.a\")").unwrap();
     fs::write(root.join("main.mag"), "(require \"core.a\")\n(artifact {})").unwrap();
-    let error = load_with_inputs(&root, "main.mag", json!({}))
+    let error = compile_file_with_inputs(&root, "main.mag", json!({}))
         .unwrap_err()
         .to_string();
     assert!(error.contains("core.a -> core.b -> core.a"), "{error}");
@@ -1076,10 +951,14 @@ fn entry_and_module_search_roots_are_independent() {
         "(require \"core.types\")\n(artifact {:marker core.types.marker})",
     )
     .unwrap();
-    let loaded =
-        load_with_inputs_and_module_roots(&entry_root, "main.mag", json!({}), &[library_root])
-            .unwrap();
-    assert_eq!(loaded.artifact["marker"], 42);
+    let loaded = compile_file_with_inputs_and_module_roots(
+        &entry_root,
+        "main.mag",
+        json!({}),
+        &[library_root],
+    )
+    .unwrap();
+    assert_eq!(loaded["marker"], 42);
 }
 
 #[test]
@@ -1098,9 +977,10 @@ fn duplicate_canonical_modules_across_roots_are_rejected() {
         "(require \"core.types\")\n(artifact {})",
     )
     .unwrap();
-    let error = load_with_inputs_and_module_roots(&entry, "main.mag", json!({}), &[left, right])
-        .unwrap_err()
-        .to_string();
+    let error =
+        compile_file_with_inputs_and_module_roots(&entry, "main.mag", json!({}), &[left, right])
+            .unwrap_err()
+            .to_string();
     assert!(error.contains("ambiguous across search roots"), "{error}");
 }
 
@@ -1724,7 +1604,7 @@ fn fallible_nodes_compose_with_kleisli_semantics() {
     )
     .unwrap();
 
-    let program = load_with_inputs_and_module_roots(
+    let program = compile_file_with_inputs_and_module_roots(
         &root,
         "main.mag",
         json!({}),
@@ -1732,12 +1612,10 @@ fn fallible_nodes_compose_with_kleisli_semantics() {
     )
     .unwrap();
 
-    assert_eq!(program.artifact["id"], "fallible>=>continuation");
-    assert!(program.artifact["actors"]
-        .as_array()
-        .is_some_and(|actors| actors
-            .iter()
-            .any(|actor| actor["id"] == "fallible>=>continuation.error")));
+    assert_eq!(program["id"], "fallible>=>continuation");
+    assert!(program["actors"].as_array().is_some_and(|actors| actors
+        .iter()
+        .any(|actor| actor["id"] == "fallible>=>continuation.error")));
 }
 
 #[test]
@@ -1748,6 +1626,7 @@ fn graph_product_input_accepts_repeated_typed_fan_in() {
         root.join("main.mag"),
         r#"
           (require "nefor.graph")
+          (require "nefor.mag")
           (type CoveredLeft {:value Int})
           (type CoveredRight {:value String})
           (type CoveredChoice (| CoveredLeft CoveredRight))
@@ -1797,15 +1676,22 @@ fn graph_product_input_accepts_repeated_typed_fan_in() {
           (let choice-result (nefor.graph.output "choice-result" (type-tag CoveredLeft)))
           (let choice-topology (nefor.graph.graph
                     [(nefor.graph.edge choice-start choice-result)]))
-          (let choice-rule (nefor.graph.rule
-                    "observe-choice" (get choice-start "output") "observe-choice"))
+          (let choice-operation
+            (nefor.graph.instantiate-delta-template "observe-choice"
+              (get choice-start "output")
+              (as (Map String nefor.mag.TypedCapture) {})
+              (as (List nefor.mag.Expression) [])
+              (as nefor.mag.DeltaTemplate
+                {:types (as (Map String TypeDescriptor) {})
+                 :actors [] :routes [] :messages [] :nodes []
+                 :actor_reference_relocations []})))
           (let contracts (host-input "factory_contracts"
                             (type-tag (List nefor.graph.FactoryContract))))
           (let checked (nefor.graph.validate topology contracts))
           (let output-checked (nefor.graph.validate output-topology contracts))
           (let choice-without-rule (nefor.graph.validate choice-topology contracts))
-          (let choice-with-rule (nefor.graph.validate-with-rules
-                    choice-topology [choice-rule] contracts))
+          (let choice-with-operation (nefor.graph.validate-with-operations
+                    choice-topology [choice-operation] contracts))
           (let lowered (nefor.graph.lower topology))
           (let lowered-left (first (filter
                     (fn [[candidate nefor.graph.LowerActor]] -> Bool
@@ -1825,7 +1711,7 @@ fn graph_product_input_accepts_repeated_typed_fan_in() {
           (artifact {:valid (core.validated.valid? checked)
                :output-valid (core.validated.valid? output-checked)
                :choice-without-rule-valid (core.validated.valid? choice-without-rule)
-               :choice-with-rule-valid (core.validated.valid? choice-with-rule)
+               :choice-with-operation-valid (core.validated.valid? choice-with-operation)
                :type-count (count (get lowered "types"))
                :left-output-id
                  (get (first (get lowered-left "outputs")) "type_id")
@@ -1875,14 +1761,17 @@ fn graph_product_input_accepts_repeated_typed_fan_in() {
             }
         ]
     });
-    let artifact =
-        load_with_inputs_and_module_roots(&root, "main.mag", inputs, &[root.clone(), mag_lib])
-            .unwrap()
-            .artifact;
+    let artifact = compile_file_with_inputs_and_module_roots(
+        &root,
+        "main.mag",
+        inputs,
+        &[root.clone(), mag_lib],
+    )
+    .unwrap();
     assert_eq!(artifact["valid"], true, "{:?}", artifact);
     assert_eq!(artifact["output-valid"], true);
     assert_eq!(artifact["choice-without-rule-valid"], false);
-    assert_eq!(artifact["choice-with-rule-valid"], true);
+    assert_eq!(artifact["choice-with-operation-valid"], true);
     assert!(artifact["type-count"].as_u64().unwrap() >= 4);
     assert_eq!(artifact["left-output-id"], artifact["left-route-source-id"]);
     assert_eq!(
@@ -2096,9 +1985,7 @@ fn type_schema_preserves_qualified_nominals_and_substitutes_generics() {
         "(require \"core.types\")\n(artifact core.types.schema)",
     )
     .unwrap();
-    let artifact = load_with_inputs(&root, "main.mag", json!({}))
-        .unwrap()
-        .artifact;
+    let artifact = compile_file_with_inputs(&root, "main.mag", json!({})).unwrap();
     assert_eq!(artifact["version"], 1);
     assert_eq!(artifact["root"]["kind"], "named");
     assert_eq!(artifact["root"]["name"], "core.types.Box");
@@ -2110,51 +1997,6 @@ fn type_schema_preserves_qualified_nominals_and_substitutes_generics() {
         artifact["root"]["body"]["fields"][0]["schema"]["item"]["kind"],
         "string"
     );
-}
-
-#[test]
-fn tagged_sum_json_round_trips_aliases_and_rejects_forged_envelopes() {
-    let root = workspace("tagged-sum-json");
-    fs::write(
-        root.join("main.mag"),
-        r#"
-          (type X {:value Int})
-          (type Y {:value Int})
-          (type XY (| X Y))
-          (type Alias XY)
-          (type Nested {:choice Alias :pair (+ String Alias)})
-          (let accept (fn [[value Nested]] -> Artifact
-            (artifact value)))
-          (artifact (type-schema (type-tag Alias)))
-        "#,
-    )
-    .unwrap();
-    let loaded = load_with_inputs(&root, "main.mag", json!({})).unwrap();
-    let variants = loaded.artifact["root"]["variants"].as_array().unwrap();
-    assert_eq!(variants.len(), 2);
-    let first = variants[0]["tag"].as_str().unwrap();
-    let second = variants[1]["tag"].as_str().unwrap();
-    assert_ne!(first, second);
-    assert!(first.starts_with("sha256:"));
-    assert!(second.starts_with("sha256:"));
-
-    let input = json!({
-        "choice": {"type": first, "value": {"value": 1}},
-        "pair": ["kept", {"type": second, "value": {"value": 2}}]
-    });
-    let artifact = eval_fn(&loaded, "accept", input.clone()).unwrap();
-    assert_eq!(artifact, input);
-
-    for malformed in [
-        json!({"choice": {"value": {"value": 1}}, "pair": ["kept", {"type": second, "value": {"value": 2}}]}),
-        json!({"choice": {"type": first}, "pair": ["kept", {"type": second, "value": {"value": 2}}]}),
-        json!({"choice": {"type": first, "value": {"value": 1}, "extra": true}, "pair": ["kept", {"type": second, "value": {"value": 2}}]}),
-        json!({"choice": {"type": "sha256:forged", "value": {"value": 1}}, "pair": ["kept", {"type": second, "value": {"value": 2}}]}),
-        json!({"choice": {"type": first, "value": {"value": "wrong"}}, "pair": ["kept", {"type": second, "value": {"value": 2}}]}),
-        json!({"choice": {"value": 1}, "pair": ["kept", {"type": second, "value": {"value": 2}}]}),
-    ] {
-        assert!(eval_fn(&loaded, "accept", malformed).is_err());
-    }
 }
 
 #[test]

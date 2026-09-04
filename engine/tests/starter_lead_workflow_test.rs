@@ -110,7 +110,9 @@ fn production_mag_eval_wrapper_compiles_direct_process_exec() {
     .unwrap_or_else(|error| panic!("production mag-eval wrapper failed to compile: {error}"));
 
     assert!(artifact
-        .get("actors")
+        .get("program")
+        .and_then(|program| program.get("initial"))
+        .and_then(|initial| initial.get("actors"))
         .and_then(|value| value.as_array())
         .is_some());
 }

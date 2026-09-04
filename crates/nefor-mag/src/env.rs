@@ -216,13 +216,6 @@ impl Default for Env {
 }
 
 impl Env {
-    pub(crate) fn owns_binding_handle(&self, handle: &BindingHandle) -> bool {
-        handle
-            .state
-            .upgrade()
-            .is_some_and(|state| Arc::ptr_eq(&state, &self.state))
-    }
-
     pub fn new() -> Self {
         Self::new_in(
             Path::new("."),
@@ -1169,8 +1162,8 @@ impl Env {
         if limit == 0 {
             return;
         }
-        // Keep resident programs bounded even when rule functions see a long
-        // stream of distinct inputs. Clearing only forfeits prior work.
+        // Bound distinct memoized inputs within one compilation. Clearing only
+        // forfeits prior work.
         if state.memoized_calls.len() >= limit {
             state.memoized_calls.clear();
         }

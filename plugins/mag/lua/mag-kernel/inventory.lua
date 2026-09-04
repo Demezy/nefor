@@ -17,7 +17,7 @@
 -- Construction is NOT the fold's concern: a spawn only registers the spec
 -- (id, factory, params, routes). The routing layer constructs the instance
 -- lazily, at the actor's first satisfied input contract (actor-model.md,
--- Lifecycle). Initial rule registration belongs to the run composition in
+-- Lifecycle). Declarative operation registration belongs to the run composition in
 -- init.lua; the fold accepts only actor/message/kill deltas.
 
 local kinds = require("kinds")
@@ -165,7 +165,9 @@ local function validate(self, mod)
   local actors = mod.actors or {}
   local messages = mod.messages or {}
   local kills = mod.kills or {}
-  local rules = mod.rules or {}
+  if mod.rules ~= nil then
+    return nil, "rules are not a supported modification field"
+  end
 
   if not is_array(actors) then
     return nil, "actors must be an array"
@@ -176,16 +178,6 @@ local function validate(self, mod)
   if not is_array(kills) then
     return nil, "kills must be an array"
   end
-  if not is_array(rules) then
-    return nil, "rules must be an array"
-  end
-
-  -- Initial subscriptions are registered by init.lua before the first fold.
-  -- A later delta cannot mutate that immutable subscription set.
-  if #rules > 0 then
-    return nil, "rules are immutable initial subscriptions"
-  end
-
   -- actors: shape + intra-modification id uniqueness. A single
   -- modification naming one id twice is an authoring/lowering bug, not a
   -- race, so it is a hard rejection (distinct from the cross-modification

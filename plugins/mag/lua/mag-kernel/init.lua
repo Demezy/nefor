@@ -237,17 +237,14 @@ local function new_run_context(meta)
     run_complete_taken = false,
     terminal_settlement = nil,
     run_failed = nil,
-    rules = {},
-    rule_ids = {},
-    trigger_queue = {},
     operations = {},
     operation_queue = {},
     operation_draining = false,
     pending_completion = nil,
     emission_seq = 0,
     observation_seq = 0,
-    rule_error = nil,
-    rule_failed = false,
+    operation_error = nil,
+    operation_failed = false,
     logical_paths = {},
     logical_actors = {},
   }
@@ -339,7 +336,7 @@ local function new_run_context(meta)
   end
 
   local function settle_result(node_id, result, persisted_result)
-    if ctx.rule_error or ctx.rule_failed then return false end
+    if ctx.operation_error or ctx.operation_failed then return false end
     local accepted = ctx.terminal_settlement or ctx.pending_completion
     if accepted then
       emit_event({
@@ -364,7 +361,7 @@ local function new_run_context(meta)
   end
 
   ctx.settle_quiescent = function()
-    if ctx.rule_failed then
+    if ctx.operation_failed then
       ctx.pending_completion = nil
       ctx.run_complete = nil
       return false
@@ -415,18 +412,17 @@ local function new_run_context(meta)
     persist_output = persist_output,
     settle_result = settle_result,
     observe_output = function(actor, wire, output)
-      if ctx.rule_failed then return false end
+      if ctx.operation_failed then return false end
       ctx.emission_seq = ctx.emission_seq + 1
       local emission_seq = ctx.emission_seq
       local function fail_payload(kind, id)
-        ctx.rule_error = string.format(
+        ctx.operation_error = string.format(
           "%s %q source %s/%s emitted no canonical value", kind, id, actor, wire)
-        ctx.rule_failed = true
-        ctx.trigger_queue = {}
+        ctx.operation_failed = true
         ctx.operation_queue = {}
         ctx.pending_completion = nil
         ctx.run_complete = nil
-        ctx.run_failed = { error = ctx.rule_error, failure = kind .. "_payload", from = actor }
+        ctx.run_failed = { error = ctx.operation_error, failure = kind .. "_payload", from = actor }
         return false
       end
       for _, operation in ipairs(ctx.operations) do
@@ -439,21 +435,6 @@ local function new_run_context(meta)
           ctx.operation_queue[#ctx.operation_queue + 1] = {
             operation = operation, emission_seq = emission_seq,
             source = { actor = actor, wire = wire }, value = plain_data.copy(output.value),
-          }
-        end
-      end
-      for _, rule in ipairs(ctx.rules) do
-        local host = nefor and nefor.semantic_type
-        local semantic_match = not ctx.semantic_strict or type(rule.on.type) ~= "table"
-          or (type(output.semantic_type) == "table"
-            and type(host) == "table" and type(host.accepts) == "function"
-            and host.accepts(rule.on.type, output.semantic_type))
-        if rule.on.actor == actor and rule.on.wire == wire and semantic_match then
-          if type(output) ~= "table" or output.value == nil then return fail_payload("rule", rule.id) end
-          ctx.trigger_queue[#ctx.trigger_queue + 1] = {
-            rule_id = rule.id, fn = rule.fn,
-            source = { actor = actor, wire = wire },
-            emission_seq = emission_seq, value = output.value,
           }
         end
       end
@@ -593,33 +574,32 @@ local function new_run_context(meta)
   ctx.modlog = mlog
   ctx.observer = obs
   ctx.drain_operations = function()
-    if ctx.operation_draining or ctx.rule_failed then return not ctx.rule_failed end
+    if ctx.operation_draining or ctx.operation_failed then return not ctx.operation_failed end
     ctx.operation_draining = true
-    while not ctx.rule_failed and #ctx.operation_queue > 0 do
+    while not ctx.operation_failed and #ctx.operation_queue > 0 do
       local trigger = table.remove(ctx.operation_queue, 1)
       local delta, materialize_error = operations.materialize(trigger.operation, trigger.value)
       if not delta then
-        ctx.rule_error = string.format("operation %q materialization failed: %s",
+        ctx.operation_error = string.format("operation %q materialization failed: %s",
           trigger.operation.id, tostring(materialize_error))
       else
         local outcome = apply_with_logical_nodes(ctx, delta)
         if not outcome.ok then
-          ctx.rule_error = string.format("operation %q delta rejected: %s",
+          ctx.operation_error = string.format("operation %q delta rejected: %s",
             trigger.operation.id, tostring(outcome.error or "unknown rejection"))
         end
       end
-      if ctx.rule_error then
-        ctx.rule_failed = true
+      if ctx.operation_error then
+        ctx.operation_failed = true
         ctx.operation_queue = {}
-        ctx.trigger_queue = {}
         ctx.pending_completion = nil
         ctx.run_complete = nil
-        ctx.run_failed = { error = ctx.rule_error, failure = "operation", from = "mag.operation" }
+        ctx.run_failed = { error = ctx.operation_error, failure = "operation", from = "mag.operation" }
       end
     end
     ctx.operation_draining = false
     ctx.settle_quiescent()
-    return not ctx.rule_failed
+    return not ctx.operation_failed
   end
   -- Exposed so init-level control ops (interrupt_run) can emit run-scoped
   -- lifecycle events through the same run_id-stamping sink the observer uses.
@@ -767,7 +747,7 @@ return {
   -- { ok = false, error } — a duplicate live run_id rejects (the id is the
   -- context key and the reply correlation; two runs may not share it).
   --
-  -- Session-boundary reaping: the engine (and this resident kernel) outlives
+  -- Session-boundary reaping: the engine and this long-lived kernel outlive
   -- TUI sessions, so a run context whose run never terminated in a PREVIOUS
   -- session would leak actors forever. Beginning a run under a new session_id
   -- reaps every live context from a different session — the per-run analogue
@@ -809,7 +789,7 @@ return {
 
   -- Validate the complete immutable program before a run exists. This is also
   -- used by mag.load, so an artifact remains executable after its compiler
-  -- source and resident environment have been discarded.
+  -- source has been discarded.
   preflight_program = function(initial, program_operations)
     local checked, err = operations.preflight(initial, program_operations or {}, registry)
     if not checked then return { ok = false, error = err } end
@@ -882,63 +862,11 @@ return {
         "result boundary %q with semantic type %q is not a declared output of actor %q",
         boundary.wire, tostring(boundary.type_id), boundary.actor) }
     end
-    local seen_rules = {}
-    for index, rule in ipairs(mod.rules or {}) do
-      if type(rule) ~= "table" or type(rule.id) ~= "string" or rule.id == ""
-          or type(rule.fn) ~= "string" or rule.fn == ""
-          or type(rule.on) ~= "table" or type(rule.on.actor) ~= "string"
-          or type(rule.on.wire) ~= "string" then
-        return { ok = false, error = string.format("rules[%d] is malformed", index) }
-      end
-      if seen_rules[rule.id] then
-        return { ok = false, error = string.format("duplicate rule id %q", rule.id) }
-      end
-      seen_rules[rule.id] = true
-      if rule.on.actor == boundary.actor and rule.on.wire == boundary.wire then
-        return { ok = false, error = string.format(
-          "rule %q may not bind the result boundary", rule.id) }
-      end
-      local source_rule_actor
-      for _, spec in ipairs(mod.actors or {}) do
-        if spec.id == rule.on.actor then
-          source_rule_actor = spec
-          break
-        end
-      end
-      if not source_rule_actor then
-        return { ok = false, error = string.format(
-          "rule %q source actor %q does not exist", rule.id, rule.on.actor) }
-      end
-      local wire_declared = false
-      if typed_artifact then
-        local host = nefor and nefor.semantic_type
-        for _, output in ipairs(source_rule_actor.outputs or {}) do
-          if output.wire == rule.on.wire and
-              type(host) == "table" and type(host.accepts) == "function"
-              and host.accepts(output.type, rule.on.type) then
-            wire_declared = true
-            break
-          end
-        end
-      else
-        local rule_decl = registry:declaration(source_rule_actor.factory)
-        for _, output in ipairs((rule_decl and rule_decl.outputs) or {}) do
-          if output == rule.on.wire then wire_declared = true break end
-        end
-      end
-      if not wire_declared then
-        return { ok = false, error = string.format(
-          "rule %q semantic subscription on wire %q is not an output of actor %q",
-          rule.id, rule.on.wire, rule.on.actor) }
-      end
-    end
-    ctx.rules = mod.rules or {}
-    ctx.rule_ids = seen_rules
     ctx.router:set_result_boundary(boundary)
     ctx.router:register_type_declarations(mod.types)
     local modification = {}
     for key, value in pairs(mod) do
-      if key ~= "result" and key ~= "rules" then
+      if key ~= "result" then
         modification[key] = value
       end
     end
@@ -959,11 +887,24 @@ return {
     if not ctx then
       return { ok = false, error = err }
     end
-    if type(mod) == "table" and type(mod.rules) == "table" and #mod.rules > 0 then
-      return { ok = false, error = "rules are immutable initial subscriptions" }
-    end
     if type(mod) == "table" and mod.result ~= nil then
       return { ok = false, error = "a delta cannot define or replace the result boundary" }
+    end
+    if ctx.semantic_strict and (type(mod) ~= "table" or type(mod.types) ~= "table") then
+      return { ok = false, error = "a typed run requires delta semantic declarations" }
+    end
+    if ctx.semantic_strict then
+      local semantic_host = nefor and nefor.semantic_type
+      for _, message in ipairs(mod.messages or {}) do
+        if type(message.content) == "table" and message.content.kind == "mag.ApprovalReply" then
+          local validation = type(semantic_host) == "table"
+              and type(semantic_host.validate_value) == "function"
+              and semantic_host.validate_value(message.semantic_type, message.content)
+          if type(validation) ~= "table" or validation.ok ~= true then
+            return { ok = false, error = "mag.ApprovalReply has a malformed typed payload" }
+          end
+        end
+      end
     end
     if type(mod) == "table" and type(mod.types) == "table" then
       ctx.router:register_type_declarations(mod.types)
@@ -976,24 +917,6 @@ return {
     return outcome
   end,
 
-  take_rule_trigger = function(run_id)
-    local ctx = runs[run_id]
-    if not ctx or ctx.rule_failed or #ctx.trigger_queue == 0 then return nil end
-    return table.remove(ctx.trigger_queue, 1)
-  end,
-
-  fail_run = function(run_id, error)
-    local ctx = runs[run_id]
-    if not ctx then return false end
-    ctx.trigger_queue = {}
-    ctx.operation_queue = {}
-    ctx.pending_completion = nil
-    ctx.run_complete = nil
-    ctx.rule_error = error
-    ctx.rule_failed = true
-    ctx.run_failed = { error = error, failure = "rule", from = "mag.rule" }
-    return true
-  end,
 
   -- Drain one actor gracefully within a run (actor-model.md, Signals: drain /
   -- SIGTERM): calls its handle_drain where declared. This is the graceful path
@@ -1087,7 +1010,7 @@ return {
 
   -- Plain-data factory contracts supplied to MAG compilation as immutable
   -- input. Qualified identity is the authored/lowered name; implementation is
-  -- retained only so the runtime can bind it to the resident constructor.
+  -- retained only so the runtime can bind it to the registered constructor.
   registry_contracts = function(array_mt)
     return registry:contracts(array_mt)
   end,

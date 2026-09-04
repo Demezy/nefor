@@ -51,6 +51,21 @@ local kinds = require("kinds")
 
 local M = {}
 
+local function approval_reply_type()
+  local arguments = nefor.json and type(nefor.json.decode) == "function"
+    and nefor.json.decode("[]") or {}
+  return {
+    kind = "named", name = "mag.ApprovalReply", arguments = arguments, body = {
+      kind = "record", fields = {
+        { name = "approved", type = { kind = "primitive", name = "Bool" } },
+        { name = "content", type = { kind = "primitive", name = "String" } },
+        { name = "kind", type = { kind = "primitive", name = "String" } },
+        { name = "reason", type = { kind = "primitive", name = "String" } },
+      },
+    },
+  }
+end
+
 M.declaration = {
   name = "human",
   semantic = {
@@ -139,11 +154,20 @@ function M.construct(id, params, emit, deps)
     -- Otherwise: a subject to approve. Record it, raise the request, and defer
     -- completion until the human answers.
     pending = message
+    local semantic_host = nefor and nefor.semantic_type
+    local reply_type = approval_reply_type()
+    local reply_type_id = type(semantic_host) == "table" and type(semantic_host.id) == "function"
+      and semantic_host.id(reply_type) or nil
+    if type(reply_type_id) ~= "string" then
+      error("human approval requires semantic type identity support")
+    end
     emit(sign({
       kind = kinds.ApprovalRequest,
       correlation = id,
       prompt = params.prompt,
       subject = message,
+      reply_type = reply_type,
+      reply_type_id = reply_type_id,
     }))
     return { status = "pending" }
   end

@@ -8,7 +8,7 @@
 -- the declared input contract states it — nothing sniffs a runtime shape
 -- (docs/ir.md, Firing; task-nefor-mag-primitive-tools "Done when").
 --
--- Contract (reconciled against tests/fixtures/two-agents.modification.json —
+-- Contract (reconciled against the plugin acceptance graph —
 -- `run-tool` routes `generic-tool.ToolHandle` here, and this node routes
 -- `generic-provider.ProviderOut` onward, back into the llm; flagged):
 --   input   generic-tool.ToolHandle       (single; fires per handle)

@@ -261,8 +261,7 @@ local WRITER_MAG = [=[
       [(nefor.graph.edge start build) (nefor.graph.edge build out)])))
 ]=]
 
--- Modification shapes the mag plugin replies with on mag.loaded — the
--- ModificationIr {actors, messages, kills, rules} the loader lowers to.
+-- Compact concrete-modification fixtures used inside canonical program envelopes.
 -- The agent template namespaces its internals under :id (worker.llm etc.);
 -- these are trimmed to the actors the validators care about.
 local KERNEL_FACTORIES = { "adapter", "llm", "run-tool", "sink", "stub", "tool-result" }
@@ -299,7 +298,7 @@ local function artifact_from_modification(modification)
         id = actor.id,
         factory = "nefor.factory." .. tostring(actor.factory),
         type_arguments = actor.type_arguments or {},
-        params = actor.params or {},
+        params = { ["$mag"] = "packed-value", value = actor.params or {} },
         routes = routes,
       }
     end
@@ -317,13 +316,26 @@ local function artifact_from_modification(modification)
       end
     end
   end
+  local messages = {}
+  for _, message in ipairs(modification.messages or {}) do
+    messages[#messages + 1] = {
+      to = message.to,
+      semantic_type = message.semantic_type,
+      semantic_type_id = message.semantic_type_id,
+      content = { ["$mag"] = "packed-value", value = message.content },
+    }
+  end
   return {
     actors = actors,
-    messages = modification.messages or {},
+    messages = messages,
     kills = modification.kills or {},
-    rules = modification.rules or {},
     result = result,
   }
+end
+
+local function envelope_from_modification(modification)
+  return { format = "nefor.mag", version = 1, kind = "program",
+    program = { initial = artifact_from_modification(modification), operations = {} } }
 end
 
 local function read_only_modification()
@@ -343,7 +355,6 @@ local function read_only_modification()
       kind = "nefor.agent.Input", value = { prompt = "<initial task text>" },
     } } },
     kills = {},
-    rules = {},
   }
 end
 
@@ -359,7 +370,6 @@ local function writer_modification()
     },
     messages = { { to = "build.llm", content = { kind = "task", prompt = "<initial task text>" } } },
     kills = {},
-    rules = {},
   }
 end
 
@@ -608,11 +618,8 @@ local function feed_loaded(modification, factories)
     hash        = "sha256:test",
     factories   = factories or KERNEL_FACTORIES,
     factory_contracts = factory_contracts(factories),
-    artifact = artifact_from_modification(modification),
+    artifact = envelope_from_modification(modification),
   }
-  if load.body.resident == true then
-    reply.program_id = load.body.id
-  end
   feed("mag", reply)
   return load
 end
@@ -657,7 +664,7 @@ do
     "execute preserves the plugin artifact type arguments")
   assert_true(lw._internals.state.kernel_factories["nefor.factory.structured-output"] == true,
     "factory contracts from the plugin reply feed control-plane validation")
-  local patch = exec.body.params_overlay["worker.llm"]
+  local patch = exec.body.params_overlay["actor:10:worker.llm"]
   assert_eq(patch.provider, nil, "runtime does not override the authored provider")
   assert_eq(patch.model, nil, "runtime does not override the authored model")
   assert_eq(patch.reasoning_effort, nil,
@@ -685,9 +692,110 @@ do
   assert_eq(run.nodes["worker.llm"].reasoner, "nefor.factory.structured-output",
     "run metadata uses the artifact factory identity")
   local preview = require("libs.mag-workspace").preview(
-    loaded_artifact, "sha256:test", KERNEL_FACTORIES)
+    envelope_from_modification(modification), "sha256:test", KERNEL_FACTORIES)
   assert_true(preview:find("worker.llm (nefor.factory.structured-output)", 1, true) ~= nil,
     "preview renders the same artifact factory identity")
+end
+
+-- Preview and control decoding remove exactly the explicit compiler wrapper;
+-- an authored record that resembles a semantic sum stays ordinary user data.
+do
+  local authored = { type = "sha256:user-authored", value = { nested = true } }
+  local artifact = {
+    format = "nefor.mag", version = 1, kind = "program", program = {
+      initial = {
+        actors = { {
+          id = "record", factory = "nefor.factory.stub", type_arguments = {},
+          params = { ["$mag"] = "packed-value", value = authored }, routes = {},
+        } },
+        messages = { {
+          to = "record", content = { ["$mag"] = "packed-value", value = authored },
+        } },
+        kills = {}, nodes = {}, result = { from = { actor = "record", wire = "result" } },
+      },
+      operations = {},
+    },
+  }
+  local workspace = require("libs.mag-workspace")
+  local decoded = assert(workspace.decode_artifact(artifact))
+  assert_eq(decoded.modification.actors[1].params.type, "sha256:user-authored",
+    "Lua decode preserves a user record shaped like a semantic sum")
+  assert_eq(decoded.modification.actors[1].params.value.nested, true,
+    "Lua decode never recursively collapses the authored record")
+  assert_eq(decoded.modification.messages[1].content.type, "sha256:user-authored",
+    "message decoding follows the same one-boundary rule")
+  local inventory = workspace.actor_inventory(decoded)
+  assert_eq(inventory[1].actor.params.type, "sha256:user-authored",
+    "control-plane inventory scans the preserved record without collapsing it")
+  local preview = workspace.preview(artifact, "sha256:packed-preview", KERNEL_FACTORIES)
+  assert_true(preview:find('type: "sha256:user-authored"', 1, true) ~= nil,
+    "preview renders the preserved authored record rather than its nested value")
+end
+
+-- Template definitions participate in validation and overlays, but graph-status
+-- contains only concrete runtime actors. Each materialization enters through
+-- its own lifecycle identity.
+do
+  fresh()
+  lw.configure({ agent_system = "ambient template system" })
+  write_mag_file("template-status-write", "template-status.mag", READ_ONLY_MAG)
+  _test.calls_clear()
+  execute_mag("template-status-execute", "template-status.mag")
+  local load = find_call(decode_calls(), function(c)
+    return c.body.kind == "mag.load" and c.target == "mag"
+  end)
+  local artifact = {
+    format = "nefor.mag", version = 1, kind = "program", program = {
+      initial = {
+        actors = { {
+          id = "source", factory = "nefor.factory.stub", type_arguments = {},
+          params = { ["$mag"] = "packed-value", value = {} }, routes = {},
+        } },
+        messages = {}, kills = {}, nodes = {},
+        result = { from = { actor = "source", wire = "result" } },
+      },
+      operations = { {
+        id = "expand", captures = {}, template = {
+          actors = { {
+            slot = "worker", factory = "nefor.factory.llm", type_arguments = {},
+            params = { ["$mag"] = "packed-value", value = {
+              system = "template authored system", tools = { "read_file" },
+            } }, routes = {},
+          } },
+          messages = {}, kills = {}, nodes = {},
+        },
+      } },
+    },
+  }
+  feed("mag", {
+    kind = "mag.loaded", in_reply_to = load.body.id, hash = "sha256:template-status",
+    factories = KERNEL_FACTORIES, factory_contracts = factory_contracts(), artifact = artifact,
+  })
+  local exec = find_call(decode_calls(), function(c) return c.body.kind == "mag.execute" end)
+  assert_true(exec ~= nil, "template program passes definition-time validation")
+  assert_true(exec.body.params_overlay["operation:6:expand:template:6:worker"].system
+      :find("ambient template system", 1, true) ~= nil,
+    "template definitions receive the same agent-system overlay as initial actors")
+  local run = lw._internals.state.active_runs[exec.body.run_id]
+  assert_eq(#run.nodes_order, 1, "template definitions are not registered as runtime nodes")
+  assert_eq(run.nodes_order[1], "source", "initial concrete actor is registered by runtime id")
+
+  feed("mag", { kind = "mag.actor_spawned", run_id = exec.body.run_id,
+    id = "expand.worker.0", factory = "nefor.factory.llm" })
+  feed("mag", { kind = "mag.actor_spawned", run_id = exec.body.run_id,
+    id = "expand.worker.1", factory = "nefor.factory.llm" })
+  assert_true(run.nodes["expand.worker.0"] ~= nil and run.nodes["expand.worker.1"] ~= nil,
+    "separate materializations become distinct runtime nodes")
+  assert_eq(#run.nodes_order, 3,
+    "one definition produces only its concrete materialized instances in bookkeeping")
+
+  lw._internals.set_graph_status_now(function() return 100 end)
+  _test.calls_clear()
+  invoke_tool("template-status", "graph-status", { run_id = exec.body.run_id })
+  local nodes = tool_result("template-status").body.output.run.nodes
+  assert_eq(#nodes, 3, "graph-status excludes the template definition")
+  assert_eq(nodes[2].id, "expand.worker.0", "first materialization keeps its runtime identity")
+  assert_eq(nodes[3].id, "expand.worker.1", "second materialization keeps its runtime identity")
 end
 
 -- ------------------------------------------------------------------
@@ -751,8 +859,6 @@ do
   })
   local eval_load = latest_mag_load()
   assert_true(eval_load ~= nil, "mag-eval emits mag.load")
-  assert_eq(eval_load.body.resident, true,
-    "mag-eval retains the exact source environment until submission")
   assert_eq(eval_load.body.module_roots[1], "/deps/standard",
     "mag-eval receives its own defensive root copy")
   assert_eq(eval_load.body.module_roots[2], "/deps/extra",
@@ -865,8 +971,6 @@ do
   end)
   assert_true(load ~= nil,
     "fresh mag apply emits mag.load to the plugin; got " .. json.encode(_test.calls()))
-  assert_eq(load.body.resident, true,
-    "fresh mag apply requests an exact resident program handle")
   assert_eq(load.body.entry, "auth-login-map.mag", "mag.load names the .mag entry file")
   assert_true(type(load.body.source_dir) == "string" and #load.body.source_dir > 0,
     "mag.load carries the workspace source_dir")
@@ -889,11 +993,10 @@ do
   feed("mag", {
     kind        = "mag.loaded",
     in_reply_to = load.body.id,
-    program_id  = load.body.id,
     hash        = "sha256:read-only",
     factories   = KERNEL_FACTORIES,
     factory_contracts = factory_contracts(KERNEL_FACTORIES),
-    artifact = artifact_from_modification(read_only_modification()),
+    artifact = envelope_from_modification(read_only_modification()),
   })
   calls = decode_calls()
 
@@ -924,16 +1027,14 @@ do
 
   assert_eq(exec.body.params_overlay, nil,
     "without ambient system context the runtime emits no parameter overlay")
-  assert_eq(exec.body.program_id, load.body.id,
-    "mag.execute addresses the exact resident program returned by mag.loaded")
-  assert_eq(exec.body.artifact, nil,
-    "resident execution does not copy the compiled artifact inline")
+  assert_eq(exec.body.artifact.kind, "program",
+    "mag.execute carries the compiled immutable program inline")
   local loaded_artifact = artifact_from_modification(read_only_modification())
-  assert_eq(loaded_artifact.actors[2].params.provider, "chatgpt",
+  assert_eq(loaded_artifact.actors[2].params.value.provider, "chatgpt",
     "the compiled artifact carries the concrete provider")
-  assert_eq(loaded_artifact.actors[2].params.model, "gpt-5.6-sol",
+  assert_eq(loaded_artifact.actors[2].params.value.model, "gpt-5.6-sol",
     "the compiled artifact carries the concrete model")
-  assert_eq(loaded_artifact.actors[2].params.reasoning_effort, "medium",
+  assert_eq(loaded_artifact.actors[2].params.value.reasoning_effort, "medium",
     "the compiled artifact carries the concrete reasoning effort")
 
   local reply = find_call(calls, function(c)
@@ -963,7 +1064,7 @@ do
   assert_eq(status.body.output.run.run_id, reply.body.output.run_id,
     "graph-status retains the opaque handle for disambiguation")
   local nodes = status.body.output.run.nodes
-  assert_eq(nodes[1].id, "worker.entry", "actor ids preserved in run summaries")
+  assert_eq(nodes[1].id, "worker.entry", "runtime actor ids are preserved in run summaries")
   assert_eq(nodes[2].reasoner, "nefor.factory.llm",
     "qualified factory identity carried under the reasoner key")
 end
@@ -1069,7 +1170,6 @@ do
     return c.body.kind == "mag.load" and c.target == "mag"
   end)
   assert_true(load ~= nil, "compile emits mag.load")
-  assert_eq(load.body.resident, false, "compile-only loads retain no program environment")
   _test.calls_clear()
   feed("mag", {
     kind        = "mag.error",
@@ -1106,8 +1206,6 @@ do
     return c.body.kind == "mag.load" and c.target == "mag"
   end)
   assert_true(load ~= nil, "mag apply compiles through mag.load")
-  assert_eq(load.body.resident, false,
-    "live deltas retain no independent program environment")
   assert_eq(tool_result("firing-mag-apply"), nil,
     "mag apply does not settle before compilation and kernel acknowledgement")
 
@@ -1117,18 +1215,17 @@ do
         id = "patch.llm",
         factory = "nefor.factory.llm",
         type_arguments = {},
-        params = {
+        params = { ["$mag"] = "packed-value", value = {
           provider = "chatgpt",
           model = "gpt-5.6-sol",
           reasoning_effort = "medium",
           system = "Continue the live run.",
-        },
+        } },
         routes = {},
       },
     },
     messages = {},
     kills = {},
-    rules = {},
     types = {},
   }
   feed("mag", {
@@ -1137,7 +1234,7 @@ do
     hash = "sha256:delta",
     factories = KERNEL_FACTORIES,
     factory_contracts = factory_contracts(KERNEL_FACTORIES),
-    artifact = delta,
+    artifact = { format = "nefor.mag", version = 1, kind = "delta", delta = delta },
   })
 
   local apply = find_call(decode_calls(), function(c)
@@ -1147,11 +1244,11 @@ do
   assert_eq(apply.body.run_id, run_id, "mag apply targets the explicitly named live run")
   assert_eq(apply.body.source, "lead-workflow.mag.apply",
     "mag apply declares its control-plane source")
-  assert_eq(apply.body.modification.actors[1].id, "patch.llm",
+  assert_eq(apply.body.artifact.delta.actors[1].id, "patch.llm",
     "mag apply submits the compiler-produced actors")
-  assert_eq(#apply.body.modification.messages, 0,
+  assert_eq(#apply.body.artifact.delta.messages, 0,
     "mag apply submits the compiler-produced messages")
-  assert_eq(#apply.body.modification.kills, 0,
+  assert_eq(#apply.body.artifact.delta.kills, 0,
     "mag apply submits the compiler-produced kills")
   assert_eq(apply.body.params_overlay, nil,
     "apply emits no parameter overlay without ambient system context")
@@ -1159,9 +1256,9 @@ do
     "live apply cannot replace the target run model snapshot")
   assert_eq(model_snapshot_resolutions, 0,
     "live apply does not recompute the target run model snapshot")
-  assert_eq(apply.body.modification.actors[1].params.provider, "chatgpt",
+  assert_eq(apply.body.artifact.delta.actors[1].params.value.provider, "chatgpt",
     "apply preserves the compiler-produced provider")
-  assert_eq(apply.body.modification.actors[1].params.model, "gpt-5.6-sol",
+  assert_eq(apply.body.artifact.delta.actors[1].params.value.model, "gpt-5.6-sol",
     "apply preserves the compiler-produced model")
   assert_eq(tool_result("firing-mag-apply"), nil,
     "mag apply remains pending until the kernel acknowledgement")
@@ -1200,14 +1297,15 @@ do
     hash = "sha256:not-a-delta",
     factories = KERNEL_FACTORIES,
     factory_contracts = factory_contracts(KERNEL_FACTORIES),
-    artifact = {
-      actors = {}, messages = {}, kills = {}, rules = {},
-      result = { from = { actor = "existing", type = "Result", wire = "Result" } },
-    },
+    artifact = { format = "nefor.mag", version = 1, kind = "program", program = {
+      initial = { actors = {}, messages = {}, kills = {},
+        result = { from = { actor = "existing", type = "Result", wire = "Result" } } },
+      operations = {},
+    } },
   })
   local invalid = tool_result("firing-mag-apply-result")
   assert_true(invalid ~= nil
-      and invalid.body.error:find("cannot define or replace the result boundary", 1, true) ~= nil,
+      and invalid.body.error:find("requires a delta envelope", 1, true) ~= nil,
     "mag apply rejects a fresh-run result boundary")
   assert_eq(find_call(decode_calls(), function(c) return c.body.kind == "mag.apply" end), nil,
     "invalid delta never reaches the kernel")
@@ -1232,7 +1330,8 @@ do
     hash = "sha256:rejected-delta",
     factories = KERNEL_FACTORIES,
     factory_contracts = factory_contracts(KERNEL_FACTORIES),
-    artifact = { actors = {}, messages = {}, kills = {}, rules = {}, types = {} },
+    artifact = { format = "nefor.mag", version = 1, kind = "delta",
+      delta = { actors = {}, messages = {}, kills = {}, types = {} } },
   })
   local apply = find_call(decode_calls(), function(c) return c.body.kind == "mag.apply" end)
   feed("mag", {
@@ -1469,7 +1568,6 @@ local function lead_turn_modification()
     },
     messages = { { to = "lead.source", content = { kind = "mag.Unit" } } },
     kills = {},
-    rules = {},
   }
 end
 
@@ -1482,9 +1580,8 @@ local function relayed_lead_prompt()
   if load ~= nil then
     agentic_loop.receive_msg(make_entry("mag", {
       kind = "mag.loaded", in_reply_to = load.body.id,
-      program_id = load.body.id,
       hash = "sha256:lead",
-      artifact = artifact_from_modification(lead_turn_modification()),
+      artifact = envelope_from_modification(lead_turn_modification()),
     }))
     calls = decode_calls()
   end
@@ -1494,7 +1591,7 @@ local function relayed_lead_prompt()
   end)
   if exec == nil then return nil end
   local source = type(exec.body.params_overlay) == "table"
-      and exec.body.params_overlay["lead.source"] or nil
+      and exec.body.params_overlay["actor:11:lead.source"] or nil
   return type(source) == "table" and type(source.value) == "table"
       and source.value.prompt or nil
 end
@@ -1672,7 +1769,6 @@ do
   for _, n in ipairs(block.body.nodes) do statuses[n.id] = n.status end
   assert_eq(statuses["worker.entry"], "killed", "killed actor keeps its terminal state")
   assert_eq(statuses["worker.llm"], "done", "completed actor is done, not pending")
-  assert_eq(statuses["sink"], "done", "sink is done, not pending")
 end
 
 -- A failed run appends a failed run-result block carrying the error.
@@ -1846,7 +1942,7 @@ do
     .. json.encode(_test.calls()))
   assert_eq(exec.body.params_overlay, nil,
     "writer needs no runtime overlay without ambient system context")
-  assert_eq(artifact_from_modification(writer_modification()).actors[1].params.reasoning_effort, "low",
+  assert_eq(artifact_from_modification(writer_modification()).actors[1].params.value.reasoning_effort, "low",
     "writer keeps the effort authored in the compiled artifact")
 end
 
@@ -2300,7 +2396,7 @@ end
 -- (mag-eval async submission and ownership) Every caller receives a detached
 -- handle; subagent provenance scopes control to the dispatching actor.
 do
-  local artifact = artifact_from_modification(read_only_modification())
+  local artifact = envelope_from_modification(read_only_modification())
 
   -- Lead caller: validate, submit, acknowledge with the standard stable handle,
   -- and register in the shared active-run table.
@@ -2314,8 +2410,7 @@ do
   assert_eq(find_call(decode_calls(), function(c) return c.body.kind == "tool.result" end), nil,
     "no acknowledgment exists before compilation and validation")
   _test.calls_clear()
-  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    program_id = load.body.id, hash = "sha256:eval",
+  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id, hash = "sha256:eval",
     factory_contracts = factory_contracts(), artifact = artifact })
   local calls = decode_calls()
   local exec = find_call(calls, function(c) return c.body.kind == "mag.execute" end)
@@ -2378,8 +2473,7 @@ do
     { caller_id = "r9/cap-4", invocation = agent_invocation })
   load = latest_mag_load()
   _test.calls_clear()
-  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    program_id = load.body.id, hash = "sha256:agent",
+  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id, hash = "sha256:agent",
     factory_contracts = factory_contracts(), artifact = artifact })
   calls = decode_calls()
   exec = find_call(calls, function(c) return c.body.kind == "mag.execute" end)
@@ -2442,8 +2536,7 @@ do
     { caller_id = "r9/cap-auto", invocation = agent_invocation })
   load = latest_mag_load()
   _test.calls_clear()
-  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    program_id = load.body.id, hash = "sha256:auto",
+  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id, hash = "sha256:auto",
     factory_contracts = factory_contracts(), artifact = artifact })
   exec = find_call(decode_calls(), function(c) return c.body.kind == "mag.execute" end)
   local owner_run_id = exec.body.run_id
@@ -2474,8 +2567,7 @@ do
     { caller_id = "r9/cap-5", invocation = agent_invocation })
   load = latest_mag_load()
   _test.calls_clear()
-  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    program_id = load.body.id, hash = "sha256:agent-cancel",
+  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id, hash = "sha256:agent-cancel",
     factory_contracts = factory_contracts(), artifact = artifact })
   exec = find_call(decode_calls(), function(c) return c.body.kind == "mag.execute" end)
   assert_true(exec ~= nil and lw._internals.state.active_runs[exec.body.run_id] ~= nil,
@@ -2501,8 +2593,7 @@ do
       args = { intent = "Inspect lifecycle", expr = "(nefor.shell.script \"x\" \"pwd\")" } })
     local pending_load = latest_mag_load()
     _test.calls_clear()
-    feed("mag", { kind = "mag.loaded", in_reply_to = pending_load.body.id,
-      program_id = pending_load.body.id, hash = "sha256:lifecycle",
+    feed("mag", { kind = "mag.loaded", in_reply_to = pending_load.body.id, hash = "sha256:lifecycle",
       factory_contracts = factory_contracts(), artifact = artifact })
     local submitted = find_call(decode_calls(), function(c)
       return c.body.kind == "mag.execute"
@@ -2742,9 +2833,8 @@ do
   assert_eq(mag_eval._internals.state.pending_loads[load.body.id], nil,
     "cancel removes pending compile correlation")
   _test.calls_clear()
-  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    program_id = load.body.id, hash = "sha256:late", factory_contracts = factory_contracts(),
-    artifact = artifact_from_modification(read_only_modification()) })
+  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id, hash = "sha256:late", factory_contracts = factory_contracts(),
+    artifact = envelope_from_modification(read_only_modification()) })
   assert_eq(find_call(decode_calls(), function(c) return c.body.kind == "mag.execute" end), nil,
     "late compile response cannot execute orphaned work")
   assert_eq(next(lw._internals.state.active_runs), nil, "late response registers no active run")
@@ -2823,9 +2913,11 @@ do
   local invalid = artifact_from_modification(read_only_modification())
   invalid.result = nil
   _test.calls_clear()
-  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    program_id = load.body.id, hash = "sha256:invalid",
-    factory_contracts = factory_contracts(), artifact = invalid })
+  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id, hash = "sha256:invalid",
+    factory_contracts = factory_contracts(), artifact = {
+      format = "nefor.mag", version = 1, kind = "program",
+      program = { initial = invalid, operations = {} },
+    } })
   calls = decode_calls()
   err = find_call(calls, function(c)
     return c.body.kind == "tool.result" and c.body.id == "gate-validation-error"
@@ -2856,10 +2948,9 @@ do
   assert_eq(#loads, 2, "two concurrent eval compiles are pending")
   _test.calls_clear()
   for i = #loads, 1, -1 do
-    feed("mag", { kind = "mag.loaded", in_reply_to = loads[i].body.id,
-      program_id = loads[i].body.id, hash = "sha256:" .. tostring(i),
+    feed("mag", { kind = "mag.loaded", in_reply_to = loads[i].body.id, hash = "sha256:" .. tostring(i),
       factory_contracts = factory_contracts(),
-      artifact = artifact_from_modification(read_only_modification()) })
+      artifact = envelope_from_modification(read_only_modification()) })
   end
   local calls = decode_calls()
   for _, inner in ipairs({ "gate-a", "gate-b" }) do
@@ -2907,19 +2998,13 @@ do
   assert_eq(lw._internals.state.pending_mag_load[load.body.id], nil,
     "file execute cancel invalidates pending load correlation")
   local cancel_calls = decode_calls()
-  local unload = find_call(cancel_calls, function(c)
-    return c.body.kind == "mag.unload" and c.body.program_id == load.body.id
-  end)
-  assert_true(unload ~= nil,
-    "canceling a resident load releases the handle if compilation wins the race")
   assert_eq(find_call(cancel_calls, function(c) return c.body.kind == "tool.result" end), nil,
     "canceling an unsubmitted file load emits no source settlement")
 
   feed("tool-gate", { kind = "lead-workflow.tool.cancel", id = "file-pending-execute" })
-  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    program_id = load.body.id, hash = "sha256:file-late",
+  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id, hash = "sha256:file-late",
     factory_contracts = factory_contracts(),
-    artifact = artifact_from_modification(read_only_modification()) })
+    artifact = envelope_from_modification(read_only_modification()) })
   feed("mag", { kind = "mag.error", in_reply_to = load.body.id,
     message = "late compiler failure" })
   local calls = decode_calls()
@@ -2946,10 +3031,9 @@ do
   assert_eq(next(lw._internals.state.pending_mag_load), nil,
     "session end clears all pending file loads")
   _test.calls_clear()
-  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
-    program_id = load.body.id, hash = "sha256:session-late",
+  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id, hash = "sha256:session-late",
     factory_contracts = factory_contracts(),
-    artifact = artifact_from_modification(read_only_modification()) })
+    artifact = envelope_from_modification(read_only_modification()) })
   feed("mag", { kind = "mag.error", in_reply_to = load.body.id,
     message = "late session compiler failure" })
   local calls = decode_calls()
@@ -3306,10 +3390,9 @@ do
     intent = "Inspect provenance", expr = "(nefor.shell.script \"x\" \"pwd\")",
   }, { caller_id = "opaque-gate-inner", invocation = lead_eval })
   local eval_load = latest_mag_load()
-  feed("mag", { kind = "mag.loaded", in_reply_to = eval_load.body.id,
-    program_id = eval_load.body.id, hash = "sha256:provenance",
+  feed("mag", { kind = "mag.loaded", in_reply_to = eval_load.body.id, hash = "sha256:provenance",
     factory_contracts = factory_contracts(),
-    artifact = artifact_from_modification(read_only_modification()) })
+    artifact = envelope_from_modification(read_only_modification()) })
   lead_ack = find_call(decode_calls(), function(c)
     return c.body.kind == "tool.result" and c.body.id == "provenance-eval-lead"
   end)

@@ -41,7 +41,6 @@ fn fixture_fingerprint_separates_workload_and_implementation_roots() {
         None,
         "static",
         Some(json!({})),
-        vec![],
     );
     let initial = fixture_fingerprint(&case);
 
@@ -77,7 +76,6 @@ fn fixture_fingerprint_covers_non_module_workload_inputs() {
         None,
         "static",
         Some(json!({})),
-        vec![probe_success("run", json!(1), json!(1))],
     );
     write_fixture_file(&mut case, "data.txt", b"first");
     let initial = fixture_fingerprint(&case);
@@ -102,31 +100,6 @@ fn fixture_fingerprint_covers_non_module_workload_inputs() {
     assert_ne!(initial, fixture_fingerprint(&case));
     case.expected_artifact = Some(json!({}));
 
-    case.probes = vec![probe_success("run", json!(1), json!(2))];
-    assert_ne!(initial, fixture_fingerprint(&case));
-
-    fs::remove_dir_all(scratch).ok();
-}
-
-#[test]
-fn resident_probe_expectation_mismatch_aborts_report_creation() {
-    let scratch = scratch("probe-mismatch");
-    let mut case = fixture(
-        &scratch,
-        "case",
-        "oracle",
-        "oracle",
-        None,
-        "(let run (fn [[value Int]] -> Artifact (artifact value)))\n(artifact {})",
-        vec![],
-        json!({}),
-        None,
-        "resident",
-        Some(json!({})),
-        vec![probe_success("run", json!(1), json!(2))],
-    );
-    refresh_fixture_fingerprints(std::slice::from_mut(&mut case));
-    assert!(std::panic::catch_unwind(|| observe(&case)).is_err());
     fs::remove_dir_all(scratch).ok();
 }
 

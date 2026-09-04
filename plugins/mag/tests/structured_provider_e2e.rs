@@ -546,12 +546,13 @@ async fn run_case(kind: ProviderKind) {
     }
 
     let artifact = load_text_answer_program(&mut mag_out, &mut mag_in, temp.path()).await;
-    let constructor_id = artifact["actors"]
-        .as_array()
-        .expect("artifact actors")
+    let constructor_id = artifact
+        .pointer("/program/initial/actors")
+        .and_then(Value::as_array)
+        .expect("program artifact actors")
         .iter()
         .find(|actor| actor["factory"] == "nefor.factory.llm")
-        .and_then(|actor| actor["params"]["output_type"].as_str())
+        .and_then(|actor| actor["params"]["value"]["output_type"].as_str())
         .expect("compiler-derived TextAnswer constructor identity")
         .to_owned();
 
@@ -566,7 +567,7 @@ async fn run_case(kind: ProviderKind) {
             "principal": "lead",
             "conversation_id": "structured-provider-conversation",
             "artifact": artifact,
-            "params_overlay": {"answer.llm": {"provider": kind.name()}}
+            "params_overlay": {"actor:10:answer.llm": {"provider": kind.name()}}
         })),
     )
     .await;

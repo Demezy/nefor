@@ -223,18 +223,6 @@
       "artifact_hash": null
     },
     {
-      "name": "artifact-dead-named-resident-function-remains-callable",
-      "artifact_hash": "8b3672675b76c87458b60299026e82b2326cc88ff0f5af408808ee64b19437da"
-    },
-    {
-      "name": "resident-function-reads-captured-top-level-peer",
-      "artifact_hash": "8b3672675b76c87458b60299026e82b2326cc88ff0f5af408808ee64b19437da"
-    },
-    {
-      "name": "required-module-export-remains-available",
-      "artifact_hash": "8b3672675b76c87458b60299026e82b2326cc88ff0f5af408808ee64b19437da"
-    },
-    {
       "name": "read-and-read-json",
       "artifact_hash": "0685dd100bd9e3d810070752e01c3a95cbbe5c7c60bf75baa5f5a688188aae50"
     },

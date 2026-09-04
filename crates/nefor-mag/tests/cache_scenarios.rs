@@ -49,18 +49,21 @@ fn cache_catalog_is_ordered_and_has_an_independent_identity() {
     );
     assert_eq!(
         CACHE_SCENARIO_PROTOCOL_VERSION,
-        "mag-cache-scenario-worker-v1"
+        "mag-cache-scenario-worker-v2"
     );
-    assert_eq!(CACHE_SCENARIO_CATALOG_VERSION, "cycle-4-pre-cache-v2");
+    assert_eq!(CACHE_SCENARIO_CATALOG_VERSION, "cycle-4-artifact-only-v3");
     assert_ne!(
         CACHE_SCENARIO_PROTOCOL_VERSION,
         bench_support::WORKER_PROTOCOL_VERSION
     );
-    assert!(!cache_catalog_fingerprint().is_empty());
+    assert_eq!(
+        cache_catalog_fingerprint(),
+        "sha256:fad04eb03770e65882b6355a8db050d6a5dde9dae5aec0f3e74edadb94d33264"
+    );
 }
 
 #[test]
-fn pre_cache_baseline_scenarios_report_only_cold_compilations() {
+fn artifact_only_baseline_scenarios_report_only_cold_compilations() {
     let root = source_root();
     for definition in definitions() {
         if definition.name == "cold-shipped-lead-turn" {
@@ -73,13 +76,13 @@ fn pre_cache_baseline_scenarios_report_only_cold_compilations() {
             definition.name
         );
         assert!(sample.target_duration_ns >= sample.compile_profile.total_duration_ns);
-        assert_eq!(sample.session_stats.compile_requests, 0);
+        assert_eq!(sample.session_stats.memory_compile_requests, 0);
         assert_eq!(
             sample.session_stats.successful_compilations + sample.session_stats.failed_compilations,
-            sample.session_stats.load_requests
+            sample.session_stats.file_compile_requests
         );
         assert_eq!(
-            sample.session_stats.cold_compilations, sample.session_stats.load_requests,
+            sample.session_stats.cold_compilations, sample.session_stats.file_compile_requests,
             "{}",
             definition.name
         );
@@ -91,7 +94,7 @@ fn repeat_setup_is_outside_the_single_profiled_target_operation() {
     let (samples, raw_batch_ns) = run_batch(&source_root(), "identical-repeat-module-chain", 2);
     assert_eq!(samples.len(), 2);
     for sample in &samples {
-        assert_eq!(sample.session_stats.load_requests, 2);
+        assert_eq!(sample.session_stats.file_compile_requests, 2);
         assert_eq!(sample.session_stats.successful_compilations, 2);
         assert_eq!(sample.session_stats.failed_compilations, 0);
         assert!(sample.session_stats.cold_compilations <= 2);
@@ -110,7 +113,7 @@ fn repeat_setup_is_outside_the_single_profiled_target_operation() {
 #[test]
 fn identical_failure_is_recomputed_without_caching() {
     let sample = run_sample(&source_root(), "identical-repeat-broken-module");
-    assert_eq!(sample.session_stats.load_requests, 2);
+    assert_eq!(sample.session_stats.file_compile_requests, 2);
     assert_eq!(sample.session_stats.failed_compilations, 2);
     assert_eq!(sample.session_stats.cold_compilations, 2);
     assert!(sample.compile_profile.phases.module_read_ns > 0);

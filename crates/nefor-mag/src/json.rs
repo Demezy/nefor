@@ -35,7 +35,10 @@ pub fn value_to_json(env: &Env, value: &Value) -> Result<serde_json::Value, MagE
         Value::TypeSchema(schema) => serde_json::to_value(schema)
             .map_err(|e| MagError::Eval(format!("serialize type schema: {e}"))),
         Value::SemanticTypeId(id) => Ok(id.as_str().into()),
-        Value::PackedValue(value) => value_to_json(env, value),
+        Value::PackedValue(value) => Ok(serde_json::json!({
+            "$mag": "packed-value",
+            "value": value_to_json(env, value)?,
+        })),
         Value::JsonValue(value) => Ok(value.clone()),
         Value::HostInputs(_) => Err(MagError::Eval(
             "compiler host inputs cannot enter an artifact".into(),
@@ -470,7 +473,7 @@ pub fn json_to_typed_value(
         ),
         unsupported => {
             return Err(MagError::Type(format!(
-                "{unsupported} is not representable as rule input JSON"
+                "{unsupported} is not representable as typed runtime JSON"
             )))
         }
     })

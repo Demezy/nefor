@@ -38,7 +38,7 @@ pub mod kernel {
             std::fs::create_dir_all(&source_dir).expect("create shell test workspace");
             std::fs::write(source_dir.join("main.mag"), source).expect("write shell test program");
             let contracts = host.registry_contracts().expect("runtime contracts");
-            let loaded = nefor_mag::load_with_inputs_and_module_roots(
+            let artifact = nefor_mag::compile_file_with_inputs_and_module_roots(
                 &source_dir,
                 "main.mag",
                 serde_json::json!({"factory_contracts": contracts}),
@@ -48,7 +48,6 @@ pub mod kernel {
                 ],
             )
             .expect("compile MAG test program");
-            let artifact = serde_json::to_value(loaded.artifact).expect("serialize shell artifact");
             let modification =
                 crate::artifact_modification(&artifact).expect("normalize shell artifact");
             let _ = std::fs::remove_dir_all(source_dir);
@@ -122,7 +121,7 @@ pub mod kernel {
             std::fs::write(workspace.join("main.mag"), source).expect("write guide program");
 
             let contracts = host.registry_contracts().expect("runtime contracts");
-            let loaded = nefor_mag::load_with_inputs_and_module_roots(
+            let artifact = nefor_mag::compile_file_with_inputs_and_module_roots(
                 &workspace,
                 "main.mag",
                 serde_json::json!({"factory_contracts": contracts}),
@@ -132,8 +131,8 @@ pub mod kernel {
                 ],
             )
             .expect("compile Nefor guide with runtime contracts");
-            let initial = crate::artifact_modification(&loaded.artifact)
-                .expect("normalize guide initial modification");
+            let decoded = crate::artifact_program(&artifact).expect("decode guide program");
+            let initial = decoded.initial;
 
             let actors = initial["actors"].as_array().expect("guide actors");
             for factory in [
@@ -149,8 +148,16 @@ pub mod kernel {
                     "guide must exercise {factory}"
                 );
             }
-            let rules = initial["rules"].as_array().expect("guide rules");
-            assert!(rules.iter().any(|rule| rule["fn"] == "expand-followup"));
+            assert!(
+                !decoded.operations.is_empty(),
+                "guide declares runtime operations"
+            );
+            assert!(decoded
+                .operations
+                .iter()
+                .any(|operation| operation["template"]["actors"]
+                    .as_array()
+                    .is_some_and(|actors| !actors.is_empty())));
 
             let build_params = actor_params(&initial, "development.build");
             assert_eq!(build_params["script"], "cargo build");
@@ -186,34 +193,12 @@ pub mod kernel {
                     .ok
             );
             let started = host
-                .start("mag-book-contracts", &initial)
+                .start_program("mag-book-contracts", &initial, &decoded.operations)
                 .expect("start guide modification");
             assert!(
                 started.ok,
                 "guide host validation failed: {:?}",
                 started.error
-            );
-
-            let dynamic = nefor_mag::eval_fn(
-                &loaded,
-                "expand-followup",
-                serde_json::json!({
-                    "collection": "test",
-                    "index": 0,
-                    "value": {
-                        "title": "inspect",
-                        "instructions": "Inspect the implementation."
-                    }
-                }),
-            )
-            .expect("evaluate guide dynamic worker expansion");
-            let applied = host
-                .apply("mag-book-contracts", &dynamic)
-                .expect("apply dynamic guide modification");
-            assert!(
-                applied.ok,
-                "dynamic guide worker validation failed: {:?}",
-                applied.error
             );
 
             host.end_run("mag-book-contracts", TeardownReason::RunComplete)
@@ -245,7 +230,6 @@ pub mod kernel {
                     "actors": [actor],
                     "messages": [],
                     "kills": [],
-                    "rules": [],
                     "result": {"from": {"actor": "inline", "wire": "stub.Out", "type": "String"}}
                 });
                 let outcome = host.start(run_id, &modification).expect("start");
@@ -1743,7 +1727,6 @@ pub mod kernel {
                 }],
                 "messages": [{"to": "custom", "content": {"kind": "stub.In"}}],
                 "kills": [],
-                "rules": [],
                 "result": {"from": {
                     "actor": "custom",
                     "type": "example.CustomResult",
@@ -1788,8 +1771,7 @@ pub mod kernel {
                             "routes": {}
                         }],
                         "messages": [{"to": "missing", "content": {"kind": "stub.In"}}],
-                        "kills": [],
-                        "rules": []
+                        "kills": []
                     }),
                 )
                 .expect("apply rejected modification");
@@ -1805,8 +1787,7 @@ pub mod kernel {
                     &serde_json::json!({
                         "actors": [],
                         "messages": [{"to": "tentative", "content": {"kind": "stub.In"}}],
-                        "kills": [],
-                        "rules": []
+                        "kills": []
                     }),
                 )
                 .expect("probe inventory after rejection");
@@ -1815,220 +1796,6 @@ pub mod kernel {
                 .error
                 .as_deref()
                 .is_some_and(|error| { error.contains("unknown message target 'tentative'") }));
-        }
-
-        #[test]
-        fn rules_bind_concrete_ports_and_require_canonical_values() {
-            let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let host = LuaHost::load_kernel(
-                &manifest.join("lua/mag-kernel/init.lua"),
-                Some(&manifest.join("../../lua")),
-            )
-            .expect("load shipped kernel");
-
-            host.begin_run("rule-payload", "rule-payload", None)
-                .expect("begin");
-            let graph = serde_json::json!({
-                "actors": [
-                    {"id":"source", "factory":"nefor.factory.stub", "type_arguments":[], "params":{}, "routes":{}},
-                    {"id":"result", "factory":"nefor.factory.stub", "type_arguments":[], "params":{}, "routes":{}}
-                ],
-                "messages": [
-                    {"to":"source", "content":{"kind":"stub.In"}},
-                    {"to":"result", "content":{"kind":"stub.In"}}
-                ],
-                "kills": [],
-                "rules": [{
-                    "id":"expand", "on":{"actor":"source", "wire":"stub.Out", "type":"String"},
-                    "fn":"expand"
-                }],
-                "result":{"from":{"actor":"result", "wire":"stub.Out", "type":"String"}}
-            });
-            let outcome = host.start("rule-payload", &graph).expect("start");
-            assert!(outcome.ok, "start failed: {:?}", outcome.error);
-            assert!(host
-                .take_rule_trigger("rule-payload")
-                .expect("trigger")
-                .is_none());
-            let failure = host
-                .take_run_failed("rule-payload")
-                .expect("failure")
-                .expect("canonical payload failure");
-            assert!(failure.contains("emitted no canonical value"), "{failure}");
-            assert!(host
-                .take_run_complete("rule-payload")
-                .expect("completion")
-                .is_none());
-
-            host.begin_run("rule-ok", "rule-ok", None)
-                .expect("begin canonical rule");
-            let mut canonical = graph.clone();
-            canonical["actors"][0]["params"]["value"] = serde_json::json!({"task":"one"});
-            canonical["messages"] = serde_json::json!([
-                {"to":"source", "content":{"kind":"stub.In", "n":1}},
-                {"to":"source", "content":{"kind":"stub.In", "n":2}},
-                {"to":"result", "content":{"kind":"stub.In"}}
-            ]);
-            let accepted = host.start("rule-ok", &canonical).expect("start canonical");
-            assert!(accepted.ok, "start failed: {:?}", accepted.error);
-            let trigger = host
-                .take_rule_trigger("rule-ok")
-                .expect("trigger")
-                .expect("one canonical trigger");
-            assert_eq!(trigger.rule_id, "expand");
-            assert_eq!(trigger.source_actor, "source");
-            assert_eq!(trigger.source_wire, "stub.Out");
-            assert_eq!(trigger.emission_seq, 1);
-            assert_eq!(trigger.value, serde_json::json!({"task":"one"}));
-
-            host.begin_run("rule-isolated", "rule-isolated", None)
-                .expect("begin isolated rule");
-            let isolated = host
-                .start("rule-isolated", &canonical)
-                .expect("start isolated");
-            assert!(isolated.ok);
-            let isolated_trigger = host
-                .take_rule_trigger("rule-isolated")
-                .expect("isolated trigger")
-                .expect("isolated queue");
-            assert_eq!(isolated_trigger.emission_seq, 1);
-            let second = host
-                .take_rule_trigger("rule-ok")
-                .expect("second trigger")
-                .expect("FIFO second source emission");
-            assert_eq!(second.emission_seq, 2);
-            assert!(host
-                .take_rule_trigger("rule-ok")
-                .expect("quiescent first run")
-                .is_none());
-
-            host.begin_run("rule-fanout", "rule-fanout", None)
-                .expect("begin rule fanout");
-            let mut fanout = graph.clone();
-            fanout["actors"][0]["params"]["value"] = serde_json::json!({"task":"fanout"});
-            let mut second_rule = fanout["rules"][0].clone();
-            second_rule["id"] = JsonValue::String("expand-again".into());
-            fanout["rules"].as_array_mut().unwrap().push(second_rule);
-            assert!(host.start("rule-fanout", &fanout).expect("fanout start").ok);
-            assert_eq!(
-                host.take_rule_trigger("rule-fanout")
-                    .unwrap()
-                    .unwrap()
-                    .rule_id,
-                "expand"
-            );
-            assert_eq!(
-                host.take_rule_trigger("rule-fanout")
-                    .unwrap()
-                    .unwrap()
-                    .rule_id,
-                "expand-again"
-            );
-
-            host.begin_run("rule-result", "rule-result", None)
-                .expect("begin result rule");
-            let mut result_rule = graph;
-            result_rule["rules"][0]["on"]["actor"] = JsonValue::String("result".into());
-            let rejected = host
-                .start("rule-result", &result_rule)
-                .expect("start reject");
-            assert!(!rejected.ok);
-            assert!(rejected
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("may not bind the result boundary")));
-
-            host.begin_run("rule-duplicate", "rule-duplicate", None)
-                .expect("begin duplicate rule");
-            let mut duplicate = result_rule;
-            duplicate["rules"][0]["on"]["actor"] = JsonValue::String("source".into());
-            let copied = duplicate["rules"][0].clone();
-            duplicate["rules"].as_array_mut().unwrap().push(copied);
-            let duplicate_result = host
-                .start("rule-duplicate", &duplicate)
-                .expect("duplicate reject");
-            assert!(!duplicate_result.ok);
-            assert!(duplicate_result
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("duplicate rule id")));
-
-            for (run_id, messages) in [
-                (
-                    "rule-invalid-valid",
-                    serde_json::json!([
-                        {"to":"source", "content":{"kind":"stub.In"}},
-                        {"to":"source", "content":{"kind":"stub.In", "value":{"ok":true}}},
-                        {"to":"result", "content":{"kind":"stub.In"}}
-                    ]),
-                ),
-                (
-                    "rule-valid-invalid",
-                    serde_json::json!([
-                        {"to":"source", "content":{"kind":"stub.In", "value":{"ok":true}}},
-                        {"to":"source", "content":{"kind":"stub.In"}},
-                        {"to":"result", "content":{"kind":"stub.In"}}
-                    ]),
-                ),
-            ] {
-                host.begin_run(run_id, run_id, None)
-                    .expect("begin mixed emissions");
-                let mut mixed = canonical.clone();
-                mixed["actors"][0]["params"] = serde_json::json!({"canonical_from_message":true});
-                mixed["messages"] = messages;
-                let outcome = host.start(run_id, &mixed).expect("mixed start");
-                assert!(outcome.ok);
-                assert!(host
-                    .take_rule_trigger(run_id)
-                    .expect("disabled queue")
-                    .is_none());
-                assert!(host.take_run_failed(run_id).expect("failed run").is_some());
-                assert!(host
-                    .take_run_complete(run_id)
-                    .expect("no completion")
-                    .is_none());
-            }
-
-            host.begin_run("rule-stop-route", "rule-stop-route", None)
-                .expect("begin stopped route");
-            let stopped_route = serde_json::json!({
-                "actors": [
-                    {"id":"source", "factory":"nefor.factory.stub", "type_arguments":[], "params":{},
-                     "routes":{"stub.Out":[{"actor":"consumer","wire":"stub.Out"}]}},
-                    {"id":"consumer", "factory":"nefor.factory.stub", "type_arguments":[], "params":{}, "routes":{}}
-                ],
-                "messages":[{"to":"source", "content":{"kind":"stub.In"}}],
-                "kills":[],
-                "rules":[{"id":"expand", "on":{"actor":"source", "wire":"stub.Out", "type":"String"}, "fn":"expand"}],
-                "result":{"from":{"actor":"consumer", "wire":"stub.Out", "type":"String"}}
-            });
-            assert!(
-                host.start("rule-stop-route", &stopped_route)
-                    .expect("stopped route start")
-                    .ok
-            );
-            assert!(host
-                .take_run_failed("rule-stop-route")
-                .expect("route failure")
-                .is_some());
-            assert!(host
-                .take_run_complete("rule-stop-route")
-                .expect("consumer stayed unfired")
-                .is_none());
-
-            let immutable = host
-                .apply(
-                    "rule-payload",
-                    &serde_json::json!({"actors":[], "messages":[], "kills":[], "rules":[{
-                        "id":"late", "on":{"actor":"source", "wire":"stub.Out"}, "fn":"late"
-                    }]}),
-                )
-                .expect("delta apply");
-            assert!(!immutable.ok);
-            assert!(immutable
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("immutable initial subscriptions")));
         }
     }
 }
@@ -2051,27 +1818,26 @@ mod tests {
         let body = serde_json::json!({
             "run_id": "unsupported-schema",
             "session_id": "session-1",
-            "artifact": {
-                "actors": [{
-                    "id": "answer",
-                    "factory": "structured-output",
-                    "params": {
-                        "schema": {"version": 1, "root": {"kind": "json_value"}}
-                    }
-                }],
-                "messages": [], "kills": [], "rules": []
-            }
+            "artifact": {"format":"nefor.mag","version":1,"kind":"program","program":{
+                "initial": {
+                    "actors": [{
+                        "id": "answer",
+                        "factory": "structured-output",
+                        "params": {"$mag":"packed-value","value":{"schema": {"version": 1, "root": {"kind": "json_value"}}}}
+                    }],
+                    "messages": [], "kills": []
+                },
+                "operations": []
+            }}
         });
         let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
         let mut active = ActiveExecutes::new();
-        let mut programs = ResidentPrograms::new();
         let mut bridge = CapabilityBridge::new("tool-gate");
         handle_execute(
             &out_tx,
             "direct",
             body.as_object().expect("execute body"),
             Some("execute-1"),
-            &mut programs,
             (&host, &mut active, &mut bridge),
         )
         .await
@@ -2148,12 +1914,10 @@ mod tests {
             "entry": "main.mag"
         });
         let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
-        let mut programs = ResidentPrograms::new();
         handle_load(
             &out_tx,
             body.as_object().expect("load body"),
             Some("load-malformed"),
-            &mut programs,
             &host,
         )
         .await
@@ -2172,385 +1936,10 @@ mod tests {
             message.contains("pass only the success output type"),
             "{message}"
         );
-        assert!(programs.is_empty(), "invalid program is not installed");
         assert!(
             host.drain_emits().expect("kernel emits").is_empty(),
             "load rejection cannot emit mag.run_started"
         );
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[tokio::test]
-    async fn malformed_resident_rules_are_rejected_by_the_plugin_not_mag_core() {
-        let root = std::env::temp_dir().join(format!(
-            "mag-malformed-resident-rules-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("workspace");
-        fs::write(
-            root.join("main.mag"),
-            r#"(artifact {:actors [] :messages [] :kills [] :rules "not-a-list"})"#,
-        )
-        .expect("program");
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let host = LuaHost::load_kernel(
-            &manifest.join("lua/mag-kernel/init.lua"),
-            Some(&manifest.join("../../lua")),
-        )
-        .expect("kernel");
-        let body = serde_json::json!({
-            "id": "load-malformed-rules",
-            "source_dir": root,
-            "entry": "main.mag"
-        });
-        let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
-        let mut programs = ResidentPrograms::new();
-        handle_load(
-            &out_tx,
-            body.as_object().expect("load body"),
-            Some("load-malformed-rules"),
-            &mut programs,
-            &host,
-        )
-        .await
-        .expect("load rejection is a protocol response");
-
-        let outgoing = out_rx.try_recv().expect("load rejection");
-        let Body::Event(body) = outgoing.body else {
-            panic!("expected event response")
-        };
-        assert_eq!(body["kind"], ERROR_KIND);
-        assert!(body["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("'rules' must be an array")));
-        assert!(programs.is_empty(), "invalid program is not installed");
-        assert!(host.drain_emits().expect("kernel emits").is_empty());
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[tokio::test]
-    async fn valid_text_answer_agent_loads_through_existing_path() {
-        let root =
-            std::env::temp_dir().join(format!("mag-valid-text-agent-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("workspace");
-        fs::write(
-            root.join("main.mag"),
-            r#"
-(require "nefor.actors")
-(require "nefor.artifact")
-(require "nefor.contracts")
-(require "nefor.graph")
-(let exact-model (fn [[selected nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel selected))
-(let configured-model (as nefor.actors.ResolvedModel {:provider "mock-provider" :model "mock-model" :reasoning-effort (nefor.actors.reasoning-effort "medium")}))
-(let start (nefor.actors.task-source "task" "test"))
-(let worker (nefor.actors.resolved-agent exact-model
-        (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "worker"
-         :model configured-model
-         :system "Answer."
-         :tools (as (List String) [])
-         :da-policy (nefor.contracts.no-da-policy)
-         :max-corrections 0})
-        (type-tag nefor.contracts.Task)
-        (type-tag nefor.contracts.TextAnswer)))
-(let result (nefor.graph.output "result"
-        (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
-(nefor.artifact.compile
-    (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-      (nefor.graph.add-edges graph
-        [(nefor.graph.edge start worker)
-         (nefor.graph.edge worker result)])))
-"#,
-        )
-        .expect("program");
-        let module_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
-        let config_module_root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/nefor-agent/mag/lib");
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let host = LuaHost::load_kernel(
-            &manifest.join("lua/mag-kernel/init.lua"),
-            Some(&manifest.join("../../lua")),
-        )
-        .expect("kernel");
-        let body = serde_json::json!({
-            "id": "load-valid",
-            "resident": true,
-            "source_dir": root,
-            "module_roots": [module_root, config_module_root],
-            "entry": "main.mag"
-        });
-        let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
-        let mut programs = ResidentPrograms::new();
-        handle_load(
-            &out_tx,
-            body.as_object().expect("load body"),
-            Some("load-valid"),
-            &mut programs,
-            &host,
-        )
-        .await
-        .expect("load succeeds");
-
-        let outgoing = out_rx.try_recv().expect("load response");
-        let Body::Event(body) = outgoing.body else {
-            panic!("expected event response")
-        };
-        assert_eq!(body["kind"], LOADED_KIND, "{body:?}");
-        assert_eq!(body["program_id"], "load-valid");
-        assert!(
-            programs.contains_key("load-valid"),
-            "valid resident program is retained by its exact handle"
-        );
-
-        let execute = serde_json::json!({
-            "id": "execute-valid",
-            "run_id": "valid-text-agent",
-            "run_name": "valid-text-agent",
-            "session_id": "session-1",
-            "program_id": "load-valid"
-        });
-        let mut active = ActiveExecutes::new();
-        let mut bridge = CapabilityBridge::new("tool-gate");
-        handle_execute(
-            &out_tx,
-            "direct",
-            execute.as_object().expect("execute body"),
-            Some("execute-valid"),
-            &mut programs,
-            (&host, &mut active, &mut bridge),
-        )
-        .await
-        .expect("valid execution starts");
-        let emitted = std::iter::from_fn(|| out_rx.try_recv().ok())
-            .filter_map(|outgoing| match outgoing.body {
-                Body::Event(body) => Some(body),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            emitted.iter().any(|body| {
-                body.get("kind").and_then(Value::as_str) == Some("mag.run_started")
-                    && body.get("run_id").and_then(Value::as_str) == Some("valid-text-agent")
-            }),
-            "valid execution follows the normal run-start lifecycle"
-        );
-        assert!(
-            emitted.iter().any(|body| {
-                body.get("kind").and_then(Value::as_str)
-                    == Some("conversation.provider.invoke.request")
-            }),
-            "valid TextAnswer agent reaches the provider path"
-        );
-        assert!(active.contains_key("valid-text-agent"));
-        assert!(
-            programs.contains_key("load-valid"),
-            "execution leaves the reusable retained handle available"
-        );
-        let unload = serde_json::json!({"program_id": "load-valid"});
-        handle_unload(
-            &out_tx,
-            unload.as_object().expect("unload body"),
-            Some("unload-valid"),
-            &mut programs,
-        )
-        .await
-        .expect("unload succeeds");
-        let Body::Event(unloaded) = out_rx.try_recv().expect("unload reply").body else {
-            panic!("expected event response")
-        };
-        assert_eq!(unloaded["kind"], UNLOADED_KIND);
-        assert_eq!(unloaded["released"], true);
-        assert!(programs.is_empty(), "unload releases the reusable handle");
-        assert!(
-            run_program(&active, "valid-text-agent").is_some(),
-            "the live run keeps its already-pinned program environment"
-        );
-        host.end_run("valid-text-agent", TeardownReason::Killed)
-            .expect("cleanup run");
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[tokio::test]
-    async fn retained_program_handles_address_the_exact_source_environment() {
-        fn source(label: &str) -> String {
-            format!(
-                r#"
-(type Task {{:task String}})
-(let expand (fn [[task Task]] -> Artifact
-  (artifact {{:actors [] :messages [] :kills ["{label}"] :rules []}})))
-(artifact {{:actors [{{:id "source" :factory "nefor.factory.stub"
-                       :type_arguments [] :params {{}} :routes {{}}}}]
-           :messages [] :kills []
-           :rules [{{:id "expand"
-                    :on {{:actor "source" :type (type-evidence (type-tag Task)) :wire "stub.Out"}}
-                    :fn "expand"}}]}})
-"#
-            )
-        }
-
-        let root = std::env::temp_dir().join(format!(
-            "mag-resident-program-handles-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("alpha")).expect("alpha workspace");
-        fs::create_dir_all(root.join("beta")).expect("beta workspace");
-        fs::write(root.join("alpha/main.mag"), source("alpha")).expect("alpha program");
-        fs::write(root.join("beta/main.mag"), source("beta")).expect("beta program");
-
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let host = LuaHost::load_kernel(
-            &manifest.join("lua/mag-kernel/init.lua"),
-            Some(&manifest.join("../../lua")),
-        )
-        .expect("kernel");
-        let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
-        let mut programs = ResidentPrograms::new();
-        for label in ["alpha", "beta"] {
-            let body = serde_json::json!({
-                "id": format!("load-{label}"),
-                "resident": true,
-                "source_dir": root.join(label),
-                "entry": "main.mag"
-            });
-            handle_load(
-                &out_tx,
-                body.as_object().expect("load body"),
-                Some(&format!("load-{label}")),
-                &mut programs,
-                &host,
-            )
-            .await
-            .expect("resident load");
-            let Body::Event(reply) = out_rx.try_recv().expect("load reply").body else {
-                panic!("expected event response")
-            };
-            assert_eq!(reply["kind"], LOADED_KIND);
-            assert_eq!(reply["program_id"], format!("load-{label}"));
-        }
-
-        let eval = serde_json::json!({
-            "program_id": "load-alpha",
-            "name": "expand",
-            "input": {"task": "test"}
-        });
-        handle_eval(
-            &out_tx,
-            eval.as_object().expect("eval body"),
-            Some("eval-alpha"),
-            &programs,
-            &ActiveExecutes::new(),
-        )
-        .await
-        .expect("exact resident eval");
-        let Body::Event(reply) = out_rx.try_recv().expect("eval reply").body else {
-            panic!("expected event response")
-        };
-        assert_eq!(reply["kind"], "mag.artifact");
-        assert_eq!(reply["artifact"]["kills"], serde_json::json!(["alpha"]));
-        assert_eq!(
-            programs.len(),
-            2,
-            "evaluating one handle retains both programs"
-        );
-
-        fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn resident_rule_expands_a_typed_value_into_an_atomic_delta() {
-        let root = std::env::temp_dir().join(format!("mag-rule-expansion-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).expect("workspace");
-        fs::write(
-            root.join("main.mag"),
-            r#"
-              (type Task {:task String})
-              (type ExpandedResult {:greeting String})
-              (let task-name (fn [[task Task]] -> String (get task "task")))
-              (let expand (fn [[task Task]] -> Artifact
-                (artifact {:actors []
-                   :messages [{:to "middle" :content {:kind "stub.In" :task (task-name task)}}]
-                   :kills []
-                   :rules []})))
-              (let finish (fn [[task Task]] -> Artifact
-                (artifact {:actors []
-                   :messages [{:to "result" :content {:kind "stub.In" :task task}}]
-                   :kills []
-                   :rules []})))
-              (artifact {:actors [
-                  {:id "source" :factory "nefor.factory.stub" :type_arguments []
-                   :params {:value {:task "one"}} :routes {}}
-                  {:id "middle" :factory "nefor.factory.stub" :type_arguments []
-                   :params {:value {:task "nested"}} :routes {}}
-                  {:id "result" :factory "nefor.factory.stub" :type_arguments []
-                   :params {:greeting "expanded"} :routes {}}]
-                 :messages [{:to "source" :content {:kind "stub.In"}}]
-                 :kills []
-                 :rules [{:id "expand" :on {:actor "source" :type (type-evidence (type-tag Task)) :wire "stub.Out"}
-                          :fn "expand"}
-                         {:id "finish" :on {:actor "middle" :type (type-evidence (type-tag Task)) :wire "stub.Out"}
-                          :fn "finish"}]
-                 :result {:from {:actor "result" :type (type-evidence (type-tag ExpandedResult)) :wire "stub.Out"}}})
-            "#,
-        )
-        .expect("program");
-        let module_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
-        let config_module_root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/nefor-agent/mag/lib");
-        let program = nefor_mag::load_with_inputs_and_module_roots(
-            &root,
-            "main.mag",
-            serde_json::json!({}),
-            &[root.clone(), module_root, config_module_root],
-        )
-        .expect("load program");
-        let artifact = program.artifact.clone();
-        let modification = artifact_modification(&artifact).expect("normalize graph");
-        let rules = resolve_resident_rules(&program, &modification).expect("rules valid");
-        let program = ResidentProgram {
-            loaded: program,
-            rules,
-        };
-
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let host = LuaHost::load_kernel(
-            &manifest.join("lua/mag-kernel/init.lua"),
-            Some(&manifest.join("../../lua")),
-        )
-        .expect("kernel");
-        assert!(
-            host.begin_run("rule-e2e", "rule-e2e", None)
-                .expect("begin")
-                .ok
-        );
-        let started = host.start("rule-e2e", &modification).expect("start");
-        assert!(started.ok, "start failed: {:?}", started.error);
-        assert!(host
-            .take_run_complete("rule-e2e")
-            .expect("premature completion")
-            .is_none());
-
-        drain_rule_triggers(&host, Some(&program), "rule-e2e").expect("drain rules");
-        let completion = host
-            .take_run_complete("rule-e2e")
-            .expect("completion")
-            .unwrap_or_else(|| {
-                let failure = host.take_run_failed("rule-e2e").expect("rule run failure");
-                panic!("delta did not fire static result actor: {failure:?}")
-            });
-        assert_eq!(
-            completion
-                .result
-                .as_ref()
-                .and_then(|result| result["greeting"].as_str()),
-            Some("expanded")
-        );
-        assert!(host
-            .take_rule_trigger("rule-e2e")
-            .expect("quiescent")
-            .is_none());
         fs::remove_dir_all(root).ok();
     }
 
@@ -2600,7 +1989,6 @@ mod tests {
                 "content": {"kind":"generic-provider.ProviderOut","messages":[{"role":"user","content":"go"}]}
             }],
             "kills": [],
-            "rules": [],
             "result": {"from": {
                 "actor":"answer",
                 "type":"nefor.agent.Result",
@@ -2642,13 +2030,9 @@ mod tests {
             .expect("request id")
             .to_owned();
         let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
-        let mut programs = ResidentPrograms::new();
         let mut active = HashMap::from([(
             "provider-events".to_owned(),
-            ActiveExecute {
-                in_reply_to: None,
-                program: None,
-            },
+            ActiveExecute { in_reply_to: None },
         )]);
 
         for body in [
@@ -2683,7 +2067,6 @@ mod tests {
                 &out_tx,
                 "conversation-manager",
                 &body,
-                &mut programs,
                 &host,
                 &mut active,
                 &mut bridge,

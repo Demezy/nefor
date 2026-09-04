@@ -141,7 +141,7 @@ The whole union must be handled by a compatible downstream node or terminal outp
 
 `:tools` is the agent's capability boundary. Use `nefor.actors.read-only-tools`, `nefor.actors.general-tools`, or an explicit list. A tool call not in the invocation allowlist is rejected even if the tool exists globally. `:da-policy` configures command policy; it does not replace the runtime approval gate.
 
-If a downstream reviewer can work with partial failed output, accept the full union as input. Otherwise route success and error separately in a resident program with `nefor.actors.result-arm`.
+If a downstream reviewer can work with partial failed output, accept the full union as input. Otherwise route success and error into separate ordinary nodes with `nefor.node.choose`.
 
 ## Edges, products, unions, and joins
 
@@ -213,15 +213,19 @@ indefinitely. The current API has no `bash`, `BashOptions`,
 
 `nefor.actors.approval-gate` branches a `TextAnswer` into nominal `Approved` and `Rejected` results. Use it when human judgment is part of the graph's meaning. It is distinct from lead `write-review`, which authorizes execution of a write-capable orchestration plan before launch. See [Orchestrating MAG](orchestrating.md#mag-author-and-launch-a-program).
 
-## Dynamic rules
+## Runtime expansion
 
-Most workflows should be fully static. When a runtime result determines how many nodes are needed, use a resident program:
+Most workflows should be fully static. When runtime data determines cardinality,
+use the node-oriented `DynamicList`/`nefor.dynamic.traverse-template` boundary. It authors
+an immutable `InstantiateDeltaTemplate` operation subscribed to a typed output.
+Fixed worker lists use `nefor.node.sequence`.
 
-```lisp
-(nefor.artifact.compile-program topology rules)
-```
-
-A rule subscribes to a typed port created with `nefor.graph.rule`; its named pure MAG function returns a delta artifact. Runtime-sized worker expansion is exposed as the node-oriented `DynamicList`/`dynamic.traverse` boundary; fixed worker lists use `nefor.node.sequence`. Rules are program metadata, not graph edges, and do not give agents authority to alter the graph. See [MAG composition semantics](../../../plugins/mag/docs/patterns.md).
+Version 1 evaluates only the closed Trigger, Capture, Field,
+IntToDecimalString, and ConcatStrings expression forms while materializing a
+structural delta template. There is no general runtime expression language or
+post-compilation MAG function application. Operations are program metadata, not
+graph edges, and do not give actors authority to alter the graph. See
+[MAG composition semantics](../../../plugins/mag/docs/patterns.md).
 
 ## Worktrees
 

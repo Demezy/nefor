@@ -64,7 +64,7 @@ fn terminal_settlement_is_first_write_wins_even_after_host_take() {
         assert(kernel.begin_run({run_id="race", run_name="race", session_id="s"}).ok)
         assert(kernel.start("race", {
           actors={{id="result", factory="nefor.factory.stub", type_arguments={}, params={greeting="first"}, routes={}}},
-          messages={{to="result", content={kind="stub.In"}}}, kills={}, rules={},
+          messages={{to="result", content={kind="stub.In"}}}, kills={},
           result={from={actor="result", wire="stub.Out"}}
         }).ok)
         local emit = kernel.context("race").router:emitter("result")
@@ -114,7 +114,7 @@ fn synchronous_initial_output_drains_declarative_operations_before_start_returns
             {id="result",factory="nefor.factory.stub",type_arguments={},params={},
              input=port("result","stub.In"),outputs={port("result","stub.Out")},routes={}}
           },messages={{to="source",semantic_type=S,semantic_type_id="String",content={kind="stub.In",value="go"}}},
-          kills={},rules={},nodes={{path={"source"},members={"source"}},{path={"result"},members={"result"}}},
+          kills={},nodes={{path={"source"},members={"source"}},{path={"result"},members={"result"}}},
           result={from=port("result","stub.Out")}
         },{operation,second})
         assert(outcome.ok,outcome.error)
@@ -140,7 +140,7 @@ fn synchronous_initial_output_drains_declarative_operations_before_start_returns
           },messages={
             {to="result",semantic_type=S,semantic_type_id="String",content={kind="stub.In",value="go"}},
             {to="source",semantic_type=S,semantic_type_id="String",content={kind="stub.In",value="go"}}
-          },kills={},rules={},nodes={{path={"result"},members={"result"}},{path={"source"},members={"source"}}},
+          },kills={},nodes={{path={"result"},members={"result"}},{path={"source"},members={"source"}}},
           result={from=port("result","stub.Out")}
         },{failing})
         assert(failed_start.ok,failed_start.error)
@@ -152,7 +152,7 @@ fn synchronous_initial_output_drains_declarative_operations_before_start_returns
 }
 
 #[test]
-fn killed_generation_cannot_route_settle_or_trigger_rules() {
+fn killed_generation_cannot_route_or_settle() {
     run(r#"
         assert(kernel.begin_run({run_id="stale", run_name="stale", session_id="s"}).ok)
         assert(kernel.start("stale", {
@@ -163,15 +163,12 @@ fn killed_generation_cannot_route_settle_or_trigger_rules() {
             {id="result", factory="nefor.factory.stub", type_arguments={}, params={}, routes={}}
           },
           messages={{to="source", content={kind="stub.In"}}}, kills={},
-          rules={{id="watch", on={actor="source", wire="stub.Out"}, fn="noop"}},
           result={from={actor="result", wire="stub.Out"}}
         }).ok)
-        assert(kernel.take_rule_trigger("stale"))
         local ctx = kernel.context("stale")
         local stale_emit = ctx.router:emitter("source")
-        assert(kernel.apply("stale", {actors={}, messages={}, kills={"source"}, rules={}}).ok)
+        assert(kernel.apply("stale", {actors={}, messages={}, kills={"source"}}).ok)
         stale_emit({kind="stub.Out", value="late"})
-        assert(kernel.take_rule_trigger("stale") == nil)
         assert(kernel.take_run_complete("stale") == nil)
         local ignored = 0
         for _, event in ipairs(events) do

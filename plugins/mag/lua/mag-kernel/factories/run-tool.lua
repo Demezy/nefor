@@ -6,7 +6,7 @@
 -- next node. Nothing here inspects an input's runtime shape to decide what it
 -- received — the declared input contract does that (docs/ir.md, Firing).
 --
--- Contract (reconciled against tests/fixtures/two-agents.modification.json —
+-- Contract (reconciled against the plugin acceptance graph —
 -- `run-tool` routes `generic-tool.ToolHandle` to its `tool-result`; flagged):
 --   input   generic-tool.ToolCalls   (single; fires per ToolCalls message)
 --   output  generic-tool.ToolHandle  (one aggregated handle per batch)

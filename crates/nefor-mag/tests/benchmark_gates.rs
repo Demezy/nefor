@@ -25,7 +25,6 @@ fn success(value: u64) -> SemanticOutcome {
     SemanticOutcome::Success {
         artifact_hash: fingerprint(&serde_json::to_vec(&artifact).unwrap()),
         artifact_json: artifact,
-        resident_probe_results: vec![],
     }
 }
 
@@ -410,7 +409,6 @@ fn stage_boundary_fingerprint_excludes_stage_body_but_keeps_shared_inputs() {
         None,
         "timed",
         None,
-        vec![],
     );
     let mut forward = fixture(
         &scratch,
@@ -424,7 +422,6 @@ fn stage_boundary_fingerprint_excludes_stage_body_but_keeps_shared_inputs() {
         None,
         "timed",
         None,
-        vec![],
     );
     analysis.topology_fingerprint = Some("topology".into());
     forward.topology_fingerprint = Some("topology".into());

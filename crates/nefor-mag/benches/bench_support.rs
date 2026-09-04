@@ -9,25 +9,25 @@ use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub const SCHEMA_VERSION: u8 = 5;
-pub const COMPARISON_SCHEMA_VERSION: u8 = 4;
-pub const CURRENT_MAIN_A0_WORKLOAD_CATALOG_VERSION: &str = "cycle-2-current-main-v2";
-pub const PHASE0_WORKLOAD_CATALOG_VERSION: &str = "cycle-3-a0-evidence-v1";
-pub const ORACLE_CATALOG_VERSION: &str = "mag-oracles-25-v1";
-pub const PROFILER_SCHEMA_VERSION: &str = "generic-compiler-profile-v2";
+pub const SCHEMA_VERSION: u8 = 6;
+pub const COMPARISON_SCHEMA_VERSION: u8 = 5;
+pub const CURRENT_MAIN_A0_WORKLOAD_CATALOG_VERSION: &str = "artifact-only-current-main-v4";
+pub const PHASE0_WORKLOAD_CATALOG_VERSION: &str = "cycle-3-a0-artifact-only-v2";
+pub const ORACLE_CATALOG_VERSION: &str = "mag-oracles-22-artifact-only-v3";
+pub const PROFILER_SCHEMA_VERSION: &str = "artifact-only-compiler-profile-v3";
 pub const STATISTICS_POLICY_VERSION: &str = "paired-nearest-rank-p90-fwer-v2";
-pub const WORKER_PROTOCOL_VERSION: &str = "mag-bench-worker-v1";
+pub const WORKER_PROTOCOL_VERSION: &str = "mag-bench-worker-v2";
 pub const BOOTSTRAP_RESAMPLES: usize = 131_072;
 pub const LEGACY_COMBINED_FINGERPRINT: &str =
     "sha256:0e2cf14afde86802d519af05e668a615e8f1618733c5fe2777adc3778d9c8431";
 pub const LEGACY_WORKLOAD_FINGERPRINT: &str =
     "sha256:59617bf4d8755e91d7b5ea5d13574bca7efc7c79276e850fd5ce479df037deaa";
 pub const CURRENT_MAIN_A0_WORKLOAD_FINGERPRINT: &str =
-    "sha256:9c485ea062a2df747c27272fc69a5fbe547ccccddfac08d6a63bc3fd284a9498";
+    "sha256:2091566c5de30a202a03fbf44864988f89cb4ca46cc84b35ec72758952bf3ca7";
 pub const CURRENT_MAIN_A0_ORACLE_FINGERPRINT: &str =
-    "sha256:4a558e3cd73cc1f4bb1259d698bdbf313301dfbf7898092a725350540491d03e";
+    "sha256:6a5c94f49c8e400f64f47000934b47a78220384fed4090b7897e7f7268e5c295";
 pub const PHASE0_WORKLOAD_FINGERPRINT: &str =
-    "sha256:a90c11c492f9736376591f9e4916082e8dc42d4bf13ad29607eadff5ba620762";
+    "sha256:9dcde7543ed3c4735eb688d8fcaaedc965b7586487aceccef95c5df64cd9a2de";
 pub const MAX_TARGET_MEDIAN_RATIO: f64 = 0.90;
 pub const MIN_TARGET_COUNTER_REDUCTION: f64 = 0.40;
 pub const MAX_CASE_P90_RATIO: f64 = 1.10;
@@ -150,7 +150,6 @@ pub enum SemanticOutcome {
     Success {
         artifact_json: Value,
         artifact_hash: String,
-        resident_probe_results: Vec<ProbeResult>,
     },
     Error {
         class: String,
@@ -158,27 +157,6 @@ pub enum SemanticOutcome {
         policy_stage: String,
         ordered_diagnostics: Vec<String>,
     },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ProbeResult {
-    pub function: String,
-    pub input: Value,
-    pub expected: ProbeExpectation,
-    pub result: Result<Value, ErrorObservation>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum ProbeExpectation {
-    Success { value: Value },
-    Error { class: String },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ErrorObservation {
-    pub class: String,
-    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -193,13 +171,6 @@ pub struct OracleObservation {
 pub struct Recommendation {
     pub candidate: Option<String>,
     pub evidence: String,
-}
-
-#[derive(Clone)]
-pub struct Probe {
-    function: &'static str,
-    input: Value,
-    expected: ProbeExpectation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,7 +228,6 @@ pub struct Fixture {
     pub expected_error: Option<String>,
     pub policy: String,
     pub expected_artifact: Option<Value>,
-    pub probes: Vec<Probe>,
     pub compiler_options: nefor_mag::CompilerOptions,
 }
 
@@ -273,7 +243,6 @@ struct LegacyCase {
     name: String,
     #[serde(default)]
     fixture_fingerprint: String,
-    artifact_hash: Option<String>,
 }
 
 fn manifest_catalog_fingerprint(entries: &[LegacyCase]) -> String {
@@ -287,7 +256,7 @@ fn manifest_catalog_fingerprint(entries: &[LegacyCase]) -> String {
     )
 }
 
-pub fn assert_legacy_preserved(cases: &[CaseReport], oracles: &[OracleObservation]) {
+pub fn assert_catalog_membership(cases: &[CaseReport], oracles: &[OracleObservation]) {
     let historical: LegacyManifest =
         serde_json::from_str(include_str!("legacy_cycle2_manifest.json"))
             .expect("parse immutable cycle-2 manifest");
@@ -307,10 +276,6 @@ pub fn assert_legacy_preserved(cases: &[CaseReport], oracles: &[OracleObservatio
         LEGACY_WORKLOAD_FINGERPRINT
     );
     assert_eq!(
-        manifest_catalog_fingerprint(&current.cases),
-        CURRENT_MAIN_A0_WORKLOAD_FINGERPRINT
-    );
-    assert_eq!(
         cases.len(),
         historical.cases.len(),
         "inherited timed case count"
@@ -319,50 +284,56 @@ pub fn assert_legacy_preserved(cases: &[CaseReport], oracles: &[OracleObservatio
     for ((actual, historical), current) in cases.iter().zip(historical.cases).zip(current.cases) {
         assert_eq!(actual.name, historical.name, "inherited timed case order");
         assert_eq!(actual.name, current.name, "current A0 timed case order");
-        assert_eq!(
-            actual.fixture_fingerprint, current.fixture_fingerprint,
-            "{} current-main A0 fixture fingerprint",
-            actual.name
-        );
-        assert_eq!(
-            actual.artifact_hash, current.artifact_hash,
-            "{} current-main A0 artifact hash",
-            actual.name
-        );
     }
     assert_eq!(
-        oracles.len(),
         historical.oracles.len(),
-        "legacy oracle count"
+        25,
+        "immutable legacy oracle count"
     );
+    let retired_oracles = [
+        "artifact-dead-named-resident-function-remains-callable",
+        "resident-function-reads-captured-top-level-peer",
+        "required-module-export-remains-available",
+    ];
+    for retired in retired_oracles {
+        assert!(
+            historical
+                .oracles
+                .iter()
+                .any(|oracle| oracle.name == retired),
+            "immutable legacy manifest retains retired oracle {retired}"
+        );
+        assert!(
+            current.oracles.iter().all(|oracle| oracle.name != retired),
+            "artifact-only catalog excludes retired oracle {retired}"
+        );
+    }
+    let retained_historical = historical
+        .oracles
+        .iter()
+        .filter(|oracle| !retired_oracles.contains(&oracle.name.as_str()));
+    assert_eq!(oracles.len(), 22, "artifact-only oracle count");
     assert_eq!(
         oracles.len(),
         current.oracles.len(),
         "current A0 oracle count"
     );
-    for ((actual, historical), current) in
-        oracles.iter().zip(historical.oracles).zip(current.oracles)
+    for ((actual, historical), current) in oracles
+        .iter()
+        .zip(retained_historical)
+        .zip(current.oracles.iter())
     {
-        assert_eq!(actual.name, historical.name, "legacy oracle order");
+        assert_eq!(actual.name, historical.name, "retained legacy oracle order");
         assert_eq!(actual.name, current.name, "current A0 oracle order");
-        let artifact_hash = match &actual.observation {
-            SemanticOutcome::Success { artifact_hash, .. } => Some(artifact_hash.clone()),
-            SemanticOutcome::Error { .. } => None,
-        };
-        assert_eq!(
-            artifact_hash, current.artifact_hash,
-            "{} current-main A0 oracle artifact hash",
-            actual.name
-        );
     }
 }
 
 pub fn run_case(case: &Fixture, samples: usize, warmups: usize) -> CaseReport {
     for _ in 0..warmups {
-        assert_timed_outcome(case, load(case, None));
+        assert_timed_outcome(case, compile_fixture(case, None));
     }
     let calibration_started = Instant::now();
-    assert_timed_outcome(case, load(case, None));
+    assert_timed_outcome(case, compile_fixture(case, None));
     let calibration_ns = nanos(calibration_started.elapsed());
     let batch_count = calibrate_batch_count(calibration_ns, 5_000_000);
     let seed = u64::from_le_bytes(
@@ -413,7 +384,7 @@ pub fn run_case(case: &Fixture, samples: usize, warmups: usize) -> CaseReport {
     let mut profiles = Vec::with_capacity(samples);
     for _ in 0..samples {
         let profiler = nefor_mag::profile::CompileProfiler::new();
-        let result = load(case, Some(&profiler));
+        let result = compile_fixture(case, Some(&profiler));
         if assert_timed_outcome(case, result).is_some() {
             profiles.push(profiler.snapshot());
         }
@@ -456,40 +427,20 @@ pub fn run_case(case: &Fixture, samples: usize, warmups: usize) -> CaseReport {
 fn measure_case_batch(case: &Fixture, batch_count: u64, hashes: &mut Vec<String>) -> u64 {
     let started = Instant::now();
     for _ in 0..batch_count {
-        if let Some(program) = assert_timed_outcome(case, load(case, None)) {
-            hashes.push(program.hash.clone());
-            black_box(program.artifact);
+        if let Some(artifact) = assert_timed_outcome(case, compile_fixture(case, None)) {
+            hashes.push(fingerprint(&canonical_json_bytes(&artifact)));
+            black_box(artifact);
         }
     }
     nanos(started.elapsed())
 }
 
 pub fn observe(case: &Fixture) -> OracleObservation {
-    let observation = match load(case, None) {
-        Ok(program) => {
-            let resident_probe_results = case
-                .probes
-                .iter()
-                .map(|probe| {
-                    let result = nefor_mag::eval_fn(&program, probe.function, probe.input.clone())
-                        .map_err(|error| error_observation(&error));
-                    ProbeResult {
-                        function: probe.function.into(),
-                        input: probe.input.clone(),
-                        expected: probe.expected.clone(),
-                        result,
-                    }
-                })
-                .collect();
-            for (probe, result) in case.probes.iter().zip(&resident_probe_results) {
-                validate_probe(case, probe, result);
-            }
-            SemanticOutcome::Success {
-                artifact_json: program.artifact,
-                artifact_hash: program.hash,
-                resident_probe_results,
-            }
-        }
+    let observation = match compile_fixture(case, None) {
+        Ok(artifact) => SemanticOutcome::Success {
+            artifact_hash: fingerprint(&canonical_json_bytes(&artifact)),
+            artifact_json: artifact,
+        },
         Err(error) => SemanticOutcome::Error {
             class: error_class(&error).into(),
             message: error.to_string(),
@@ -506,17 +457,17 @@ pub fn observe(case: &Fixture) -> OracleObservation {
     }
 }
 
-fn load(
+fn compile_fixture(
     case: &Fixture,
     profiler: Option<&nefor_mag::profile::CompileProfiler>,
-) -> Result<nefor_mag::LoadedProgram, MagError> {
+) -> Result<Value, MagError> {
     let module_roots = case
         .module_roots
         .iter()
         .map(|root| root.path.clone())
         .collect::<Vec<_>>();
     match profiler {
-        Some(profiler) => nefor_mag::load_with_profiler_and_options(
+        Some(profiler) => nefor_mag::compile_file_with_profiler_and_options(
             &case.source_dir,
             &case.entry,
             case.inputs.clone(),
@@ -524,7 +475,7 @@ fn load(
             profiler,
             case.compiler_options,
         ),
-        None => nefor_mag::load_with_inputs_and_module_roots_and_options(
+        None => nefor_mag::compile_file_with_inputs_and_module_roots_and_options(
             &case.source_dir,
             &case.entry,
             case.inputs.clone(),
@@ -534,16 +485,13 @@ fn load(
     }
 }
 
-fn assert_timed_outcome(
-    case: &Fixture,
-    result: Result<nefor_mag::LoadedProgram, MagError>,
-) -> Option<nefor_mag::LoadedProgram> {
+fn assert_timed_outcome(case: &Fixture, result: Result<Value, MagError>) -> Option<Value> {
     match (&case.expected_error, result) {
-        (None, Ok(program)) => {
+        (None, Ok(artifact)) => {
             if let Some(expected) = &case.expected_artifact {
-                assert_eq!(&program.artifact, expected, "{} timed artifact", case.name);
+                assert_eq!(&artifact, expected, "{} timed artifact", case.name);
             }
-            Some(program)
+            Some(artifact)
         }
         (Some(expected), Err(error)) if error_class(&error) == expected => None,
         (None, Err(error)) => panic!("{} failed: {error}", case.name),
@@ -590,7 +538,6 @@ pub fn fixture(
     expected_error: Option<&str>,
     policy: &str,
     expected_artifact: Option<Value>,
-    probes: Vec<Probe>,
 ) -> Fixture {
     let dir = scratch.join(name);
     fs::create_dir_all(&dir).expect("create fixture dir");
@@ -613,7 +560,6 @@ pub fn fixture(
         expected_error: expected_error.map(str::to_owned),
         policy: policy.into(),
         expected_artifact,
-        probes,
         compiler_options: nefor_mag::CompilerOptions::default(),
     }
 }
@@ -634,37 +580,6 @@ pub fn write_fixture_file(case: &mut Fixture, relative: &str, bytes: &[u8]) {
     }
     fs::write(path, bytes).expect("write fixture file");
     case.fixture_files.push(PathBuf::from(relative));
-}
-
-pub fn probe_success(function: &'static str, input: Value, expected: Value) -> Probe {
-    Probe {
-        function,
-        input,
-        expected: ProbeExpectation::Success { value: expected },
-    }
-}
-
-pub fn probe_error(function: &'static str, input: Value, class: &str) -> Probe {
-    Probe {
-        function,
-        input,
-        expected: ProbeExpectation::Error {
-            class: class.into(),
-        },
-    }
-}
-
-fn validate_probe(case: &Fixture, probe: &Probe, result: &ProbeResult) {
-    let accepted = match (&probe.expected, &result.result) {
-        (ProbeExpectation::Success { value }, Ok(actual)) => value == actual,
-        (ProbeExpectation::Error { class }, Err(actual)) => class == &actual.class,
-        _ => false,
-    };
-    assert!(
-        accepted,
-        "{} probe {} expectation mismatch: expected {:?}, got {:?}",
-        case.name, probe.function, probe.expected, result.result
-    );
 }
 
 pub fn refresh_fixture_fingerprints(fixtures: &mut [Fixture]) {
@@ -697,19 +612,8 @@ pub fn fixture_fingerprint(case: &Fixture) -> String {
             &serde_json::to_value(&case.expected_artifact).expect("expected artifact"),
         ),
     );
-    hash_part(
-        &mut digest,
-        "probes",
-        &canonical_json_bytes(
-            &serde_json::to_value(
-                case.probes
-                    .iter()
-                    .map(|probe| (&probe.function, &probe.input, &probe.expected))
-                    .collect::<Vec<_>>(),
-            )
-            .expect("probe definitions"),
-        ),
-    );
+    // Artifact-only fixtures do not carry post-compilation probes.
+    hash_part(&mut digest, "probes", b"[]");
 
     let mut fixture_files = case.fixture_files.clone();
     fixture_files.sort();
@@ -855,13 +759,6 @@ pub fn error_class(error: &MagError) -> &'static str {
         MagError::Type(_) => "type",
         MagError::Unresolved(_) => "unresolved",
         MagError::Arity { .. } => "arity",
-    }
-}
-
-fn error_observation(error: &MagError) -> ErrorObservation {
-    ErrorObservation {
-        class: error_class(error).into(),
-        message: error.to_string(),
     }
 }
 
@@ -2058,7 +1955,7 @@ pub fn warm_worker_case(case: &Fixture, iterations: usize) -> u64 {
     let mut elapsed = 0;
     for _ in 0..iterations.max(1) {
         let started = Instant::now();
-        assert_timed_outcome(case, load(case, None));
+        assert_timed_outcome(case, compile_fixture(case, None));
         elapsed = nanos(started.elapsed());
     }
     elapsed
@@ -2067,9 +1964,8 @@ pub fn warm_worker_case(case: &Fixture, iterations: usize) -> u64 {
 pub fn measure_worker_batch(case: &Fixture, batch_count: u64) -> u64 {
     let started = Instant::now();
     for _ in 0..batch_count {
-        if let Some(program) = assert_timed_outcome(case, load(case, None)) {
-            black_box(program.hash);
-            black_box(program.artifact);
+        if let Some(artifact) = assert_timed_outcome(case, compile_fixture(case, None)) {
+            black_box(artifact);
         }
     }
     nanos(started.elapsed())
@@ -2081,7 +1977,7 @@ pub fn worker_case_observation(case: &Fixture) -> SemanticOutcome {
 
 pub fn worker_case_counters(case: &Fixture) -> Option<OperationCounters> {
     let profiler = nefor_mag::profile::CompileProfiler::new();
-    assert_timed_outcome(case, load(case, Some(&profiler)));
+    assert_timed_outcome(case, compile_fixture(case, Some(&profiler)));
     let counters = profiler.snapshot().counters;
     assert_counter_invariants(&counters, &case.name);
     Some(counters)

@@ -116,7 +116,7 @@ fn marginal_main(args: &[String]) {
         .map(|case| run_case(case, samples, warmups))
         .collect::<Vec<_>>();
     let oracles = oracle_fixtures.iter().map(observe).collect::<Vec<_>>();
-    assert_legacy_preserved(&cases[..inherited_count], &oracles);
+    assert_catalog_membership(&cases[..inherited_count], &oracles);
     let report = Report {
         schema_version: SCHEMA_VERSION,
         identity: Some(identity),
@@ -1032,7 +1032,6 @@ fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
         None,
         "timed",
         None,
-        vec![],
     )];
     for size in [16, 64, 256] {
         for (family, source) in [
@@ -1053,7 +1052,6 @@ fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
                 None,
                 "timed",
                 None,
-                vec![],
             ));
         }
     }
@@ -1077,7 +1075,6 @@ fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
                 None,
                 "timed",
                 None,
-                vec![],
             ));
         }
     }
@@ -1101,7 +1098,6 @@ fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
                 None,
                 "timed",
                 None,
-                vec![],
             ));
         }
     }
@@ -1120,7 +1116,6 @@ fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
         expected_error: None,
         policy: "timed".into(),
         expected_artifact: None,
-        probes: vec![],
         compiler_options: nefor_mag::CompilerOptions::default(),
     });
     for (width, depth) in [(4, 4), (8, 8), (16, 8)] {
@@ -1143,7 +1138,6 @@ fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
                 None,
                 "timed",
                 None,
-                vec![],
             );
             generated.topology_fingerprint = Some(topology_fingerprint);
             generated.compiler_options.limits.call_depth = 1024;
@@ -1183,7 +1177,6 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
             Some(class),
             policy,
             expected,
-            vec![],
         ));
     }
     out.push(fixture(
@@ -1198,9 +1191,8 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
         Some("evaluation"),
         "dead_local_may_elide",
         Some(json!({"ok": true})),
-        vec![],
     ));
-    out.push(fixture(scratch, "untaken-branch-does-not-demand-local", "oracle", "oracle", None, "(let run (fn [] -> Artifact (if false (artifact (remove-at [1] 9)) (artifact {:ok true}))))\n(run)", core.clone(), json!({}), None, "demanded-runtime", Some(json!({"ok": true})), vec![]));
+    out.push(fixture(scratch, "untaken-branch-does-not-demand-local", "oracle", "oracle", None, "(let run (fn [] -> Artifact (if false (artifact (remove-at [1] 9)) (artifact {:ok true}))))\n(run)", core.clone(), json!({}), None, "demanded-runtime", Some(json!({"ok": true}))));
 
     let mut unused_module = fixture(
         scratch,
@@ -1214,33 +1206,9 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
         Some("unresolved"),
         "module",
         None,
-        vec![],
     );
     write_module(&mut unused_module, "broken.mag", "(let broken missing)");
     out.push(unused_module);
-
-    out.push(fixture(scratch, "artifact-dead-named-resident-function-remains-callable", "oracle", "oracle", None, "(let hidden (fn [[value Int]] -> Artifact (artifact {:value value})))\n(artifact {:loaded true})", core.clone(), json!({}), None, "resident", Some(json!({"loaded": true})), vec![probe_success("hidden", json!(7), json!({"value": 7})), probe_error("hidden", json!("wrong"), "type")]));
-    out.push(fixture(scratch, "resident-function-reads-captured-top-level-peer", "oracle", "oracle", None, "(let peer 41)\n(let read-peer (fn [[value Int]] -> Artifact (artifact {:peer peer :value value})))\n(artifact {:loaded true})", core.clone(), json!({}), None, "resident", Some(json!({"loaded": true})), vec![probe_success("read-peer", json!(1), json!({"peer": 41, "value": 1}))]));
-    let mut module_export = fixture(
-        scratch,
-        "required-module-export-remains-available",
-        "oracle",
-        "oracle",
-        None,
-        "(require \"library\")\n(artifact {:loaded true})",
-        core.clone(),
-        json!({}),
-        None,
-        "module",
-        Some(json!({"loaded": true})),
-        vec![probe_success("library.run", json!(3), json!({"module": 3}))],
-    );
-    write_module(
-        &mut module_export,
-        "library.mag",
-        "(let run (fn [[value Int]] -> Artifact (artifact {:module value})))",
-    );
-    out.push(module_export);
 
     let mut files = fixture(
         scratch,
@@ -1253,9 +1221,7 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
         json!({}),
         None,
         "file-input",
-        Some(json!({"text":"hello\n","items":["second","first"]})),
-        vec![],
-    );
+        Some(json!({"text":"hello\n","items":["second","first"]})),);
     write_fixture_file(&mut files, "message.txt", b"hello\n");
     write_fixture_file(
         &mut files,
@@ -1267,7 +1233,7 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
     out.push(fixture(scratch, "nested-host-input", "oracle", "oracle", None,
         "(type Config {:steps (List {:enabled Bool :label String})})\n(artifact (host-input \"config\" (type-tag Config)))",
         core.clone(), json!({"config":{"steps":[{"enabled":true,"label":"build"}]}}), None, "host-input",
-        Some(json!({"steps":[{"enabled":true,"label":"build"}]})), vec![]));
+        Some(json!({"steps":[{"enabled":true,"label":"build"}]}))));
     out.push(fixture(
         scratch,
         "missing-host-input",
@@ -1280,22 +1246,21 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
         Some("type"),
         "host-input",
         None,
-        vec![],
     ));
     out.push(fixture(scratch, "wrong-nested-host-input", "oracle", "oracle", None,
         "(type Config {:steps (List {:enabled Bool :label String})})\n(artifact (host-input \"config\" (type-tag Config)))",
-        core.clone(), json!({"config":{"steps":[{"enabled":"yes","label":"build"}]}}), Some("type"), "host-input", None, vec![]));
+        core.clone(), json!({"config":{"steps":[{"enabled":"yes","label":"build"}]}}), Some("type"), "host-input", None));
 
     out.push(fixture(scratch, "function-local-closure-capture", "oracle", "oracle", None,
         "(let run (fn [[value Int]] -> Artifact (let captured value) (let emit (fn [[suffix String]] -> Artifact (artifact {:captured captured :suffix suffix}))) (emit \"ok\")))\n(run 6)",
-        core.clone(), json!({}), None, "closure", Some(json!({"captured":6,"suffix":"ok"})), vec![]));
+        core.clone(), json!({}), None, "closure", Some(json!({"captured":6,"suffix":"ok"}))));
     out.push(fixture(scratch, "closures-in-strict-values", "oracle", "oracle", None,
         "(let handlers {:even (fn [[items (List Int)]] -> Bool (if (= (count items) 0) true ((get handlers \"odd\") (remove-at items 0)))) :odd (fn [[items (List Int)]] -> Bool (if (= (count items) 0) false ((get handlers \"even\") (remove-at items 0))))})\n(artifact ((get handlers \"even\") [1 2]))",
-        core.clone(), json!({}), None, "closure", Some(json!(true)), vec![]));
+        core.clone(), json!({}), None, "closure", Some(json!(true))));
 
     let mut nominal = fixture(scratch, "same-shaped-module-nominals", "oracle", "oracle", None,
         "(require \"left.types\")\n(require \"right.types\")\n(let accept-left (fn [[value left.types.Payload]] -> left.types.Payload value))\n(artifact (accept-left (as right.types.Payload {:value 1})))",
-        core.clone(), json!({}), Some("type"), "nominal", None, vec![]);
+        core.clone(), json!({}), Some("type"), "nominal", None);
     write_module(
         &mut nominal,
         "left/types.mag",
@@ -1311,7 +1276,7 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
     let mut ordering = fixture(scratch, "deterministic-derived-ordering", "oracle", "oracle", None,
         "(require \"ordered.values\")\n(let manifest (read-json \"order.json\"))\n(artifact {:collection (map (fn [[entry {:rank String :label String}]] -> String (get entry \"label\")) (sort-by (fn [[entry {:rank String :label String}]] -> String (get entry \"rank\")) [{:rank \"2\" :label \"b\"} {:rank \"1\" :label \"a\"}])) :module ordered.values.items :file (get manifest \"items\")})",
         core.clone(), json!({}), None, "ordering",
-        Some(json!({"collection":["a","b"],"module":["module-z","module-a"],"file":["file-2","file-1"]})), vec![]);
+        Some(json!({"collection":["a","b"],"module":["module-z","module-a"],"file":["file-2","file-1"]})));
     write_module(
         &mut ordering,
         "ordered/values.mag",
@@ -1326,7 +1291,7 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
 
     let type_descriptor = json!({"kind":"named","name":"main.Choice","arguments":[],"body":{"kind":"record","fields":[{"name":"label","type":{"kind":"primitive","name":"String"}}]}});
     let type_schema = json!({"version":1,"root":{"kind":"named","name":"main.Choice","body":{"kind":"record","fields":[{"name":"label","schema":{"kind":"string"}}]}}});
-    out.push(fixture(scratch, "evidence-artifact-identity", "oracle", "oracle", None, "(type Choice {:label String})\n(type Selected (| Choice Int))\n(let value (as Selected (as Choice {:label \"yes\"})))\n(artifact {:descriptor (type-evidence (type-tag Choice)) :schema (type-schema (type-tag Choice)) :semantic_id (type-id (type-evidence (type-tag Choice))) :selected value})", core.clone(), json!({}), None, "static", Some(json!({"descriptor":type_descriptor,"schema":type_schema,"semantic_id":"sha256:604d7d96efdd1a0250532974cc8fd2729a659f6d2f67fc25e28d06b32d97dd10","selected":{"type":"sha256:604d7d96efdd1a0250532974cc8fd2729a659f6d2f67fc25e28d06b32d97dd10","value":{"label":"yes"}}})), vec![]));
+    out.push(fixture(scratch, "evidence-artifact-identity", "oracle", "oracle", None, "(type Choice {:label String})\n(type Selected (| Choice Int))\n(let value (as Selected (as Choice {:label \"yes\"})))\n(artifact {:descriptor (type-evidence (type-tag Choice)) :schema (type-schema (type-tag Choice)) :semantic_id (type-id (type-evidence (type-tag Choice))) :selected value})", core.clone(), json!({}), None, "static", Some(json!({"descriptor":type_descriptor,"schema":type_schema,"semantic_id":"sha256:604d7d96efdd1a0250532974cc8fd2729a659f6d2f67fc25e28d06b32d97dd10","selected":{"type":"sha256:604d7d96efdd1a0250532974cc8fd2729a659f6d2f67fc25e28d06b32d97dd10","value":{"label":"yes"}}}))));
 
     out.push(fixture(
         scratch,
@@ -1340,9 +1305,8 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
         Some("evaluation"),
         "graph-validation",
         None,
-        vec![],
     ));
-    out.push(fixture(scratch, "graph-validation-priority", "oracle", "oracle", None, "(require \"nefor.artifact\")\n(require \"nefor.graph\")\n(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph graph))\n(nefor.artifact.compile topology)", nefor, inputs, Some("evaluation"), "graph-validation", None, vec![]));
+    out.push(fixture(scratch, "graph-validation-priority", "oracle", "oracle", None, "(require \"nefor.artifact\")\n(require \"nefor.graph\")\n(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph graph))\n(nefor.artifact.compile topology)", nefor, inputs, Some("evaluation"), "graph-validation", None));
     out
 }
 
