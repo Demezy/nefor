@@ -2,8 +2,8 @@
   "schema_version": 1,
   "identity": {
     "source": "examples/nefor-agent/agentic-loop/dynamic-tasks.mag",
-    "source_sha256": "f154092252e99e3098001175b0ac0b97186bae9d5a5d49579f9170c112d04422",
-    "compiled_artifact_hash": "1d8a6493adfcecd3ec61f9779c289e145dfad432cdd19b912f7df53ff769fe6d"
+    "source_sha256": "3f0f546cd11a54ba1acb87a20369baf31daf0015db4aa50754433d4b99ed4b22",
+    "compiled_artifact_hash": "e1a9ccde50ccff85bc6b0b13100e70e2589574953c43888582c5c3b8360a631c"
   },
   "resident_wire": {
     "load": {

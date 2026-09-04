@@ -1,4 +1,5 @@
 (require "nefor.graph")
+(require "nefor.mag")
 (require "nefor.contracts")
 (require "nefor.dynamic")
 
@@ -232,7 +233,7 @@
               (nefor.graph.stored-route run-out result-in)
               (nefor.graph.stored-route result-out llm-in)]
      :messages []
-     :rules []
+     :operations []
      :nodes [(nefor.graph.logical-node [id] [])
              (nefor.graph.logical-node [id "entry"] [entry-id])
              (nefor.graph.logical-node [id "llm"] [llm-id])
@@ -314,7 +315,7 @@
     (nefor.graph.identity result-id
       (type-tag
         (| (nefor.contracts.Continue T) (nefor.contracts.Exhausted T)))))
-  (nefor.graph.node-with-rules-and-nodes id "ordinary"
+  (nefor.graph.node-with-operations-and-nodes id "ordinary"
     [(nefor.graph.actor actor-id retry-gate-factory
        [(type-evidence type)]
        (as RetryGateParams {:max_retries (get config "max-retries")})
@@ -325,7 +326,7 @@
     [(nefor.graph.stored-route continued (get result "input"))
      (nefor.graph.stored-route exhausted (get result "input"))]
     (as (List nefor.graph.Message) [])
-    (as (List nefor.graph.Rule) [])
+    (as (List nefor.mag.ProgramOperation) [])
     [(nefor.graph.logical-node [id] [])
      (nefor.graph.logical-node [id "gate"] [actor-id])
      (nefor.graph.logical-node [id "result"] [result-id])]
@@ -350,7 +351,7 @@
   (let result
     (nefor.graph.identity result-id
       (type-tag (| nefor.contracts.Approved nefor.contracts.Rejected))))
-  (nefor.graph.node-with-rules-and-nodes id "ordinary"
+  (nefor.graph.node-with-operations-and-nodes id "ordinary"
     [(nefor.graph.actor actor-id human-factory []
        (as HumanParams {:prompt (get config "prompt")})
        (nefor.graph.store-port input)
@@ -360,7 +361,7 @@
     [(nefor.graph.stored-route approved (get result "input"))
      (nefor.graph.stored-route rejected (get result "input"))]
     (as (List nefor.graph.Message) [])
-    (as (List nefor.graph.Rule) [])
+    (as (List nefor.mag.ProgramOperation) [])
     [(nefor.graph.logical-node [id] [])
      (nefor.graph.logical-node [id "human"] [actor-id])
      (nefor.graph.logical-node [id "result"] [result-id])]

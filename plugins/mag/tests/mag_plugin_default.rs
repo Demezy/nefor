@@ -328,6 +328,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn versioned_program_envelope_unwraps_and_rejects_wrong_discriminators() {
+        let initial = serde_json::json!({"actors": [], "rules": [], "result": {}});
+        let envelope = serde_json::json!({
+            "format": "nefor.mag", "version": 1, "kind": "program",
+            "program": {"initial": initial, "operations": []}
+        });
+        assert_eq!(artifact_modification(&envelope).unwrap(), initial);
+        for invalid in [
+            serde_json::json!({"format":"other","version":1,"kind":"program","program":{"initial":{},"operations":[]}}),
+            serde_json::json!({"format":"nefor.mag","version":2,"kind":"program","program":{"initial":{},"operations":[]}}),
+            serde_json::json!({"format":"nefor.mag","version":1,"kind":"delta","delta":{}}),
+            serde_json::json!({"format":"nefor.mag","version":1,"kind":"program","program":{"initial":{},"operations":[1]}}),
+        ] {
+            assert!(
+                artifact_modification(&invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn provider_schema_preflight_rejects_unsupported_types_before_activation() {
         let modification = serde_json::json!({
             "actors": [{
@@ -643,7 +664,7 @@ mod tests {
         let artifact = serde_json::json!([]);
         assert!(artifact_modification(&artifact)
             .expect_err("non-object must be rejected")
-            .contains("graph-modification object"));
+            .contains("artifact must be an object"));
     }
 
     #[test]

@@ -1740,7 +1740,42 @@ fn graph_modification(artifact: &Value, context: &str) -> Result<Value, String> 
 }
 
 fn artifact_modification(artifact: &Value) -> Result<Value, String> {
-    graph_modification(artifact, "mag.execute")
+    let Some(object) = artifact.as_object() else {
+        return Err("mag.execute artifact must be an object".to_owned());
+    };
+    if object.get("format").is_none() {
+        // Temporary staged seam for callers and resident deltas compiled before
+        // the versioned Nefor envelope became the canonical authoring format.
+        return graph_modification(artifact, "mag.execute");
+    }
+    if object.get("format").and_then(Value::as_str) != Some("nefor.mag") {
+        return Err("mag.execute artifact has an unsupported format".to_owned());
+    }
+    if object.get("version").and_then(Value::as_u64) != Some(1) {
+        return Err("mag.execute artifact has an unsupported nefor.mag version".to_owned());
+    }
+    if object.get("kind").and_then(Value::as_str) != Some("program") {
+        return Err("mag.execute requires a nefor.mag program envelope".to_owned());
+    }
+    let program = object
+        .get("program")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "mag.execute program envelope requires an object payload".to_owned())?;
+    let operations = program
+        .get("operations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "mag.execute program.operations must be an array".to_owned())?;
+    for (index, operation) in operations.iter().enumerate() {
+        if !operation.is_object() {
+            return Err(format!("mag.execute program.operations[{index}] must be an object"));
+        }
+    }
+    graph_modification(
+        program
+            .get("initial")
+            .ok_or_else(|| "mag.execute program envelope requires initial".to_owned())?,
+        "mag.execute program initial",
+    )
 }
 
 fn resolve_resident_rules(

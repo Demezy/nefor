@@ -34,25 +34,38 @@ MAG.
 ## Host artifact boundary
 
 MAG serializes the value passed to `artifact` without imposing an envelope.
-Nefor's MAG library returns a graph modification directly:
+Nefor's MAG library owns an explicit versioned application envelope:
 
 ```json
 {
-  "actors": [
-    {
-      "id": "answer",
-      "factory": "nefor.factory.llm",
-      "type_arguments": [],
-      "params": {},
-      "routes": {}
-    }
-  ],
-  "messages": [],
-  "kills": [],
-  "rules": [],
-  "nodes": [{ "path": ["answer"], "members": ["answer"] }]
+  "format": "nefor.mag",
+  "version": 1,
+  "kind": "program",
+  "program": {
+    "initial": {
+      "actors": [
+        {
+          "id": "answer",
+          "factory": "nefor.factory.llm",
+          "type_arguments": [],
+          "params": {},
+          "routes": {}
+        }
+      ],
+      "messages": [],
+      "kills": [],
+      "rules": [],
+      "nodes": [{ "path": ["answer"], "members": ["answer"] }],
+      "result": { "from": { "actor": "answer", "wire": "nefor.agent.Result" } }
+    },
+    "operations": []
+  }
 }
 ```
+
+A delta uses the same format/version with `kind: "delta"` and a `delta`
+payload. It has no result boundary or operations. The core compiler remains
+schema-opaque.
 
 `factory` is the qualified registry identity and `type_arguments` supplies its
 concrete generic specialization. The plugin passes both fields through
@@ -84,12 +97,15 @@ schema lowering is repeated defensively at execute after control-plane overlays
 and before `begin_run`; a failure at either boundary emits `mag.error`. A load
 failure has no run lifecycle. The execute backstop can only reject before
 `begin_run`, so it likewise emits no `mag.run_started`; its correlated control
-plane must settle any pre-registered invocation as failed. The shipped
-control-plane can explicitly call resident functions with `mag.eval`, and the
-The IR is the data the evaluator produces and the kernel folds: a **graph
-modification**. It is minimal, carries only basic operations, and must never
-grow domain concepts or logic primitives — logic lives in MAG, reached through
-the evaluator.
+plane must settle any pre-registered invocation as failed. The shipped control-plane can explicitly call resident functions with
+`mag.eval` during the staged migration. That retained evaluator and the legacy
+`rules` inside `program.initial` are temporary execution seams; canonical new
+authoring is the inert `InstantiateDeltaTemplate` operation described in
+[lowering](lowering.md).
+
+The concrete modification remains the data the kernel folds. It is minimal and
+contains only kernel operations; the declarative operation schema stays in the
+Nefor MAG envelope.
 
 ## The modification
 

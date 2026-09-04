@@ -42,7 +42,7 @@
                    [(nefor.graph.store-port output)])]
        :routes (as (List nefor.graph.StoredRoute) [])
        :messages []
-       :rules []
+       :operations []
        :nodes [(nefor.graph.logical-node [name] [name])]
        :input input
        :output output})))

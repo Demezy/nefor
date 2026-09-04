@@ -1,0 +1,85 @@
+;; Nefor-owned, versioned immutable execution artifacts. Core MAG treats every
+;; value in this module as opaque application data.
+
+(type TypedCapture {:semantic_type TypeDescriptor
+                    :semantic_type_id SemanticTypeId
+                    :value PackedValue})
+
+(type Trigger {:id String :result_type SemanticTypeId})
+(type Capture {:id String :result_type SemanticTypeId :capture String})
+(type Field {:id String :result_type SemanticTypeId :record String :field String})
+(type IntToDecimalString {:id String :result_type SemanticTypeId :value String})
+(type ConcatStrings {:id String :result_type SemanticTypeId :values (List String)})
+(type Expression (| Trigger Capture Field IntToDecimalString ConcatStrings))
+
+(type LocalActorRef {:slot String})
+(type ExistingActorRef {:id String})
+(type ActorRef (| LocalActorRef ExistingActorRef))
+(type TemplatePort {:actor ActorRef
+                    :type TypeDescriptor
+                    :type_id SemanticTypeId
+                    :wire String})
+(type ScalarParameterBinding {:path (List String) :value String})
+(type ActorReferenceRelocation {:actor LocalActorRef
+                                :path (List String)
+                                :shape String})
+(type TemplateActor {:slot String
+                     :id String
+                     :factory String
+                     :type_arguments (List TypeDescriptor)
+                     :params PackedValue
+                     :input TemplatePort
+                     :outputs (List TemplatePort)
+                     :parameter_bindings (List ScalarParameterBinding)})
+(type TemplateRoute {:from TemplatePort :to TemplatePort :product_position Int})
+(type TemplateMessage {:to TemplatePort
+                       :semantic_type TypeDescriptor
+                       :semantic_type_id SemanticTypeId
+                       :content PackedValue})
+(type FixedPathSegment {:value String})
+(type BoundPathSegment {:value String})
+(type PathSegment (| FixedPathSegment BoundPathSegment))
+(type TemplateLogicalNode {:path (List PathSegment) :members (List LocalActorRef)})
+(type DeltaTemplate {:types (Map String TypeDescriptor)
+                     :actors (List TemplateActor)
+                     :routes (List TemplateRoute)
+                     :messages (List TemplateMessage)
+                     :nodes (List TemplateLogicalNode)
+                     :actor_reference_relocations (List ActorReferenceRelocation)})
+
+;; Version 1 deliberately has one operation. A future version may introduce a
+;; tagged operation sum without making this schema generic today.
+(type InstantiateDeltaTemplate {:id String
+                                :on_actor String
+                                :on_wire String
+                                :trigger_type TypeDescriptor
+                                :trigger_type_id SemanticTypeId
+                                :captures (Map String TypedCapture)
+                                :expressions (List Expression)
+                                :template DeltaTemplate})
+(type ProgramOperation {:id String
+                        :on_actor String
+                        :on_wire String
+                        :trigger_type TypeDescriptor
+                        :trigger_type_id SemanticTypeId
+                        :captures (Map String TypedCapture)
+                        :expressions (List Expression)
+                        :template DeltaTemplate})
+
+(type Program [Initial] {:initial Initial
+                         :operations (List ProgramOperation)})
+(type ProgramEnvelope [Initial]
+  {:format String :version Int :kind String :program (Program Initial)})
+(type DeltaEnvelope [D] {:format String :version Int :kind String :delta D})
+
+(let program-envelope
+  (fn [Initial] [[initial Initial] [operations (List ProgramOperation)]]
+    -> (ProgramEnvelope Initial)
+    (as (ProgramEnvelope Initial)
+      {:format "nefor.mag" :version 1 :kind "program"
+       :program (as (Program Initial)
+         {:initial initial :operations operations})})))
+(let delta-envelope
+  (fn [D] [[delta D]] -> (DeltaEnvelope D)
+    (as (DeltaEnvelope D)
+      {:format "nefor.mag" :version 1 :kind "delta" :delta delta})))

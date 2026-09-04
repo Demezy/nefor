@@ -280,11 +280,25 @@ async fn load_lead_program<R: AsyncBufReadExt + Unpin>(
         .expect("mag.loaded carries the compiled artifact")
 }
 
+fn program_initial(artifact: &Value) -> &Value {
+    artifact.pointer("/program/initial").unwrap_or(artifact)
+}
+
+fn program_initial_mut(artifact: &mut Value) -> &mut Value {
+    if artifact.pointer("/program/initial").is_some() {
+        artifact
+            .pointer_mut("/program/initial")
+            .expect("program initial")
+    } else {
+        artifact
+    }
+}
+
 /// The spawner's per-turn clone: point the initial task at the user
 /// message.
 fn turn_artifact(program: &Value, user_text: &str) -> Value {
     let mut m = program.clone();
-    let actors = m
+    let actors = program_initial_mut(&mut m)
         .get_mut("actors")
         .and_then(Value::as_array_mut)
         .expect("program has actors");
@@ -377,7 +391,7 @@ async fn typed_task_contract_lowers_and_corrects_mock_provider_json() {
     handshake(&mut reader, &mut stdin).await;
 
     let artifact = load_typed_task_program(&mut reader, &mut stdin).await;
-    let actors = artifact
+    let actors = program_initial(&artifact)
         .pointer("/actors")
         .and_then(Value::as_array)
         .unwrap();
@@ -586,6 +600,7 @@ fn dynamic_behavior_fixture() -> Value {
 }
 
 fn compact_modification(artifact: &Value) -> Value {
+    let artifact = artifact.pointer("/program/initial").unwrap_or(artifact);
     let actors = artifact["actors"]
         .as_array()
         .expect("artifact actors")
@@ -662,6 +677,93 @@ fn compact_modification(artifact: &Value) -> Value {
     })
 }
 
+fn assert_dynamic_program_envelope(artifact: &Value) {
+    assert_eq!(artifact["format"], "nefor.mag");
+    assert_eq!(artifact["version"], 1);
+    assert_eq!(artifact["kind"], "program");
+    let program = artifact["program"].as_object().expect("program payload");
+    let operations = program["operations"]
+        .as_array()
+        .expect("ordered operations");
+    assert_eq!(operations.len(), 1);
+    let operation = &operations[0];
+    assert_eq!(operation["id"], "expand.expand");
+    assert_eq!(operation["on_actor"], "expand.input");
+    assert_eq!(operation["on_wire"], "nefor.dynamic.Indexed");
+    assert!(operation["trigger_type_id"]
+        .as_str()
+        .is_some_and(|value| value.starts_with("sha256:")));
+    let expressions = operation["expressions"]
+        .as_array()
+        .expect("flat expressions");
+    let shapes = expressions
+        .iter()
+        .filter_map(Value::as_object)
+        .map(|value| {
+            if value.contains_key("capture") {
+                "capture"
+            } else if value.contains_key("record") {
+                "field"
+            } else if value.contains_key("values") {
+                "concat"
+            } else if value.contains_key("value") {
+                "int-to-decimal-string"
+            } else {
+                "trigger"
+            }
+        })
+        .collect::<Vec<_>>();
+    for required in [
+        "trigger",
+        "capture",
+        "field",
+        "int-to-decimal-string",
+        "concat",
+    ] {
+        assert!(
+            shapes.contains(&required),
+            "missing {required} expression: {shapes:?}"
+        );
+    }
+    let ids = expressions
+        .iter()
+        .map(|expression| expression["id"].as_str().expect("expression id"))
+        .collect::<Vec<_>>();
+    assert_eq!(ids[0], "trigger");
+    for (index, expression) in expressions.iter().enumerate() {
+        let references = expression
+            .get("record")
+            .and_then(Value::as_str)
+            .into_iter()
+            .chain(expression.get("value").and_then(Value::as_str))
+            .chain(
+                expression
+                    .get("values")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str),
+            );
+        for reference in references {
+            let position = ids
+                .iter()
+                .position(|candidate| *candidate == reference)
+                .expect("expression reference resolves");
+            assert!(position < index, "expressions are topologically ordered");
+        }
+    }
+    let slots = operation["template"]["actors"]
+        .as_array()
+        .expect("template actors")
+        .iter()
+        .map(|actor| actor["slot"].as_str().expect("actor slot"))
+        .collect::<Vec<_>>();
+    assert_eq!(slots, ["entry", "llm", "run-tool", "tool-result", "result"]);
+    assert!(operation.get("fn").is_none());
+    assert!(operation.get("source").is_none());
+    assert!(operation.get("bytecode").is_none());
+}
+
 async fn load_dynamic_program<R: AsyncBufReadExt + Unpin>(
     reader: &mut R,
     stdin: &mut ChildStdin,
@@ -683,6 +785,7 @@ async fn load_dynamic_program<R: AsyncBufReadExt + Unpin>(
     let fixture = dynamic_behavior_fixture();
     assert_eq!(loaded["in_reply_to"], load_id);
     assert_eq!(loaded["program_id"], load_id);
+    assert_dynamic_program_envelope(&loaded["artifact"]);
     assert_eq!(
         loaded["hash"],
         fixture["identity"]["compiled_artifact_hash"]
@@ -830,12 +933,15 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
     let loaded = load_dynamic_program(&mut reader, &mut stdin, "dynamic-load").await;
     assert_dynamic_eval_wire(&mut reader, &mut stdin, "dynamic-load").await;
     let artifact = &loaded["artifact"];
+    let initial = artifact
+        .pointer("/program/initial")
+        .expect("program envelope initial");
     assert_eq!(
-        artifact.pointer("/messages/0/to").and_then(Value::as_str),
+        initial.pointer("/messages/0/to").and_then(Value::as_str),
         Some("task")
     );
     assert_eq!(
-        artifact
+        initial
             .pointer("/messages/0/content/kind")
             .and_then(Value::as_str),
         Some("mag.Unit")

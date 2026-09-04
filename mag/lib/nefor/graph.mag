@@ -1,5 +1,6 @@
 (require "core.validated")
 (require "nefor.contracts")
+(require "nefor.mag")
 
 ;; A graph is an immutable edge set. The list is a deterministic storage
 ;; detail: graph/add-edges/remove-edges normalize it to set semantics.
@@ -19,14 +20,13 @@
                :semantic_type TypeDescriptor
                :semantic_type_id SemanticTypeId
                :content PackedValue})
-(type Rule {:id String :on StoredPort :fn String})
 (type LogicalNode {:path (List String) :members (List String)})
 (type StoredNode {:id String
                   :role String
                   :actors (List Actor)
                   :routes (List StoredRoute)
                   :messages (List Message)
-                  :rules (List Rule)
+                  :operations (List nefor.mag.ProgramOperation)
                   :nodes (List LogicalNode)
                   :input StoredPort
                   :output StoredPort})
@@ -35,7 +35,7 @@
                   :actors (List Actor)
                   :routes (List StoredRoute)
                   :messages (List Message)
-                  :rules (List Rule)
+                  :operations (List nefor.mag.ProgramOperation)
                   :nodes (List LogicalNode)
                   :input (Port I)
                   :output (Port O)})
@@ -58,8 +58,8 @@
    :routes_by_source_actor (Map String (List StoredRoute))
    :messages (List Message)
    :messages_by_input (Map String (List Message))
-   :graph_rules (List Rule)
-   :graph_rules_by_output (Map String (List Rule))
+   :graph_operations (List nefor.mag.ProgramOperation)
+   :graph_operations_by_output (Map String (List nefor.mag.ProgramOperation))
    :edges_by_from_node (Map String (List Edge))
    :edges_by_to_node (Map String (List Edge))
    :roots (List StoredNode)
@@ -72,7 +72,7 @@
    :actors (List Actor)
    :routes (List StoredRoute)
    :messages (List Message)
-   :graph_rules (List Rule)
+   :graph_operations (List nefor.mag.ProgramOperation)
    :logical_nodes (List LogicalNode)
    :edges_by_from_node (Map String (List Edge))
    :edges_by_to_node (Map String (List Edge))
@@ -95,7 +95,10 @@
 
 ;; Runtime subscriptions remain program metadata. They observe a graph but are
 ;; not vertices or edges and therefore do not participate in edge-set algebra.
-(type Program {:graph Graph :rules (List Rule)})
+(type LegacyRule {:id String :on StoredPort :fn String})
+(type Program {:graph Graph
+               :operations (List nefor.mag.ProgramOperation)
+               :legacy_rules (List LegacyRule)})
 
 (type FactoryTypeScheme {:input_tags (List String)
                          :outputs (List String)})
@@ -121,12 +124,12 @@
                     :semantic_type TypeDescriptor
                     :semantic_type_id SemanticTypeId
                     :content PackedValue})
-(type LowerRule {:id String :on StoredPort :fn String})
+(type LowerLegacyRule {:id String :on StoredPort :fn String})
 (type ResultBoundary {:from StoredPort})
 (type Modification {:actors (List LowerActor)
                     :messages (List LowerMessage)
                     :kills (List String)
-                    :rules (List LowerRule)
+                    :rules (List LowerLegacyRule)
                     :types (Map String TypeDescriptor)
                     :nodes (List LogicalNode)
                     :result ResultBoundary})
@@ -143,7 +146,7 @@
 (type LowerDelta {:actors (List LowerActor)
                   :messages (List LowerMessage)
                   :kills (List String)
-                  :rules (List LowerRule)
+                  :rules (List LowerLegacyRule)
                   :types (Map String TypeDescriptor)
                   :nodes (List LogicalNode)})
 
@@ -182,36 +185,36 @@
         [(logical-node (get (first values) "path")
            (concat (get (first values) "members") members))]
         (remove-at values 0)))))
-(let node-with-rules-and-nodes
+(let node-with-operations-and-nodes
   (fn [I O] [[id String] [role String] [actors (List Actor)]
              [routes (List StoredRoute)] [messages (List Message)]
-             [rules (List Rule)] [nodes (List LogicalNode)]
+             [operations (List nefor.mag.ProgramOperation)] [nodes (List LogicalNode)]
              [input (Port I)] [output (Port O)]]
     -> (Node I O)
     (as (Node I O) {:id id :role role :actors actors :routes routes
-                    :messages messages :rules rules :nodes nodes
+                    :messages messages :operations operations :nodes nodes
                     :input input :output output})))
 
 (let node (fn [I O] [[id String] [role String] [actors (List Actor)]
                      [routes (List StoredRoute)] [messages (List Message)]
                      [input (Port I)] [output (Port O)]] -> (Node I O)
-  (node-with-rules-and-nodes id role actors routes messages []
+  (node-with-operations-and-nodes id role actors routes messages []
     [(logical-node [id] (actor-ids actors))] input output)))
 
-(let node-with-rules
+(let node-with-operations
   (fn [I O] [[id String] [role String] [actors (List Actor)]
              [routes (List StoredRoute)] [messages (List Message)]
-             [rules (List Rule)] [input (Port I)] [output (Port O)]]
+             [operations (List nefor.mag.ProgramOperation)] [input (Port I)] [output (Port O)]]
     -> (Node I O)
-    (node-with-rules-and-nodes id role actors routes messages rules
+    (node-with-operations-and-nodes id role actors routes messages operations
       [(logical-node [id] (actor-ids actors))] input output)))
 
-(let with-rule
-  (fn [I O] [[value (Node I O)] [subscription Rule]] -> (Node I O)
-    (node-with-rules-and-nodes
+(let with-operation
+  (fn [I O] [[value (Node I O)] [subscription nefor.mag.ProgramOperation]] -> (Node I O)
+    (node-with-operations-and-nodes
       (get value "id") (get value "role")
       (get value "actors") (get value "routes") (get value "messages")
-      (concat (get value "rules") [subscription])
+      (concat (get value "operations") [subscription])
       (get value "nodes")
       (get value "input") (get value "output"))))
 
@@ -219,7 +222,7 @@
   (as StoredNode {:id (get value "id") :role (get value "role")
                   :actors (get value "actors") :routes (get value "routes")
                   :messages (get value "messages")
-                  :rules (get value "rules")
+                  :operations (get value "operations")
                   :nodes (get value "nodes")
                   :input (store-port (get value "input"))
                   :output (store-port (get value "output"))})))
@@ -250,8 +253,45 @@
                  :semantic_type selected
                  :semantic_type_id (type-id selected)
                  :content (pack {:kind (get to "wire") :value value})})))
-(let rule (fn [T] [[id String] [on (Port T)] [fn-name String]] -> Rule
-  (as Rule {:id id :on (store-port on) :fn fn-name})))
+(let instantiate-delta-template
+  (fn [T] [[id String] [on (Port T)]
+           [captures (Map String nefor.mag.TypedCapture)]
+           [expressions (List nefor.mag.Expression)]
+           [template nefor.mag.DeltaTemplate]] -> nefor.mag.ProgramOperation
+    (let stored (store-port on))
+    (as nefor.mag.ProgramOperation
+      (as nefor.mag.InstantiateDeltaTemplate
+        {:id id
+         :on_actor (get stored "actor")
+         :on_wire (get stored "wire")
+         :trigger_type (get stored "type")
+         :trigger_type_id (get stored "type_id")
+         :captures captures
+         :expressions expressions
+         :template template}))))
+(let legacy-rule (fn [T] [[id String] [on (Port T)] [fn-name String]] -> LegacyRule
+  (as LegacyRule {:id id :on (store-port on) :fn fn-name})))
+(let operation-port (fn [[value nefor.mag.ProgramOperation]] -> StoredPort
+  (as StoredPort {:actor (get value "on_actor")
+                  :type (get value "trigger_type")
+                  :type_id (get value "trigger_type_id")
+                  :wire (get value "on_wire")})))
+;; Transitional authoring alias for existing compile-time coverage tests. It
+;; creates the new sole operation shape and retains no callable function.
+(let rule (fn [T] [[id String] [on (Port T)] [ignored String]] -> nefor.mag.ProgramOperation
+  (let stored (store-port on))
+  (let trigger
+    (as nefor.mag.Expression
+      (as nefor.mag.Trigger
+        {:id "trigger" :result_type (get stored "type_id")})))
+  (instantiate-delta-template id on
+    (as (Map String nefor.mag.TypedCapture) {}) [trigger]
+    (as nefor.mag.DeltaTemplate
+      {:types (as (Map String TypeDescriptor) {}) :actors [] :routes []
+       :messages [] :nodes [] :actor_reference_relocations []}))))
+(let with-rule
+  (fn [I O] [[value (Node I O)] [operation nefor.mag.ProgramOperation]] -> (Node I O)
+    (with-operation value operation)))
 
 (let source-factory "nefor.factory.source")
 (let source (fn [T] [[id String] [type (TypeTag T)] [value T]] -> (Node Unit T)
@@ -424,9 +464,9 @@
       (bootstrap-messages
         (map (fn [[candidate StoredNode]] -> StoredPort (get candidate "input")) roots)
         routes authored-messages)))
-  (let graph-rules
-    (flat-map (fn [[candidate StoredNode]] -> (List Rule)
-                (get candidate "rules"))
+  (let graph-operations
+    (flat-map (fn [[candidate StoredNode]] -> (List nefor.mag.ProgramOperation)
+                (get candidate "operations"))
               nodes))
   (let logical-nodes
     (flat-map (fn [[candidate StoredNode]] -> (List LogicalNode)
@@ -439,7 +479,7 @@
      :actors actors
      :routes routes
      :messages messages
-     :graph_rules graph-rules
+     :graph_operations graph-operations
      :logical_nodes logical-nodes
      :edges_by_from_node edges-by-from-node
      :edges_by_to_node edges-by-to-node
@@ -476,7 +516,7 @@
   (let actors (get projection "actors"))
   (let routes (get projection "routes"))
   (let messages (get projection "messages"))
-  (let graph-rules (get projection "graph_rules"))
+  (let graph-operations (get projection "graph_operations"))
   (let outputs (get projection "outputs"))
   (as GraphAnalysis
     {:edges edges
@@ -517,12 +557,12 @@
          (fn [[candidate Message]] -> String
            (port-address-key (get candidate "to")))
          messages)
-     :graph_rules graph-rules
-     :graph_rules_by_output
+     :graph_operations graph-operations
+     :graph_operations_by_output
        (group-by
-         (fn [[candidate Rule]] -> String
-           (port-address-key (get candidate "on")))
-         graph-rules)
+         (fn [[candidate nefor.mag.ProgramOperation]] -> String
+           (port-address-key (operation-port candidate)))
+         graph-operations)
      :edges_by_from_node (get projection "edges_by_from_node")
      :edges_by_to_node (get projection "edges_by_to_node")
      :roots (get projection "roots")
@@ -570,10 +610,12 @@
                 (input-needs-bootstrap? routes-by-input messages-by-input candidate)) boundary-ports))))
 (let graph-messages (fn [[value Graph]] -> (List Message)
   (get (graph-projection value) "messages")))
-(let graph-rules (fn [[value Graph]] -> (List Rule)
-  (get (graph-projection value) "graph_rules")))
-(let program (fn [[value Graph] [rules (List Rule)]] -> Program
-  (as Program {:graph value :rules (concat (graph-rules value) rules)})))
+(let graph-operations (fn [[value Graph]] -> (List nefor.mag.ProgramOperation)
+  (get (graph-projection value) "graph_operations")))
+(let program (fn [[value Graph] [legacy-rules (List LegacyRule)]] -> Program
+  (as Program {:graph value
+               :operations (graph-operations value)
+               :legacy_rules legacy-rules})))
 (let graph-logical-nodes (fn [[value Graph]] -> (List LogicalNode)
   (get (graph-projection value) "logical_nodes")))
 (let insert-string
@@ -919,11 +961,10 @@
   (canonical {:kind "route"
               :to (port-address target)
               :type (get target "type")})))
-(let describe-rule-handler (fn [[candidate Rule]] -> String
-  (canonical {:kind "resident_rule"
+(let describe-operation-handler (fn [[candidate nefor.mag.ProgramOperation]] -> String
+  (canonical {:kind "operation"
               :id (get candidate "id")
-              :function (get candidate "fn")
-              :type (get (get candidate "on") "type")})))
+              :type (get candidate "trigger_type")})))
 (let actor-input-sources (fn [[analysis GraphAnalysis] [candidate Actor]] -> (List String)
   (let key (port-address-key (get candidate "input")))
   (concat
@@ -932,13 +973,13 @@
     (map describe-message-source (or (get (get analysis "messages_by_input") key)
                                     (as (List Message) []))))))
 (let output-handlers
-  (fn [[analysis GraphAnalysis] [rules-by-output (Map String (List Rule))]
+  (fn [[analysis GraphAnalysis] [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
        [output StoredPort]] -> (List String)
     (let key (port-address-key output))
     (concat
       (map describe-route-handler (or (get (get analysis "routes_by_output") key)
                                      (as (List StoredRoute) [])))
-      (map describe-rule-handler (or (get rules-by-output key) (as (List Rule) []))))))
+      (map describe-operation-handler (or (get operations-by-output key) (as (List nefor.mag.ProgramOperation) []))))))
 
 (let actor-input-source-types
   (fn [[analysis GraphAnalysis] [candidate Actor]] -> (List TypeDescriptor)
@@ -968,13 +1009,13 @@
          (or (get (get analysis "routes_by_output")
                   (port-address-key output))
              (as (List StoredRoute) [])))))
-(let rule-handler-types
-  (fn [[rules-by-output (Map String (List Rule))] [output StoredPort]]
+(let operation-handler-types
+  (fn [[operations-by-output (Map String (List nefor.mag.ProgramOperation))] [output StoredPort]]
     -> (List TypeDescriptor)
-    (map (fn [[candidate Rule]] -> TypeDescriptor
-           (get (get candidate "on") "type"))
-         (or (get rules-by-output (port-address-key output))
-             (as (List Rule) [])))))
+    (map (fn [[candidate nefor.mag.ProgramOperation]] -> TypeDescriptor
+           (get (operation-port candidate) "type"))
+         (or (get operations-by-output (port-address-key output))
+             (as (List nefor.mag.ProgramOperation) [])))))
 (let terminal-output?
   (fn [[analysis GraphAnalysis] [output StoredPort]] -> Bool
     (not (= (indexed-count (get analysis "terminal_outputs_by_full_port")
@@ -982,22 +1023,22 @@
             0))))
 (let actor-output-coverage-valid?
   (fn [[analysis GraphAnalysis]
-       [rules-by-output (Map String (List Rule))]
+       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
        [output StoredPort]] -> Bool
     (if (terminal-output? analysis output)
       true
       (descriptor-output-covered-by?
         (get output "type")
         (concat (route-handler-types analysis output)
-                (rule-handler-types rules-by-output output))))))
+                (operation-handler-types operations-by-output output))))))
 (let actor-outputs-coverage-valid?
   (fn [[analysis GraphAnalysis]
-       [rules-by-output (Map String (List Rule))]
+       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
        [candidate Actor]] -> Bool
     (= (count
          (filter (fn [[output StoredPort]] -> Bool
                    (not (actor-output-coverage-valid?
-                          analysis rules-by-output output)))
+                          analysis operations-by-output output)))
                  (get candidate "outputs")))
        0)))
 (let route-valid?
@@ -1065,13 +1106,13 @@
           ["every node must be reachable from a root node whose input accepts Unit"])))))
 (let validate-output-coverage-stage
   (fn [[value Graph] [analysis GraphAnalysis]
-       [rules-by-output (Map String (List Rule))]
+       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
        [contracts (List FactoryContract)] [result StoredNode]]
     -> (core.validated.Validated String Graph)
     (let bad-output-coverage
       (flat-map (fn [[candidate Actor]] -> (List StoredPort)
                   (filter (fn [[output StoredPort]] -> Bool
-                            (not (actor-output-coverage-valid? analysis rules-by-output output)))
+                            (not (actor-output-coverage-valid? analysis operations-by-output output)))
                           (get candidate "outputs"))) (get analysis "actors")))
     (let errors
       (map (fn [[output StoredPort]] -> String
@@ -1079,8 +1120,8 @@
                (canonical {:actor (get output "actor")
                            :output (port-address output)
                            :output_type (get output "type")
-                           :available_handlers (output-handlers analysis rules-by-output output)
-                           :reason "coverage is incomplete; every output alternative needs an ordinary route, resident subscription, or terminal output path"})))
+                           :available_handlers (output-handlers analysis operations-by-output output)
+                           :reason "coverage is incomplete; every output alternative needs an ordinary route, operation subscription, or terminal output path"})))
            bad-output-coverage))
     (as (core.validated.Validated String Graph)
       (if (= (count bad-output-coverage) 0)
@@ -1088,7 +1129,7 @@
         (core.validated.invalid errors)))))
 (let validate-input-coverage-stage
   (fn [[value Graph] [analysis GraphAnalysis]
-       [rules-by-output (Map String (List Rule))]
+       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
        [contracts (List FactoryContract)] [result StoredNode]]
     -> (core.validated.Validated String Graph)
     (let bad-input-coverage
@@ -1108,11 +1149,11 @@
     (as (core.validated.Validated String Graph)
       (if (= (count bad-input-coverage) 0)
         (validate-output-coverage-stage
-          value analysis rules-by-output contracts result)
+          value analysis operations-by-output contracts result)
         (core.validated.invalid errors)))))
 (let validate-outputs-stage
   (fn [[value Graph] [analysis GraphAnalysis]
-       [rules-by-output (Map String (List Rule))]
+       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
        [contracts (List FactoryContract)] [result StoredNode]]
     -> (core.validated.Validated String Graph)
     (let bad-outputs
@@ -1122,12 +1163,12 @@
     (as (core.validated.Validated String Graph)
       (if (= (count bad-outputs) 0)
         (validate-input-coverage-stage
-          value analysis rules-by-output contracts result)
+          value analysis operations-by-output contracts result)
         (core.validated.invalid
           ["output nodes require an incoming edge and are terminal"])))))
 (let validate-roots-stage
   (fn [[value Graph] [analysis GraphAnalysis]
-       [rules-by-output (Map String (List Rule))]
+       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
        [contracts (List FactoryContract)] [result StoredNode]]
     -> (core.validated.Validated String Graph)
     (let bad-roots
@@ -1137,7 +1178,7 @@
     (as (core.validated.Validated String Graph)
       (if (= (count bad-roots) 0)
         (validate-outputs-stage
-          value analysis rules-by-output contracts result)
+          value analysis operations-by-output contracts result)
         (core.validated.invalid
           (map (fn [[candidate StoredNode]] -> String
              (let input (get candidate "input"))
@@ -1148,7 +1189,7 @@
                            :reason "zero incoming edges; only inputs that accept Unit can be activated automatically"}))) bad-roots))))))
 (let validate-boundaries-stage
   (fn [[value Graph] [analysis GraphAnalysis]
-       [rules-by-output (Map String (List Rule))]
+       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
        [contracts (List FactoryContract)] [result StoredNode]]
     -> (core.validated.Validated String Graph)
     (let bad-boundaries
@@ -1158,24 +1199,45 @@
     (as (core.validated.Validated String Graph)
       (if (= (count bad-boundaries) 0)
         (validate-roots-stage
-          value analysis rules-by-output contracts result)
+          value analysis operations-by-output contracts result)
         (core.validated.invalid
           ["boundary node roles require their concrete source/output factory shape, and ordinary nodes cannot contain initial messages"])))))
+(let operation-id (fn [[value nefor.mag.ProgramOperation]] -> String (get value "id")))
+(let operation-valid?
+  (fn [[analysis GraphAnalysis] [value nefor.mag.ProgramOperation]] -> Bool
+    (let on (operation-port value))
+    (if (= (get value "id") "") false
+      (if (not (= (get value "trigger_type_id") (get on "type_id"))) false
+        (if (= (indexed-count (get analysis "output_ports_by_address")
+                 (port-address-key on)) 0) false
+          (not (terminal-output? analysis on)))))))
 (let validate-unique-output-stage
-  (fn [[value Graph] [analysis GraphAnalysis] [rules (List Rule)]
+  (fn [[value Graph] [analysis GraphAnalysis] [operations (List nefor.mag.ProgramOperation)]
        [contracts (List FactoryContract)]]
     -> (core.validated.Validated String Graph)
-    (let all-rules (concat (get analysis "graph_rules") rules))
-    (let rules-by-output
+    (let all-operations (concat (get analysis "graph_operations") operations))
+    (let operation-ids-unique
+      (= (count (keys (group-by operation-id all-operations)))
+         (count all-operations)))
+    (let invalid
+      (filter (fn [[candidate nefor.mag.ProgramOperation]] -> Bool
+                (not (operation-valid? analysis candidate))) all-operations))
+    (let operations-by-output
       (group-by
-        (fn [[candidate Rule]] -> String
-          (port-address-key (get candidate "on")))
-        all-rules))
+        (fn [[candidate nefor.mag.ProgramOperation]] -> String
+          (port-address-key (operation-port candidate)))
+        all-operations))
     (let result (first (get analysis "outputs")))
-    (validate-boundaries-stage
-      value analysis rules-by-output contracts result)))
-(let validate-with-rules
-  (fn [[value Graph] [rules (List Rule)]
+    (as (core.validated.Validated String Graph)
+      (if (not operation-ids-unique)
+        (core.validated.invalid ["program operation ids must be non-empty and unique"])
+        (if (not (= (count invalid) 0))
+          (core.validated.invalid
+            ["program operations must observe a declared non-result output with matching trigger type"])
+          (validate-boundaries-stage
+            value analysis operations-by-output contracts result))))))
+(let validate-with-operations
+  (fn [[value Graph] [operations (List nefor.mag.ProgramOperation)]
        [contracts (List FactoryContract)]]
     -> (core.validated.Validated String Graph)
     (let analysis (analyze-graph value))
@@ -1198,11 +1260,12 @@
                   (core.validated.invalid
                     ["graph needs exactly one concrete output node"])
                   (validate-unique-output-stage
-                    value analysis rules contracts))))))))))
+                    value analysis operations contracts))))))))))
 
 (let validate (fn [[value Graph] [contracts (List FactoryContract)]]
   -> (core.validated.Validated String Graph)
-  (validate-with-rules value (as (List Rule) []) contracts)))
+  (validate-with-operations value (as (List nefor.mag.ProgramOperation) []) contracts)))
+(let validate-with-rules validate-with-operations)
 
 (let zip-route-assignments
   (fn [[routes (List StoredRoute)] [positions (List Int)]]
@@ -1384,8 +1447,8 @@
                     :semantic_type (get value "semantic_type")
                     :semantic_type_id (get value "semantic_type_id")
                     :content (get value "content")})))
-(let lower-rule (fn [[value Rule]] -> LowerRule
-  (as LowerRule {:id (get value "id") :on (get value "on") :fn (get value "fn")})))
+(let lower-legacy-rule (fn [[value LegacyRule]] -> LowerLegacyRule
+  (as LowerLegacyRule {:id (get value "id") :on (get value "on") :fn (get value "fn")})))
 (let result-boundary (fn [[analysis LoweringAnalysis]] -> ResultBoundary
   (as ResultBoundary
     {:from (get (first (get analysis "outputs")) "output")})))
@@ -1405,12 +1468,14 @@
   (map (fn [[candidate Message]] -> TypeDescriptor
          (get candidate "semantic_type"))
        messages)))
-(let rule-descriptors (fn [[rules (List Rule)]] -> (List TypeDescriptor)
-  (map (fn [[candidate Rule]] -> TypeDescriptor
-         (get (get candidate "on") "type"))
-       rules)))
+(let operation-descriptors (fn [[operations (List nefor.mag.ProgramOperation)]] -> (List TypeDescriptor)
+  (map (fn [[candidate nefor.mag.ProgramOperation]] -> TypeDescriptor
+         (get (operation-port candidate) "type")) operations)))
+(let legacy-rule-descriptors (fn [[rules (List LegacyRule)]] -> (List TypeDescriptor)
+  (map (fn [[candidate LegacyRule]] -> TypeDescriptor
+         (get (get candidate "on") "type")) rules)))
 (let program-descriptors
-  (fn [[analysis LoweringAnalysis] [rules (List Rule)]]
+  (fn [[analysis LoweringAnalysis] [operations (List nefor.mag.ProgramOperation)] [legacy-rules (List LegacyRule)]]
     -> (List TypeDescriptor)
     (concat
       (concat
@@ -1419,7 +1484,7 @@
           (route-descriptors (get analysis "routes")))
         (concat
           (message-descriptors (get analysis "messages"))
-          (rule-descriptors rules)))
+          (concat (operation-descriptors operations) (legacy-rule-descriptors legacy-rules))))
       [(get (get (first (get analysis "outputs")) "output") "type")])))
 (let delta-descriptors (fn [[value Delta]] -> (List TypeDescriptor)
   (concat
@@ -1433,7 +1498,8 @@
   (let assigned (assigned-lowering-routes analysis))
   (let assigned-by-source
     (group-by assigned-route-source-actor assigned))
-  (let rules (get value "rules"))
+  (let operations (get value "operations"))
+  (let legacy-rules (get value "legacy_rules"))
   (as Modification
     {:actors
        (map (fn [[candidate Actor]] -> LowerActor
@@ -1444,12 +1510,12 @@
             (get analysis "actors"))
      :messages (map lower-message (get analysis "messages"))
      :kills (as (List String) [])
-     :rules (map lower-rule rules)
-     :types (descriptor-table (program-descriptors analysis rules))
+     :rules (map lower-legacy-rule legacy-rules)
+     :types (descriptor-table (program-descriptors analysis operations legacy-rules))
      :nodes (get analysis "logical_nodes")
      :result (result-boundary analysis)})))
 (let lower (fn [[value Graph]] -> Modification
-  (lower-program (program value (as (List Rule) [])))))
+  (lower-program (program value (as (List LegacyRule) [])))))
 
 ;; Resident rule deltas are operational artifacts, not graph values.
 (let delta (fn [[actors (List Actor)] [routes (List StoredRoute)]
@@ -1514,21 +1580,6 @@
                  (concat authored-messages
                    (bootstrap-messages unit-ports (get value "routes") authored-messages)))
      :kills (get value "kills")
-     :rules (as (List LowerRule) [])
+     :rules (as (List LowerLegacyRule) [])
      :types (descriptor-table (delta-descriptors value))
      :nodes (get value "nodes")})))
-
-;; A resident program may begin with rule-observed exits that only become
-;; connected after a rule returns its operational delta. Its explicit boundary
-;; remains outside Graph validation for that reason.
-(let lower-resident (fn [T] [[change Delta] [rules (List Rule)] [result (Port T)]] -> Modification
-  (let lowered (lower-delta change))
-  (as Modification {:actors (get lowered "actors")
-                      :messages (get lowered "messages")
-                      :kills (get lowered "kills")
-                      :rules (map lower-rule rules)
-                      :types (descriptor-table
-                               (concat (delta-descriptors change)
-                                       [(get (store-port result) "type")]))
-                      :nodes (get lowered "nodes")
-                      :result (as ResultBoundary {:from (store-port result)})})))

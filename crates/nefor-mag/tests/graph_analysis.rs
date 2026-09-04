@@ -58,6 +58,7 @@ fn analysis_preserves_normalized_first_occurrence_and_flattening_order() {
         r#"
           (require "core.validated")
           (require "nefor.graph")
+          (require "nefor.mag")
 
           (let validation-message
             (fn [[checked (core.validated.Validated String nefor.graph.Graph)]] -> String
@@ -108,9 +109,9 @@ fn analysis_preserves_normalized_first_occurrence_and_flattening_order() {
                       (get (get candidate "to") "actor"))
                     (get analysis "messages"))
              :rule-ids
-               (map (fn [[candidate nefor.graph.Rule]] -> String
+               (map (fn [[candidate nefor.mag.ProgramOperation]] -> String
                       (get candidate "id"))
-                    (get analysis "graph_rules"))
+                    (get analysis "graph_operations"))
              :duplicate-lowers-identically
                (= (canonical (nefor.graph.lower topology))
                   (canonical (nefor.graph.lower plain)))
@@ -516,4 +517,47 @@ fn duplicate_precedence_contract_selection_and_sequence_order_are_stable() {
         artifact["collector-params"]["expected_senders"],
         json!(["first-child", "second-child"])
     );
+}
+
+#[test]
+fn nefor_artifact_emits_exact_versioned_program_and_delta_envelopes() {
+    let program = run(
+        "program-envelope",
+        r#"
+          (require "nefor.artifact")
+          (require "nefor.graph")
+          (let start (nefor.graph.source "start" (type-tag nefor.contracts.Text)
+            (as nefor.contracts.Text {:content "hello"})))
+          (let result (nefor.graph.output "result" (type-tag nefor.contracts.Text)))
+          (nefor.artifact.compile
+            (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+              (nefor.graph.add-edges graph [(nefor.graph.edge start result)])))
+        "#,
+        contracts(json!([])),
+    );
+    assert_eq!(program["format"], "nefor.mag");
+    assert_eq!(program["version"], 1);
+    assert_eq!(program["kind"], "program");
+    assert_eq!(program["program"]["operations"], json!([]));
+    let initial = &program["program"]["initial"];
+    assert_eq!(initial["rules"], json!([]));
+    assert!(initial.get("result").is_some());
+    assert!(program.get("actors").is_none());
+
+    let delta = run(
+        "delta-envelope",
+        r#"
+          (require "nefor.artifact")
+          (require "nefor.graph")
+          (nefor.artifact.delta
+            (nefor.graph.delta [] [] [] []))
+        "#,
+        json!({}),
+    );
+    assert_eq!(delta["format"], "nefor.mag");
+    assert_eq!(delta["version"], 1);
+    assert_eq!(delta["kind"], "delta");
+    assert!(delta["delta"].get("result").is_none());
+    assert!(delta["delta"].get("operations").is_none());
+    assert_eq!(delta["delta"]["rules"], json!([]));
 }

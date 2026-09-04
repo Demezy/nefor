@@ -11,15 +11,32 @@
 (type WorkerResult {:task String :description String})
 (type Summary {:content String})
 
-;; One runtime occurrence becomes one ordinary worker node. The task is known
-;; when this resident function runs, so it can shape both identity and prompt.
+(let occurrence (nefor.dynamic.trigger-ref (type-tag (nefor.dynamic.Indexed Task))))
+(let occurrence-index (nefor.dynamic.field-ref occurrence "index" (type-tag Int)))
+(let occurrence-value (nefor.dynamic.field-ref occurrence "value" (type-tag Task)))
+(let occurrence-text (nefor.dynamic.field-ref occurrence-value "description" (type-tag String)))
+(let occurrence-index-text (nefor.dynamic.int-to-decimal-string-ref occurrence-index))
+(let worker-id (nefor.dynamic.concat-strings-ref
+  [(nefor.dynamic.capture-ref "expand.worker." (type-tag String)) occurrence-index-text]))
+(let worker-root (nefor.dynamic.concat-strings-ref
+  [(nefor.dynamic.capture-ref "expand-" (type-tag String)) occurrence-index-text]))
+(let worker-system (nefor.dynamic.concat-strings-ref
+  [(nefor.dynamic.capture-ref "Complete this task: " (type-tag String)) occurrence-text]))
+(let worker-template
+  (nefor.agents.dynamic-template-with-tools agents.resolve-model agents.mock
+    "expand" occurrence-index worker-id worker-root worker-system []
+    (type-tag WorkerResult) 2))
+
+;; Temporary resident implementation seam. The versioned artifact is fully
+;; declarative; this function is retained only by compile-program until the
+;; runtime operation executor lands.
 (let expand-task
   (fn [[entry (nefor.dynamic.Indexed Task)]] -> Artifact
-    (let task (get entry "value"))
+    (let value (get entry "value"))
     (let worker
       (nefor.agents.with-tools agents.resolve-model agents.mock
         (str "expand.worker." (get entry "index"))
-        (str "Complete this task: " (get task "description"))
+        (str "Complete this task: " (get value "description"))
         [] (type-tag Unit) (type-tag WorkerResult) 2))
     (nefor.dynamic.expand "expand" entry worker)))
 
@@ -30,7 +47,7 @@
     "Return the ordered task plan." []
     (type-tag nefor.contracts.Task) (type-tag Task) 2))
 (let workers
-  (nefor.dynamic.traverse "expand" expand-task
+  (nefor.dynamic.traverse-template "expand" worker-template
     (type-tag Task)
     (type-tag (| WorkerResult nefor.contracts.AgentError))))
 
@@ -52,6 +69,11 @@
 (let workflow (nefor.node.>=> ran summarize))
 (let result (nefor.graph.output-for "result" workflow))
 
-(nefor.artifact.compile
+(nefor.artifact.compile-program
   (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-    (nefor.graph.add-edges graph [(nefor.graph.edge workflow result)])))
+    (nefor.graph.add-edges graph [(nefor.graph.edge workflow result)]))
+  [(nefor.graph.legacy-rule "expand.expand"
+     (nefor.graph.port "expand.input"
+       (type-tag (nefor.dynamic.Indexed Task))
+       "nefor.dynamic.Indexed")
+     (function-name expand-task))])

@@ -23,10 +23,21 @@ namespaced modules
   -> ordinary typed actor values
   -> nefor.graph.Graph
   -> nefor.graph.validate
-  -> nefor.graph.lower
-  -> Artifact(raw value)
+  -> Nefor-owned nefor.mag v1 program or delta envelope
+  -> Artifact(opaque application value)
   -> runtime binding and defensive validation
 ```
+
+The envelope schema lives in `mag/lib/nefor/mag.mag`; core MAG remains
+schema-opaque. A program envelope contains an initial concrete modification and
+an ordered list of operations. A delta envelope contains one concrete delta.
+Version 1 defines exactly one operation, `InstantiateDeltaTemplate`, whose
+closed expression vocabulary is Trigger, Capture, Field, IntToDecimalString,
+and ConcatStrings. Its structural template names actor slots, local/existing
+actor references, typed ports, routes and product positions, typed messages,
+logical paths, scalar parameter bindings, and explicit actor-id relocation
+metadata. It contains no executable MAG, generic AST, source, bytecode,
+condition, nested operation, or generic object-construction facility.
 
 ## Authoring layer
 
@@ -78,20 +89,26 @@ remains authoritative for
 typed firing, sender-bound product slots, routing, lifecycle, failure handling,
 and result completion.
 
-Rule functions use a parallel, deliberately narrower path:
+Runtime expansion is authored as immutable operation data:
 
 ```text
-typed source value -> pure unary MAG function -> nefor.graph.Delta
-  -> nefor.graph.lower-delta
-  -> Artifact(raw value)
-  -> atomic apply to the same run
+typed trigger/captures -> closed expression references -> structural DeltaTemplate
+  -> InstantiateDeltaTemplate -> ordered program operation
 ```
 
-A delta has no result boundary. Its routes may target actors already live in
-the run; the runtime registry validates those references against the combined
-live-plus-new inventory before applying anything. Delta lowering applies the
-same bootstrap rule to newly introduced actors, so an unfed `Unit` input starts
-once whether it was introduced in the initial graph or by resident expansion.
+The current runtime still executes a resident named MAG function carried only
+in the initial modification as a temporary staged seam. It is not part of the
+canonical operation schema and new traversal authoring lowers the declarative
+template alongside it. The next migration unit replaces that seam with direct
+template materialization and then removes retained compiler environments,
+`mag.eval`, and legacy rules.
+
+A concrete delta has no result boundary or nested operations. Its routes may
+target actors already live in the run; the runtime registry validates those
+references against the combined live-plus-new inventory before applying
+anything. Delta lowering applies the same bootstrap rule to newly introduced
+actors, so an unfed `Unit` input starts once whether it was introduced in the
+initial graph or by expansion.
 
 ## One-off command expressions
 

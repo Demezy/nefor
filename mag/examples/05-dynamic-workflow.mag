@@ -10,16 +10,32 @@
 (type WorkResult {:summary String})
 (type FinalSummary {:summary String})
 
-;; Resident expansion receives one runtime occurrence. It constructs an
-;; ordinary worker node; `expand` supplies Unit, preserves the occurrence
-;; index, and returns the graph delta the resident rule applies.
+(let occurrence (nefor.dynamic.trigger-ref (type-tag (nefor.dynamic.Indexed WorkItem))))
+(let occurrence-index (nefor.dynamic.field-ref occurrence "index" (type-tag Int)))
+(let occurrence-value (nefor.dynamic.field-ref occurrence "value" (type-tag WorkItem)))
+(let occurrence-text (nefor.dynamic.field-ref occurrence-value "task" (type-tag String)))
+(let occurrence-index-text (nefor.dynamic.int-to-decimal-string-ref occurrence-index))
+(let worker-id (nefor.dynamic.concat-strings-ref
+  [(nefor.dynamic.capture-ref "worker." (type-tag String)) occurrence-index-text]))
+(let worker-root (nefor.dynamic.concat-strings-ref
+  [(nefor.dynamic.capture-ref "workers-" (type-tag String)) occurrence-index-text]))
+(let worker-system (nefor.dynamic.concat-strings-ref
+  [(nefor.dynamic.capture-ref "Complete this work item: " (type-tag String)) occurrence-text]))
+(let worker-template
+  (nefor.agents.dynamic-template-with-tools agents.resolve-model agents.mock
+    "workers" occurrence-index worker-id worker-root worker-system []
+    (type-tag WorkResult) 1))
+
+;; Temporary resident implementation seam. The versioned artifact is fully
+;; declarative; this function is retained only by compile-program until the
+;; runtime operation executor lands.
 (let expand-work
   (fn [[entry (nefor.dynamic.Indexed WorkItem)]] -> Artifact
-    (let index (get entry "index"))
+    (let value (get entry "value"))
     (let worker
       (nefor.agents.with-tools agents.resolve-model agents.mock
-        (str "worker." index)
-        (str "Complete this work item: " (get (get entry "value") "task"))
+        (str "worker." (get entry "index"))
+        (str "Complete this work item: " (get value "task"))
         [] (type-tag Unit) (type-tag WorkResult) 1))
     (nefor.dynamic.expand "workers" entry worker)))
 
@@ -30,7 +46,7 @@
     "Return the ordered work items as JSON." []
     (type-tag nefor.contracts.Task) (type-tag WorkItem) 1))
 (let workers
-  (nefor.dynamic.traverse "workers" expand-work
+  (nefor.dynamic.traverse-template "workers" worker-template
     (type-tag WorkItem)
     (type-tag (| WorkResult nefor.contracts.AgentError))))
 (let result-context
@@ -50,6 +66,11 @@
 (let workflow (nefor.node.>=> ran integrate))
 (let result (nefor.graph.output-for "result" workflow))
 
-(nefor.artifact.compile
+(nefor.artifact.compile-program
   (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-    (nefor.graph.add-edges graph [(nefor.graph.edge workflow result)])))
+    (nefor.graph.add-edges graph [(nefor.graph.edge workflow result)]))
+  [(nefor.graph.legacy-rule "workers.expand"
+     (nefor.graph.port "workers.input"
+       (type-tag (nefor.dynamic.Indexed WorkItem))
+       "nefor.dynamic.Indexed")
+     (function-name expand-work))])
