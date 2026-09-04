@@ -1,0 +1,812 @@
+{
+  "schema_version": 1,
+  "identity": {
+    "source": "examples/nefor-agent/agentic-loop/dynamic-tasks.mag",
+    "source_sha256": "f154092252e99e3098001175b0ac0b97186bae9d5a5d49579f9170c112d04422",
+    "compiled_artifact_hash": "1d8a6493adfcecd3ec61f9779c289e145dfad432cdd19b912f7df53ff769fe6d"
+  },
+  "resident_wire": {
+    "load": {
+      "kind": "mag.load",
+      "resident": true,
+      "program_id_from_request_id": true
+    },
+    "loaded": {
+      "kind": "mag.loaded",
+      "program_id": "dynamic-load"
+    },
+    "eval": {
+      "kind": "mag.eval",
+      "result_kind": "mag.artifact"
+    },
+    "execute": {
+      "kind": "mag.execute",
+      "address_field": "program_id"
+    }
+  },
+  "initial_artifact": {
+    "actors": [
+      {
+        "id": "task",
+        "factory": "nefor.factory.source",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "planner.entry",
+        "factory": "nefor.factory.adapter",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "planner.llm",
+        "factory": "nefor.factory.structured-output",
+        "system": "Return the ordered task plan.",
+        "dynamic": null
+      },
+      {
+        "id": "planner.run-tool",
+        "factory": "nefor.factory.run-tool",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "planner.tool-result",
+        "factory": "nefor.factory.tool-result",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "task>>>planner>=>expand.choose.input",
+        "factory": "nefor.factory.output",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "expand.input",
+        "factory": "nefor.factory.dynamic-input",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "expand.output",
+        "factory": "nefor.factory.dynamic-output",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "task>>>planner>=>expand.error",
+        "factory": "nefor.factory.output",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "task>>>planner>=>expand.choose.output",
+        "factory": "nefor.factory.output",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "task>>>planner>=>expand>=>summary-input>>>summarizer.choose.input",
+        "factory": "nefor.factory.output",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "summary-input",
+        "factory": "nefor.factory.dynamic-context",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "summarizer.entry",
+        "factory": "nefor.factory.adapter",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "summarizer.llm",
+        "factory": "nefor.factory.structured-output",
+        "system": "Summarize the ordered worker results.",
+        "dynamic": null
+      },
+      {
+        "id": "summarizer.run-tool",
+        "factory": "nefor.factory.run-tool",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "summarizer.tool-result",
+        "factory": "nefor.factory.tool-result",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "task>>>planner>=>expand>=>summary-input>>>summarizer.error",
+        "factory": "nefor.factory.output",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "task>>>planner>=>expand>=>summary-input>>>summarizer.choose.output",
+        "factory": "nefor.factory.output",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "result",
+        "factory": "nefor.factory.output",
+        "system": null,
+        "dynamic": null
+      }
+    ],
+    "routes": [
+      {
+        "from": "task",
+        "from_wire": "nefor.graph.Value",
+        "to": "planner.entry",
+        "to_wire": "nefor.agent.Input",
+        "product_position": -1
+      },
+      {
+        "from": "planner.entry",
+        "from_wire": "generic-provider.ProviderOut",
+        "to": "planner.llm",
+        "to_wire": "generic-provider.ProviderOut",
+        "product_position": -1
+      },
+      {
+        "from": "planner.llm",
+        "from_wire": "generic-tool.ToolCalls",
+        "to": "planner.run-tool",
+        "to_wire": "generic-tool.ToolCalls",
+        "product_position": -1
+      },
+      {
+        "from": "planner.llm",
+        "from_wire": "nefor.agent.Result",
+        "to": "task>>>planner>=>expand.choose.input",
+        "to_wire": "nefor.graph.Value",
+        "product_position": -1
+      },
+      {
+        "from": "planner.run-tool",
+        "from_wire": "generic-tool.ToolHandle",
+        "to": "planner.tool-result",
+        "to_wire": "generic-tool.ToolHandle",
+        "product_position": -1
+      },
+      {
+        "from": "planner.tool-result",
+        "from_wire": "generic-provider.ProviderOut",
+        "to": "planner.llm",
+        "to_wire": "generic-provider.ProviderOut",
+        "product_position": -1
+      },
+      {
+        "from": "task>>>planner>=>expand.choose.input",
+        "from_wire": "nefor.graph.Value",
+        "to": "expand.input",
+        "to_wire": "nefor.dynamic.Input",
+        "product_position": -1
+      },
+      {
+        "from": "task>>>planner>=>expand.choose.input",
+        "from_wire": "nefor.graph.Value",
+        "to": "task>>>planner>=>expand.error",
+        "to_wire": "nefor.graph.Value",
+        "product_position": -1
+      },
+      {
+        "from": "expand.input",
+        "from_wire": "nefor.dynamic.Complete",
+        "to": "expand.output",
+        "to_wire": "nefor.dynamic.Collect",
+        "product_position": -1
+      },
+      {
+        "from": "expand.output",
+        "from_wire": "nefor.dynamic.Output",
+        "to": "task>>>planner>=>expand.choose.output",
+        "to_wire": "nefor.graph.Value",
+        "product_position": -1
+      },
+      {
+        "from": "task>>>planner>=>expand.error",
+        "from_wire": "nefor.graph.Value",
+        "to": "task>>>planner>=>expand.choose.output",
+        "to_wire": "nefor.graph.Value",
+        "product_position": -1
+      },
+      {
+        "from": "task>>>planner>=>expand.choose.output",
+        "from_wire": "nefor.graph.Value",
+        "to": "task>>>planner>=>expand>=>summary-input>>>summarizer.choose.input",
+        "to_wire": "nefor.graph.Value",
+        "product_position": -1
+      },
+      {
+        "from": "task>>>planner>=>expand>=>summary-input>>>summarizer.choose.input",
+        "from_wire": "nefor.graph.Value",
+        "to": "summary-input",
+        "to_wire": "nefor.dynamic.Input",
+        "product_position": -1
+      },
+      {
+        "from": "task>>>planner>=>expand>=>summary-input>>>summarizer.choose.input",
+        "from_wire": "nefor.graph.Value",
+        "to": "task>>>planner>=>expand>=>summary-input>>>summarizer.error",
+        "to_wire": "nefor.graph.Value",
+        "product_position": -1
+      },
+      {
+        "from": "summary-input",
+        "from_wire": "generic-provider.ProviderOut",
+        "to": "summarizer.entry",
+        "to_wire": "generic-provider.ProviderOut",
+        "product_position": -1
+      },
+      {
+        "from": "summarizer.entry",
+        "from_wire": "generic-provider.ProviderOut",
+        "to": "summarizer.llm",
+        "to_wire": "generic-provider.ProviderOut",
+        "product_position": -1
+      },
+      {
+        "from": "summarizer.llm",
+        "from_wire": "generic-tool.ToolCalls",
+        "to": "summarizer.run-tool",
+        "to_wire": "generic-tool.ToolCalls",
+        "product_position": -1
+      },
+      {
+        "from": "summarizer.llm",
+        "from_wire": "nefor.agent.Result",
+        "to": "task>>>planner>=>expand>=>summary-input>>>summarizer.choose.output",
+        "to_wire": "nefor.graph.Value",
+        "product_position": -1
+      },
+      {
+        "from": "summarizer.run-tool",
+        "from_wire": "generic-tool.ToolHandle",
+        "to": "summarizer.tool-result",
+        "to_wire": "generic-tool.ToolHandle",
+        "product_position": -1
+      },
+      {
+        "from": "summarizer.tool-result",
+        "from_wire": "generic-provider.ProviderOut",
+        "to": "summarizer.llm",
+        "to_wire": "generic-provider.ProviderOut",
+        "product_position": -1
+      },
+      {
+        "from": "task>>>planner>=>expand>=>summary-input>>>summarizer.error",
+        "from_wire": "nefor.graph.Value",
+        "to": "task>>>planner>=>expand>=>summary-input>>>summarizer.choose.output",
+        "to_wire": "nefor.graph.Value",
+        "product_position": -1
+      },
+      {
+        "from": "task>>>planner>=>expand>=>summary-input>>>summarizer.choose.output",
+        "from_wire": "nefor.graph.Value",
+        "to": "result",
+        "to_wire": "nefor.graph.Value",
+        "product_position": -1
+      }
+    ],
+    "nodes": [
+      {
+        "members": [
+          "task"
+        ],
+        "path": [
+          "task"
+        ]
+      },
+      {
+        "members": [],
+        "path": [
+          "planner"
+        ]
+      },
+      {
+        "members": [
+          "planner.entry"
+        ],
+        "path": [
+          "planner",
+          "entry"
+        ]
+      },
+      {
+        "members": [
+          "planner.llm"
+        ],
+        "path": [
+          "planner",
+          "llm"
+        ]
+      },
+      {
+        "members": [
+          "planner.run-tool"
+        ],
+        "path": [
+          "planner",
+          "run-tool"
+        ]
+      },
+      {
+        "members": [
+          "planner.tool-result"
+        ],
+        "path": [
+          "planner",
+          "tool-result"
+        ]
+      },
+      {
+        "members": [
+          "expand.input",
+          "expand.output",
+          "task>>>planner>=>expand.choose.input",
+          "task>>>planner>=>expand.choose.output",
+          "task>>>planner>=>expand.error"
+        ],
+        "path": [
+          "expand"
+        ]
+      },
+      {
+        "members": [
+          "summary-input",
+          "task>>>planner>=>expand>=>summary-input>>>summarizer.choose.input",
+          "task>>>planner>=>expand>=>summary-input>>>summarizer.choose.output",
+          "task>>>planner>=>expand>=>summary-input>>>summarizer.error"
+        ],
+        "path": [
+          "summary-input"
+        ]
+      },
+      {
+        "members": [],
+        "path": [
+          "summarizer"
+        ]
+      },
+      {
+        "members": [
+          "summarizer.entry"
+        ],
+        "path": [
+          "summarizer",
+          "entry"
+        ]
+      },
+      {
+        "members": [
+          "summarizer.llm"
+        ],
+        "path": [
+          "summarizer",
+          "llm"
+        ]
+      },
+      {
+        "members": [
+          "summarizer.run-tool"
+        ],
+        "path": [
+          "summarizer",
+          "run-tool"
+        ]
+      },
+      {
+        "members": [
+          "summarizer.tool-result"
+        ],
+        "path": [
+          "summarizer",
+          "tool-result"
+        ]
+      },
+      {
+        "members": [
+          "result"
+        ],
+        "path": [
+          "result"
+        ]
+      }
+    ],
+    "messages": [
+      {
+        "to": "task",
+        "kind": "mag.Unit"
+      }
+    ],
+    "kills": [],
+    "rules": [
+      {
+        "id": "expand.expand",
+        "fn": "expand-task",
+        "on": {
+          "actor": "expand.input",
+          "wire": "nefor.dynamic.Indexed",
+          "type_id": "sha256:32889f0d42cf4c1a9b0206d70650f9f3aebdc4e9ec8dc1857c4773647ab2cc89"
+        }
+      }
+    ],
+    "result": {
+      "actor": "result",
+      "wire": "nefor.graph.Value",
+      "type_id": "sha256:0c30fd3c35635b642b74a61eeb8f98aeaa5cbb43cc35ee88cce7fccc596c2797"
+    }
+  },
+  "item_delta_zero": {
+    "actors": [
+      {
+        "id": "expand.worker.0.entry",
+        "factory": "nefor.factory.adapter",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "expand.worker.0.llm",
+        "factory": "nefor.factory.structured-output",
+        "system": "Complete this task: first",
+        "dynamic": null
+      },
+      {
+        "id": "expand.worker.0.run-tool",
+        "factory": "nefor.factory.run-tool",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "expand.worker.0.tool-result",
+        "factory": "nefor.factory.tool-result",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "expand.result.0",
+        "factory": "nefor.factory.dynamic-index",
+        "system": null,
+        "dynamic": {
+          "collection": "oracle",
+          "index": 0
+        }
+      }
+    ],
+    "routes": [
+      {
+        "from": "expand.worker.0.entry",
+        "from_wire": "generic-provider.ProviderOut",
+        "to": "expand.worker.0.llm",
+        "to_wire": "generic-provider.ProviderOut",
+        "product_position": -1
+      },
+      {
+        "from": "expand.worker.0.llm",
+        "from_wire": "generic-tool.ToolCalls",
+        "to": "expand.worker.0.run-tool",
+        "to_wire": "generic-tool.ToolCalls",
+        "product_position": -1
+      },
+      {
+        "from": "expand.worker.0.llm",
+        "from_wire": "nefor.agent.Result",
+        "to": "expand.result.0",
+        "to_wire": "nefor.dynamic.IndexInput",
+        "product_position": -1
+      },
+      {
+        "from": "expand.worker.0.run-tool",
+        "from_wire": "generic-tool.ToolHandle",
+        "to": "expand.worker.0.tool-result",
+        "to_wire": "generic-tool.ToolHandle",
+        "product_position": -1
+      },
+      {
+        "from": "expand.worker.0.tool-result",
+        "from_wire": "generic-provider.ProviderOut",
+        "to": "expand.worker.0.llm",
+        "to_wire": "generic-provider.ProviderOut",
+        "product_position": -1
+      },
+      {
+        "from": "expand.result.0",
+        "from_wire": "nefor.dynamic.Indexed",
+        "to": "expand.output",
+        "to_wire": "nefor.dynamic.Collect",
+        "product_position": -1
+      }
+    ],
+    "nodes": [
+      {
+        "members": [],
+        "path": [
+          "expand-0"
+        ]
+      },
+      {
+        "members": [],
+        "path": [
+          "expand-0",
+          "worker"
+        ]
+      },
+      {
+        "members": [
+          "expand.worker.0.entry"
+        ],
+        "path": [
+          "expand-0",
+          "worker",
+          "entry"
+        ]
+      },
+      {
+        "members": [
+          "expand.worker.0.llm"
+        ],
+        "path": [
+          "expand-0",
+          "worker",
+          "llm"
+        ]
+      },
+      {
+        "members": [
+          "expand.worker.0.run-tool"
+        ],
+        "path": [
+          "expand-0",
+          "worker",
+          "run-tool"
+        ]
+      },
+      {
+        "members": [
+          "expand.worker.0.tool-result"
+        ],
+        "path": [
+          "expand-0",
+          "worker",
+          "tool-result"
+        ]
+      },
+      {
+        "members": [
+          "expand.result.0"
+        ],
+        "path": [
+          "expand-0",
+          "result"
+        ]
+      }
+    ],
+    "messages": [
+      {
+        "to": "expand.worker.0.entry",
+        "kind": "nefor.agent.Input"
+      }
+    ],
+    "kills": [],
+    "rules": [],
+    "result": null
+  },
+  "scenarios": {
+    "zero": {
+      "planner_items": 0,
+      "worker_ids": [],
+      "terminal_status": "completed",
+      "terminal_content": "empty"
+    },
+    "one": {
+      "planner_items": 1,
+      "worker_ids": [
+        "expand.worker.0.llm"
+      ],
+      "terminal_status": "completed",
+      "terminal_content": "one done"
+    },
+    "multiple": {
+      "planner_items": 2,
+      "worker_ids": [
+        "expand.worker.0.llm",
+        "expand.worker.1.llm"
+      ],
+      "worker_systems": [
+        "Complete this task: repeated",
+        "Complete this task: repeated"
+      ],
+      "completion_order": [
+        "expand.worker.1.llm",
+        "expand.worker.0.llm"
+      ],
+      "summary_order": [
+        "done first",
+        "done second"
+      ],
+      "terminal_status": "completed",
+      "terminal_content": "done"
+    },
+    "invalid": {
+      "planner_attempts": 3,
+      "worker_ids": [],
+      "terminal_status": "completed",
+      "terminal_variant": "nefor.contracts.AgentError"
+    },
+    "lifecycle_subsequence": [
+      "mag.run_started",
+      "mag.nodes_declared",
+      "mag.actor_spawned",
+      "mag.actor_ready",
+      "mag.actor_busy",
+      "mag.actor_idle",
+      "mag.modification_applied",
+      "mag.run_complete",
+      "mag.run_result"
+    ],
+    "actor_killed_before_terminal_result": false
+  },
+  "item_delta_one": {
+    "actors": [
+      {
+        "id": "expand.worker.1.entry",
+        "factory": "nefor.factory.adapter",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "expand.worker.1.llm",
+        "factory": "nefor.factory.structured-output",
+        "system": "Complete this task: second",
+        "dynamic": null
+      },
+      {
+        "id": "expand.worker.1.run-tool",
+        "factory": "nefor.factory.run-tool",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "expand.worker.1.tool-result",
+        "factory": "nefor.factory.tool-result",
+        "system": null,
+        "dynamic": null
+      },
+      {
+        "id": "expand.result.1",
+        "factory": "nefor.factory.dynamic-index",
+        "system": null,
+        "dynamic": {
+          "collection": "oracle",
+          "index": 1
+        }
+      }
+    ],
+    "routes": [
+      {
+        "from": "expand.worker.1.entry",
+        "from_wire": "generic-provider.ProviderOut",
+        "to": "expand.worker.1.llm",
+        "to_wire": "generic-provider.ProviderOut",
+        "product_position": -1
+      },
+      {
+        "from": "expand.worker.1.llm",
+        "from_wire": "generic-tool.ToolCalls",
+        "to": "expand.worker.1.run-tool",
+        "to_wire": "generic-tool.ToolCalls",
+        "product_position": -1
+      },
+      {
+        "from": "expand.worker.1.llm",
+        "from_wire": "nefor.agent.Result",
+        "to": "expand.result.1",
+        "to_wire": "nefor.dynamic.IndexInput",
+        "product_position": -1
+      },
+      {
+        "from": "expand.worker.1.run-tool",
+        "from_wire": "generic-tool.ToolHandle",
+        "to": "expand.worker.1.tool-result",
+        "to_wire": "generic-tool.ToolHandle",
+        "product_position": -1
+      },
+      {
+        "from": "expand.worker.1.tool-result",
+        "from_wire": "generic-provider.ProviderOut",
+        "to": "expand.worker.1.llm",
+        "to_wire": "generic-provider.ProviderOut",
+        "product_position": -1
+      },
+      {
+        "from": "expand.result.1",
+        "from_wire": "nefor.dynamic.Indexed",
+        "to": "expand.output",
+        "to_wire": "nefor.dynamic.Collect",
+        "product_position": -1
+      }
+    ],
+    "nodes": [
+      {
+        "members": [],
+        "path": [
+          "expand-1"
+        ]
+      },
+      {
+        "members": [],
+        "path": [
+          "expand-1",
+          "worker"
+        ]
+      },
+      {
+        "members": [
+          "expand.worker.1.entry"
+        ],
+        "path": [
+          "expand-1",
+          "worker",
+          "entry"
+        ]
+      },
+      {
+        "members": [
+          "expand.worker.1.llm"
+        ],
+        "path": [
+          "expand-1",
+          "worker",
+          "llm"
+        ]
+      },
+      {
+        "members": [
+          "expand.worker.1.run-tool"
+        ],
+        "path": [
+          "expand-1",
+          "worker",
+          "run-tool"
+        ]
+      },
+      {
+        "members": [
+          "expand.worker.1.tool-result"
+        ],
+        "path": [
+          "expand-1",
+          "worker",
+          "tool-result"
+        ]
+      },
+      {
+        "members": [
+          "expand.result.1"
+        ],
+        "path": [
+          "expand-1",
+          "result"
+        ]
+      }
+    ],
+    "messages": [
+      {
+        "to": "expand.worker.1.entry",
+        "kind": "nefor.agent.Input"
+      }
+    ],
+    "kills": [],
+    "rules": [],
+    "result": null
+  }
+}

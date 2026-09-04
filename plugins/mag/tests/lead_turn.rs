@@ -578,6 +578,229 @@ async fn complete_chat<R: AsyncBufReadExt + Unpin>(
     .await;
 }
 
+fn dynamic_behavior_fixture() -> Value {
+    serde_json::from_str(include_str!(
+        "fixtures/dynamic-resident-current-behavior.json"
+    ))
+    .expect("dynamic current-behavior fixture is valid JSON")
+}
+
+fn compact_modification(artifact: &Value) -> Value {
+    let actors = artifact["actors"]
+        .as_array()
+        .expect("artifact actors")
+        .iter()
+        .map(|actor| {
+            let dynamic = (actor["factory"] == "nefor.factory.dynamic-index").then(|| {
+                json!({
+                    "collection": actor["params"]["collection"],
+                    "index": actor["params"]["index"],
+                })
+            });
+            json!({
+                "id": actor["id"],
+                "factory": actor["factory"],
+                "system": actor.pointer("/params/system").cloned().unwrap_or(Value::Null),
+                "dynamic": dynamic,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut routes = Vec::new();
+    for actor in artifact["actors"].as_array().expect("artifact actors") {
+        for (from_wire, destinations) in actor["routes"].as_object().expect("actor routes") {
+            for destination in destinations.as_array().expect("route destinations") {
+                routes.push(json!({
+                    "from": actor["id"],
+                    "from_wire": from_wire,
+                    "to": destination["actor"],
+                    "to_wire": destination["wire"],
+                    "product_position": destination["product_position"],
+                }));
+            }
+        }
+    }
+    let messages = artifact["messages"]
+        .as_array()
+        .expect("artifact messages")
+        .iter()
+        .map(|message| json!({"to": message["to"], "kind": message["content"]["kind"]}))
+        .collect::<Vec<_>>();
+    let rules = artifact["rules"]
+        .as_array()
+        .expect("artifact rules")
+        .iter()
+        .map(|rule| {
+            json!({
+                "id": rule["id"],
+                "fn": rule["fn"],
+                "on": {
+                    "actor": rule["on"]["actor"],
+                    "wire": rule["on"]["wire"],
+                    "type_id": rule["on"]["type_id"],
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    let result = artifact
+        .get("result")
+        .filter(|value| !value.is_null())
+        .map(|result| {
+            json!({
+                "actor": result["from"]["actor"],
+                "wire": result["from"]["wire"],
+                "type_id": result["from"]["type_id"],
+            })
+        });
+    json!({
+        "actors": actors,
+        "routes": routes,
+        "nodes": artifact["nodes"],
+        "messages": messages,
+        "kills": artifact["kills"],
+        "rules": rules,
+        "result": result,
+    })
+}
+
+async fn load_dynamic_program<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+    stdin: &mut ChildStdin,
+    load_id: &str,
+) -> Map<String, Value> {
+    send_event(
+        stdin,
+        obj(json!({
+            "kind": "mag.load",
+            "id": load_id,
+            "resident": true,
+            "source_dir": starter_dir().to_string_lossy(),
+            "module_roots": module_roots(),
+            "entry": "agentic-loop/dynamic-tasks.mag",
+        })),
+    )
+    .await;
+    let loaded = next_event_of_kind(reader, "mag.loaded").await;
+    let fixture = dynamic_behavior_fixture();
+    assert_eq!(loaded["in_reply_to"], load_id);
+    assert_eq!(loaded["program_id"], load_id);
+    assert_eq!(
+        loaded["hash"],
+        fixture["identity"]["compiled_artifact_hash"]
+    );
+    assert_eq!(
+        compact_modification(&loaded["artifact"]),
+        fixture["initial_artifact"],
+        "the checked-in resident program changed its current declarative artifact"
+    );
+    loaded
+}
+
+async fn assert_dynamic_eval_wire<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+    stdin: &mut ChildStdin,
+    program_id: &str,
+) {
+    let fixture = dynamic_behavior_fixture();
+    for (index, description, fixture_key) in [
+        (0, "first", "item_delta_zero"),
+        (1, "second", "item_delta_one"),
+    ] {
+        let request_id = format!("dynamic-eval-oracle-{index}");
+        send_event(
+            stdin,
+            obj(json!({
+                "kind": "mag.eval",
+                "id": request_id,
+                "program_id": program_id,
+                "name": "expand-task",
+                "input": {
+                    "collection": "oracle",
+                    "index": index,
+                    "value": {"task": "same", "description": description, "dependent_tasks": []},
+                },
+            })),
+        )
+        .await;
+        let evaluated = next_event_of_kind(reader, "mag.artifact").await;
+        assert_eq!(evaluated["in_reply_to"], request_id);
+        assert_eq!(
+            compact_modification(&evaluated["artifact"]),
+            fixture[fixture_key],
+            "resident mag.eval changed the current per-item delta wire for index {index}"
+        );
+    }
+}
+
+fn request_actor(request: &Map<String, Value>) -> &str {
+    request
+        .pointer_str("/invocation/actor_id")
+        .expect("provider request carries the authoritative actor id")
+}
+
+async fn next_provider_request_recording<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+    provider: &str,
+    trace: &mut Vec<String>,
+) -> (Map<String, Value>, Vec<Value>) {
+    let mut facts = Vec::new();
+    loop {
+        let body = next_event(reader, "conversation.provider.invoke.request").await;
+        let kind = body
+            .get("kind")
+            .and_then(Value::as_str)
+            .expect("event kind")
+            .to_owned();
+        trace.push(kind.clone());
+        match kind.as_str() {
+            "conversation.fact.append" => {
+                facts.push(body.get("fact").cloned().expect("append carries fact"));
+            }
+            "conversation.provider.invoke.request" => {
+                assert_thin_provider_request(&body, provider);
+                return (body, facts);
+            }
+            "mag.error" | "mag.run_failed" => {
+                panic!("MAG failure while expecting provider request: {body:?}");
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn next_event_of_kind_recording<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+    kind: &str,
+    trace: &mut Vec<String>,
+) -> Map<String, Value> {
+    loop {
+        let body = next_event(reader, kind).await;
+        let actual = body
+            .get("kind")
+            .and_then(Value::as_str)
+            .expect("event kind")
+            .to_owned();
+        trace.push(actual.clone());
+        if actual == kind {
+            return body;
+        }
+        if matches!(actual.as_str(), "mag.error" | "mag.run_failed") {
+            panic!("MAG failure while expecting {kind}: {body:?}");
+        }
+    }
+}
+
+fn assert_ordered_subsequence(trace: &[String], expected: &[Value]) {
+    let mut cursor = 0;
+    for expected_kind in expected {
+        let expected_kind = expected_kind.as_str().expect("fixture lifecycle kind");
+        let offset = trace[cursor..]
+            .iter()
+            .position(|kind| kind == expected_kind)
+            .unwrap_or_else(|| panic!("missing {expected_kind:?} after {cursor} in {trace:?}"));
+        cursor += offset + 1;
+    }
+}
+
 #[tokio::test]
 async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_order() {
     let data_dir = std::env::temp_dir().join(format!("mag-dynamic-tasks-{}", std::process::id()));
@@ -604,17 +827,8 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
             Some("high")
         );
     };
-    send_event(
-        &mut stdin,
-        obj(
-            json!({"kind":"mag.load","id":"dynamic-load","resident":true,
-      "source_dir":starter_dir().to_string_lossy(),
-      "module_roots":module_roots(),
-      "entry":"agentic-loop/dynamic-tasks.mag"}),
-        ),
-    )
-    .await;
-    let loaded = next_event_of_kind(&mut reader, "mag.loaded").await;
+    let loaded = load_dynamic_program(&mut reader, &mut stdin, "dynamic-load").await;
+    assert_dynamic_eval_wire(&mut reader, &mut stdin, "dynamic-load").await;
     let artifact = &loaded["artifact"];
     assert_eq!(
         artifact.pointer("/messages/0/to").and_then(Value::as_str),
@@ -626,6 +840,8 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
             .and_then(Value::as_str),
         Some("mag.Unit")
     );
+    let fixture = dynamic_behavior_fixture();
+    let mut lifecycle_trace = Vec::new();
     send_event(
         &mut stdin,
         obj(json!({"kind":"mag.execute","id":"dynamic-exec",
@@ -635,14 +851,39 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
     )
     .await;
 
-    let planner = next_provider_request(&mut reader, "mock-provider").await;
+    let (planner, _) =
+        next_provider_request_recording(&mut reader, "mock-provider", &mut lifecycle_trace).await;
+    assert_eq!(request_actor(&planner), "planner.llm");
     assert_snapshot(&planner);
     let planner_id = planner["request_id"].as_str().unwrap().to_owned();
     complete_chat(&mut reader, &mut stdin, &planner_id,
-      r#"{"value":[{"task":"a","description":"first","dependent_tasks":[]},{"task":"a.collect","description":"second","dependent_tasks":["a"]}]}"#).await;
+      r#"{"value":[{"task":"same","description":"repeated","dependent_tasks":[]},{"task":"same","description":"repeated","dependent_tasks":[] }]}"#).await;
 
-    let first = next_provider_request(&mut reader, "mock-provider").await;
-    let second = next_provider_request(&mut reader, "mock-provider").await;
+    let (first, first_facts) =
+        next_provider_request_recording(&mut reader, "mock-provider", &mut lifecycle_trace).await;
+    let (second, second_facts) =
+        next_provider_request_recording(&mut reader, "mock-provider", &mut lifecycle_trace).await;
+    let expected_workers = fixture["scenarios"]["multiple"]["worker_ids"]
+        .as_array()
+        .expect("worker ids fixture");
+    assert_eq!(request_actor(&first), expected_workers[0].as_str().unwrap());
+    assert_eq!(
+        request_actor(&second),
+        expected_workers[1].as_str().unwrap()
+    );
+    let expected_systems = fixture["scenarios"]["multiple"]["worker_systems"]
+        .as_array()
+        .expect("worker systems fixture");
+    for (facts, expected_system) in [&first_facts, &second_facts]
+        .into_iter()
+        .zip(expected_systems)
+    {
+        let expected_system = expected_system.as_str().expect("worker system");
+        assert!(
+            facts_json(facts).contains(expected_system),
+            "each equal item keeps the authored per-item system prompt: {facts:?}"
+        );
+    }
     assert_snapshot(&first);
     assert_snapshot(&second);
     let first_id = first["request_id"].as_str().unwrap().to_owned();
@@ -651,13 +892,17 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         first_id, second_id,
         "parallel workers have distinct request ids"
     );
-    // Planner order is one,two; completion order is two,one.
+    // Equal planner values retain occurrence identity; completion order is two,one.
+    assert_eq!(
+        json!([request_actor(&second), request_actor(&first)]),
+        fixture["scenarios"]["multiple"]["completion_order"]
+    );
     send_event(
         &mut stdin,
         completed(
             "mock-provider",
             &second_id,
-            json!({"text":r#"{"task":"a.collect","description":"done second"}"#}),
+            json!({"text":r#"{"task":"same","description":"done second"}"#}),
         ),
     )
     .await;
@@ -666,13 +911,14 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         completed(
             "mock-provider",
             &first_id,
-            json!({"text":r#"{"task":"a","description":"done first"}"#}),
+            json!({"text":r#"{"task":"same","description":"done first"}"#}),
         ),
     )
     .await;
 
     let (summary_create, summary_facts) =
-        next_provider_request_with_facts(&mut reader, "mock-provider").await;
+        next_provider_request_recording(&mut reader, "mock-provider", &mut lifecycle_trace).await;
+    assert_eq!(request_actor(&summary_create), "summarizer.llm");
     assert_snapshot(&summary_create);
     assert_eq!(
         summary_create.pointer_str("/output_schema/type"),
@@ -709,8 +955,15 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
     // constructor evidence instead of erasing WorkerResult vs AgentError.
     assert!(ordered[0]["type"].as_str().is_some());
     assert!(ordered[1]["type"].as_str().is_some());
-    assert_eq!(ordered[0]["value"]["task"], "a");
-    assert_eq!(ordered[1]["value"]["task"], "a.collect");
+    assert_eq!(ordered[0]["value"]["task"], "same");
+    assert_eq!(ordered[1]["value"]["task"], "same");
+    assert_eq!(
+        json!([
+            ordered[0]["value"]["description"],
+            ordered[1]["value"]["description"]
+        ]),
+        fixture["scenarios"]["multiple"]["summary_order"]
+    );
     send_event(
         &mut stdin,
         completed(
@@ -720,10 +973,31 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         ),
     )
     .await;
-    let result = next_event_of_kind(&mut reader, "mag.run_result").await;
-    assert_eq!(result["status"], "completed", "{result:?}");
+    let result =
+        next_event_of_kind_recording(&mut reader, "mag.run_result", &mut lifecycle_trace).await;
+    assert_eq!(
+        result["status"], fixture["scenarios"]["multiple"]["terminal_status"],
+        "{result:?}"
+    );
     assert_typed_result(&result);
-    assert_eq!(result["result"]["value"]["content"], "done");
+    assert_eq!(
+        result["result"]["value"]["content"],
+        fixture["scenarios"]["multiple"]["terminal_content"]
+    );
+    assert_ordered_subsequence(
+        &lifecycle_trace,
+        fixture["scenarios"]["lifecycle_subsequence"]
+            .as_array()
+            .expect("lifecycle fixture"),
+    );
+    assert_eq!(
+        lifecycle_trace
+            .iter()
+            .any(|kind| kind == "mag.actor_killed"),
+        fixture["scenarios"]["actor_killed_before_terminal_result"]
+            .as_bool()
+            .expect("actor-killed fixture"),
+    );
     shutdown(stdin, child).await;
 }
 
@@ -736,23 +1010,18 @@ async fn dynamic_tasks_zero_uses_empty_collection_identity_and_reaches_summarize
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());
     handshake(&mut reader, &mut stdin).await;
-    send_event(
-        &mut stdin,
-        obj(json!({"kind":"mag.load","id":"zero-load","resident":true,
-      "source_dir":starter_dir().to_string_lossy(),"module_roots":module_roots(),
-      "entry":"agentic-loop/dynamic-tasks.mag"})),
-    )
-    .await;
-    next_event_of_kind(&mut reader, "mag.loaded").await;
+    load_dynamic_program(&mut reader, &mut stdin, "zero-load").await;
     send_event(
         &mut stdin,
         obj(
-            json!({"kind":"mag.execute","id":"zero-exec","program_id":"zero-load","run_id":"zero-run",
-      "run_name":"zero","session_id":SESSION_ID,"principal":"lead","conversation_id":CONVERSATION_ID}),
+            json!({"kind":"mag.execute","id":"zero-exec","run_id":"zero-run",
+      "run_name":"zero","session_id":SESSION_ID,"principal":"lead","conversation_id":CONVERSATION_ID,
+      "program_id":"zero-load"}),
         ),
     )
     .await;
     let planner = next_provider_request(&mut reader, "mock-provider").await;
+    assert_eq!(request_actor(&planner), "planner.llm");
     complete_chat(
         &mut reader,
         &mut stdin,
@@ -771,6 +1040,7 @@ async fn dynamic_tasks_zero_uses_empty_collection_identity_and_reaches_summarize
         if event.get("kind").and_then(Value::as_str) == Some("conversation.provider.invoke.request")
         {
             assert_thin_provider_request(&event, "mock-provider");
+            assert_eq!(request_actor(&event), "summarizer.llm");
             break event;
         }
     };
@@ -796,8 +1066,16 @@ async fn dynamic_tasks_zero_uses_empty_collection_identity_and_reaches_summarize
             break event;
         }
     };
+    let fixture = dynamic_behavior_fixture();
+    assert_eq!(
+        result["status"],
+        fixture["scenarios"]["zero"]["terminal_status"]
+    );
     assert_typed_result(&result);
-    assert_eq!(result["result"]["value"]["content"], "empty");
+    assert_eq!(
+        result["result"]["value"]["content"],
+        fixture["scenarios"]["zero"]["terminal_content"]
+    );
     shutdown(stdin, child).await;
 }
 
@@ -810,23 +1088,18 @@ async fn dynamic_tasks_one_runs_one_real_worker_and_static_summarizer() {
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());
     handshake(&mut reader, &mut stdin).await;
-    send_event(
-        &mut stdin,
-        obj(json!({"kind":"mag.load","id":"one-load","resident":true,
-      "source_dir":starter_dir().to_string_lossy(),"module_roots":module_roots(),
-      "entry":"agentic-loop/dynamic-tasks.mag"})),
-    )
-    .await;
-    next_event_of_kind(&mut reader, "mag.loaded").await;
+    load_dynamic_program(&mut reader, &mut stdin, "one-load").await;
     send_event(
         &mut stdin,
         obj(
-            json!({"kind":"mag.execute","id":"one-exec","program_id":"one-load","run_id":"one-run",
-      "run_name":"one","session_id":SESSION_ID,"principal":"lead","conversation_id":CONVERSATION_ID}),
+            json!({"kind":"mag.execute","id":"one-exec","run_id":"one-run",
+      "run_name":"one","session_id":SESSION_ID,"principal":"lead","conversation_id":CONVERSATION_ID,
+      "program_id":"one-load"}),
         ),
     )
     .await;
     let planner = next_provider_request(&mut reader, "mock-provider").await;
+    assert_eq!(request_actor(&planner), "planner.llm");
     complete_chat(
         &mut reader,
         &mut stdin,
@@ -835,6 +1108,13 @@ async fn dynamic_tasks_one_runs_one_real_worker_and_static_summarizer() {
     )
     .await;
     let worker = next_provider_request(&mut reader, "mock-provider").await;
+    let fixture = dynamic_behavior_fixture();
+    assert_eq!(
+        request_actor(&worker),
+        fixture["scenarios"]["one"]["worker_ids"][0]
+            .as_str()
+            .expect("one worker id fixture")
+    );
     assert!(worker["request_id"].as_str().is_some());
     complete_chat(
         &mut reader,
@@ -844,6 +1124,7 @@ async fn dynamic_tasks_one_runs_one_real_worker_and_static_summarizer() {
     )
     .await;
     let summary = next_provider_request(&mut reader, "mock-provider").await;
+    assert_eq!(request_actor(&summary), "summarizer.llm");
     complete_chat(
         &mut reader,
         &mut stdin,
@@ -852,8 +1133,15 @@ async fn dynamic_tasks_one_runs_one_real_worker_and_static_summarizer() {
     )
     .await;
     let result = next_event_of_kind(&mut reader, "mag.run_result").await;
+    assert_eq!(
+        result["status"],
+        fixture["scenarios"]["one"]["terminal_status"]
+    );
     assert_typed_result(&result);
-    assert_eq!(result["result"]["value"]["content"], "one done");
+    assert_eq!(
+        result["result"]["value"]["content"],
+        fixture["scenarios"]["one"]["terminal_content"]
+    );
     shutdown(stdin, child).await;
 }
 
@@ -866,26 +1154,19 @@ async fn dynamic_tasks_invalid_planner_spawns_nothing_and_returns_typed_error() 
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());
     handshake(&mut reader, &mut stdin).await;
+    load_dynamic_program(&mut reader, &mut stdin, "invalid-load").await;
     send_event(
         &mut stdin,
         obj(
-            json!({"kind":"mag.load","id":"invalid-load","resident":true,
-      "source_dir":starter_dir().to_string_lossy(),"module_roots":module_roots(),
-      "entry":"agentic-loop/dynamic-tasks.mag"}),
-        ),
-    )
-    .await;
-    next_event_of_kind(&mut reader, "mag.loaded").await;
-    send_event(
-        &mut stdin,
-        obj(
-            json!({"kind":"mag.execute","id":"invalid-exec","program_id":"invalid-load","run_id":"invalid-run",
-      "run_name":"invalid","session_id":SESSION_ID,"principal":"lead","conversation_id":CONVERSATION_ID}),
+            json!({"kind":"mag.execute","id":"invalid-exec","run_id":"invalid-run",
+      "run_name":"invalid","session_id":SESSION_ID,"principal":"lead","conversation_id":CONVERSATION_ID,
+      "program_id":"invalid-load"}),
         ),
     )
     .await;
     for _ in 0..3 {
         let request = next_provider_request(&mut reader, "mock-provider").await;
+        assert_eq!(request_actor(&request), "planner.llm");
         complete_chat(
             &mut reader,
             &mut stdin,
@@ -906,7 +1187,11 @@ async fn dynamic_tasks_invalid_planner_spawns_nothing_and_returns_typed_error() 
             break event;
         }
     };
-    assert_eq!(result["status"], "completed", "{result:?}");
+    let fixture = dynamic_behavior_fixture();
+    assert_eq!(
+        result["status"], fixture["scenarios"]["invalid"]["terminal_status"],
+        "{result:?}"
+    );
     assert_typed_result(&result);
     assert_eq!(
         result["result"]["value"]["last_output"]["text"], "not json",
