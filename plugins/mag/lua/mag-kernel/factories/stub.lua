@@ -22,6 +22,7 @@ M.declaration = {
     value = "data?", -- optional canonical payload for rule-kernel tests
     canonical_from_message = "bool?",
   },
+  template = { relocations = {} },
 
   -- Input ports, each a firing-bearing shape (shape.lua). The stub declares
   -- one single-typed input: it fires per arriving message.

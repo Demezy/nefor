@@ -108,7 +108,10 @@ fn registry_exposes_qualified_serializable_contracts() {
               local decl, err = reg:register({
                 declaration = {
                   name = "example",
-                  params = { count = "int" },
+                  params = { count = "int", owner = "string" },
+                  template = { relocations = {
+                    { path = { "owner" }, shape = "actor_id" },
+                  } },
                   inputs = { value = "core.String" },
                   outputs = { "core.String" },
                   semantic = {
@@ -128,6 +131,8 @@ fn registry_exposes_qualified_serializable_contracts() {
               assert(contracts[1].identity == "nefor.factory.example")
               assert(contracts[1].implementation == "example")
               assert(contracts[1].params.count == "int")
+              assert(contracts[1].template.relocations[1].shape == "actor_id")
+              assert(contracts[1].template.relocations[1].path[1] == "owner")
               assert(contracts[1].type_scheme.inputs.value == "core.String")
               assert(contracts[1].type_scheme.input_tags[1] == "core.String")
               assert(contracts[1].type_scheme.outputs[1] == "core.String")

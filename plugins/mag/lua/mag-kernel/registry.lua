@@ -108,6 +108,31 @@ local function validate_declaration(decl)
   if decl.params ~= nil and type(decl.params) ~= "table" then
     return nil, "declaration.params must be a table (params schema)"
   end
+  if decl.template ~= nil then
+    if type(decl.template) ~= "table" or not is_dense_list(decl.template.relocations) then
+      return nil, "declaration.template must contain a dense relocations list"
+    end
+    for index, relocation in ipairs(decl.template.relocations) do
+      if type(relocation) ~= "table" or not is_dense_list(relocation.path)
+          or #relocation.path == 0
+          or (relocation.shape ~= "actor_id" and relocation.shape ~= "actor_id_list") then
+        return nil, string.format("declaration.template.relocations[%d] is malformed", index)
+      end
+      for _, part in ipairs(relocation.path) do
+        if type(part) ~= "string" or part == "" then
+          return nil, string.format("declaration.template.relocations[%d] path is malformed", index)
+        end
+      end
+      for key in pairs(relocation) do
+        if key ~= "path" and key ~= "shape" then
+          return nil, string.format("declaration.template.relocations[%d] has unknown field %s", index, tostring(key))
+        end
+      end
+    end
+    for key in pairs(decl.template) do
+      if key ~= "relocations" then return nil, "declaration.template has unknown field " .. tostring(key) end
+    end
+  end
 
   if type(decl.inputs) ~= "table" then
     return nil, "declaration.inputs must be a table of named input shapes"
@@ -316,6 +341,7 @@ function registry:contracts(array_mt)
       identity = decl.identity,
       implementation = decl.name,
       params = decl.params or {},
+      template = decl.template,
       type_scheme = {
         variables = array_copy(decl.type_variables),
         inputs = decl.inputs,

@@ -97,11 +97,12 @@ schema lowering is repeated defensively at execute after control-plane overlays
 and before `begin_run`; a failure at either boundary emits `mag.error`. A load
 failure has no run lifecycle. The execute backstop can only reject before
 `begin_run`, so it likewise emits no `mag.run_started`; its correlated control
-plane must settle any pre-registered invocation as failed. The shipped control-plane can explicitly call resident functions with
-`mag.eval` during the staged migration. That retained evaluator and the legacy
-`rules` inside `program.initial` are temporary execution seams; canonical new
-authoring is the inert `InstantiateDeltaTemplate` operation described in
-[lowering](lowering.md).
+plane must settle any pre-registered invocation as failed. The shipped control-plane can still explicitly call resident functions with
+`mag.eval` for older `compile-program` artifacts. That retained evaluator and
+legacy `rules` are bounded compatibility seams. Canonical authoring uses the
+executed `InstantiateDeltaTemplate` operation described in
+[lowering](lowering.md), and the same immutable artifact can execute inline
+after its source and resident compiler environment are gone.
 
 The concrete modification remains the data the kernel folds. It is minimal and
 contains only kernel operations; the declarative operation schema stays in the
@@ -165,8 +166,9 @@ This projection never changes firing, routing, or scheduling.
 ## The fold
 
 Runtime state is a graph; the initial state is NullGraph — empty. Loading a
-program applies its initial modification. Later modifications come from
-explicit control-plane apply/eval paths or automatic resident rule firing:
+program registers its immutable operations and applies its initial modification.
+Later modifications come from explicit control-plane apply/eval paths,
+declarative operation firing, or the bounded legacy resident-rule path:
 
 ```
 Graph(0)   = NullGraph
@@ -421,9 +423,9 @@ kind.
 
 ## Division of responsibility
 
-| Concern                                                                                                                                | Owner                                                       |
-| -------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Parsing, load-time evaluation, validation, rule-function evaluation, id namespacing                                                    | MAG evaluator (`crates/nefor-mag`, resident in this plugin) |
-| The fold: applying modifications, lazy construction, slot buffering, routing, correlation, no-op/lifecycle logging, output persistence | Kernel (this plugin's Lua)                                  |
-| What an actor actually does with a message                                                                                             | The factory, entirely                                       |
-| Capability quirks (provider protocols, aborts)                                                                                         | The capability plugin's own API                             |
+| Concern                                                                                                                                  | Owner                           |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| Parsing, load-time evaluation, semantic descriptor/protocol helpers, bounded legacy rule evaluation                                      | Rust host / MAG evaluator       |
+| Operation preflight, expression evaluation, template materialization/relocation, the atomic fold, firing, routing, lifecycle, settlement | Kernel (this plugin's Lua)      |
+| What an actor actually does with a message                                                                                               | The factory, entirely           |
+| Capability quirks (provider protocols, aborts)                                                                                           | The capability plugin's own API |

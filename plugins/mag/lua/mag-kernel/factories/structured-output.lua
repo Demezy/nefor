@@ -39,6 +39,7 @@ M.declaration = {
     turn_id = "string?", submission_ids = "table?", input_cause = "string?",
     dynamic_item_type = "string?", dynamic_item_descriptor = "table?",
   },
+  template = { relocations = {} },
   inputs = { provider_input = "generic-provider.ProviderOut" },
   outputs = { "generic-tool.ToolCalls", RESULT },
   signals = { "kill", "drain" },

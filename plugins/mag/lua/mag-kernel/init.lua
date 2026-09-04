@@ -23,6 +23,7 @@ local routing = require("routing")
 local modlog = require("modlog")
 local observer = require("observer")
 local plain_data = require("plain-data")
+local operations = require("operations")
 local stub = require("factories.stub")
 local sink = require("factories.sink")
 local source = require("factories.source")
@@ -213,6 +214,8 @@ end
 -- Build one run context. `meta` carries the host-provided run identity
 -- (run_id/run_name/session_id/model_snapshot) — injected, never ambient
 -- (docs/ir.md).
+local apply_with_logical_nodes
+
 local function new_run_context(meta)
   run_seq = run_seq + 1
   local scope = "r" .. tostring(run_seq)
@@ -237,6 +240,10 @@ local function new_run_context(meta)
     rules = {},
     rule_ids = {},
     trigger_queue = {},
+    operations = {},
+    operation_queue = {},
+    operation_draining = false,
+    pending_completion = nil,
     emission_seq = 0,
     observation_seq = 0,
     rule_error = nil,
@@ -313,32 +320,62 @@ local function new_run_context(meta)
 
   -- The sole terminal linearization point. Persistence and completion become
   -- visible together, and the accepted value remains latched after host take.
+  local function publish_completion(settlement)
+    persist_output(settlement.from, settlement.persisted_result or settlement.result)
+    local completion = {
+      output_path = ctx.last_output_path,
+      persisted = ctx.last_output_path ~= nil,
+      result = settlement.result,
+    }
+    settlement.completion = completion
+    ctx.terminal_settlement = settlement
+    ctx.run_complete = completion
+    emit_event({
+      kind = observer.EVENTS.run_complete,
+      from = settlement.from,
+      result = completion.result,
+      persisted = completion.persisted,
+    })
+  end
+
   local function settle_result(node_id, result, persisted_result)
-    if ctx.rule_error then return false end
-    if ctx.terminal_settlement then
+    if ctx.rule_error or ctx.rule_failed then return false end
+    local accepted = ctx.terminal_settlement or ctx.pending_completion
+    if accepted then
       emit_event({
         kind = "mag.terminal_settlement_ignored",
         from = node_id,
-        accepted_from = ctx.terminal_settlement.from,
+        accepted_from = accepted.from,
         reason = "already_settled",
       })
       return false
     end
-    persist_output(node_id, persisted_result or result)
-    local completion = {
-      output_path = ctx.last_output_path,
-      persisted = ctx.last_output_path ~= nil,
-      result = result,
-    }
-    ctx.terminal_settlement = { from = node_id, completion = completion }
-    ctx.run_complete = completion
-    emit_event({
-      kind = observer.EVENTS.run_complete,
+    local settlement = {
       from = node_id,
       result = result,
-      persisted = completion.persisted,
-    })
+      persisted_result = persisted_result,
+    }
+    if #ctx.operations > 0 or ctx.operation_draining or #ctx.operation_queue > 0 then
+      ctx.pending_completion = settlement
+    else
+      publish_completion(settlement)
+    end
     return true
+  end
+
+  ctx.settle_quiescent = function()
+    if ctx.rule_failed then
+      ctx.pending_completion = nil
+      ctx.run_complete = nil
+      return false
+    end
+    if ctx.pending_completion and not ctx.operation_draining and #ctx.operation_queue == 0 then
+      local settlement = ctx.pending_completion
+      ctx.pending_completion = nil
+      publish_completion(settlement)
+      return true
+    end
+    return false
   end
 
   -- Injected host bus seam. Routing already mints run-scoped capability ids.
@@ -380,6 +417,31 @@ local function new_run_context(meta)
     observe_output = function(actor, wire, output)
       if ctx.rule_failed then return false end
       ctx.emission_seq = ctx.emission_seq + 1
+      local emission_seq = ctx.emission_seq
+      local function fail_payload(kind, id)
+        ctx.rule_error = string.format(
+          "%s %q source %s/%s emitted no canonical value", kind, id, actor, wire)
+        ctx.rule_failed = true
+        ctx.trigger_queue = {}
+        ctx.operation_queue = {}
+        ctx.pending_completion = nil
+        ctx.run_complete = nil
+        ctx.run_failed = { error = ctx.rule_error, failure = kind .. "_payload", from = actor }
+        return false
+      end
+      for _, operation in ipairs(ctx.operations) do
+        local host = nefor and nefor.semantic_type
+        local semantic_match = type(output.semantic_type) == "table"
+          and type(host) == "table" and type(host.accepts) == "function"
+          and host.accepts(operation.trigger_type, output.semantic_type)
+        if operation.on_actor == actor and operation.on_wire == wire and semantic_match then
+          if type(output) ~= "table" or output.value == nil then return fail_payload("operation", operation.id) end
+          ctx.operation_queue[#ctx.operation_queue + 1] = {
+            operation = operation, emission_seq = emission_seq,
+            source = { actor = actor, wire = wire }, value = plain_data.copy(output.value),
+          }
+        end
+      end
       for _, rule in ipairs(ctx.rules) do
         local host = nefor and nefor.semantic_type
         local semantic_match = not ctx.semantic_strict or type(rule.on.type) ~= "table"
@@ -387,27 +449,12 @@ local function new_run_context(meta)
             and type(host) == "table" and type(host.accepts) == "function"
             and host.accepts(rule.on.type, output.semantic_type))
         if rule.on.actor == actor and rule.on.wire == wire and semantic_match then
-          if type(output) ~= "table" or output.value == nil then
-            ctx.rule_error = string.format(
-              "rule %q source %s/%s emitted no canonical value",
-              rule.id, actor, wire)
-            ctx.rule_failed = true
-            ctx.trigger_queue = {}
-            ctx.run_failed = {
-              error = ctx.rule_error,
-              failure = "rule_payload",
-              from = actor,
-            }
-            return false
-          else
-            ctx.trigger_queue[#ctx.trigger_queue + 1] = {
-              rule_id = rule.id,
-              fn = rule.fn,
-              source = { actor = actor, wire = wire },
-              emission_seq = ctx.emission_seq,
-              value = output.value,
-            }
-          end
+          if type(output) ~= "table" or output.value == nil then return fail_payload("rule", rule.id) end
+          ctx.trigger_queue[#ctx.trigger_queue + 1] = {
+            rule_id = rule.id, fn = rule.fn,
+            source = { actor = actor, wire = wire },
+            emission_seq = emission_seq, value = output.value,
+          }
         end
       end
       return true
@@ -545,6 +592,35 @@ local function new_run_context(meta)
   ctx.router = router
   ctx.modlog = mlog
   ctx.observer = obs
+  ctx.drain_operations = function()
+    if ctx.operation_draining or ctx.rule_failed then return not ctx.rule_failed end
+    ctx.operation_draining = true
+    while not ctx.rule_failed and #ctx.operation_queue > 0 do
+      local trigger = table.remove(ctx.operation_queue, 1)
+      local delta, materialize_error = operations.materialize(trigger.operation, trigger.value)
+      if not delta then
+        ctx.rule_error = string.format("operation %q materialization failed: %s",
+          trigger.operation.id, tostring(materialize_error))
+      else
+        local outcome = apply_with_logical_nodes(ctx, delta)
+        if not outcome.ok then
+          ctx.rule_error = string.format("operation %q delta rejected: %s",
+            trigger.operation.id, tostring(outcome.error or "unknown rejection"))
+        end
+      end
+      if ctx.rule_error then
+        ctx.rule_failed = true
+        ctx.operation_queue = {}
+        ctx.trigger_queue = {}
+        ctx.pending_completion = nil
+        ctx.run_complete = nil
+        ctx.run_failed = { error = ctx.rule_error, failure = "operation", from = "mag.operation" }
+      end
+    end
+    ctx.operation_draining = false
+    ctx.settle_quiescent()
+    return not ctx.rule_failed
+  end
   -- Exposed so init-level control ops (interrupt_run) can emit run-scoped
   -- lifecycle events through the same run_id-stamping sink the observer uses.
   ctx.emit_event = emit_event
@@ -657,7 +733,7 @@ local function validate_logical_nodes(ctx, modification)
   return true
 end
 
-local function apply_with_logical_nodes(ctx, modification, opts)
+apply_with_logical_nodes = function(ctx, modification, opts)
   local valid, validation_error = validate_logical_nodes(ctx, modification)
   if not valid then
     local rejected = { ok = false, error = validation_error }
@@ -731,6 +807,15 @@ return {
     return { ok = true, reaped = stale }
   end,
 
+  -- Validate the complete immutable program before a run exists. This is also
+  -- used by mag.load, so an artifact remains executable after its compiler
+  -- source and resident environment have been discarded.
+  preflight_program = function(initial, program_operations)
+    local checked, err = operations.preflight(initial, program_operations or {}, registry)
+    if not checked then return { ok = false, error = err } end
+    return { ok = true }
+  end,
+
   -- Start a run's program: apply its initial modification through that run's
   -- fold. Spawns register specs, initial messages deliver immediately
   -- (registration already put every route and input contract in place), and
@@ -741,11 +826,14 @@ return {
   -- starting from NullGraph; no sweep, and a run starting mid-another-run
   -- touches nothing outside its own context. Returns the fold's verbatim
   -- { ok = true } | { ok = false, error = "..." }.
-  start = function(run_id, mod)
+  start = function(run_id, mod, program_operations)
     local ctx, err = context_of(run_id)
     if not ctx then
       return { ok = false, error = err }
     end
+    local checked, operation_error = operations.preflight(mod, program_operations or {}, registry)
+    if not checked then return { ok = false, error = operation_error } end
+    ctx.operations = checked
     local boundary = mod and mod.result and mod.result.from
     if type(boundary) ~= "table" or type(boundary.actor) ~= "string"
         or type(boundary.wire) ~= "string" then
@@ -859,7 +947,9 @@ return {
         spec.semantic_strict = true
       end
     end
-    return apply_with_logical_nodes(ctx, modification)
+    local outcome = apply_with_logical_nodes(ctx, modification)
+    if outcome.ok then ctx.drain_operations() end
+    return outcome
   end,
 
   -- Apply one graph modification through a run's fold. Strictly serialized
@@ -881,7 +971,9 @@ return {
         spec.semantic_strict = true
       end
     end
-    return apply_with_logical_nodes(ctx, mod)
+    local outcome = apply_with_logical_nodes(ctx, mod)
+    if outcome.ok then ctx.drain_operations() end
+    return outcome
   end,
 
   take_rule_trigger = function(run_id)
@@ -894,6 +986,8 @@ return {
     local ctx = runs[run_id]
     if not ctx then return false end
     ctx.trigger_queue = {}
+    ctx.operation_queue = {}
+    ctx.pending_completion = nil
     ctx.run_complete = nil
     ctx.rule_error = error
     ctx.rule_failed = true
@@ -927,6 +1021,7 @@ return {
     ctx.router:activate(id, {
       messages = { { from = "mag.owner-result", message = message } },
     })
+    ctx.drain_operations()
     return true
   end,
 
@@ -1041,6 +1136,7 @@ return {
   bus_response = function(response)
     for run_id, ctx in pairs(runs) do
       if ctx.router:bus_response(response) then
+        ctx.drain_operations()
         return run_id
       end
     end

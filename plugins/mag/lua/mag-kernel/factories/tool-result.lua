@@ -56,6 +56,7 @@ M.declaration = {
   },
 
   params = {},
+  template = { relocations = {} },
 
   inputs = {
     handle = "generic-tool.ToolHandle",

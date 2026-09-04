@@ -237,6 +237,11 @@ async fn next_provider_request_with_facts<R: AsyncBufReadExt + Unpin>(
             Some("mag.error" | "mag.run_failed") => {
                 panic!("MAG failure while expecting provider request: {body:?}");
             }
+            Some("mag.run_result")
+                if body.get("status").and_then(Value::as_str) != Some("completed") =>
+            {
+                panic!("MAG run settled while expecting provider request: {body:?}");
+            }
             _ => {}
         }
     }
@@ -798,42 +803,6 @@ async fn load_dynamic_program<R: AsyncBufReadExt + Unpin>(
     loaded
 }
 
-async fn assert_dynamic_eval_wire<R: AsyncBufReadExt + Unpin>(
-    reader: &mut R,
-    stdin: &mut ChildStdin,
-    program_id: &str,
-) {
-    let fixture = dynamic_behavior_fixture();
-    for (index, description, fixture_key) in [
-        (0, "first", "item_delta_zero"),
-        (1, "second", "item_delta_one"),
-    ] {
-        let request_id = format!("dynamic-eval-oracle-{index}");
-        send_event(
-            stdin,
-            obj(json!({
-                "kind": "mag.eval",
-                "id": request_id,
-                "program_id": program_id,
-                "name": "expand-task",
-                "input": {
-                    "collection": "oracle",
-                    "index": index,
-                    "value": {"task": "same", "description": description, "dependent_tasks": []},
-                },
-            })),
-        )
-        .await;
-        let evaluated = next_event_of_kind(reader, "mag.artifact").await;
-        assert_eq!(evaluated["in_reply_to"], request_id);
-        assert_eq!(
-            compact_modification(&evaluated["artifact"]),
-            fixture[fixture_key],
-            "resident mag.eval changed the current per-item delta wire for index {index}"
-        );
-    }
-}
-
 fn request_actor(request: &Map<String, Value>) -> &str {
     request
         .pointer_str("/invocation/actor_id")
@@ -931,7 +900,6 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         );
     };
     let loaded = load_dynamic_program(&mut reader, &mut stdin, "dynamic-load").await;
-    assert_dynamic_eval_wire(&mut reader, &mut stdin, "dynamic-load").await;
     let artifact = &loaded["artifact"];
     let initial = artifact
         .pointer("/program/initial")
@@ -1194,13 +1162,21 @@ async fn dynamic_tasks_one_runs_one_real_worker_and_static_summarizer() {
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());
     handshake(&mut reader, &mut stdin).await;
-    load_dynamic_program(&mut reader, &mut stdin, "one-load").await;
+    let loaded = load_dynamic_program(&mut reader, &mut stdin, "one-load").await;
+    let artifact = loaded["artifact"].clone();
+    send_event(
+        &mut stdin,
+        obj(json!({"kind":"mag.unload","id":"one-unload","program_id":"one-load"})),
+    )
+    .await;
+    let unloaded = next_event_of_kind(&mut reader, "mag.unloaded").await;
+    assert_eq!(unloaded["released"], true);
     send_event(
         &mut stdin,
         obj(
             json!({"kind":"mag.execute","id":"one-exec","run_id":"one-run",
       "run_name":"one","session_id":SESSION_ID,"principal":"lead","conversation_id":CONVERSATION_ID,
-      "program_id":"one-load"}),
+      "artifact":artifact}),
         ),
     )
     .await;

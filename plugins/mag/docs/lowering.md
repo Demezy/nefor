@@ -96,12 +96,19 @@ typed trigger/captures -> closed expression references -> structural DeltaTempla
   -> InstantiateDeltaTemplate -> ordered program operation
 ```
 
-The current runtime still executes a resident named MAG function carried only
-in the initial modification as a temporary staged seam. It is not part of the
-canonical operation schema and new traversal authoring lowers the declarative
-template alongside it. The next migration unit replaces that seam with direct
-template materialization and then removes retained compiler environments,
-`mag.eval`, and legacy rules.
+The Lua kernel preflights the complete operation set before initial apply,
+registers it immutably in artifact order, and matches every canonical output
+against those subscriptions. A run-local FIFO evaluates the five expression
+forms against that exact emission's `value`, clones and relocates the template,
+regenerates canonical edge identities, validates the complete delta against the
+live-plus-new inventory, and applies it atomically. Synchronous emissions enqueue
+nested work rather than re-entering the fold. Success becomes visible only when
+the operation queue is quiescent; an operation failure defeats a success that
+raced ahead of it.
+
+Resident `mag.eval` and legacy rules remain only for older explicit
+`compile-program` callers. Declarative programs and inline artifact reuse do not
+retain or consult their compiler environment.
 
 A concrete delta has no result boundary or nested operations. Its routes may
 target actors already live in the run; the runtime registry validates those

@@ -683,15 +683,23 @@ async fn handle_load(
     ) {
         Ok(loaded) => {
             let artifact = loaded.artifact.clone();
-            let modification = match artifact_modification(&artifact) {
-                Ok(modification) => modification,
+            let decoded = match artifact_program(&artifact) {
+                Ok(decoded) => decoded,
                 Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
             };
-            let rules = match resolve_resident_rules(&loaded, &modification) {
+            let preflight = host.preflight_program(&decoded.initial, &decoded.operations)?;
+            if !preflight.ok {
+                return send_event(
+                    out_tx,
+                    error_body(in_reply_to, preflight.error.as_deref().unwrap_or("artifact preflight failed")),
+                )
+                .await;
+            }
+            let rules = match resolve_resident_rules(&loaded, &decoded.initial) {
                 Ok(rules) => rules,
                 Err(error) => return send_event(out_tx, mag_error_body(in_reply_to, &error)).await,
             };
-            if let Err(error) = preflight_provider_schemas(&modification) {
+            if let Err(error) = preflight_provider_schemas(&decoded.initial) {
                 return send_event(out_tx, error_body(in_reply_to, &error)).await;
             }
             // The registry's factory names ride along so the control plane can
@@ -910,7 +918,7 @@ async fn handle_execute(
         )
         .await;
     }
-    let (mut modification, program) = match (requested_program, body.get("artifact")) {
+    let (mut modification, operations, program) = match (requested_program, body.get("artifact")) {
         (Some(program_id), None) => {
             let Some(program) = programs.get(program_id).cloned() else {
                 return send_event(
@@ -922,21 +930,22 @@ async fn handle_execute(
                 )
                 .await;
             };
-            let modification = match artifact_modification(&program.artifact) {
-                Ok(modification) => modification,
+            let decoded = match artifact_program(&program.artifact) {
+                Ok(decoded) => decoded,
                 Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
             };
-            (modification, Some(program))
+            (decoded.initial, decoded.operations, Some(program))
         }
         (None, Some(artifact)) => {
-            let modification = match artifact_modification(artifact) {
-                Ok(modification) => modification,
+            let decoded = match artifact_program(artifact) {
+                Ok(decoded) => decoded,
                 Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
             };
-            if modification
-            .get("rules")
-            .and_then(Value::as_array)
-            .is_some_and(|rules| !rules.is_empty())
+            if decoded
+                .initial
+                .get("rules")
+                .and_then(Value::as_array)
+                .is_some_and(|rules| !rules.is_empty())
             {
                 return send_event(
                     out_tx,
@@ -947,7 +956,7 @@ async fn handle_execute(
                 )
                 .await;
             }
-            (modification, None)
+            (decoded.initial, decoded.operations, None)
         }
         (None, None) => {
             return send_event(
@@ -971,6 +980,14 @@ async fn handle_execute(
     }
     if let Err(error) = preflight_provider_schemas(&modification) {
         return send_event(out_tx, error_body(in_reply_to, &error)).await;
+    }
+    let preflight = host.preflight_program(&modification, &operations)?;
+    if !preflight.ok {
+        return send_event(
+            out_tx,
+            error_body(in_reply_to, preflight.error.as_deref().unwrap_or("artifact preflight failed")),
+        )
+        .await;
     }
 
     let run_id = body
@@ -1030,7 +1047,11 @@ async fn handle_execute(
         let msg = begun.error.unwrap_or_else(|| "begin_run failed".into());
         return send_event(out_tx, run_result_failed(in_reply_to, &run_id, &msg)).await;
     }
-    let outcome = host.start(&run_id, &modification)?;
+    let outcome = if operations.is_empty() {
+        host.start(&run_id, &modification)?
+    } else {
+        host.start_program(&run_id, &modification, &operations)?
+    };
     drain_rule_triggers(host, program.as_deref(), &run_id)?;
     flush_emits(out_tx, host, bridge).await?;
 
@@ -1739,14 +1760,22 @@ fn graph_modification(artifact: &Value, context: &str) -> Result<Value, String> 
     Ok(Value::Object(data))
 }
 
-fn artifact_modification(artifact: &Value) -> Result<Value, String> {
+struct DecodedProgram {
+    initial: Value,
+    operations: Vec<Value>,
+}
+
+fn artifact_program(artifact: &Value) -> Result<DecodedProgram, String> {
     let Some(object) = artifact.as_object() else {
         return Err("mag.execute artifact must be an object".to_owned());
     };
     if object.get("format").is_none() {
         // Temporary staged seam for callers and resident deltas compiled before
         // the versioned Nefor envelope became the canonical authoring format.
-        return graph_modification(artifact, "mag.execute");
+        return Ok(DecodedProgram {
+            initial: graph_modification(artifact, "mag.execute")?,
+            operations: Vec::new(),
+        });
     }
     if object.get("format").and_then(Value::as_str) != Some("nefor.mag") {
         return Err("mag.execute artifact has an unsupported format".to_owned());
@@ -1770,12 +1799,20 @@ fn artifact_modification(artifact: &Value) -> Result<Value, String> {
             return Err(format!("mag.execute program.operations[{index}] must be an object"));
         }
     }
-    graph_modification(
-        program
-            .get("initial")
-            .ok_or_else(|| "mag.execute program envelope requires initial".to_owned())?,
-        "mag.execute program initial",
-    )
+    Ok(DecodedProgram {
+        initial: graph_modification(
+            program
+                .get("initial")
+                .ok_or_else(|| "mag.execute program envelope requires initial".to_owned())?,
+            "mag.execute program initial",
+        )?,
+        operations: operations.clone(),
+    })
+}
+
+#[cfg(test)]
+fn artifact_modification(artifact: &Value) -> Result<Value, String> {
+    artifact_program(artifact).map(|program| program.initial)
 }
 
 fn resolve_resident_rules(

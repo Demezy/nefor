@@ -2,8 +2,8 @@
   "schema_version": 1,
   "identity": {
     "source": "examples/nefor-agent/agentic-loop/dynamic-tasks.mag",
-    "source_sha256": "3f0f546cd11a54ba1acb87a20369baf31daf0015db4aa50754433d4b99ed4b22",
-    "compiled_artifact_hash": "e1a9ccde50ccff85bc6b0b13100e70e2589574953c43888582c5c3b8360a631c"
+    "source_sha256": "030c809b20aaea2ac0e96b0aa8285a4a973e5f70d2af722f9b70782b0bf97efc",
+    "compiled_artifact_hash": "8f76de2a4b0c93a26ee50e63d4ab3ac19f9ee9df40a78c0450a32850a8ab729a"
   },
   "resident_wire": {
     "load": {
@@ -429,17 +429,7 @@
       }
     ],
     "kills": [],
-    "rules": [
-      {
-        "id": "expand.expand",
-        "fn": "expand-task",
-        "on": {
-          "actor": "expand.input",
-          "wire": "nefor.dynamic.Indexed",
-          "type_id": "sha256:32889f0d42cf4c1a9b0206d70650f9f3aebdc4e9ec8dc1857c4773647ab2cc89"
-        }
-      }
-    ],
+    "rules": [],
     "result": {
       "actor": "result",
       "wire": "nefor.graph.Value",

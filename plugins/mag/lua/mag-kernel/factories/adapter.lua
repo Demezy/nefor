@@ -62,6 +62,7 @@ M.declaration = {
     seed = "string?", -- boundary-shape label (the loader authors "provider-in")
     schema = "table",
   },
+  template = { relocations = {} },
 
   -- Union input (shape.lua): a fresh typed turn or an already-built provider
   -- continuation. Firing "on any".

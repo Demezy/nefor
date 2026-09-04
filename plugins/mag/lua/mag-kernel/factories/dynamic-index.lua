@@ -16,6 +16,7 @@ M.declaration = {
     outputs = { { wire = OUTPUT, type = indexed } },
   },
   params = { collection = "string", index = "number" },
+  template = { relocations = {} },
   inputs = { value = INPUT },
   outputs = { OUTPUT },
   signals = {},

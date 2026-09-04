@@ -330,11 +330,14 @@ mod tests {
     #[test]
     fn versioned_program_envelope_unwraps_and_rejects_wrong_discriminators() {
         let initial = serde_json::json!({"actors": [], "rules": [], "result": {}});
+        let operation = serde_json::json!({"id":"expand","template":{}});
         let envelope = serde_json::json!({
             "format": "nefor.mag", "version": 1, "kind": "program",
-            "program": {"initial": initial, "operations": []}
+            "program": {"initial": initial, "operations": [operation.clone()]}
         });
-        assert_eq!(artifact_modification(&envelope).unwrap(), initial);
+        let decoded = artifact_program(&envelope).unwrap();
+        assert_eq!(decoded.initial, initial);
+        assert_eq!(decoded.operations, vec![operation]);
         for invalid in [
             serde_json::json!({"format":"other","version":1,"kind":"program","program":{"initial":{},"operations":[]}}),
             serde_json::json!({"format":"nefor.mag","version":2,"kind":"program","program":{"initial":{},"operations":[]}}),

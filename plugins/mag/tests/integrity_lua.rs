@@ -32,6 +32,20 @@ fn run(script: &str) {
               return "opaque-test-id-" .. sequence
             end
           end)(),
+          semantic_type = {
+            id = function(value) return value.name end,
+            accepts = function(left, right) return left.name == right.name end,
+            validate_declarations = function() return true end,
+            validate_value = function() return { ok = true } end,
+            input_covered_by = function() return true end,
+          },
+          json = {
+            encode = function(value)
+              if value.path then return table.concat(value.path, "/") .. ":" .. value.shape end
+              return value.from.actor .. "/" .. value.from.wire .. "->"
+                .. value.to.actor .. "/" .. value.to.wire
+            end,
+          },
         }
         "#,
     )
@@ -67,6 +81,73 @@ fn terminal_settlement_is_first_write_wins_even_after_host_take() {
         assert(ignored == 2)
         assert(completed == 1)
         assert(kernel.context("race").terminal_settlement.completion.result.greeting == "first")
+        "#);
+}
+
+#[test]
+fn synchronous_initial_output_drains_declarative_operations_before_start_returns() {
+    run(r#"
+        local S={kind="primitive",name="String"}
+        local function port(actor,wire) return {actor=actor,wire=wire,type=S,type_id="String"} end
+        local operation={
+          id="spawn",on_actor="source",on_wire="stub.Out",trigger_type=S,trigger_type_id="String",
+          captures={},expressions={{id="trigger",result_type="String"}},
+          template={types={},actors={{slot="spawned",id="trigger",factory="nefor.factory.stub",
+            type_arguments={},params={value="child"},input={actor={type="local",value={slot="spawned"}},type=S,type_id="String",wire="stub.In"},
+            outputs={{actor={type="local",value={slot="spawned"}},type=S,type_id="String",wire="stub.Out"}},parameter_bindings={}}},
+            routes={},messages={{to={actor={type="local",value={slot="spawned"}},type=S,type_id="String",wire="stub.In"},
+              semantic_type=S,semantic_type_id="String",content={kind="stub.In",value="go"}}},
+            nodes={{path={{value="spawned"}},members={{slot="spawned"}}}},actor_reference_relocations={}}
+        }
+        local second=require("plain-data").copy(operation)
+        second.id="spawn-again"
+        second.captures.suffix={semantic_type=S,semantic_type_id="String",value="-again"}
+        second.expressions[2]={id="suffix",result_type="String",capture="suffix"}
+        second.expressions[3]={id="second-id",result_type="String",values={"trigger","suffix"}}
+        second.template.actors[1].id="second-id"
+        second.template.nodes[1].path={{value="second-id"}}
+        assert(kernel.begin_run({run_id="sync-op",run_name="sync-op",session_id="s"}).ok)
+        local outcome=kernel.start("sync-op",{
+          types={String=S},actors={
+            {id="source",factory="nefor.factory.stub",type_arguments={},params={value="spawned"},
+             input=port("source","stub.In"),outputs={port("source","stub.Out")},routes={}},
+            {id="result",factory="nefor.factory.stub",type_arguments={},params={},
+             input=port("result","stub.In"),outputs={port("result","stub.Out")},routes={}}
+          },messages={{to="source",semantic_type=S,semantic_type_id="String",content={kind="stub.In",value="go"}}},
+          kills={},rules={},nodes={{path={"source"},members={"source"}},{path={"result"},members={"result"}}},
+          result={from=port("result","stub.Out")}
+        },{operation,second})
+        assert(outcome.ok,outcome.error)
+        local ctx=kernel.context("sync-op")
+        assert(ctx.inventory.state_of("spawned")=="alive")
+        assert(#ctx.operations==2 and #ctx.operation_queue==0 and ctx.emission_seq==3)
+        assert(ctx.inventory.state_of("spawned-again")=="alive")
+
+        kernel.end_run("sync-op")
+        local failing=require("plain-data").copy(operation)
+        failing.template.routes={{
+          from={actor={type="local",value={slot="spawned"}},type=S,type_id="String",wire="stub.Out"},
+          to={actor={type="existing",value={id="missing"}},type=S,type_id="String",wire="stub.In"},
+          product_position=-1,
+        }}
+        assert(kernel.begin_run({run_id="failure-wins",run_name="failure-wins",session_id="s"}).ok)
+        local failed_start=kernel.start("failure-wins",{
+          types={String=S},actors={
+            {id="result",factory="nefor.factory.stub",type_arguments={},params={value="success"},
+             input=port("result","stub.In"),outputs={port("result","stub.Out")},routes={}},
+            {id="source",factory="nefor.factory.stub",type_arguments={},params={value="spawned"},
+             input=port("source","stub.In"),outputs={port("source","stub.Out")},routes={}}
+          },messages={
+            {to="result",semantic_type=S,semantic_type_id="String",content={kind="stub.In",value="go"}},
+            {to="source",semantic_type=S,semantic_type_id="String",content={kind="stub.In",value="go"}}
+          },kills={},rules={},nodes={{path={"result"},members={"result"}},{path={"source"},members={"source"}}},
+          result={from=port("result","stub.Out")}
+        },{failing})
+        assert(failed_start.ok,failed_start.error)
+        assert(kernel.take_run_complete("failure-wins")==nil,"success escaped before operation failure")
+        local operation_failure=kernel.take_run_failed("failure-wins")
+        assert(operation_failure, "operation failure was not retained")
+        assert(operation_failure.error:match("operation"),operation_failure.error)
         "#);
 }
 

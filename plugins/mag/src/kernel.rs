@@ -291,10 +291,32 @@ impl LuaHost {
     /// contract, so a synchronous program runs to completion inside this call;
     /// an async one (a provider round-trip pending) progresses via
     /// [`LuaHost::bus_response`].
+    pub fn preflight_program(
+        &self,
+        initial: &JsonValue,
+        operations: &[JsonValue],
+    ) -> Result<ApplyOutcome, MagError> {
+        let initial = self.lua.to_value(initial)?;
+        let operations = self.lua.to_value(operations)?;
+        let f: Function = self.kernel.get("preflight_program")?;
+        let res: Table = f.call::<Table>((initial, operations))?;
+        apply_outcome(&res)
+    }
+
     pub fn start(&self, run_id: &str, modification: &JsonValue) -> Result<ApplyOutcome, MagError> {
+        self.start_program(run_id, modification, &[])
+    }
+
+    pub fn start_program(
+        &self,
+        run_id: &str,
+        modification: &JsonValue,
+        operations: &[JsonValue],
+    ) -> Result<ApplyOutcome, MagError> {
         let mod_val = self.lua.to_value(modification)?;
+        let operations = self.lua.to_value(operations)?;
         let f: Function = self.kernel.get("start")?;
-        let res: Table = f.call::<Table>((run_id, mod_val))?;
+        let res: Table = f.call::<Table>((run_id, mod_val, operations))?;
         apply_outcome(&res)
     }
 

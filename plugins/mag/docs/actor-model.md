@@ -390,7 +390,7 @@ fields. Selecting a profile replaces all four model fields; omission therefore
 clears options from the current model instead of inheriting them. The control
 plane resolves that whole value once; the kernel stores one
 owned copy in the run context and applies it only while constructing `llm` and
-`structured-output` actors. It therefore covers initial actors, resident-rule
+`structured-output` actors. It therefore covers initial actors, declarative template
 expansion, and actors added through `mag.apply` without rewriting their
 inventory specs or consulting live catalog state.
 

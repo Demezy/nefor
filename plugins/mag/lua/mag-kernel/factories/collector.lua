@@ -16,6 +16,9 @@ M.declaration = {
     outputs={{wire=COLLECTED,type={kind="list",item={kind="variable",name="T"}}}},
   },
   params = { expected_senders = "table" },
+  template = { relocations = {
+    { path = { "expected_senders" }, shape = "actor_id_list" },
+  } },
   inputs = { item = ITEM },
   outputs = { COLLECTED },
   signals = { "kill", "drain" },

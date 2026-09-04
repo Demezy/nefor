@@ -12,6 +12,7 @@
 (type Summary {:content String})
 
 (let occurrence (nefor.dynamic.trigger-ref (type-tag (nefor.dynamic.Indexed Task))))
+(let occurrence-collection (nefor.dynamic.field-ref occurrence "collection" (type-tag String)))
 (let occurrence-index (nefor.dynamic.field-ref occurrence "index" (type-tag Int)))
 (let occurrence-value (nefor.dynamic.field-ref occurrence "value" (type-tag Task)))
 (let occurrence-text (nefor.dynamic.field-ref occurrence-value "description" (type-tag String)))
@@ -24,21 +25,8 @@
   [(nefor.dynamic.capture-ref "Complete this task: " (type-tag String)) occurrence-text]))
 (let worker-template
   (nefor.agents.dynamic-template-with-tools agents.resolve-model agents.mock
-    "expand" occurrence-index worker-id worker-root worker-system []
+    "expand" occurrence-collection occurrence-index worker-id worker-root worker-system []
     (type-tag WorkerResult) 2))
-
-;; Temporary resident implementation seam. The versioned artifact is fully
-;; declarative; this function is retained only by compile-program until the
-;; runtime operation executor lands.
-(let expand-task
-  (fn [[entry (nefor.dynamic.Indexed Task)]] -> Artifact
-    (let value (get entry "value"))
-    (let worker
-      (nefor.agents.with-tools agents.resolve-model agents.mock
-        (str "expand.worker." (get entry "index"))
-        (str "Complete this task: " (get value "description"))
-        [] (type-tag Unit) (type-tag WorkerResult) 2))
-    (nefor.dynamic.expand "expand" entry worker)))
 
 (let start
   (nefor.actors.task-source "task" "Plan this request"))
@@ -69,11 +57,6 @@
 (let workflow (nefor.node.>=> ran summarize))
 (let result (nefor.graph.output-for "result" workflow))
 
-(nefor.artifact.compile-program
+(nefor.artifact.compile
   (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-    (nefor.graph.add-edges graph [(nefor.graph.edge workflow result)]))
-  [(nefor.graph.legacy-rule "expand.expand"
-     (nefor.graph.port "expand.input"
-       (type-tag (nefor.dynamic.Indexed Task))
-       "nefor.dynamic.Indexed")
-     (function-name expand-task))])
+    (nefor.graph.add-edges graph [(nefor.graph.edge workflow result)])))

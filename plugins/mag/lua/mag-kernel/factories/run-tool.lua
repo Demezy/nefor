@@ -78,6 +78,7 @@ M.declaration = {
     allowlist = "table?",  -- tool-name allowlist for this node (lowered from :tools)
     ["da-policy"] = "table?", -- per-node bash approval rules (lowered from :da-policy)
   },
+  template = { relocations = {} },
 
   inputs = {
     calls = "generic-tool.ToolCalls",

@@ -17,6 +17,9 @@ M.declaration = {
     outputs = { { wire = OUTPUT, type = product } },
   },
   params = { expected_senders = "table" },
+  template = { relocations = {
+    { path = { "expected_senders" }, shape = "actor_id_list" },
+  } },
   inputs = { value = INPUT },
   outputs = { OUTPUT },
   signals = {},
