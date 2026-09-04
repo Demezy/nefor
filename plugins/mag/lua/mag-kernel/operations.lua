@@ -57,23 +57,39 @@ local function descriptor_field(descriptor, name)
   return nil
 end
 
-local function actor_ref(ref)
-  if type(ref) ~= "table" then return nil end
-  if ref.type ~= nil or ref.value ~= nil then
-    if type(ref.type) ~= "string" or type(ref.value) ~= "table" then return nil end
-    if ref.value.slot ~= nil and ref.value.id == nil then return ref.value, "local" end
-    if ref.value.id ~= nil and ref.value.slot == nil then return ref.value, "existing" end
+-- These semantic identities are the discriminants of the closed nefor.mag v1
+-- algebra. Changing a constructor definition is a wire-version change, not a
+-- runtime inference problem.
+local CONSTRUCTORS = {
+  local_actor = "sha256:ac9051a4394ae17aaa7569c33a5454b584abcaf9bc37e2c7e456d899ca7a396c",
+  existing_actor = "sha256:092a40e12abe40aacd2004b531482f8a5585c503f46d46c2c7077a7ab65997a9",
+  fixed_path = "sha256:af48b5f5e4d43945f29b0e8707634d80d8337c6937b8eb235f1a95c52cd91017",
+  bound_path = "sha256:21b86a109b971ade6464aa5b3a8bd650f14f122254af6c1c33f301e9dd57003a",
+}
+
+local function constructor_ids()
+  return CONSTRUCTORS
+end
+
+local function actor_ref(ref, constructors)
+  if type(ref) ~= "table" or type(ref.type) ~= "string" or type(ref.value) ~= "table" then
     return nil
   end
-  if ref.slot ~= nil and ref.id == nil then return ref, "local" end
-  if ref.id ~= nil and ref.slot == nil then return ref, "existing" end
+  if ref._variant == "local" or (ref._variant == nil and ref.type == constructors.local_actor) then
+    return ref.value, "local"
+  end
+  if ref._variant == "existing" or (ref._variant == nil and ref.type == constructors.existing_actor) then
+    return ref.value, "existing"
+  end
   return nil
 end
 
-local function validate_ref(ref, slots, label)
-  local value, kind = actor_ref(ref)
-  if not value then return nil, label .. " must be exactly one local or existing actor reference: " .. nefor.json.encode(ref) end
-  local ok, err = exact_fields(value, kind == "local" and {slot=true} or {id=true}, label)
+local function validate_ref(ref, slots, constructors, label)
+  local ok, err = exact_fields(ref, {type=true,value=true}, label)
+  if not ok then return nil, err end
+  local value, kind = actor_ref(ref, constructors)
+  if not value then return nil, label .. " has an unknown actor reference constructor" end
+  ok, err = exact_fields(value, kind == "local" and {slot=true} or {id=true}, label .. ".value")
   if not ok then return nil, err end
   if kind == "local" and (not nonempty(value.slot) or not slots[value.slot]) then
     return nil, label .. " names an unknown local actor slot"
@@ -82,16 +98,16 @@ local function validate_ref(ref, slots, label)
   return true
 end
 
-local function local_slot(ref)
-  local value, kind = actor_ref(ref)
+local function local_slot(ref, constructors)
+  local value, kind = actor_ref(ref, constructors)
   return kind == "local" and value.slot or nil
 end
 
-local function validate_port(port, slots, label)
+local function validate_port(port, slots, constructors, label)
   local ok, err = exact_fields(port,
     { actor = true, type = true, type_id = true, wire = true }, label)
   if not ok then return nil, err end
-  ok, err = validate_ref(port.actor, slots, label .. ".actor")
+  ok, err = validate_ref(port.actor, slots, constructors, label .. ".actor")
   if not ok then return nil, err end
   if not nonempty(port.wire) then return nil, label .. ".wire must be non-empty" end
   return validate_typed(port.type, port.type_id, label)
@@ -255,6 +271,9 @@ function M.preflight(initial, operations, registry)
     end
     local declarations_ok, declarations_result = pcall(semantic_host.validate_declarations, template.types)
     if not declarations_ok or declarations_result ~= true then return nil, label .. ".template.types are invalid" end
+    local constructors
+    constructors, err = constructor_ids(template.types, label .. ".template.types")
+    if not constructors then return nil, err end
     local slots, actor_by_slot, relocations_by_slot = {}, {}, {}
     for actor_index, actor in ipairs(template.actors) do
       local actor_label = string.format("%s.template.actors[%d]", label, actor_index)
@@ -278,13 +297,13 @@ function M.preflight(initial, operations, registry)
     end
     for _, actor in ipairs(template.actors) do
       local actor_label = label .. ".template actor " .. actor.slot
-      ok, err = validate_port(actor.input, slots, actor_label .. ".input")
+      ok, err = validate_port(actor.input, slots, constructors, actor_label .. ".input")
       if not ok then return nil, err end
-      if local_slot(actor.input.actor) ~= actor.slot then return nil, actor_label .. ".input must belong to its actor" end
+      if local_slot(actor.input.actor, constructors) ~= actor.slot then return nil, actor_label .. ".input must belong to its actor" end
       for index, output in ipairs(actor.outputs) do
-        ok, err = validate_port(output, slots, string.format("%s.outputs[%d]", actor_label, index))
+        ok, err = validate_port(output, slots, constructors, string.format("%s.outputs[%d]", actor_label, index))
         if not ok then return nil, err end
-        if local_slot(output.actor) ~= actor.slot then return nil, actor_label .. " output must belong to its actor" end
+        if local_slot(output.actor, constructors) ~= actor.slot then return nil, actor_label .. " output must belong to its actor" end
       end
       for index, binding in ipairs(actor.parameter_bindings) do
         ok, err = exact_fields(binding, {path=true,value=true}, string.format("%s.parameter_bindings[%d]", actor_label,index))
@@ -328,8 +347,8 @@ function M.preflight(initial, operations, registry)
       local route_label=string.format("%s.template.routes[%d]",label,index)
       ok,err=exact_fields(route,{from=true,to=true,product_position=true},route_label)
       if not ok then return nil,err end
-      ok,err=validate_port(route.from,slots,route_label..".from"); if not ok then return nil,err end
-      ok,err=validate_port(route.to,slots,route_label..".to"); if not ok then return nil,err end
+      ok,err=validate_port(route.from,slots,constructors,route_label..".from"); if not ok then return nil,err end
+      ok,err=validate_port(route.to,slots,constructors,route_label..".to"); if not ok then return nil,err end
       if type(route.product_position)~="number" or route.product_position%1~=0 or route.product_position < -1 then
         return nil,route_label.." product_position must be an integer >= -1"
       end
@@ -338,7 +357,7 @@ function M.preflight(initial, operations, registry)
       local message_label=string.format("%s.template.messages[%d]",label,index)
       ok,err=exact_fields(message,{to=true,semantic_type=true,semantic_type_id=true,content=true},message_label)
       if not ok then return nil,err end
-      ok,err=validate_port(message.to,slots,message_label..".to"); if not ok then return nil,err end
+      ok,err=validate_port(message.to,slots,constructors,message_label..".to"); if not ok then return nil,err end
       ok,err=validate_typed(message.semantic_type,message.semantic_type_id,message_label); if not ok then return nil,err end
     end
     for index,node in ipairs(template.nodes) do
@@ -346,22 +365,43 @@ function M.preflight(initial, operations, registry)
       ok,err=exact_fields(node,{path=true,members=true},node_label); if not ok then return nil,err end
       if not dense_list(node.path) or #node.path==0 or not dense_list(node.members) then return nil,node_label.." has malformed lists" end
       for _,segment in ipairs(node.path) do
-        local segment_value = segment
-        if type(segment)=="table" and segment.type~=nil then
-          ok,err=exact_fields(segment,{type=true,value=true},node_label..".path segment"); if not ok then return nil,err end
-          segment_value=segment.value
+        ok,err=exact_fields(segment,{type=true,value=true},node_label..".path segment"); if not ok then return nil,err end
+        ok,err=exact_fields(segment.value,{value=true},node_label..".path segment value"); if not ok then return nil,err end
+        if segment.type ~= constructors.fixed_path and segment.type ~= constructors.bound_path then
+          return nil,node_label.." path segment has an unknown constructor"
         end
-        ok,err=exact_fields(segment_value,{value=true},node_label..".path segment value"); if not ok then return nil,err end
-        if not nonempty(segment_value.value) then return nil,node_label.." path segment must be non-empty" end
-        -- Sum constructors serialize with semantic type ids. A segment whose
-        -- value resolves to an expression is bound; every other segment is fixed.
+        if not nonempty(segment.value.value) then return nil,node_label.." path segment must be non-empty" end
+        if segment.type == constructors.bound_path and not expressions[segment.value.value] then
+          return nil,node_label.." bound path segment references an unknown expression"
+        end
       end
       for _,member in ipairs(node.members) do
         ok,err=exact_fields(member,{slot=true},node_label..".member"); if not ok then return nil,err end
         if not slots[member.slot] then return nil,node_label.." names an unknown member slot" end
       end
     end
-    owned[#owned+1]=plain_data.copy(operation)
+    local owned_operation=plain_data.copy(operation)
+    owned_operation._constructors=constructors
+    local function retain_ref_variant(ref)
+      ref._variant = ref.type == constructors.local_actor and "local" or "existing"
+    end
+    for _, actor in ipairs(owned_operation.template.actors) do
+      retain_ref_variant(actor.input.actor)
+      for _, output in ipairs(actor.outputs) do retain_ref_variant(output.actor) end
+    end
+    for _, route in ipairs(owned_operation.template.routes) do
+      retain_ref_variant(route.from.actor)
+      retain_ref_variant(route.to.actor)
+    end
+    for _, message in ipairs(owned_operation.template.messages) do
+      retain_ref_variant(message.to.actor)
+    end
+    for _, node in ipairs(owned_operation.template.nodes) do
+      for _, segment in ipairs(node.path) do
+        segment._variant = segment.type == constructors.fixed_path and "fixed" or "bound"
+      end
+    end
+    owned[#owned+1]=owned_operation
   end
   return owned
 end
@@ -389,14 +429,14 @@ local function get_path(root,path)
   return current,true
 end
 
-local function ref_id(ref, ids)
-  local value, kind = actor_ref(ref)
+local function ref_id(ref, ids, constructors)
+  local value, kind = actor_ref(ref, constructors)
   if kind == "local" then return ids[value.slot] end
   return value and value.id or nil
 end
 
-local function port_value(port, ids)
-  return {actor=ref_id(port.actor,ids),type=plain_data.copy(port.type),
+local function port_value(port, ids, constructors)
+  return {actor=ref_id(port.actor,ids,constructors),type=plain_data.copy(port.type),
     type_id=port.type_id,wire=port.wire}
 end
 
@@ -408,6 +448,8 @@ end
 M.edge_id=edge_id
 
 function M.materialize(operation, trigger_value)
+  local constructors=operation._constructors
+  if type(constructors)~="table" then return nil,"operation constructor metadata is absent" end
   local values={}
   for _,expression in ipairs(operation.expressions) do
     local value
@@ -436,10 +478,10 @@ function M.materialize(operation, trigger_value)
     local actor={id=ids[template_actor.slot],factory=template_actor.factory,
       type_arguments=plain_data.copy(template_actor.type_arguments),
       params=plain_data.copy(template_actor.params),
-      input=port_value(template_actor.input,ids),outputs={},routes={}}
+      input=port_value(template_actor.input,ids,operation._constructors),outputs={},routes={}}
     declare_port(actor.input)
     for index,output in ipairs(template_actor.outputs) do
-      actor.outputs[index]=port_value(output,ids)
+      actor.outputs[index]=port_value(output,ids,operation._constructors)
       declare_port(actor.outputs[index])
     end
     for _,binding in ipairs(template_actor.parameter_bindings) do
@@ -465,9 +507,9 @@ function M.materialize(operation, trigger_value)
     end
   end
   for _,route in ipairs(template.routes) do
-    local from=port_value(route.from,ids); local to=port_value(route.to,ids)
+    local from=port_value(route.from,ids,operation._constructors); local to=port_value(route.to,ids,operation._constructors)
     declare_port(from); declare_port(to)
-    local source=actor_by_slot[local_slot(route.from.actor)]
+    local source=actor_by_slot[local_slot(route.from.actor, operation._constructors)]
     if not source then return nil,"template routes may only originate at local actors" end
     source.routes[from.wire]=source.routes[from.wire] or {}
     source.routes[from.wire][#source.routes[from.wire]+1]={actor=to.actor,wire=to.wire,
@@ -476,7 +518,7 @@ function M.materialize(operation, trigger_value)
   end
   local messages={}
   for index,message in ipairs(template.messages) do
-    local to=port_value(message.to,ids)
+    local to=port_value(message.to,ids,operation._constructors)
     types[message.semantic_type_id]=plain_data.copy(message.semantic_type)
     messages[index]={to=to.actor,semantic_type=plain_data.copy(message.semantic_type),
       semantic_type_id=message.semantic_type_id,content=plain_data.copy(message.content)}
@@ -485,11 +527,12 @@ function M.materialize(operation, trigger_value)
   for index,node in ipairs(template.nodes) do
     local path={}
     for part,segment in ipairs(node.path) do
-      local value=segment.value
-      local bound=false
-      if segment.type~=nil then value=segment.value.value end
-      bound=values[value]~=nil
-      path[part]=bound and values[value] or value
+      local value=segment.value.value
+      if segment._variant=="bound" then
+        path[part]=values[value]
+      else
+        path[part]=value
+      end
     end
     local members={}; for member,ref in ipairs(node.members) do members[member]=ids[ref.slot] end
     nodes[index]={path=path,members=members}

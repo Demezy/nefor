@@ -295,6 +295,7 @@ impl LuaHost {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn start(&self, run_id: &str, modification: &JsonValue) -> Result<ApplyOutcome, MagError> {
         self.start_program(run_id, modification, &[])
     }

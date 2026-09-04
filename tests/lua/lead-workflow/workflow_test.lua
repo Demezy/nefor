@@ -326,8 +326,10 @@ local function artifact_from_modification(modification)
     }
   end
   return {
+    types = modification.types or {},
     actors = actors,
     messages = messages,
+    nodes = modification.nodes or {},
     kills = modification.kills or {},
     result = result,
   }
@@ -704,6 +706,7 @@ do
   local artifact = {
     format = "nefor.mag", version = 1, kind = "program", program = {
       initial = {
+        types = {},
         actors = { {
           id = "record", factory = "nefor.factory.stub", type_arguments = {},
           params = { ["$mag"] = "packed-value", value = authored }, routes = {},
@@ -732,6 +735,36 @@ do
     "preview renders the preserved authored record rather than its nested value")
 end
 
+do
+  local workspace = require("libs.mag-workspace")
+  local initial = { types = {}, actors = {}, messages = {}, nodes = {}, kills = {}, result = {} }
+  local delta = { types = {}, actors = {}, messages = {}, nodes = {}, kills = {} }
+  local _, mixed_program_error = workspace.decode_artifact {
+    format = "nefor.mag", version = 1, kind = "program",
+    program = { initial = initial, operations = {} }, delta = delta,
+  }
+  assert_true(mixed_program_error:find("unknown field delta", 1, true) ~= nil,
+    "program envelope rejects a delta sibling")
+  local _, mixed_delta_error = workspace.decode_artifact {
+    format = "nefor.mag", version = 1, kind = "delta", delta = delta,
+    program = { initial = initial, operations = {} },
+  }
+  assert_true(mixed_delta_error:find("unknown field program", 1, true) ~= nil,
+    "delta envelope rejects a program sibling")
+  local _, delta_operations_error = workspace.decode_artifact {
+    format = "nefor.mag", version = 1, kind = "delta",
+    delta = { types = {}, actors = {}, messages = {}, nodes = {}, kills = {}, operations = {} },
+  }
+  assert_true(delta_operations_error:find("unknown field operations", 1, true) ~= nil,
+    "delta payload rejects operation residue")
+  local _, operation_error = workspace.decode_artifact {
+    format = "nefor.mag", version = 1, kind = "program",
+    program = { initial = initial, operations = { { extra = true } } },
+  }
+  assert_true(operation_error:find("unknown field extra", 1, true) ~= nil,
+    "program operation rejects unknown fields")
+end
+
 -- Template definitions participate in validation and overlays, but graph-status
 -- contains only concrete runtime actors. Each materialization enters through
 -- its own lifecycle identity.
@@ -747,6 +780,7 @@ do
   local artifact = {
     format = "nefor.mag", version = 1, kind = "program", program = {
       initial = {
+        types = {},
         actors = { {
           id = "source", factory = "nefor.factory.stub", type_arguments = {},
           params = { ["$mag"] = "packed-value", value = {} }, routes = {},
@@ -755,7 +789,8 @@ do
         result = { from = { actor = "source", wire = "result" } },
       },
       operations = { {
-        id = "expand", captures = {}, template = {
+        id = "expand", on_actor = "source", on_wire = "result",
+        trigger_type = {}, trigger_type_id = "type", captures = {}, expressions = {}, template = {
           actors = { {
             slot = "worker", factory = "nefor.factory.llm", type_arguments = {},
             params = { ["$mag"] = "packed-value", value = {
@@ -1225,6 +1260,7 @@ do
       },
     },
     messages = {},
+    nodes = {},
     kills = {},
     types = {},
   }
@@ -1298,7 +1334,7 @@ do
     factories = KERNEL_FACTORIES,
     factory_contracts = factory_contracts(KERNEL_FACTORIES),
     artifact = { format = "nefor.mag", version = 1, kind = "program", program = {
-      initial = { actors = {}, messages = {}, kills = {},
+      initial = { types = {}, actors = {}, messages = {}, nodes = {}, kills = {},
         result = { from = { actor = "existing", type = "Result", wire = "Result" } } },
       operations = {},
     } },
@@ -1331,7 +1367,7 @@ do
     factories = KERNEL_FACTORIES,
     factory_contracts = factory_contracts(KERNEL_FACTORIES),
     artifact = { format = "nefor.mag", version = 1, kind = "delta",
-      delta = { actors = {}, messages = {}, kills = {}, types = {} } },
+      delta = { actors = {}, messages = {}, nodes = {}, kills = {}, types = {} } },
   })
   local apply = find_call(decode_calls(), function(c) return c.body.kind == "mag.apply" end)
   feed("mag", {
@@ -2922,7 +2958,7 @@ do
   err = find_call(calls, function(c)
     return c.body.kind == "tool.result" and c.body.id == "gate-validation-error"
   end)
-  assert_true(err ~= nil and err.body.error:find("structural result boundary", 1, true) ~= nil,
+  assert_true(err ~= nil and err.body.error:find("no structural result boundary", 1, true) ~= nil,
     "eval validation error returns directly to its firing")
   assert_eq(find_call(calls, function(c) return c.body.kind == "mag.execute" end), nil,
     "validation failure never executes")

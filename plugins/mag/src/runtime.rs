@@ -355,8 +355,10 @@ async fn settle_run(
     } else {
         return Ok(());
     };
-    let a = active.remove(run_id).expect("checked above");
-    if let Some(id) = a.in_reply_to {
+    let Some(active_run) = active.remove(run_id) else {
+        return Ok(());
+    };
+    if let Some(id) = active_run.in_reply_to {
         reply.insert("in_reply_to".into(), Value::String(id));
     }
     send_event(out_tx, reply).await?;
@@ -1465,12 +1467,41 @@ fn immutable_artifact_hash(artifact: &Value) -> Result<String, String> {
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
-fn graph_modification(artifact: &Value, context: &str) -> Result<Value, String> {
-    let data = artifact
+fn exact_object<'a>(
+    value: &'a Value,
+    required: &[&str],
+    context: &str,
+) -> Result<&'a Map<String, Value>, String> {
+    let object = value
         .as_object()
-        .cloned()
-        .ok_or_else(|| format!("{context} artifact must be a graph-modification object"))?;
-    Ok(Value::Object(data))
+        .ok_or_else(|| format!("{context} must be an object"))?;
+    for key in object.keys() {
+        if !required.contains(&key.as_str()) {
+            return Err(format!("{context} has unknown field {key}"));
+        }
+    }
+    for key in required {
+        if !object.contains_key(*key) {
+            return Err(format!("{context} requires {key}"));
+        }
+    }
+    Ok(object)
+}
+
+fn graph_modification(
+    artifact: &Value,
+    fields: &[&str],
+    context: &str,
+) -> Result<Value, String> {
+    let object = artifact
+        .as_object()
+        .ok_or_else(|| format!("{context} must be an object"))?;
+    for key in object.keys() {
+        if !fields.contains(&key.as_str()) {
+            return Err(format!("{context} has unknown field {key}"));
+        }
+    }
+    Ok(Value::Object(object.clone()))
 }
 
 fn unpack_packed(value: &mut Value, context: &str) -> Result<(), String> {
@@ -1547,9 +1578,11 @@ struct DecodedProgram {
 }
 
 fn artifact_program(artifact: &Value) -> Result<DecodedProgram, String> {
-    let Some(object) = artifact.as_object() else {
-        return Err("mag.execute artifact must be an object".to_owned());
-    };
+    let object = exact_object(
+        artifact,
+        &["format", "version", "kind", "program"],
+        "mag.execute artifact",
+    )?;
     if object.get("format").and_then(Value::as_str) != Some("nefor.mag") {
         return Err("mag.execute artifact has an unsupported format".to_owned());
     }
@@ -1559,34 +1592,57 @@ fn artifact_program(artifact: &Value) -> Result<DecodedProgram, String> {
     if object.get("kind").and_then(Value::as_str) != Some("program") {
         return Err("mag.execute requires a nefor.mag program envelope".to_owned());
     }
-    let program = object
+    let program_value = object
         .get("program")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "mag.execute program envelope requires an object payload".to_owned())?;
+        .ok_or_else(|| "mag.execute program envelope requires a payload".to_owned())?;
+    let program = exact_object(
+        program_value,
+        &["initial", "operations"],
+        "mag.execute program",
+    )?;
     let operations = program
         .get("operations")
         .and_then(Value::as_array)
         .ok_or_else(|| "mag.execute program.operations must be an array".to_owned())?;
+    let operation_fields = [
+        "id",
+        "on_actor",
+        "on_wire",
+        "trigger_type",
+        "trigger_type_id",
+        "captures",
+        "expressions",
+        "template",
+    ];
     for (index, operation) in operations.iter().enumerate() {
-        if !operation.is_object() {
-            return Err(format!("mag.execute program.operations[{index}] must be an object"));
-        }
+        exact_object(
+            operation,
+            &operation_fields,
+            &format!("mag.execute program.operations[{index}]"),
+        )?;
     }
     let mut initial = graph_modification(
-        program.get("initial").ok_or_else(||
-            "mag.execute program envelope requires initial".to_owned())?,
+        program
+            .get("initial")
+            .ok_or_else(|| "mag.execute program envelope requires initial".to_owned())?,
+        &["types", "actors", "messages", "nodes", "kills", "result"],
         "mag.execute program initial",
     )?;
     let mut operations = operations.clone();
     unpack_modification(&mut initial, "mag.execute program initial")?;
     unpack_operations(&mut operations)?;
-    Ok(DecodedProgram { initial, operations })
+    Ok(DecodedProgram {
+        initial,
+        operations,
+    })
 }
 
 fn artifact_delta(artifact: &Value) -> Result<Value, String> {
-    let object = artifact
-        .as_object()
-        .ok_or_else(|| "mag.apply artifact must be an object".to_owned())?;
+    let object = exact_object(
+        artifact,
+        &["format", "version", "kind", "delta"],
+        "mag.apply artifact",
+    )?;
     if object.get("format").and_then(Value::as_str) != Some("nefor.mag") {
         return Err("mag.apply artifact has an unsupported format".to_owned());
     }
@@ -1597,8 +1653,10 @@ fn artifact_delta(artifact: &Value) -> Result<Value, String> {
         return Err("mag.apply requires a nefor.mag delta envelope".to_owned());
     }
     let mut delta = graph_modification(
-        object.get("delta").ok_or_else(||
-            "mag.apply delta envelope requires delta".to_owned())?,
+        object
+            .get("delta")
+            .ok_or_else(|| "mag.apply delta envelope requires delta".to_owned())?,
+        &["types", "actors", "messages", "nodes", "kills"],
         "mag.apply delta",
     )?;
     unpack_modification(&mut delta, "mag.apply delta")?;
@@ -1606,6 +1664,7 @@ fn artifact_delta(artifact: &Value) -> Result<Value, String> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn artifact_modification(artifact: &Value) -> Result<Value, String> {
     artifact_program(artifact).map(|program| program.initial)
 }

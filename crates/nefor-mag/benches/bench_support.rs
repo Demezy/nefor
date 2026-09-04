@@ -526,6 +526,7 @@ fn validate_oracle(case: &Fixture, observation: &SemanticOutcome) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn fixture(
     scratch: &Path,
     name: &str,

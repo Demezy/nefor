@@ -8,8 +8,8 @@
 -- into the `generic-provider.ProviderOut` turn the downstream `llm` consumes.
 -- A ProviderInput is already a complete provider turn and passes through.
 --
--- Contract (reconciled against the plugin acceptance graph and
--- the loader's eval_agent, which authors this node; flagged):
+-- Contract (reconciled against the plugin acceptance graph and the MAG agent
+-- library lowering which authors this node; flagged):
 --   input   ( nefor.agent.Input | generic-provider.ProviderOut )
 --           union — fires on either
 --   output  generic-provider.ProviderOut              the next provider turn

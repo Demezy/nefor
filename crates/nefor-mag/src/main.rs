@@ -91,6 +91,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn compile(
     args: CompileArgs,
 ) -> Result<(Value, Option<nefor_mag::profile::CompileProfile>), Diagnostic> {
@@ -146,6 +147,7 @@ fn compile(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn require_directory(path: &Path, kind: &'static str) -> Result<(), Diagnostic> {
     match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_dir() => Ok(()),
@@ -162,6 +164,7 @@ fn require_directory(path: &Path, kind: &'static str) -> Result<(), Diagnostic> 
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn load_inputs(specs: &[String]) -> Result<Value, Diagnostic> {
     let mut inputs = Map::new();
     for spec in specs {

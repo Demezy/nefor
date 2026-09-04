@@ -130,6 +130,25 @@ local function copy(value)
   return out
 end
 
+local function exact_fields(value, required, context)
+  if type(value) ~= "table" then return nil, context .. " must be an object" end
+  for key in pairs(value) do
+    if not required[key] then return nil, context .. " has unknown field " .. tostring(key) end
+  end
+  for key in pairs(required) do
+    if value[key] == nil then return nil, context .. " requires " .. key end
+  end
+  return true
+end
+
+local function exact_modification(value, fields, context)
+  if type(value) ~= "table" then return nil, context .. " must be an object" end
+  for key in pairs(value) do
+    if not fields[key] then return nil, context .. " has unknown field " .. tostring(key) end
+  end
+  return copy(value)
+end
+
 local function unpack(value, context)
   local fields = 0
   if type(value) == "table" then
@@ -159,6 +178,11 @@ end
 local function unpack_operations(operations)
   local materialized = copy(operations)
   for operation_index, operation in ipairs(materialized) do
+    local ok, operation_error = exact_fields(operation, {
+      id = true, on_actor = true, on_wire = true, trigger_type = true,
+      trigger_type_id = true, captures = true, expressions = true, template = true,
+    }, "program.operations[" .. operation_index .. "]")
+    if not ok then return nil, operation_error end
     for capture_id, capture in pairs(operation.captures or {}) do
       local value, err = unpack(capture.value, "program.operations[" .. operation_index
         .. "].captures." .. tostring(capture_id) .. ".value")
@@ -177,18 +201,34 @@ function M.decode_artifact(artifact)
   if type(artifact) ~= "table" or artifact.format ~= "nefor.mag" or artifact.version ~= 1 then
     return nil, "artifact must be a nefor.mag version 1 envelope"
   end
-  if artifact.kind == "program" and type(artifact.program) == "table"
-      and type(artifact.program.initial) == "table"
-      and type(artifact.program.operations) == "table" then
-    local modification, modification_error = unpack_modification(
-      artifact.program.initial, "program.initial")
+  if artifact.kind == "program" then
+    local ok, envelope_error = exact_fields(artifact,
+      { format = true, version = true, kind = true, program = true }, "program envelope")
+    if not ok then return nil, envelope_error end
+    ok, envelope_error = exact_fields(artifact.program,
+      { initial = true, operations = true }, "program payload")
+    if not ok or type(artifact.program.operations) ~= "table" then
+      return nil, envelope_error or "program.operations must be a list"
+    end
+    local initial, initial_error = exact_modification(artifact.program.initial, {
+      types = true, actors = true, messages = true, nodes = true, kills = true, result = true,
+    }, "program.initial")
+    if not initial then return nil, initial_error end
+    local modification, modification_error = unpack_modification(initial, "program.initial")
     if not modification then return nil, modification_error end
     local operations, operations_error = unpack_operations(artifact.program.operations)
     if not operations then return nil, operations_error end
     return { kind = "program", modification = modification, operations = operations }
   end
-  if artifact.kind == "delta" and type(artifact.delta) == "table" then
-    local modification, modification_error = unpack_modification(artifact.delta, "delta")
+  if artifact.kind == "delta" then
+    local ok, envelope_error = exact_fields(artifact,
+      { format = true, version = true, kind = true, delta = true }, "delta envelope")
+    if not ok then return nil, envelope_error end
+    local delta, delta_error = exact_modification(artifact.delta, {
+      types = true, actors = true, messages = true, nodes = true, kills = true,
+    }, "delta")
+    if not delta then return nil, delta_error end
+    local modification, modification_error = unpack_modification(delta, "delta")
     if not modification then return nil, modification_error end
     return { kind = "delta", modification = modification, operations = {} }
   end

@@ -329,8 +329,14 @@ mod tests {
 
     #[test]
     fn versioned_program_envelope_unwraps_and_rejects_wrong_discriminators() {
-        let initial = serde_json::json!({"actors": [], "result": {}});
-        let operation = serde_json::json!({"id":"expand","template":{}});
+        let initial = serde_json::json!({
+            "types": {}, "actors": [], "messages": [], "nodes": [], "kills": [], "result": {}
+        });
+        let operation = serde_json::json!({
+            "id":"expand", "on_actor":"source", "on_wire":"Out",
+            "trigger_type":{}, "trigger_type_id":"type", "captures":{},
+            "expressions":[], "template":{}
+        });
         let envelope = serde_json::json!({
             "format": "nefor.mag", "version": 1, "kind": "program",
             "program": {"initial": initial, "operations": [operation.clone()]}
@@ -349,6 +355,46 @@ mod tests {
                 "accepted {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn artifact_wire_boundary_rejects_mixed_and_unknown_fields() {
+        let initial = serde_json::json!({
+            "types": {}, "actors": [], "messages": [], "nodes": [], "kills": [], "result": {}
+        });
+        let delta = serde_json::json!({
+            "types": {}, "actors": [], "messages": [], "nodes": [], "kills": []
+        });
+        let program = serde_json::json!({
+            "format":"nefor.mag", "version":1, "kind":"program",
+            "program":{"initial":initial, "operations":[]}
+        });
+        let delta_envelope = serde_json::json!({
+            "format":"nefor.mag", "version":1, "kind":"delta", "delta":delta
+        });
+        let mut mixed_program = program.clone();
+        mixed_program["delta"] = delta_envelope["delta"].clone();
+        assert!(artifact_program(&mixed_program).is_err());
+        let mut mixed_delta = delta_envelope.clone();
+        mixed_delta["program"] = program["program"].clone();
+        assert!(artifact_delta(&mixed_delta).is_err());
+
+        let mut program_unknown = program.clone();
+        program_unknown["program"]["extra"] = Value::Bool(true);
+        assert!(artifact_program(&program_unknown).is_err());
+        let mut operation_unknown = program.clone();
+        operation_unknown["program"]["operations"] = serde_json::json!([{
+            "id":"x", "on_actor":"source", "on_wire":"Out", "trigger_type":{},
+            "trigger_type_id":"type", "captures":{}, "expressions":[],
+            "template":{}, "extra":true
+        }]);
+        assert!(artifact_program(&operation_unknown).is_err());
+        let mut delta_operations = delta_envelope.clone();
+        delta_operations["delta"]["operations"] = serde_json::json!([]);
+        assert!(artifact_delta(&delta_operations).is_err());
+        let mut delta_result = delta_envelope;
+        delta_result["delta"]["result"] = serde_json::json!({});
+        assert!(artifact_delta(&delta_result).is_err());
     }
 
     #[test]
@@ -638,9 +684,10 @@ mod tests {
     #[test]
     fn artifact_boundary_preserves_factory_identity() {
         let artifact = serde_json::json!({
+            "types": {},
             "actors": [{"id": "answer", "factory": "nefor.factory.llm", "type_arguments": [],
                 "params": {"$mag": "packed-value", "value": {}}}],
-            "messages": [], "kills": []
+            "messages": [], "nodes": [], "kills": [], "result": {}
         });
         let envelope = serde_json::json!({"format":"nefor.mag","version":1,"kind":"program",
             "program":{"initial":artifact,"operations":[]}});
@@ -655,9 +702,10 @@ mod tests {
     #[test]
     fn artifact_boundary_preserves_structural_result_metadata() {
         let artifact = serde_json::json!({
+            "types": {},
             "actors": [{"id": "answer", "factory": "nefor.factory.llm", "type_arguments": [],
                 "params": {"$mag": "packed-value", "value": {}}, "routes": {}}],
-            "messages": [], "kills": [],
+            "messages": [], "nodes": [], "kills": [],
             "result": {"from": {
                 "actor": "answer",
                 "type": "audit.CodeAudit",
@@ -865,7 +913,10 @@ mod tests {
                     "kills": [], "nodes": [], "result": {"from": {"actor": "initial", "wire": "out"}}
                 },
                 "operations": [{
+                    "id":"expand", "on_actor":"initial", "on_wire":"out",
+                    "trigger_type":{}, "trigger_type_id":"type",
                     "captures": {"saved": {"value": packed(authored.clone())}},
+                    "expressions": [],
                     "template": {
                         "types": {},
                         "actors": [{"slot": "worker", "factory": "stub", "params": packed(authored.clone())}],
@@ -905,10 +956,12 @@ mod tests {
     fn template_actor_overlays_use_collision_free_addresses_and_preserve_artifact() {
         let artifact = serde_json::json!({
             "format":"nefor.mag", "version":1, "kind":"program", "program":{
-                "initial":{"actors":[{"id":"same","factory":"llm","params":{
+                "initial":{"types":{},"actors":[{"id":"same","factory":"llm","params":{
                     "$mag":"packed-value","value":{"model":"authored"}
-                }}]},
-                "operations":[{"id":"expand","template":{"actors":[
+                }}],"messages":[],"nodes":[],"kills":[],"result":{}},
+                "operations":[{"id":"expand","on_actor":"same","on_wire":"out",
+                    "trigger_type":{},"trigger_type_id":"type","captures":{},"expressions":[],
+                    "template":{"actors":[
                     {"slot":"same","factory":"llm","params":{
                         "$mag":"packed-value","value":{"model":"template"}
                     }}

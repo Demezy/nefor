@@ -1763,6 +1763,7 @@ pub mod kernel {
                 .apply(
                     run_id,
                     &serde_json::json!({
+                        "types": {},
                         "actors": [{
                             "id": "tentative",
                             "factory": "nefor.factory.stub",
@@ -1771,22 +1772,28 @@ pub mod kernel {
                             "routes": {}
                         }],
                         "messages": [{"to": "missing", "content": {"kind": "stub.In"}}],
+                        "nodes": [{"path": ["tentative"], "members": ["tentative"]}],
                         "kills": []
                     }),
                 )
                 .expect("apply rejected modification");
             assert!(!rejected.ok);
-            assert!(rejected
-                .error
-                .as_deref()
-                .is_some_and(|error| error.contains("unknown message target 'missing'")));
+            assert!(
+                rejected
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("unknown message target 'missing'")),
+                "{rejected:?}"
+            );
 
             let probe = host
                 .apply(
                     run_id,
                     &serde_json::json!({
+                        "types": {},
                         "actors": [],
                         "messages": [{"to": "tentative", "content": {"kind": "stub.In"}}],
+                        "nodes": [],
                         "kills": []
                     }),
                 )

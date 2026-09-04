@@ -12,8 +12,8 @@ actors finish out of order. The empty list is the ordinary list identity and
 produces `[]` after its input activation.
 
 `nefor.dynamic.DynamicList O` is a different, runtime effect. A producer emits
-indexed occurrences plus explicit completion. `dynamic.traverse` constructs
-one ordinary worker node per occurrence, and `dynamic.context` waits for
+indexed occurrences plus explicit completion. `nefor.dynamic.traverse-template`
+instantiates one closed worker template per occurrence, and `nefor.dynamic.context` waits for
 completion before presenting one ordered provider turn. No runtime-sized MAG
 `List` value or conversion between the two universes exists. The shipped
 `examples/nefor-agent/agentic-loop/dynamic-tasks.mag` exercises zero, invalid,

@@ -49,8 +49,17 @@ fn declarative_templates_validate_relocate_and_materialize_distinct_firings() {
         local trigger_t = {kind="record",name="Occurrence",fields={
           {name="index",type=int_t},{name="name",type=string_t},
         }}
+        local local_actor_t = {kind="named",name="nefor.mag.LocalActorRef"}
+        local existing_actor_t = {kind="named",name="nefor.mag.ExistingActorRef"}
+        local fixed_path_t = {kind="named",name="nefor.mag.FixedPathSegment"}
+        local bound_path_t = {kind="named",name="nefor.mag.BoundPathSegment"}
+        local LOCAL = "sha256:ac9051a4394ae17aaa7569c33a5454b584abcaf9bc37e2c7e456d899ca7a396c"
+        local EXISTING = "sha256:092a40e12abe40aacd2004b531482f8a5585c503f46d46c2c7077a7ab65997a9"
+        local FIXED = "sha256:af48b5f5e4d43945f29b0e8707634d80d8337c6937b8eb235f1a95c52cd91017"
+        local BOUND = "sha256:21b86a109b971ade6464aa5b3a8bd650f14f122254af6c1c33f301e9dd57003a"
+        local function local_ref(slot) return {type=LOCAL,value={slot=slot}} end
         local function port(slot, wire)
-          return {actor={slot=slot},type=string_t,type_id="type:String",wire=wire}
+          return {actor=local_ref(slot),type=string_t,type_id="type:String",wire=wire}
         end
         local registry = {
           declaration = function(_, factory)
@@ -72,14 +81,20 @@ fn declarative_templates_validate_relocate_and_materialize_distinct_firings() {
             {id="prefix-ref",result_type="type:String",capture="prefix"},
             {id="actor-id",result_type="type:String",values={"prefix-ref","index-text"}},
           },
-          template={types={},actors={
+          template={types={
+            [LOCAL]=local_actor_t,[EXISTING]=existing_actor_t,
+            [FIXED]=fixed_path_t,[BOUND]=bound_path_t,
+          },actors={
             {slot="leaf",id="actor-id",factory="leaf",type_arguments={},params={label=""},
              input=port("leaf","In"),outputs={port("leaf","Out")},
              parameter_bindings={{path={"label"},value="name"}}},
             {slot="join",id="name",factory="join",type_arguments={},params={expected_senders={"leaf"}},
              input=port("join","In"),outputs={port("join","Out")},parameter_bindings={}},
           },routes={{from=port("leaf","Out"),to=port("join","In"),product_position=-1}},
-          messages={},nodes={{path={{value="actor-id"}},members={{slot="leaf"}}}},
+          messages={},nodes={
+            {path={{type=BOUND,value={value="actor-id"}}},members={{slot="leaf"}}},
+            {path={{type=FIXED,value={value="actor-id"}}},members={}},
+          },
           actor_reference_relocations={{actor={slot="join"},path={"expected_senders"},shape="actor_id_list"}}},
         }
         local initial={actors={{id="source",outputs={{wire="Out",type=trigger_t,type_id="type:Occurrence"}}},
@@ -96,6 +111,17 @@ fn declarative_templates_validate_relocate_and_materialize_distinct_firings() {
         local edge1=second.actors[1].routes.Out[1].edge_id
         assert(edge0 ~= edge1)
         assert(first.nodes[1].path[1] == "worker.0")
+        assert(first.nodes[2].path[1] == "actor-id")
+
+        local wrong_path=require("plain-data").copy(operation)
+        wrong_path.template.nodes[1].path[1].type="type:Foreign"
+        local _,wrong_path_error=operations.preflight(initial,{wrong_path},registry)
+        assert(wrong_path_error:match("unknown constructor"),wrong_path_error)
+        local wrong_ref=require("plain-data").copy(operation)
+        wrong_ref.template.actors[1].input.actor.type=EXISTING
+        local _,wrong_ref_error=operations.preflight(initial,{wrong_ref},registry)
+        assert(wrong_ref_error:match("unknown actor reference constructor")
+          or wrong_ref_error:match("unknown field"),wrong_ref_error)
 
         local unsupported=require("plain-data").copy(operation)
         unsupported.template.actors[1].factory="unsupported"

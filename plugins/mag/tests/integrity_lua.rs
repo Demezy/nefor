@@ -88,16 +88,28 @@ fn terminal_settlement_is_first_write_wins_even_after_host_take() {
 fn synchronous_initial_output_drains_declarative_operations_before_start_returns() {
     run(r#"
         local S={kind="primitive",name="String"}
+        local L={kind="named",name="nefor.mag.LocalActorRef"}
+        local E={kind="named",name="nefor.mag.ExistingActorRef"}
+        local F={kind="named",name="nefor.mag.FixedPathSegment"}
+        local B={kind="named",name="nefor.mag.BoundPathSegment"}
+        local LOCAL="sha256:ac9051a4394ae17aaa7569c33a5454b584abcaf9bc37e2c7e456d899ca7a396c"
+        local EXISTING="sha256:092a40e12abe40aacd2004b531482f8a5585c503f46d46c2c7077a7ab65997a9"
+        local FIXED="sha256:af48b5f5e4d43945f29b0e8707634d80d8337c6937b8eb235f1a95c52cd91017"
+        local BOUND="sha256:21b86a109b971ade6464aa5b3a8bd650f14f122254af6c1c33f301e9dd57003a"
+        local template_types={String=S,[LOCAL]=L,[EXISTING]=E,[FIXED]=F,[BOUND]=B}
+        local function local_ref(slot) return {type=LOCAL,value={slot=slot}} end
+        local function existing_ref(id) return {type=EXISTING,value={id=id}} end
+        local function bound(value) return {type=BOUND,value={value=value}} end
         local function port(actor,wire) return {actor=actor,wire=wire,type=S,type_id="String"} end
         local operation={
           id="spawn",on_actor="source",on_wire="stub.Out",trigger_type=S,trigger_type_id="String",
           captures={},expressions={{id="trigger",result_type="String"}},
-          template={types={},actors={{slot="spawned",id="trigger",factory="nefor.factory.stub",
-            type_arguments={},params={value="child"},input={actor={type="local",value={slot="spawned"}},type=S,type_id="String",wire="stub.In"},
-            outputs={{actor={type="local",value={slot="spawned"}},type=S,type_id="String",wire="stub.Out"}},parameter_bindings={}}},
-            routes={},messages={{to={actor={type="local",value={slot="spawned"}},type=S,type_id="String",wire="stub.In"},
+          template={types=template_types,actors={{slot="spawned",id="trigger",factory="nefor.factory.stub",
+            type_arguments={},params={value="child"},input={actor=local_ref("spawned"),type=S,type_id="String",wire="stub.In"},
+            outputs={{actor=local_ref("spawned"),type=S,type_id="String",wire="stub.Out"}},parameter_bindings={}}},
+            routes={},messages={{to={actor=local_ref("spawned"),type=S,type_id="String",wire="stub.In"},
               semantic_type=S,semantic_type_id="String",content={kind="stub.In",value="go"}}},
-            nodes={{path={{value="spawned"}},members={{slot="spawned"}}}},actor_reference_relocations={}}
+            nodes={{path={bound("trigger")},members={{slot="spawned"}}}},actor_reference_relocations={}}
         }
         local second=require("plain-data").copy(operation)
         second.id="spawn-again"
@@ -105,7 +117,7 @@ fn synchronous_initial_output_drains_declarative_operations_before_start_returns
         second.expressions[2]={id="suffix",result_type="String",capture="suffix"}
         second.expressions[3]={id="second-id",result_type="String",values={"trigger","suffix"}}
         second.template.actors[1].id="second-id"
-        second.template.nodes[1].path={{value="second-id"}}
+        second.template.nodes[1].path={bound("second-id")}
         assert(kernel.begin_run({run_id="sync-op",run_name="sync-op",session_id="s"}).ok)
         local outcome=kernel.start("sync-op",{
           types={String=S},actors={
@@ -120,14 +132,16 @@ fn synchronous_initial_output_drains_declarative_operations_before_start_returns
         assert(outcome.ok,outcome.error)
         local ctx=kernel.context("sync-op")
         assert(ctx.inventory.state_of("spawned")=="alive")
-        assert(#ctx.operations==2 and #ctx.operation_queue==0 and ctx.emission_seq==3)
+        assert(ctx.inventory.get("spawned").semantic_strict==true)
+        assert(ctx.router.type_declarations[LOCAL]~=nil)
+        assert(#ctx.operations==2 and #ctx.operation_queue==0)
         assert(ctx.inventory.state_of("spawned-again")=="alive")
 
         kernel.end_run("sync-op")
         local failing=require("plain-data").copy(operation)
         failing.template.routes={{
-          from={actor={type="local",value={slot="spawned"}},type=S,type_id="String",wire="stub.Out"},
-          to={actor={type="existing",value={id="missing"}},type=S,type_id="String",wire="stub.In"},
+          from={actor=local_ref("spawned"),type=S,type_id="String",wire="stub.Out"},
+          to={actor=existing_ref("missing"),type=S,type_id="String",wire="stub.In"},
           product_position=-1,
         }}
         assert(kernel.begin_run({run_id="failure-wins",run_name="failure-wins",session_id="s"}).ok)
@@ -152,6 +166,45 @@ fn synchronous_initial_output_drains_declarative_operations_before_start_returns
 }
 
 #[test]
+fn rejected_typed_delta_does_not_leak_declarations_or_mutate_input() {
+    run(r#"
+        local S={kind="primitive",name="String"}
+        local function port(actor,wire)
+          return {actor=actor,wire=wire,type=S,type_id="String"}
+        end
+        assert(kernel.begin_run({run_id="typed-atomic",run_name="typed-atomic",session_id="s"}).ok)
+        assert(kernel.start("typed-atomic",{
+          types={String=S},actors={
+            {id="result",factory="nefor.factory.stub",type_arguments={},params={},
+             input=port("result","stub.In"),outputs={port("result","stub.Out")},routes={}}
+          },messages={},kills={},nodes={{path={"result"},members={"result"}}},
+          result={from=port("result","stub.Out")}
+        }).ok)
+        local rejected={
+          types={Rejected={kind="primitive",name="Rejected"}},actors={
+            {id="candidate",factory="nefor.factory.stub",type_arguments={},params={},
+             input=port("candidate","stub.In"),outputs={port("candidate","stub.Out")},routes={}}
+          },messages={{to="missing",semantic_type=S,semantic_type_id="String",
+            content={kind="stub.In",value="no"}}},kills={},
+          nodes={{path={"candidate"},members={"candidate"}}}
+        }
+        local outcome=kernel.apply("typed-atomic",rejected)
+        assert(not outcome.ok)
+        local ctx=kernel.context("typed-atomic")
+        assert(ctx.router.type_declarations.Rejected==nil)
+        assert(rejected.actors[1].semantic_strict==nil)
+        assert(ctx.inventory.state_of("candidate")=="never-existed")
+        local accepted=kernel.apply("typed-atomic",{
+          types={Accepted={kind="primitive",name="Accepted"}},
+          actors={},messages={},kills={},nodes={}
+        })
+        assert(accepted.ok,accepted.error)
+        assert(ctx.router.type_declarations.Accepted.name=="Accepted")
+        assert(ctx.router.type_declarations.Rejected==nil)
+        "#);
+}
+
+#[test]
 fn killed_generation_cannot_route_or_settle() {
     run(r#"
         assert(kernel.begin_run({run_id="stale", run_name="stale", session_id="s"}).ok)
@@ -167,7 +220,7 @@ fn killed_generation_cannot_route_or_settle() {
         }).ok)
         local ctx = kernel.context("stale")
         local stale_emit = ctx.router:emitter("source")
-        assert(kernel.apply("stale", {actors={}, messages={}, kills={"source"}}).ok)
+        assert(kernel.apply("stale", {types={},actors={},messages={},nodes={},kills={"source"}}).ok)
         stale_emit({kind="stub.Out", value="late"})
         assert(kernel.take_run_complete("stale") == nil)
         local ignored = 0

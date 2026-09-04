@@ -397,7 +397,8 @@ owned copy in the run context and applies it only while constructing `llm` and
 expansion, and actors added through `mag.apply` without rewriting their
 inventory specs or consulting live catalog state.
 
-`nefor.actors.agent` and `dynamic-agent` accept one exhaustive resolver from a
+`nefor.actors.agent` and `nefor.agents.dynamic-template-with-tools` accept one
+exhaustive resolver from a
 configuration's finite model vocabulary to `AuthoredModel`, the sum of a
 concrete `ResolvedModel` and `ModelProfile`. A concrete arm uses the snapshot's
 current model, preserving the current-only behavior. An arm may instead return

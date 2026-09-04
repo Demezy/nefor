@@ -152,8 +152,10 @@ fn report_with_p90(
     artifact_hash: &str,
     workload: &str,
 ) -> Report {
-    let mut counters = OperationCounters::default();
-    counters.value_equality_visits = equality_visits;
+    let counters = OperationCounters {
+        value_equality_visits: equality_visits,
+        ..OperationCounters::default()
+    };
     Report {
         schema_version: SCHEMA_VERSION,
         identity: Some(ReportIdentity {

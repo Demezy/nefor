@@ -134,7 +134,7 @@ fn failed_file_compile_records_total_and_every_started_entry_phase() {
             &root,
             entry,
             json!({}),
-            &[root.clone()],
+            std::slice::from_ref(&root),
             &profiler,
         )
         .expect_err("fixture must fail");
@@ -180,7 +180,7 @@ fn failed_module_work_records_started_nested_phases() {
             &root,
             "main.mag",
             json!({}),
-            &[root.clone()],
+            std::slice::from_ref(&root),
             &profiler,
         )
         .expect_err("fixture must fail");

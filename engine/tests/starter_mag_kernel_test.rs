@@ -191,6 +191,24 @@ fn install_stub_nefor(lua: &Lua) -> mlua::Result<()> {
         Ok(descriptor.stable_id().to_string())
     })?;
     semantic_type.set("id", id)?;
+    let validate_declarations = lua.create_function(|lua, declarations: Value| {
+        let declarations: serde_json::Value = lua.from_value(declarations)?;
+        let declarations = declarations
+            .as_object()
+            .ok_or_else(|| mlua::Error::runtime("semantic declarations must be an object"))?;
+        for (id, descriptor) in declarations {
+            let descriptor = nefor_mag::json::concrete_type_from_json(descriptor)
+                .map_err(|error| mlua::Error::runtime(error.to_string()))?;
+            let actual = descriptor.stable_id();
+            if actual.as_str() != id {
+                return Err(mlua::Error::runtime(format!(
+                    "semantic declaration key {id} does not match descriptor identity {actual}"
+                )));
+            }
+        }
+        Ok(true)
+    })?;
+    semantic_type.set("validate_declarations", validate_declarations)?;
     let accepts = lua.create_function(|lua, (target, source): (Value, Value)| {
         let target: serde_json::Value = lua.from_value(target)?;
         let source: serde_json::Value = lua.from_value(source)?;

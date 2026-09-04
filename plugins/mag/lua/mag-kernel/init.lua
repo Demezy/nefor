@@ -215,6 +215,7 @@ end
 -- (run_id/run_name/session_id/model_snapshot) — injected, never ambient
 -- (docs/ir.md).
 local apply_with_logical_nodes
+local apply_typed_delta
 
 local function new_run_context(meta)
   run_seq = run_seq + 1
@@ -583,7 +584,7 @@ local function new_run_context(meta)
         ctx.operation_error = string.format("operation %q materialization failed: %s",
           trigger.operation.id, tostring(materialize_error))
       else
-        local outcome = apply_with_logical_nodes(ctx, delta)
+        local outcome = apply_typed_delta(ctx, delta)
         if not outcome.ok then
           ctx.operation_error = string.format("operation %q delta rejected: %s",
             trigger.operation.id, tostring(outcome.error or "unknown rejection"))
@@ -724,6 +725,7 @@ apply_with_logical_nodes = function(ctx, modification, opts)
   for key, value in pairs(opts or {}) do apply_opts[key] = value end
   apply_opts.before_execute = function()
     ctx.observer:nodes_declared(modification.nodes)
+    if opts and opts.before_execute then opts.before_execute() end
   end
   local result = ctx.observer:apply(modification, apply_opts)
   if result.ok then
@@ -735,6 +737,42 @@ apply_with_logical_nodes = function(ctx, modification, opts)
     end
   end
   return result
+end
+
+apply_typed_delta = function(ctx, mod)
+  if type(mod) ~= "table" then
+    return { ok = false, error = "a typed run requires a delta object" }
+  end
+  if mod.result ~= nil then
+    return { ok = false, error = "a delta cannot define or replace the result boundary" }
+  end
+  if type(mod.types) ~= "table" then
+    return { ok = false, error = "a typed run requires delta semantic declarations" }
+  end
+  local semantic_host = nefor and nefor.semantic_type
+  local declarations_ok, declarations_result = pcall(
+    semantic_host and semantic_host.validate_declarations, mod.types)
+  if not declarations_ok or declarations_result ~= true then
+    return { ok = false, error = "delta semantic declarations are invalid: "
+      .. tostring(declarations_result) }
+  end
+  for _, message in ipairs(mod.messages or {}) do
+    if type(message.content) == "table" and message.content.kind == "mag.ApprovalReply" then
+      local validation = type(semantic_host) == "table"
+          and type(semantic_host.validate_value) == "function"
+          and semantic_host.validate_value(message.semantic_type, message.content)
+      if type(validation) ~= "table" or validation.ok ~= true then
+        return { ok = false, error = "mag.ApprovalReply has a malformed typed payload" }
+      end
+    end
+  end
+  local prepared = plain_data.copy(mod)
+  for _, spec in ipairs(prepared.actors or {}) do spec.semantic_strict = true end
+  return apply_with_logical_nodes(ctx, prepared, {
+    before_execute = function()
+      ctx.router:register_type_declarations(prepared.types)
+    end,
+  })
 end
 
 nefor.log("mag-kernel ready")
@@ -887,32 +925,7 @@ return {
     if not ctx then
       return { ok = false, error = err }
     end
-    if type(mod) == "table" and mod.result ~= nil then
-      return { ok = false, error = "a delta cannot define or replace the result boundary" }
-    end
-    if ctx.semantic_strict and (type(mod) ~= "table" or type(mod.types) ~= "table") then
-      return { ok = false, error = "a typed run requires delta semantic declarations" }
-    end
-    if ctx.semantic_strict then
-      local semantic_host = nefor and nefor.semantic_type
-      for _, message in ipairs(mod.messages or {}) do
-        if type(message.content) == "table" and message.content.kind == "mag.ApprovalReply" then
-          local validation = type(semantic_host) == "table"
-              and type(semantic_host.validate_value) == "function"
-              and semantic_host.validate_value(message.semantic_type, message.content)
-          if type(validation) ~= "table" or validation.ok ~= true then
-            return { ok = false, error = "mag.ApprovalReply has a malformed typed payload" }
-          end
-        end
-      end
-    end
-    if type(mod) == "table" and type(mod.types) == "table" then
-      ctx.router:register_type_declarations(mod.types)
-      for _, spec in ipairs(mod.actors or {}) do
-        spec.semantic_strict = true
-      end
-    end
-    local outcome = apply_with_logical_nodes(ctx, mod)
+    local outcome = apply_typed_delta(ctx, mod)
     if outcome.ok then ctx.drain_operations() end
     return outcome
   end,

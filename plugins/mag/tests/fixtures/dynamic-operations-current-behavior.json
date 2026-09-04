@@ -16,7 +16,7 @@
       {
         "id": "expand.worker.0.llm",
         "factory": "nefor.factory.structured-output",
-        "system": "Complete this task: first",
+        "system": "Complete this task: repeated",
         "dynamic": null
       },
       {
@@ -36,7 +36,7 @@
         "factory": "nefor.factory.dynamic-index",
         "system": null,
         "dynamic": {
-          "collection": "oracle",
+          "collection": "<runtime>",
           "index": 0
         }
       }
@@ -200,18 +200,51 @@
       "terminal_status": "completed",
       "terminal_variant": "nefor.contracts.AgentError"
     },
-    "lifecycle_subsequence": [
+    "actor_killed_before_terminal_result": false,
+    "application_trace": [
       "mag.run_started",
       "mag.nodes_declared",
       "mag.actor_spawned",
-      "mag.actor_ready",
-      "mag.actor_busy",
-      "mag.actor_idle",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "conversation.provider.invoke.request",
       "mag.modification_applied",
+      "mag.nodes_declared",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "conversation.provider.invoke.request",
+      "mag.modification_applied",
+      "mag.nodes_declared",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
+      "conversation.provider.invoke.request",
+      "mag.modification_applied",
+      "conversation.provider.invoke.request",
       "mag.run_complete",
       "mag.run_result"
-    ],
-    "actor_killed_before_terminal_result": false
+    ]
   },
   "item_delta_one": {
     "actors": [
@@ -224,7 +257,7 @@
       {
         "id": "expand.worker.1.llm",
         "factory": "nefor.factory.structured-output",
-        "system": "Complete this task: second",
+        "system": "Complete this task: repeated",
         "dynamic": null
       },
       {
@@ -244,7 +277,7 @@
         "factory": "nefor.factory.dynamic-index",
         "system": null,
         "dynamic": {
-          "collection": "oracle",
+          "collection": "<runtime>",
           "index": 1
         }
       }

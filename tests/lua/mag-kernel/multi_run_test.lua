@@ -163,13 +163,15 @@ assert_eq(#by_kind(a_wire, "mag.modification_applied"), 1,
 assert_eq(by_kind(a_wire, "mag.modification_applied")[1].run_id, "run-A",
   "modification_applied carries run_id")
 
+local string_type = { kind = "primitive", name = "String" }
+local delta_types = { [nefor.semantic_type.id(string_type)] = string_type }
 local duplicate_node = kernel.apply("run-A", {
-  actors = {}, messages = {}, kills = {},
+  types = delta_types, actors = {}, messages = {}, kills = {},
   nodes = { { path = { "agent" }, members = {} } },
 })
 assert_true(not duplicate_node.ok, "a duplicate full logical path rejects")
 assert_true(tostring(duplicate_node.error):find("duplicate logical node path", 1, true) ~= nil,
-  "duplicate path rejection is precise")
+  "duplicate path rejection is precise: " .. tostring(duplicate_node.error))
 local duplicate_wire = drain_emitted()
 assert_eq(#by_kind(duplicate_wire, "mag.nodes_declared"), 0,
   "a rejected hierarchy is never published")
@@ -237,7 +239,9 @@ local c_wire = launch("run-C", "s1")
 local c_invoke = the_invoke(c_wire, "run-C")
 
 -- Kill run-A's agent (mid-flight: it holds an open provider request).
-local applied = kernel.apply("run-A", { kills = { "agent" } })
+local applied = kernel.apply("run-A", {
+  types = delta_types, actors = {}, messages = {}, nodes = {}, kills = { "agent" },
+})
 assert_true(applied.ok, "kill applies to run-A")
 local a_kill_wire = drain_emitted()
 local a_killed = by_kind(a_kill_wire, "mag.actor_killed")

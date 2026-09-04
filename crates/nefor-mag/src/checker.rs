@@ -1501,6 +1501,7 @@ fn compile_block_in(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_checked_candidate(
     env: &Env,
     outer: &[CheckedScope],

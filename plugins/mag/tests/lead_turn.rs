@@ -28,6 +28,7 @@ use std::time::Duration;
 
 use nefor_protocol::{Body, Envelope, PluginName, PluginOutgoing, SystemBody, Timestamp};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::time::timeout;
@@ -64,6 +65,19 @@ fn module_roots() -> [PathBuf; 2] {
 
 fn kernel_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lua/mag-kernel/init.lua")
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("create copied module directory");
+    for entry in std::fs::read_dir(from).expect("read module directory") {
+        let entry = entry.expect("read module entry");
+        let destination = to.join(entry.file_name());
+        if entry.file_type().expect("read module entry type").is_dir() {
+            copy_tree(&entry.path(), &destination);
+        } else {
+            std::fs::copy(entry.path(), destination).expect("copy module file");
+        }
+    }
 }
 
 fn assert_typed_result(result: &Map<String, Value>) {
@@ -713,6 +727,19 @@ async fn load_dynamic_program<R: AsyncBufReadExt + Unpin>(
     .await;
     let loaded = next_event_of_kind(reader, "mag.loaded").await;
     let fixture = dynamic_behavior_fixture();
+    let source = fixture["identity"]["source"]
+        .as_str()
+        .expect("fixture source path");
+    let source_bytes = std::fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(source),
+    )
+    .expect("read dynamic behavior source");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(source_bytes)),
+        fixture["identity"]["source_sha256"]
+    );
     assert_eq!(loaded["in_reply_to"], load_id);
     assert_dynamic_program_envelope(&loaded["artifact"]);
     assert_eq!(
@@ -732,10 +759,12 @@ async fn next_provider_request_recording<R: AsyncBufReadExt + Unpin>(
     reader: &mut R,
     provider: &str,
     trace: &mut Vec<String>,
+    events: &mut Vec<Value>,
 ) -> (Map<String, Value>, Vec<Value>) {
     let mut facts = Vec::new();
     loop {
         let body = next_event(reader, "conversation.provider.invoke.request").await;
+        events.push(Value::Object(body.clone()));
         let kind = body
             .get("kind")
             .and_then(Value::as_str)
@@ -762,9 +791,11 @@ async fn next_event_of_kind_recording<R: AsyncBufReadExt + Unpin>(
     reader: &mut R,
     kind: &str,
     trace: &mut Vec<String>,
+    events: &mut Vec<Value>,
 ) -> Map<String, Value> {
     loop {
         let body = next_event(reader, kind).await;
+        events.push(Value::Object(body.clone()));
         let actual = body
             .get("kind")
             .and_then(Value::as_str)
@@ -780,16 +811,97 @@ async fn next_event_of_kind_recording<R: AsyncBufReadExt + Unpin>(
     }
 }
 
-fn assert_ordered_subsequence(trace: &[String], expected: &[Value]) {
-    let mut cursor = 0;
-    for expected_kind in expected {
-        let expected_kind = expected_kind.as_str().expect("fixture lifecycle kind");
-        let offset = trace[cursor..]
+fn assert_materialized_item(events: &[Value], expected: &Value, index: usize) {
+    let expected_actors = expected["actors"].as_array().expect("fixture actors");
+    for actor in expected_actors {
+        let id = actor["id"].as_str().expect("fixture actor id");
+        let spawned = events
             .iter()
-            .position(|kind| kind == expected_kind)
-            .unwrap_or_else(|| panic!("missing {expected_kind:?} after {cursor} in {trace:?}"));
-        cursor += offset + 1;
+            .find(|event| event["kind"] == "mag.actor_spawned" && event["id"].as_str() == Some(id))
+            .unwrap_or_else(|| panic!("missing materialized actor {id}"));
+        assert_eq!(spawned["factory"], actor["factory"]);
+        assert_eq!(spawned["spec"]["params"]["system"], actor["system"]);
+        let dynamic = if actor["dynamic"].is_object() {
+            json!({
+                "collection": "<runtime>",
+                "index": spawned["spec"]["params"]["index"],
+            })
+        } else {
+            Value::Null
+        };
+        assert_eq!(dynamic, actor["dynamic"]);
     }
+
+    for route in expected["routes"].as_array().expect("fixture routes") {
+        let from = route["from"].as_str().expect("route source");
+        let from_wire = route["from_wire"].as_str().expect("route source wire");
+        let to = route["to"].as_str().expect("route destination");
+        let to_wire = route["to_wire"].as_str().expect("route destination wire");
+        let source = events
+            .iter()
+            .find(|event| event["kind"] == "mag.actor_spawned" && event["id"] == from)
+            .expect("route source actor");
+        let destination = events
+            .iter()
+            .find(|event| event["kind"] == "mag.actor_spawned" && event["id"] == to)
+            .expect("route destination actor");
+        let stored = source["spec"]["routes"][from_wire]
+            .as_array()
+            .expect("source routes")
+            .iter()
+            .find(|stored| stored["actor"] == to && stored["wire"] == to_wire)
+            .expect("materialized route");
+        assert_eq!(stored["product_position"], route["product_position"]);
+        let source_port = source["spec"]["outputs"]
+            .as_array()
+            .expect("source outputs")
+            .iter()
+            .find(|port| port["wire"] == from_wire)
+            .expect("source route port");
+        let destination_port = &destination["spec"]["input"];
+        let canonical: Value = serde_json::from_str(
+            stored["edge_id"]
+                .as_str()
+                .expect("canonical edge id string"),
+        )
+        .expect("canonical edge id JSON");
+        assert_eq!(
+            canonical,
+            json!({
+                "from": source_port,
+                "to": destination_port,
+            })
+        );
+    }
+
+    let root = format!("expand-{index}");
+    let nodes = events
+        .iter()
+        .filter(|event| event["kind"] == "mag.nodes_declared")
+        .flat_map(|event| event["nodes"].as_array().into_iter().flatten())
+        .filter(|node| node["path"][0].as_str() == Some(root.as_str()))
+        .cloned()
+        .map(|mut node| {
+            if node["members"].as_object().is_some_and(Map::is_empty) {
+                node["members"] = json!([]);
+            }
+            node
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(nodes, *expected["nodes"].as_array().expect("fixture nodes"));
+
+    let message = &expected["messages"][0];
+    let target = message["to"].as_str().expect("fixture message target");
+    assert!(events
+        .iter()
+        .any(|event| { event["kind"] == "mag.firing" && event["id"].as_str() == Some(target) }));
+    let target_actor = events
+        .iter()
+        .find(|event| event["kind"] == "mag.actor_spawned" && event["id"] == target)
+        .expect("message target actor");
+    assert_eq!(target_actor["spec"]["input"]["wire"], message["kind"]);
+    assert_eq!(expected["kills"], json!([]));
+    assert!(expected["result"].is_null());
 }
 
 #[tokio::test]
@@ -835,6 +947,7 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
     );
     let fixture = dynamic_behavior_fixture();
     let mut lifecycle_trace = Vec::new();
+    let mut observed_events = Vec::new();
     send_event(
         &mut stdin,
         obj(json!({"kind":"mag.execute","id":"dynamic-exec",
@@ -844,18 +957,33 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
     )
     .await;
 
-    let (planner, _) =
-        next_provider_request_recording(&mut reader, "mock-provider", &mut lifecycle_trace).await;
+    let (planner, _) = next_provider_request_recording(
+        &mut reader,
+        "mock-provider",
+        &mut lifecycle_trace,
+        &mut observed_events,
+    )
+    .await;
     assert_eq!(request_actor(&planner), "planner.llm");
     assert_snapshot(&planner);
     let planner_id = planner["request_id"].as_str().unwrap().to_owned();
     complete_chat(&mut reader, &mut stdin, &planner_id,
       r#"{"value":[{"task":"same","description":"repeated","dependent_tasks":[]},{"task":"same","description":"repeated","dependent_tasks":[] }]}"#).await;
 
-    let (first, first_facts) =
-        next_provider_request_recording(&mut reader, "mock-provider", &mut lifecycle_trace).await;
-    let (second, second_facts) =
-        next_provider_request_recording(&mut reader, "mock-provider", &mut lifecycle_trace).await;
+    let (first, first_facts) = next_provider_request_recording(
+        &mut reader,
+        "mock-provider",
+        &mut lifecycle_trace,
+        &mut observed_events,
+    )
+    .await;
+    let (second, second_facts) = next_provider_request_recording(
+        &mut reader,
+        "mock-provider",
+        &mut lifecycle_trace,
+        &mut observed_events,
+    )
+    .await;
     let expected_workers = fixture["scenarios"]["multiple"]["worker_ids"]
         .as_array()
         .expect("worker ids fixture");
@@ -909,8 +1037,13 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
     )
     .await;
 
-    let (summary_create, summary_facts) =
-        next_provider_request_recording(&mut reader, "mock-provider", &mut lifecycle_trace).await;
+    let (summary_create, summary_facts) = next_provider_request_recording(
+        &mut reader,
+        "mock-provider",
+        &mut lifecycle_trace,
+        &mut observed_events,
+    )
+    .await;
     assert_eq!(request_actor(&summary_create), "summarizer.llm");
     assert_snapshot(&summary_create);
     assert_eq!(
@@ -966,8 +1099,13 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         ),
     )
     .await;
-    let result =
-        next_event_of_kind_recording(&mut reader, "mag.run_result", &mut lifecycle_trace).await;
+    let result = next_event_of_kind_recording(
+        &mut reader,
+        "mag.run_result",
+        &mut lifecycle_trace,
+        &mut observed_events,
+    )
+    .await;
     assert_eq!(
         result["status"], fixture["scenarios"]["multiple"]["terminal_status"],
         "{result:?}"
@@ -977,11 +1115,32 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         result["result"]["value"]["content"],
         fixture["scenarios"]["multiple"]["terminal_content"]
     );
-    assert_ordered_subsequence(
-        &lifecycle_trace,
-        fixture["scenarios"]["lifecycle_subsequence"]
+    assert_materialized_item(&observed_events, &fixture["item_delta_zero"], 0);
+    assert_materialized_item(&observed_events, &fixture["item_delta_one"], 1);
+    let application_trace = lifecycle_trace
+        .iter()
+        .filter(|kind| {
+            matches!(
+                kind.as_str(),
+                "mag.run_started"
+                    | "mag.nodes_declared"
+                    | "mag.actor_spawned"
+                    | "mag.modification_applied"
+                    | "conversation.provider.invoke.request"
+                    | "mag.run_complete"
+                    | "mag.run_result"
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        application_trace,
+        fixture["scenarios"]["application_trace"]
             .as_array()
-            .expect("lifecycle fixture"),
+            .expect("application trace fixture")
+            .iter()
+            .map(|kind| kind.as_str().expect("application trace kind").to_owned())
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         lifecycle_trace
@@ -1137,6 +1296,102 @@ async fn dynamic_tasks_one_runs_one_real_worker_and_static_summarizer() {
         fixture["scenarios"]["one"]["terminal_content"]
     );
     shutdown(stdin, child).await;
+}
+
+#[tokio::test]
+async fn retained_dynamic_program_survives_source_disposal_and_process_restart() {
+    let root = std::env::temp_dir().join(format!("mag-retained-program-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+    let source = root.join("source/agentic-loop");
+    std::fs::create_dir_all(&source).expect("create temporary source");
+    std::fs::copy(
+        starter_dir().join("agentic-loop/dynamic-tasks.mag"),
+        source.join("dynamic-tasks.mag"),
+    )
+    .expect("copy operation-bearing source");
+    let core_modules = root.join("modules/core");
+    let config_modules = root.join("modules/config");
+    copy_tree(&module_roots()[0], &core_modules);
+    copy_tree(&module_roots()[1], &config_modules);
+    let data_dir = root.join("data");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+
+    let mut compiler_process = spawn_mag(&data_dir).await;
+    let mut compiler_stdin = compiler_process.stdin.take().expect("compiler stdin");
+    let mut compiler_reader =
+        BufReader::new(compiler_process.stdout.take().expect("compiler stdout"));
+    handshake(&mut compiler_reader, &mut compiler_stdin).await;
+    send_event(
+        &mut compiler_stdin,
+        obj(json!({
+            "kind":"mag.load", "id":"retained-load",
+            "source_dir":root.join("source").to_string_lossy(),
+            "module_roots":[core_modules.to_string_lossy(), config_modules.to_string_lossy()],
+            "entry":"agentic-loop/dynamic-tasks.mag"
+        })),
+    )
+    .await;
+    let loaded = next_event_of_kind(&mut compiler_reader, "mag.loaded").await;
+    let artifact = loaded["artifact"].clone();
+    assert_dynamic_program_envelope(&artifact);
+    shutdown(compiler_stdin, compiler_process).await;
+
+    std::fs::remove_dir_all(root.join("source")).expect("dispose source tree");
+    std::fs::remove_dir_all(root.join("modules")).expect("dispose module roots");
+
+    let mut runtime_process = spawn_mag(&data_dir).await;
+    let mut stdin = runtime_process.stdin.take().expect("runtime stdin");
+    let mut reader = BufReader::new(runtime_process.stdout.take().expect("runtime stdout"));
+    handshake(&mut reader, &mut stdin).await;
+    for run_id in ["retained-a", "retained-b"] {
+        send_event(
+            &mut stdin,
+            obj(json!({
+                "kind":"mag.execute", "id":format!("{run_id}-exec"), "run_id":run_id,
+                "run_name":"retained", "session_id":SESSION_ID, "principal":"lead",
+                "conversation_id":CONVERSATION_ID, "artifact":artifact.clone()
+            })),
+        )
+        .await;
+    }
+    let planner_a = next_provider_request(&mut reader, "mock-provider").await;
+    let planner_b = next_provider_request(&mut reader, "mock-provider").await;
+    assert_eq!(request_actor(&planner_a), "planner.llm");
+    assert_eq!(request_actor(&planner_b), "planner.llm");
+    for planner in [&planner_a, &planner_b] {
+        complete_chat(
+            &mut reader,
+            &mut stdin,
+            planner["request_id"].as_str().expect("planner request id"),
+            r#"{"value":[]}"#,
+        )
+        .await;
+    }
+    let summary_a = next_provider_request(&mut reader, "mock-provider").await;
+    let summary_b = next_provider_request(&mut reader, "mock-provider").await;
+    assert_eq!(request_actor(&summary_a), "summarizer.llm");
+    assert_eq!(request_actor(&summary_b), "summarizer.llm");
+    for (summary, content) in [(&summary_a, "first"), (&summary_b, "second")] {
+        complete_chat(
+            &mut reader,
+            &mut stdin,
+            summary["request_id"].as_str().expect("summary request id"),
+            &format!(r#"{{"content":"{content}"}}"#),
+        )
+        .await;
+    }
+    let first = next_event_of_kind(&mut reader, "mag.run_result").await;
+    let second = next_event_of_kind(&mut reader, "mag.run_result").await;
+    let mut run_ids = [
+        first["run_id"].as_str().expect("first run id"),
+        second["run_id"].as_str().expect("second run id"),
+    ];
+    run_ids.sort();
+    assert_eq!(run_ids, ["retained-a", "retained-b"]);
+    assert_eq!(first["status"], "completed");
+    assert_eq!(second["status"], "completed");
+    shutdown(stdin, runtime_process).await;
+    std::fs::remove_dir_all(root).ok();
 }
 
 #[tokio::test]
