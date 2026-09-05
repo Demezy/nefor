@@ -104,6 +104,37 @@ fn seeded_hit_is_exact_bytes_and_zero_compiler_work_after_unrelated_edits() {
 }
 
 #[test]
+fn deeply_nested_successful_artifacts_hit_without_compiler_work() {
+    let mut f = Fixture::new();
+    f.options.limits.expression_depth = 512;
+    let depth = 140;
+    let mut source = String::from("(let v0 0)\n");
+    for level in 1..=depth {
+        source.push_str(&format!("(let v{level} [v{}])\n", level - 1));
+    }
+    source.push_str(&format!("(artifact v{depth})"));
+    f.write("main.mag", &source);
+    let population = f.run(b"A");
+    status(&population, "miss");
+    let expected = format!("{}0{}\n", "[".repeat(depth), "]".repeat(depth)).into_bytes();
+    assert_eq!(population.bytes, expected);
+    assert_eq!(f.records().len(), 1);
+    for unrelated_edit in [false, true] {
+        if unrelated_edit {
+            f.write("unrelated.mag", "bad syntax @");
+        }
+        let profiler = CompileProfiler::new();
+        let hit = build_with_identity(f.request(), 1, CachePolicy::Use, Some(&profiler), || {
+            Ok(CompilerBuildId::from_executable_bytes(b"A"))
+        })
+        .unwrap();
+        status(&hit, "hit");
+        assert_eq!(hit.bytes, expected);
+        assert_eq!(profiler.snapshot(), CompileProfile::default());
+    }
+}
+
+#[test]
 fn every_observed_input_invalidates_and_source_a_b_a_survives() {
     for (path, changed) in [
         ("main.mag", "(artifact 2)"),
@@ -243,7 +274,17 @@ fn bypass_and_unavailable_identity_never_touch_storage_or_observe() {
 
 #[test]
 fn corruption_and_interrupted_records_are_silent_misses() {
-    for damage in 0..11 {
+    let invalid_envelopes: &[&[u8]] = &[
+        b"[\n1]\n",
+        b"[1,]\n",
+        b"{\"a\":}\n",
+        b"0 true\n",
+        b"\"\\x\"\n",
+        b"\"\xff\"\n",
+        b"[[0]\n",
+        b"0",
+    ];
+    for damage in 0..10 + invalid_envelopes.len() {
         let f = Fixture::new();
         let expected = f.run(b"A").bytes;
         let record = f.records().pop().unwrap();
@@ -266,8 +307,8 @@ fn corruption_and_interrupted_records_are_silent_misses() {
                     8 => provenance["request"]["inputs"] = json!({"changed":true}),
                     9 => provenance["artifact_length"] = json!(0),
                     _ => {
-                        // Even internally consistent non-line output cannot be replayed.
-                        let bytes = b"[\n1]\n";
+                        // Valid hashes and lengths cannot admit malformed JSON-line envelopes.
+                        let bytes = invalid_envelopes[damage - 10];
                         fs::write(record.join("artifact.json"), bytes).unwrap();
                         provenance["artifact_length"] = json!(bytes.len());
                         provenance["artifact_sha256"] = json!(digest(bytes));

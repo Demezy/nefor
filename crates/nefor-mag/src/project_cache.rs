@@ -267,12 +267,21 @@ fn load_record(path: &Path, identity: &Identity) -> Option<Vec<u8>> {
         || digest(&artifact) != provenance.artifact_sha256
         || !artifact.ends_with(b"\n")
         || artifact[..artifact.len() - 1].contains(&b'\n')
-        || serde_json::from_slice::<serde_json::Value>(&artifact).is_err()
+        || !valid_json(&artifact)
         || !provenance.observations.validate()
     {
         return None;
     }
     Some(artifact)
+}
+
+fn valid_json(bytes: &[u8]) -> bool {
+    // IgnoredAny validates JSON syntax with serde_json's iterative skip parser,
+    // without constructing a Value or imposing its deserialization depth limit.
+    // Validate UTF-8 separately because skipped strings need not be decoded.
+    std::str::from_utf8(bytes)
+        .ok()
+        .is_some_and(|text| serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok())
 }
 
 struct TemporaryDirectory(PathBuf);
