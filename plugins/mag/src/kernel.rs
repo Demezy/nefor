@@ -241,7 +241,7 @@ impl LuaHost {
     /// and emit `mag.run_started`. Run identity is injected, never ambient
     /// (docs/ir.md). The outcome carries the stale run ids the kernel reaped
     /// at the session boundary; a duplicate live `run_id` rejects.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "full-tests"))]
     pub fn begin_run(
         &self,
         run_id: &str,

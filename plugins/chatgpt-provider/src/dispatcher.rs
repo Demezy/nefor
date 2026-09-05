@@ -39,8 +39,8 @@ use crate::responses::request::{
 use crate::responses::stream::{ResponseEvent, ResponseStream};
 use crate::responses::{ModelEntry, ResponsesClient, ResponsesTurnContext, UsageSnapshot};
 use crate::state::{
-    ChatId, ChatStats, Chats, ChatsError, HistoryEntry, Message, MessageRestore, ServiceTier,
-    ToolCall, ToolCallFunction, TurnToken,
+    ChatConfiguration, ChatId, ChatStats, Chats, ChatsError, HistoryEntry, Message, MessageRestore,
+    ServiceTier, ToolCall, ToolCallFunction, TurnToken,
 };
 use crate::translator;
 use nefor_plugin_sdk::TransportError;
@@ -2064,12 +2064,15 @@ async fn handle_chat_create(
     match chats
         .recreate(
             chat_id.clone(),
-            model,
-            system,
-            tool_overrides,
-            tool_allowlist,
-            reasoning_effort,
-            provider_options,
+            ChatConfiguration {
+                model,
+                conversation_id: None,
+                system,
+                tool_overrides,
+                tool_allowlist,
+                reasoning_effort,
+                service_tier: provider_options,
+            },
         )
         .await
     {
@@ -3725,7 +3728,7 @@ fn spawn_turn(
                                                 arguments.clone(),
                                             );
                                         } else {
-                                            tool_buf.on_item_done(Some(&item_id), &arguments);
+                                            tool_buf.on_item_done(Some(&item_id), arguments);
                                         }
                                     }
                                     // `output_item.done` events are emitted in response output

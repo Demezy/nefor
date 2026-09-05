@@ -650,6 +650,19 @@ pub fn validate_fn_input(
     }
 }
 
+fn extract_artifact(value: Value, source: &str) -> Result<serde_json::Value, MagError> {
+    match value {
+        Value::Artifact(artifact) => Ok(artifact),
+        Value::Typed(inner, types::MagType::Artifact) => {
+            extract_artifact(inner.as_ref().clone(), source)
+        }
+        other => Err(MagError::Eval(format!(
+            "{source} must return Artifact, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod loaded_program_lifetime_tests {
     use super::*;
@@ -801,18 +814,5 @@ mod loaded_program_lifetime_tests {
         ));
         std::fs::remove_dir_all(first).unwrap();
         std::fs::remove_dir_all(second).unwrap();
-    }
-}
-
-fn extract_artifact(value: Value, source: &str) -> Result<serde_json::Value, MagError> {
-    match value {
-        Value::Artifact(artifact) => Ok(artifact),
-        Value::Typed(inner, types::MagType::Artifact) => {
-            extract_artifact(inner.as_ref().clone(), source)
-        }
-        other => Err(MagError::Eval(format!(
-            "{source} must return Artifact, got {}",
-            other.type_name()
-        ))),
     }
 }

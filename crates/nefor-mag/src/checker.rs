@@ -223,7 +223,7 @@ pub fn check_call(
     for index in order {
         let actual = &actual_types[index];
         let expected = substitute(&function.param_types[index], &subst);
-        compatible(env, &actual, &expected, &mut subst).map_err(MagError::Type)?;
+        compatible(env, actual, &expected, &mut subst).map_err(MagError::Type)?;
     }
     Ok((substitute(&function.return_type, &subst), subst))
 }
@@ -509,7 +509,7 @@ fn infer_form(env: &Env, locals: &mut Locals, items: &[Expr]) -> Result<MagType,
     for index in order {
         let actual = &argument_types[index];
         let expected = substitute(&params[index], &subst);
-        compatible(env, &actual, &expected, &mut subst).map_err(MagError::Type)?;
+        compatible(env, actual, &expected, &mut subst).map_err(MagError::Type)?;
     }
     Ok(substitute(&result, &subst))
 }
@@ -528,7 +528,7 @@ fn infer_match(env: &Env, locals: &Locals, items: &[Expr]) -> Result<MagType, Ma
         }
         let constructor_type = crate::eval::parse_type(env, constructor_expression, &vars)?;
         let concrete = nominal_constructor(env, &constructor_type)?;
-        if !constructors.iter().any(|accepted| *accepted == concrete) {
+        if !constructors.contains(&concrete) {
             return Err(MagError::Type(format!(
                 "constructor {constructor_type} is not an arm of {value_type}"
             )));
@@ -1381,10 +1381,12 @@ fn compile_block_in(
                 outer,
                 &mut current,
                 name,
-                *id,
-                ty,
-                function_type_params(initializer)?,
-                false,
+                CheckedCandidate {
+                    id: *id,
+                    ty,
+                    generic_binders: function_type_params(initializer)?,
+                    contributes_type_vars: false,
+                },
             )?;
         } else {
             pending.push((*name, *initializer, *id));
@@ -1406,10 +1408,12 @@ fn compile_block_in(
                         outer,
                         &mut current,
                         name,
-                        id,
-                        ty,
-                        vec![],
-                        false,
+                        CheckedCandidate {
+                            id,
+                            ty,
+                            generic_binders: vec![],
+                            contributes_type_vars: false,
+                        },
                     )?;
                     progressed = true;
                 }
@@ -1480,31 +1484,21 @@ fn insert_checked_candidate(
     outer: &[CheckedScope],
     current: &mut CheckedScope,
     name: &str,
-    id: BindingId,
-    ty: MagType,
-    generic_binders: Vec<String>,
-    contributes_type_vars: bool,
+    candidate: CheckedCandidate,
 ) -> Result<(), MagError> {
-    let canonical = canonical_type(&ty);
+    let canonical = canonical_type(&candidate.ty);
     if visible_candidates(env, outer, current, name)
         .iter()
         .any(|candidate| canonical_type(&candidate.ty) == canonical)
-        || collides_with_builtin(env, name, &ty)
+        || collides_with_builtin(env, name, &candidate.ty)
     {
         return Err(MagError::Type(format!(
-            "duplicate visible overload {name}: {ty}"
+            "duplicate visible overload {name}: {}",
+            candidate.ty
         )));
     }
-    env.set_binding_type(id, ty.clone());
-    current
-        .entry(name.to_owned())
-        .or_default()
-        .push(CheckedCandidate {
-            id,
-            ty,
-            generic_binders,
-            contributes_type_vars,
-        });
+    env.set_binding_type(candidate.id, candidate.ty.clone());
+    current.entry(name.to_owned()).or_default().push(candidate);
     Ok(())
 }
 
@@ -1906,7 +1900,7 @@ fn compile_form(
             .map_err(MagError::Type)?;
         args.push(argument);
     }
-    let result = substitute(&result, &substitution);
+    let result = substitute(result, &substitution);
     if let Some(expected) = expected {
         let bindable = internal_type_variables(&callee.ty);
         constrain_result(env, &result, expected, &mut substitution, &bindable)?;
@@ -1938,7 +1932,7 @@ fn compile_match(
         let (constructor_expression, binding_name, body_expression) = match_arm(arm_expression)?;
         let constructor_type = parse_checked_type(env, scopes, constructor_expression)?;
         let constructor = nominal_constructor(env, &constructor_type)?;
-        if !constructors.iter().any(|accepted| *accepted == constructor) {
+        if !constructors.contains(&constructor) {
             return Err(MagError::Type(format!(
                 "constructor {constructor_type} is not an arm of {}",
                 value.ty
@@ -1957,10 +1951,12 @@ fn compile_match(
             scopes,
             &mut arm_scope,
             binding_name,
-            binding_id,
-            constructor_type.clone(),
-            vec![],
-            false,
+            CheckedCandidate {
+                id: binding_id,
+                ty: constructor_type.clone(),
+                generic_binders: vec![],
+                contributes_type_vars: false,
+            },
         )?;
         let mut arm_scopes = scopes.to_vec();
         arm_scopes.push(arm_scope);
@@ -2708,10 +2704,12 @@ fn compile_function(
             scopes,
             &mut parameter_scope,
             &parameter_name,
-            id,
-            ty.clone(),
-            vec![],
-            false,
+            CheckedCandidate {
+                id,
+                ty: ty.clone(),
+                generic_binders: vec![],
+                contributes_type_vars: false,
+            },
         )?;
         checked_params.push(CheckedParam {
             id,

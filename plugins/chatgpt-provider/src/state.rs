@@ -371,6 +371,16 @@ pub struct MessageRestore {
     pub history: Vec<HistoryEntry>,
 }
 
+pub(crate) struct ChatConfiguration {
+    pub model: Option<String>,
+    pub conversation_id: Option<String>,
+    pub system: Option<String>,
+    pub tool_overrides: Option<Vec<crate::catalog::ToolSpec>>,
+    pub tool_allowlist: Option<Vec<String>>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub service_tier: Option<ServiceTier>,
+}
+
 /// Per-slug capability bits learned from the backend's /models
 /// response. Populated by `Chats::record_model_capabilities` whenever
 /// the dispatcher fetches /models. Authoritative source for "does
@@ -518,16 +528,16 @@ impl Chats {
     /// recreate. `model` overrides the plugin default; `system` becomes
     /// the Responses-API `instructions` for every turn; the two tool
     /// fields are optional gates layered over the catalog.
-    async fn build_chat(
-        &self,
-        model: Option<String>,
-        conversation_id: Option<String>,
-        system: Option<String>,
-        tool_overrides: Option<Vec<crate::catalog::ToolSpec>>,
-        tool_allowlist: Option<Vec<String>>,
-        reasoning_effort: Option<ReasoningEffort>,
-        service_tier: Option<ServiceTier>,
-    ) -> Result<ChatState, ChatsError> {
+    async fn build_chat(&self, configuration: ChatConfiguration) -> Result<ChatState, ChatsError> {
+        let ChatConfiguration {
+            model,
+            conversation_id,
+            system,
+            tool_overrides,
+            tool_allowlist,
+            reasoning_effort,
+            service_tier,
+        } = configuration;
         let resolved_model = self.resolve_model(model).await?;
         Ok(ChatState::from_create(
             resolved_model,
@@ -552,15 +562,15 @@ impl Chats {
         reasoning_effort: Option<ReasoningEffort>,
     ) -> Result<(), ChatsError> {
         let chat = self
-            .build_chat(
+            .build_chat(ChatConfiguration {
                 model,
-                None,
+                conversation_id: None,
                 system,
                 tool_overrides,
                 tool_allowlist,
                 reasoning_effort,
-                None,
-            )
+                service_tier: None,
+            })
             .await?;
         let mut g = self.inner.lock().await;
         if g.contains_key(&id) {
@@ -574,27 +584,12 @@ impl Chats {
     /// with the same id. The agentic loop can replay or restart with a
     /// reused chat id; replacement prevents an old poisoned history from
     /// leaking into a nominally new conversation.
-    pub async fn recreate(
+    pub(crate) async fn recreate(
         &self,
         id: ChatId,
-        model: Option<String>,
-        system: Option<String>,
-        tool_overrides: Option<Vec<crate::catalog::ToolSpec>>,
-        tool_allowlist: Option<Vec<String>>,
-        reasoning_effort: Option<ReasoningEffort>,
-        service_tier: Option<ServiceTier>,
+        configuration: ChatConfiguration,
     ) -> Result<(), ChatsError> {
-        let chat = self
-            .build_chat(
-                model,
-                None,
-                system,
-                tool_overrides,
-                tool_allowlist,
-                reasoning_effort,
-                service_tier,
-            )
-            .await?;
+        let chat = self.build_chat(configuration).await?;
         let mut g = self.inner.lock().await;
         if g.insert(id.clone(), chat).is_some() {
             tracing::warn!(
@@ -606,20 +601,31 @@ impl Chats {
     }
 
     pub async fn restore_messages(&self, restore: MessageRestore) -> Result<(), ChatsError> {
+        let MessageRestore {
+            id,
+            model,
+            conversation_id,
+            system,
+            tool_overrides,
+            tool_allowlist,
+            reasoning_effort,
+            service_tier,
+            history,
+        } = restore;
         let mut chat = self
-            .build_chat(
-                restore.model,
-                restore.conversation_id,
-                restore.system,
-                restore.tool_overrides,
-                restore.tool_allowlist,
-                restore.reasoning_effort,
-                restore.service_tier,
-            )
+            .build_chat(ChatConfiguration {
+                model,
+                conversation_id,
+                system,
+                tool_overrides,
+                tool_allowlist,
+                reasoning_effort,
+                service_tier,
+            })
             .await?;
-        chat.history = repair_tool_call_history(restore.history);
+        chat.history = repair_tool_call_history(history);
         let mut g = self.inner.lock().await;
-        g.insert(restore.id, chat);
+        g.insert(id, chat);
         Ok(())
     }
 
@@ -1092,12 +1098,15 @@ mod tests {
 
         c.recreate(
             id.clone(),
-            Some("new-model".into()),
-            Some("new".into()),
-            None,
-            None,
-            None,
-            Some(ServiceTier::Fast),
+            ChatConfiguration {
+                model: Some("new-model".into()),
+                conversation_id: None,
+                system: Some("new".into()),
+                tool_overrides: None,
+                tool_allowlist: None,
+                reasoning_effort: None,
+                service_tier: Some(ServiceTier::Fast),
+            },
         )
         .await
         .expect("recreate");

@@ -1785,10 +1785,10 @@ fn resolve_resident_rules(
             nefor_mag::error::MagError::Type(format!("rule {id:?} requires an object 'on'"))
         })?;
         for field in ["actor", "wire"] {
-            if !on
+            if on
                 .get(field)
                 .and_then(Value::as_str)
-                .is_some_and(|value| !value.is_empty())
+                .is_none_or(|value| value.is_empty())
             {
                 return Err(nefor_mag::error::MagError::Type(format!(
                     "rule {id:?} requires a non-empty string on.{field}"

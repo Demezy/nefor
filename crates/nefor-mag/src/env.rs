@@ -892,20 +892,20 @@ impl Env {
                     {
                         pending_frames.extend(function.closure.iter().copied());
                     }
-                    Value::List(values) | Value::Vector(values) | Value::Product(values) => {
-                        if visited_values.insert(Arc::as_ptr(&values).cast::<()>()) {
-                            pending_values.extend(values.iter().cloned());
-                        }
+                    Value::List(values) | Value::Vector(values) | Value::Product(values)
+                        if visited_values.insert(Arc::as_ptr(&values).cast::<()>()) =>
+                    {
+                        pending_values.extend(values.iter().cloned());
                     }
-                    Value::Map(values) => {
-                        if visited_values.insert(Arc::as_ptr(&values).cast::<()>()) {
-                            pending_values.extend(values.values().cloned());
-                        }
+                    Value::Map(values)
+                        if visited_values.insert(Arc::as_ptr(&values).cast::<()>()) =>
+                    {
+                        pending_values.extend(values.values().cloned());
                     }
-                    Value::Typed(value, _) | Value::PackedValue(value) => {
-                        if visited_values.insert(Arc::as_ptr(&value).cast::<()>()) {
-                            pending_values.push(value.as_ref().clone());
-                        }
+                    Value::Typed(value, _) | Value::PackedValue(value)
+                        if visited_values.insert(Arc::as_ptr(&value).cast::<()>()) =>
+                    {
+                        pending_values.push(value.as_ref().clone());
                     }
                     _ => {}
                 }
