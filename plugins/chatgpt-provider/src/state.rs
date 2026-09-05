@@ -29,7 +29,8 @@ pub enum ServiceTier {
 impl ServiceTier {
     pub fn as_wire_value(self) -> &'static str {
         match self {
-            Self::Fast => "fast",
+            // The ChatGPT subscription backend uses Codex's wire name for Fast.
+            Self::Fast => "priority",
         }
     }
 }

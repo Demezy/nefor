@@ -646,7 +646,11 @@ async fn concurrent_direct_completions_keep_request_local_tool_allowlists() {
     assert_eq!(
         observed,
         vec![
-            ("request-alpha".into(), "alpha".into(), Some("fast".into())),
+            (
+                "request-alpha".into(),
+                "alpha".into(),
+                Some("priority".into())
+            ),
             ("request-beta".into(), "beta".into(), None)
         ]
     );
@@ -740,7 +744,7 @@ async fn chat_compaction_preserves_fast_service_tier() {
         .expect("compact chat");
 
     let request = request_rx.recv().await.expect("compaction request");
-    assert_eq!(request["service_tier"], "fast");
+    assert_eq!(request["service_tier"], "priority");
     assert_eq!(request["input"][1]["type"], "compaction_trigger");
     wait_for_kind(
         &mut out_rx,

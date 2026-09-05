@@ -48,7 +48,8 @@ Aggregate input/output usage remains separate from current request occupancy.
 
 Direct completions and compaction chats accept an optional closed
 `provider_options` object. Its only supported field is
-`service_tier: "fast"`, which is sent unchanged on Responses requests;
+`service_tier: "fast"`, which maps to `service_tier: "priority"` on Responses requests,
+matching Codex's ChatGPT subscription transport;
 omission (or an empty object) keeps the standard service tier. ChatGPT owns
 this validation and rejects unknown fields or tier values before HTTP.
 
