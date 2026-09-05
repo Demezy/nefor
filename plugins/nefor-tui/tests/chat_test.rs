@@ -2325,10 +2325,10 @@ fn workflow_sidebar_uses_compact_protected_row_grammar() {
 
     for expected in [
         " ● 02m lead (4)",
-        "   · 00s entry",
+        "   ○ 00s entry",
         "   ● 02m llm",
-        "   · 00s run-tool",
-        "   · 00s tool-result",
+        "   ○ 00s run-tool",
+        "   ○ 00s tool-result",
         " ○ 00s result",
     ] {
         assert!(
@@ -9284,7 +9284,7 @@ fn node_inspector_navigation_is_inert_and_closes_back_to_sidebar_then_prompt() {
     engine.handle_key(key("space")).expect("space");
     let out = render_str(&mut engine);
     assert!(
-        out.contains("node · worker.llm"),
+        out.contains("node · worker / llm"),
         "view should be open: {out:?}"
     );
     engine.take_emit_queue();
@@ -9308,7 +9308,7 @@ fn node_inspector_navigation_is_inert_and_closes_back_to_sidebar_then_prompt() {
     engine.handle_key(key("escape")).expect("escape");
     let out = render_str(&mut engine);
     assert!(
-        !out.contains("node · worker.llm") && out.contains("● 00s llm"),
+        !out.contains("node · worker / llm") && out.contains("● 00s llm"),
         "Esc must close the view and land back on the focused sidebar: {out:?}"
     );
     let cursor = cursor_styled_text(&out);
@@ -9319,7 +9319,7 @@ fn node_inspector_navigation_is_inert_and_closes_back_to_sidebar_then_prompt() {
     engine.handle_key(key("space")).expect("space");
     let out = render_str(&mut engine);
     assert!(
-        out.contains("node · worker.llm"),
+        out.contains("node · worker / llm"),
         "Space must re-open the view for the preserved cursor row: {out:?}"
     );
 
@@ -9620,8 +9620,8 @@ fn member_rows_tick_per_activation_and_idle_rows_do_not() {
         "a pending member must not tick:\n{snap}"
     );
 
-    // The loop hands over: llm settles idle, run-tool goes busy. Only the
-    // working member ticks; the idle one renders quietly, timer-less.
+    // The loop hands over: llm settles its logical leaf and run-tool goes
+    // busy. Only the working leaf ticks; the settled one freezes its duration.
     dispatch_event(
         &mut engine,
         json!({ "kind": "mag.actor_idle", "run_id": "loop-1", "id": "lead.llm", "busy_ms": 5000 }),
@@ -9643,8 +9643,8 @@ fn member_rows_tick_per_activation_and_idle_rows_do_not() {
         "the newly-busy member ticks its OWN activation window:\n{snap}"
     );
     assert!(
-        snap.contains("  · 00s llm") && !snap.contains(" idle "),
-        "an idle member renders without a timer:\n{snap}"
+        snap.contains("  ✓ 05s llm") && !snap.contains(" idle "),
+        "a settled logical leaf freezes its activation duration:\n{snap}"
     );
     assert!(
         !snap.contains(" working "),
@@ -10663,7 +10663,7 @@ fn tui_projects_generic_diagnostics_without_factory_specific_renderer() {
     );
     let header_row = frame
         .lines()
-        .position(|line| line.contains("node · custom.node"));
+        .position(|line| line.contains("node · custom / node"));
     let body_row = frame
         .lines()
         .position(|line| line.contains("LIVE THIRD PARTY CONTENT"));
@@ -10675,7 +10675,7 @@ fn tui_projects_generic_diagnostics_without_factory_specific_renderer() {
         "inspector must keep header above its flex body and pin the footer below it:\n{frame}"
     );
     assert!(
-        frame.contains("node · custom.node") && !frame.contains("[read-only]"),
+        frame.contains("node · custom / node") && !frame.contains("[read-only]"),
         "shared shell identity missing:\n{frame}"
     );
     assert!(
@@ -11304,7 +11304,7 @@ fn agent_group_appends_canonical_result_after_existing_activity() {
 fn process_preview_renders_streams_without_channel_labels() {
     let mut engine = Engine::new(120, 36).expect("engine");
     load_chat_scenario(&mut engine);
-    open_single_node(&mut engine, "process-exec", "process.node");
+    open_single_node(&mut engine, "nefor.factory.process-exec", "process.node");
     dispatch_event(
         &mut engine,
         json!({
@@ -11367,8 +11367,8 @@ fn agent_group_inspector_shows_its_initial_assignment() {
         .expect("open group inspector");
     let snapshot = render_snapshot(&mut engine);
     assert!(
-        snapshot.contains("group · worker") && !snapshot.contains("[read-only]"),
-        "group inspector title must not imply agent capabilities:\n{snapshot}"
+        snapshot.contains("node · worker") && !snapshot.contains("[read-only]"),
+        "logical-node inspector title must not imply agent capabilities:\n{snapshot}"
     );
     assert!(
         snapshot.contains("Initial assignment") && snapshot.contains("Implement the bounded fix."),

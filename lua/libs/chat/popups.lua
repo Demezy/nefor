@@ -566,12 +566,12 @@ local function aggregate_inspector(state, p, now_ms)
   end
   local assignment = agent_group and assignment_widget(state, p.run_id, agent_group) or nil
   if assignment then table.insert(children, 1, assignment) end
-  if single_node and tostring(single_node.factory):gsub("^nefor%.factory%.", "") == "source" then
-    children = { preview_view.node(state, p.run_id, group_members[1]) }
-  elseif is_agent then
+  if is_agent then
     local result = preview_state.agent_result(state, p.run_id, agent_group)
     local result_widget = preview_view.fact("Result", result, state.expanded_details == true)
     if result_widget then children[#children + 1] = result_widget end
+  elseif single_node then
+    children = { preview_view.node(state, p.run_id, group_members[1]) }
   end
   if #children == 0 then children[1] = tui.text { content = "No observed activity yet.", style = STYLE.status_dim } end
   local header = tui.column { gap = 0, children = {

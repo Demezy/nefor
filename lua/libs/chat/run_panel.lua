@@ -435,6 +435,17 @@ local function name_widget(name, style)
 end
 
 local function group_elapsed_ms(group, now_ms)
+  if #group.children == 0 and #group.members == 1 then
+    local node = group.members[1].node
+    local started = node.activation_started_at_ms or node.started_at_ms
+    if group.status == "running" then
+      return started and math.max(0, now_ms - started) or nil
+    end
+    local finished = node.settled_at_ms or node.finished_at_ms
+    if group.status == "done" and started and finished then
+      return math.max(0, finished - started)
+    end
+  end
   if group.status == "running" then
     return group.active_ms + math.max(0, now_ms - (group.active_since_ms or now_ms))
   end

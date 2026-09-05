@@ -23,10 +23,15 @@ function M.construct(id, params, emit)
   local instance = { id = id }
 
   function instance.deliver()
+    local value = params.value
+    if type(value) == "table" and value.type == params.value_type
+        and value.value ~= nil then
+      value = value.value
+    end
     emit({
       kind = VALUE,
       from = id,
-      value = params.value,
+      value = value,
       semantic_type_id = params.value_type,
     })
     return { status = "ok" }

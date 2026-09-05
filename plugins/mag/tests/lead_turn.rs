@@ -738,7 +738,7 @@ async fn dynamic_tasks_zero_uses_empty_collection_identity_and_reaches_summarize
     handshake(&mut reader, &mut stdin).await;
     send_event(
         &mut stdin,
-        obj(json!({"kind":"mag.load","id":"zero-load",
+        obj(json!({"kind":"mag.load","id":"zero-load","resident":true,
       "source_dir":starter_dir().to_string_lossy(),"module_roots":module_roots(),
       "entry":"agentic-loop/dynamic-tasks.mag"})),
     )
@@ -747,7 +747,7 @@ async fn dynamic_tasks_zero_uses_empty_collection_identity_and_reaches_summarize
     send_event(
         &mut stdin,
         obj(
-            json!({"kind":"mag.execute","id":"zero-exec","run_id":"zero-run",
+            json!({"kind":"mag.execute","id":"zero-exec","program_id":"zero-load","run_id":"zero-run",
       "run_name":"zero","session_id":SESSION_ID,"principal":"lead","conversation_id":CONVERSATION_ID}),
         ),
     )
@@ -812,7 +812,7 @@ async fn dynamic_tasks_one_runs_one_real_worker_and_static_summarizer() {
     handshake(&mut reader, &mut stdin).await;
     send_event(
         &mut stdin,
-        obj(json!({"kind":"mag.load","id":"one-load",
+        obj(json!({"kind":"mag.load","id":"one-load","resident":true,
       "source_dir":starter_dir().to_string_lossy(),"module_roots":module_roots(),
       "entry":"agentic-loop/dynamic-tasks.mag"})),
     )
@@ -821,7 +821,7 @@ async fn dynamic_tasks_one_runs_one_real_worker_and_static_summarizer() {
     send_event(
         &mut stdin,
         obj(
-            json!({"kind":"mag.execute","id":"one-exec","run_id":"one-run",
+            json!({"kind":"mag.execute","id":"one-exec","program_id":"one-load","run_id":"one-run",
       "run_name":"one","session_id":SESSION_ID,"principal":"lead","conversation_id":CONVERSATION_ID}),
         ),
     )
@@ -868,16 +868,18 @@ async fn dynamic_tasks_invalid_planner_spawns_nothing_and_returns_typed_error() 
     handshake(&mut reader, &mut stdin).await;
     send_event(
         &mut stdin,
-        obj(json!({"kind":"mag.load","id":"invalid-load",
+        obj(
+            json!({"kind":"mag.load","id":"invalid-load","resident":true,
       "source_dir":starter_dir().to_string_lossy(),"module_roots":module_roots(),
-      "entry":"agentic-loop/dynamic-tasks.mag"})),
+      "entry":"agentic-loop/dynamic-tasks.mag"}),
+        ),
     )
     .await;
     next_event_of_kind(&mut reader, "mag.loaded").await;
     send_event(
         &mut stdin,
         obj(
-            json!({"kind":"mag.execute","id":"invalid-exec","run_id":"invalid-run",
+            json!({"kind":"mag.execute","id":"invalid-exec","program_id":"invalid-load","run_id":"invalid-run",
       "run_name":"invalid","session_id":SESSION_ID,"principal":"lead","conversation_id":CONVERSATION_ID}),
         ),
     )
