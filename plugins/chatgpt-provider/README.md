@@ -58,6 +58,17 @@ results; session replay reconstructs the same context. Public conversation and
 display projections keep only the provider-neutral message and never expose the
 encrypted artifact.
 
+## Updating model compatibility
+
+When adding support for newly released models, refresh the authoritative Codex
+checkout and inspect the newest `rust-v*` release tag. Codex derives the
+`client_version` sent to its model catalog from the whole major, minor, and
+patch version in `codex-rs/Cargo.toml`; verify that path through
+`codex-rs/models-manager/src/lib.rs` and `manager.rs`, then copy the resulting
+version to `responses::CODEX_COMPAT_CLIENT_VERSION`. A stale value can hide
+catalog models whose `minimal_client_version` gate is newer. Run
+`just test-provider` from the repository root after updating it.
+
 ## Run
 
 Spawned by the engine over stdio. Use `chatgpt-provider login` first to
