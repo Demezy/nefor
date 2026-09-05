@@ -1,3 +1,6 @@
+mod build_request;
+mod project_config;
+
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
@@ -20,6 +23,8 @@ struct Cli {
 enum Command {
     /// Compile a MAG program to an artifact; never executes it
     Compile(CompileArgs),
+    /// Build a root-local MAG project to an artifact; never executes it
+    Build(BuildArgs),
 }
 
 #[derive(Args)]
@@ -31,6 +36,26 @@ struct CompileArgs {
     #[arg(long)]
     source_dir: PathBuf,
 
+    #[command(flatten)]
+    common: CommonArgs,
+}
+
+#[derive(Args)]
+struct BuildArgs {
+    /// Entry file relative to the selected project root
+    entry: String,
+    /// Project directory containing mag.toml (defaults to cwd; no upward search)
+    #[arg(long)]
+    project: Option<PathBuf>,
+    /// Bypass all artifact cache reads and writes
+    #[arg(long)]
+    no_cache: bool,
+    #[command(flatten)]
+    common: CommonArgs,
+}
+
+#[derive(Args)]
+struct CommonArgs {
     /// MAG module search root; repeat for multiple roots (defaults to --source-dir)
     #[arg(long = "module-root")]
     module_roots: Vec<PathBuf>,
@@ -75,19 +100,21 @@ struct Diagnostic {
 
 fn main() {
     let cli = Cli::parse();
-    match cli.command {
-        Command::Compile(args) => match compile(args) {
-            Ok((artifact, profile)) => {
-                print_json_stdout(&artifact);
-                if let Some(profile) = profile {
-                    print_json_stderr(&profile);
-                }
+    let result = match cli.command {
+        Command::Compile(args) => compile(args),
+        Command::Build(args) => build(args),
+    };
+    match result {
+        Ok((artifact, profile)) => {
+            print_json_stdout(&artifact);
+            if let Some(profile) = profile {
+                print_json_stderr(&profile);
             }
-            Err(error) => {
-                print_json_stderr(&error);
-                std::process::exit(1);
-            }
-        },
+        }
+        Err(error) => {
+            print_json_stderr(&error);
+            std::process::exit(1);
+        }
     }
 }
 
@@ -95,34 +122,27 @@ fn main() {
 fn compile(
     args: CompileArgs,
 ) -> Result<(Value, Option<nefor_mag::profile::CompileProfile>), Diagnostic> {
-    require_directory(&args.source_dir, "source_dir")?;
+    let CompileArgs {
+        entry,
+        source_dir,
+        common: args,
+    } = args;
+    require_directory(&source_dir, "source_dir")?;
     let module_roots = if args.module_roots.is_empty() {
-        vec![args.source_dir.clone()]
+        vec![source_dir.clone()]
     } else {
-        args.module_roots
+        args.module_roots.clone()
     };
     for root in &module_roots {
         require_directory(root, "module_root")?;
     }
-    let inputs = load_inputs(&args.inputs)?;
-    let defaults = nefor_mag::CompilerLimits::default();
-    let options = nefor_mag::CompilerOptions {
-        limits: nefor_mag::CompilerLimits {
-            evaluation_steps: args
-                .evaluation_step_limit
-                .unwrap_or(defaults.evaluation_steps),
-            call_depth: args.call_depth_limit.unwrap_or(defaults.call_depth),
-            expression_depth: args
-                .expression_depth_limit
-                .unwrap_or(defaults.expression_depth),
-            memoized_calls: args.memoized_call_limit.unwrap_or(defaults.memoized_calls),
-        },
-    };
+    let inputs = load_inputs(&args.inputs, None)?;
+    let options = args.options();
     let profiler = args.profile.then(nefor_mag::profile::CompileProfiler::new);
     let artifact = if let Some(profiler) = &profiler {
         nefor_mag::compile_file_with_profiler_and_options(
-            &args.source_dir,
-            &args.entry,
+            &source_dir,
+            &entry,
             inputs,
             &module_roots,
             profiler,
@@ -130,8 +150,8 @@ fn compile(
         )
     } else {
         nefor_mag::compile_file_with_inputs_and_module_roots_and_options(
-            &args.source_dir,
-            &args.entry,
+            &source_dir,
+            &entry,
             inputs,
             &module_roots,
             options,
@@ -165,7 +185,7 @@ fn require_directory(path: &Path, kind: &'static str) -> Result<(), Diagnostic> 
 }
 
 #[allow(clippy::result_large_err)]
-fn load_inputs(specs: &[String]) -> Result<Value, Diagnostic> {
+fn load_inputs(specs: &[String], root: Option<&Path>) -> Result<Value, Diagnostic> {
     let mut inputs = Map::new();
     for spec in specs {
         let (name, raw_path) = spec.split_once('=').ok_or_else(|| Diagnostic {
@@ -196,7 +216,7 @@ fn load_inputs(specs: &[String]) -> Result<Value, Diagnostic> {
                 profile: None,
             });
         }
-        let path = PathBuf::from(raw_path);
+        let path = root.map_or_else(|| PathBuf::from(raw_path), |root| root.join(raw_path));
         let source = std::fs::read_to_string(&path).map_err(|error| {
             path_diagnostic(
                 "input_read",
@@ -274,6 +294,72 @@ fn print_json_stderr<T: Serialize>(value: &T) {
         Err(error) => {
             eprintln!("mag: cannot serialize JSON diagnostic: {error}");
             std::process::exit(2);
+        }
+    }
+}
+
+impl CommonArgs {
+    fn options(&self) -> nefor_mag::CompilerOptions {
+        let defaults = nefor_mag::CompilerLimits::default();
+        nefor_mag::CompilerOptions {
+            limits: nefor_mag::CompilerLimits {
+                evaluation_steps: self
+                    .evaluation_step_limit
+                    .unwrap_or(defaults.evaluation_steps),
+                call_depth: self.call_depth_limit.unwrap_or(defaults.call_depth),
+                expression_depth: self
+                    .expression_depth_limit
+                    .unwrap_or(defaults.expression_depth),
+                memoized_calls: self.memoized_call_limit.unwrap_or(defaults.memoized_calls),
+            },
+        }
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn build(
+    args: BuildArgs,
+) -> Result<(Value, Option<nefor_mag::profile::CompileProfile>), Diagnostic> {
+    let cwd = std::env::current_dir().map_err(|error| {
+        path_diagnostic(
+            "path_unavailable",
+            Path::new("."),
+            format!("cannot get current directory: {error}"),
+        )
+    })?;
+    let request = build_request::prepare(
+        &cwd,
+        args.project.as_deref(),
+        args.entry,
+        &args.common.module_roots,
+        &args.common.inputs,
+        args.common.options(),
+    )?;
+    let policy = if args.no_cache {
+        build_request::CachePolicy::Bypass
+    } else {
+        build_request::CachePolicy::Use
+    };
+    let profiler = args
+        .common
+        .profile
+        .then(nefor_mag::profile::CompileProfiler::new);
+    // Both policies are cold until the project storage layer is integrated.
+    let artifact = match (policy, request.config_version) {
+        (build_request::CachePolicy::Use | build_request::CachePolicy::Bypass, _) => {
+            match &profiler {
+                Some(profiler) => nefor_mag::CompilerSession::new()
+                    .compile_file_with_profiler(request.as_file_request(), profiler),
+                None => nefor_mag::CompilerSession::new().compile_file(request.as_file_request()),
+            }
+        }
+    };
+    match artifact {
+        Ok(artifact) => Ok((artifact, profiler.map(|profiler| profiler.snapshot()))),
+        Err(error) => {
+            let mut diagnostic = mag_diagnostic(error);
+            diagnostic.profile = profiler.map(|profiler| profiler.snapshot());
+            Err(diagnostic)
         }
     }
 }

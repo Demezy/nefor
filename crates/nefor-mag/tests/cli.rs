@@ -288,3 +288,138 @@ fn command_surface_has_no_execute_or_run_operation() {
     assert!(stdout.contains("artifact"), "{stdout}");
     assert!(!stdout.contains("resulting graph"), "{stdout}");
 }
+
+fn build_at(cwd: &Path, extra: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_mag"))
+        .current_dir(cwd)
+        .args(["build", "main.mag"])
+        .args(extra)
+        .output()
+        .expect("run project build")
+}
+
+#[test]
+fn project_is_explicit_or_cwd_and_never_discovered_upwards() {
+    let fixture = Fixture::new("project-selection");
+    fixture.write("mag.toml", "");
+    fixture.write("main.mag", "(artifact {:a 1})");
+    fs::create_dir(fixture.root.join("child")).unwrap();
+    let output = build_at(&fixture.root, &["--no-cache"]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(output.stdout, b"{\"a\":1}\n");
+    assert!(!fixture.root.join(".mag").exists());
+    let output = build_at(&fixture.root.join("child"), &[]);
+    assert_eq!(json_stderr(&output)["code"], "project_read");
+    assert!(output.stdout.is_empty());
+    let output = build_at(&fixture.root.join("child"), &["--project", ".."]);
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"{\"a\":1}\n");
+}
+
+#[test]
+fn project_manifest_is_strict_and_input_stage() {
+    let fixture = Fixture::new("project-manifest");
+    fixture.write("main.mag", "(artifact 1)");
+    for (manifest, code) in [
+        ("version = 2", "project_version"),
+        ("targets = []", "project_config"),
+        ("module-roots = 3", "project_config"),
+        ("version = ", "project_config"),
+    ] {
+        fixture.write("mag.toml", manifest);
+        let output = build_at(&fixture.root, &[]);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(json_stderr(&output)["code"], code);
+        assert_eq!(json_stderr(&output)["stage"], "input");
+    }
+}
+
+#[test]
+fn project_roots_and_host_inputs_are_anchored_to_project() {
+    let fixture = Fixture::new("project-roots");
+    let installed = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
+    fixture.write(
+        "mag.toml",
+        &format!("version = 1\nmodule-roots = [\"lib\", {:?}]", installed),
+    );
+    fixture.write("lib/value.mag", "(let number 7)");
+    fixture.write("extra/other.mag", "(let number 8)");
+    fixture.write("local.mag", "(let number 9)");
+    fixture.write(
+        "main.mag",
+        r#"(require "value")
+(require "other")
+(require "local")
+(require "core.types")
+(require "nefor.contracts")
+(artifact [value.number other.number local.number (host-input "data" (type-tag Int))])"#,
+    );
+    fixture.write("data.json", "42");
+    fs::create_dir(fixture.root.join("child")).unwrap();
+    let output = build_at(
+        &fixture.root.join("child"),
+        &[
+            "--project",
+            "..",
+            "--module-root",
+            "extra",
+            "--input",
+            "data=data.json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"[7,8,9,42]\n");
+    let output = build_at(
+        &fixture.root,
+        &[
+            "--module-root",
+            "extra",
+            "--input",
+            "data=data.json",
+            "--input",
+            "data=data.json",
+        ],
+    );
+    assert_eq!(json_stderr(&output)["code"], "input_duplicate");
+    let output = build_at(
+        &fixture.root,
+        &["--module-root", "absent", "--input", "data=absent.json"],
+    );
+    assert_eq!(json_stderr(&output)["code"], "path_unavailable");
+    let output = build_at(&fixture.root, &["--input", "data=absent.json"]);
+    assert_eq!(json_stderr(&output)["code"], "input_read");
+}
+
+#[test]
+fn project_limits_and_profile_match_cold_compile() {
+    let fixture = Fixture::new("project-limits");
+    fixture.write("mag.toml", "");
+    fixture.write(
+        "main.mag",
+        "(let id (fn [[x Int]] -> Int x))\n(artifact [(id 1) (id 1)])",
+    );
+    for flags in [
+        vec!["--evaluation-step-limit", "1"],
+        vec!["--call-depth-limit", "0"],
+        vec!["--expression-depth-limit", "1"],
+        vec!["--memoized-call-limit", "0", "--profile"],
+    ] {
+        let build = build_at(&fixture.root, &flags);
+        let cold = run(&compile_args(&fixture.root, &flags));
+        assert_eq!(build.status.success(), cold.status.success());
+        assert_eq!(build.stdout, cold.stdout);
+        if !build.status.success() {
+            assert_eq!(json_stderr(&build), json_stderr(&cold));
+        } else {
+            assert_eq!(
+                json_stderr(&build)["counters"],
+                json_stderr(&cold)["counters"]
+            );
+        }
+    }
+}
