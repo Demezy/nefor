@@ -68,6 +68,7 @@ local function translator(name)
     end
 
     local chat_id = "conversation-compact:" .. request_id
+    local provider_options = change.compaction and change.compaction.provider_options
     local plan = {
       chat_id = chat_id,
       create = {
@@ -75,6 +76,7 @@ local function translator(name)
         chat_id = chat_id,
         conversation_id = change.conversation_id,
         model = change.model or (change.compaction and change.compaction.model),
+        provider_options = provider_options ~= nil and copy(provider_options) or nil,
       },
       messages = context.messages,
       compact = {

@@ -404,7 +404,7 @@ async fn cancel_aborts_inflight_completion_and_provider_serves_next() {
 }
 
 #[tokio::test]
-async fn invalid_direct_completion_tools_fail_once_before_http() {
+async fn invalid_direct_completion_options_fail_once_before_http() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let hits = Arc::new(AtomicUsize::new(0));
@@ -471,6 +471,43 @@ async fn invalid_direct_completion_tools_fail_once_before_http() {
                     ("request_id", Value::String(request_id.into())),
                     ("model", Value::String("test-model".into())),
                     ("tools", tools),
+                    (
+                        "messages",
+                        serde_json::json!([{"role":"user","content":"hello"}]),
+                    ),
+                ],
+            )))
+            .await
+            .expect("submit invalid completion");
+        wait_for_completion_event(&mut out_rx, request_id, "failed", Duration::from_secs(2))
+            .await
+            .expect("one correlated failure");
+    }
+
+    let invalid_provider_options = [
+        ("provider-options-null", serde_json::json!(null)),
+        ("provider-options-array", serde_json::json!([])),
+        (
+            "provider-options-null-tier",
+            serde_json::json!({"service_tier": null}),
+        ),
+        (
+            "provider-options-other-tier",
+            serde_json::json!({"service_tier": "standard"}),
+        ),
+        (
+            "provider-options-unknown-field",
+            serde_json::json!({"service_tier": "fast", "unknown": true}),
+        ),
+    ];
+    for (request_id, provider_options) in invalid_provider_options {
+        in_tx
+            .send(Ok(event_env(
+                &kind("completion.request"),
+                &[
+                    ("request_id", Value::String(request_id.into())),
+                    ("model", Value::String("test-model".into())),
+                    ("provider_options", provider_options),
                     (
                         "messages",
                         serde_json::json!([{"role":"user","content":"hello"}]),
@@ -559,20 +596,28 @@ async fn concurrent_direct_completions_keep_request_local_tool_allowlists() {
     let (in_tx, in_rx) = mpsc::channel::<Result<Envelope, TransportError>>(64);
     let loop_handle = tokio::spawn(run_dispatch_loop(ctx, in_rx));
 
-    for (request_id, tool) in [("request-alpha", "alpha"), ("request-beta", "beta")] {
+    for (request_id, tool, provider_options) in [
+        (
+            "request-alpha",
+            "alpha",
+            Some(serde_json::json!({"service_tier": "fast"})),
+        ),
+        ("request-beta", "beta", None),
+    ] {
+        let mut fields = vec![
+            ("request_id", Value::String(request_id.into())),
+            ("model", Value::String("test-model".into())),
+            ("tools", serde_json::json!([tool])),
+            (
+                "messages",
+                serde_json::json!([{"role":"user","content":request_id}]),
+            ),
+        ];
+        if let Some(provider_options) = provider_options {
+            fields.push(("provider_options", provider_options));
+        }
         in_tx
-            .send(Ok(event_env(
-                &kind("completion.request"),
-                &[
-                    ("request_id", Value::String(request_id.into())),
-                    ("model", Value::String("test-model".into())),
-                    ("tools", serde_json::json!([tool])),
-                    (
-                        "messages",
-                        serde_json::json!([{"role":"user","content":request_id}]),
-                    ),
-                ],
-            )))
+            .send(Ok(event_env(&kind("completion.request"), &fields)))
             .await
             .expect("submit completion");
     }
@@ -590,15 +635,19 @@ async fn concurrent_direct_completions_keep_request_local_tool_allowlists() {
             assert_eq!(tools.len(), 1, "each request keeps exactly its allowlist");
             let tool = tools[0]["name"].as_str().expect("tool name").to_owned();
             assert_eq!(tools[0]["parameters"]["type"], "object");
-            (prompt, tool)
+            let service_tier = request
+                .get("service_tier")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            (prompt, tool, service_tier)
         })
         .collect::<Vec<_>>();
     observed.sort();
     assert_eq!(
         observed,
         vec![
-            ("request-alpha".into(), "alpha".into()),
-            ("request-beta".into(), "beta".into())
+            ("request-alpha".into(), "alpha".into(), Some("fast".into())),
+            ("request-beta".into(), "beta".into(), None)
         ]
     );
 
@@ -615,6 +664,94 @@ async fn concurrent_direct_completions_keep_request_local_tool_allowlists() {
     drop(in_tx);
     server.await.expect("server");
     let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
+}
+
+#[tokio::test]
+async fn chat_compaction_preserves_fast_service_tier() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let (request_tx, mut request_rx) = mpsc::channel::<Value>(1);
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        request_tx
+            .send(read_request_json(&mut stream).await)
+            .await
+            .expect("capture request");
+        let body = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"sealed\"},\"output_index\":0}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("response");
+    });
+
+    let (in_tx, mut out_rx, loop_handle) = start_direct_harness(
+        format!("http://{addr}"),
+        test_responses_client(format!("http://{addr}")),
+    )
+    .await;
+    in_tx
+        .send(Ok(event_env(
+            &kind("chat.create"),
+            &[
+                ("chat_id", Value::String("compact-fast".into())),
+                ("model", Value::String("test-model".into())),
+                (
+                    "provider_options",
+                    serde_json::json!({"service_tier": "fast"}),
+                ),
+            ],
+        )))
+        .await
+        .expect("create chat");
+    wait_for_kind(&mut out_rx, &kind("chat.created"), Duration::from_secs(2))
+        .await
+        .expect("chat created");
+    in_tx
+        .send(Ok(event_env(
+            &kind("chat.append"),
+            &[
+                ("chat_id", Value::String("compact-fast".into())),
+                (
+                    "message",
+                    serde_json::json!({"role":"user","content":"remember this"}),
+                ),
+            ],
+        )))
+        .await
+        .expect("append message");
+    wait_for_kind(&mut out_rx, &kind("chat.appended"), Duration::from_secs(2))
+        .await
+        .expect("message appended");
+    in_tx
+        .send(Ok(event_env(
+            &kind("chat.compact"),
+            &[("chat_id", Value::String("compact-fast".into()))],
+        )))
+        .await
+        .expect("compact chat");
+
+    let request = request_rx.recv().await.expect("compaction request");
+    assert_eq!(request["service_tier"], "fast");
+    assert_eq!(request["input"][1]["type"], "compaction_trigger");
+    wait_for_kind(
+        &mut out_rx,
+        &kind("chat.compaction.commit"),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("compaction committed");
+
+    finish_harness(in_tx, loop_handle).await;
+    server.await.expect("server");
 }
 
 struct ScriptedSseReply {

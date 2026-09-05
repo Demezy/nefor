@@ -20,6 +20,20 @@ use tokio_util::sync::CancellationToken;
 
 use crate::responses::request::{ReasoningEffort, ResponseItem};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTier {
+    Fast,
+}
+
+impl ServiceTier {
+    pub fn as_wire_value(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // Message shape — internal history representation.
 //
@@ -252,6 +266,7 @@ enum TurnState {
 
 struct ChatState {
     model: String,
+    service_tier: Option<ServiceTier>,
     /// Durable conversation-manager identity supplied by the caller. Unlike
     /// `ChatId`, this stays stable across provider requests, so Responses
     /// routing and prompt caching remain sticky while mutable provider state
@@ -280,6 +295,7 @@ impl ChatState {
     fn new(model: String) -> Self {
         Self {
             model,
+            service_tier: None,
             conversation_id: None,
             system: None,
             history: Vec::new(),
@@ -298,6 +314,7 @@ impl ChatState {
         tool_overrides: Option<Vec<crate::catalog::ToolSpec>>,
         tool_allowlist: Option<Vec<String>>,
         reasoning_effort: Option<ReasoningEffort>,
+        service_tier: Option<ServiceTier>,
     ) -> Self {
         let mut chat = Self::new(model);
         chat.conversation_id = conversation_id;
@@ -305,6 +322,7 @@ impl ChatState {
         chat.tool_overrides = tool_overrides;
         chat.tool_allowlist = tool_allowlist;
         chat.reasoning_effort = reasoning_effort;
+        chat.service_tier = service_tier;
         chat
     }
 }
@@ -331,6 +349,7 @@ pub enum ChatsError {
 #[derive(Debug, Clone)]
 pub struct ChatSnapshot {
     pub model: String,
+    pub service_tier: Option<ServiceTier>,
     pub conversation_id: Option<String>,
     pub system: Option<String>,
     pub history: Vec<HistoryEntry>,
@@ -347,6 +366,7 @@ pub struct MessageRestore {
     pub tool_overrides: Option<Vec<crate::catalog::ToolSpec>>,
     pub tool_allowlist: Option<Vec<String>>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub service_tier: Option<ServiceTier>,
     pub history: Vec<HistoryEntry>,
 }
 
@@ -505,6 +525,7 @@ impl Chats {
         tool_overrides: Option<Vec<crate::catalog::ToolSpec>>,
         tool_allowlist: Option<Vec<String>>,
         reasoning_effort: Option<ReasoningEffort>,
+        service_tier: Option<ServiceTier>,
     ) -> Result<ChatState, ChatsError> {
         let resolved_model = self.resolve_model(model).await?;
         Ok(ChatState::from_create(
@@ -514,6 +535,7 @@ impl Chats {
             tool_overrides,
             tool_allowlist,
             reasoning_effort,
+            service_tier,
         ))
     }
 
@@ -536,6 +558,7 @@ impl Chats {
                 tool_overrides,
                 tool_allowlist,
                 reasoning_effort,
+                None,
             )
             .await?;
         let mut g = self.inner.lock().await;
@@ -558,6 +581,7 @@ impl Chats {
         tool_overrides: Option<Vec<crate::catalog::ToolSpec>>,
         tool_allowlist: Option<Vec<String>>,
         reasoning_effort: Option<ReasoningEffort>,
+        service_tier: Option<ServiceTier>,
     ) -> Result<(), ChatsError> {
         let chat = self
             .build_chat(
@@ -567,6 +591,7 @@ impl Chats {
                 tool_overrides,
                 tool_allowlist,
                 reasoning_effort,
+                service_tier,
             )
             .await?;
         let mut g = self.inner.lock().await;
@@ -588,6 +613,7 @@ impl Chats {
                 restore.tool_overrides,
                 restore.tool_allowlist,
                 restore.reasoning_effort,
+                restore.service_tier,
             )
             .await?;
         chat.history = repair_tool_call_history(restore.history);
@@ -665,6 +691,7 @@ impl Chats {
         g.get(id)
             .map(|c| ChatSnapshot {
                 model: c.model.clone(),
+                service_tier: c.service_tier,
                 conversation_id: c.conversation_id.clone(),
                 system: c.system.clone(),
                 history: c.history.clone(),
@@ -1069,6 +1096,7 @@ mod tests {
             None,
             None,
             None,
+            Some(ServiceTier::Fast),
         )
         .await
         .expect("recreate");
@@ -1079,6 +1107,7 @@ mod tests {
         let snap = c.snapshot(&id).await.expect("snapshot");
         assert!(snap.history.is_empty());
         assert_eq!(snap.model, "new-model");
+        assert_eq!(snap.service_tier, Some(ServiceTier::Fast));
         assert_eq!(snap.conversation_id.as_deref(), Some("conversation-1"));
         assert_eq!(snap.system.as_deref(), Some("new"));
     }
@@ -1432,6 +1461,7 @@ mod tests {
             tool_overrides: None,
             tool_allowlist: None,
             reasoning_effort: None,
+            service_tier: None,
             history: vec![
                 Message::user("hi"),
                 Message::assistant_with_tool_calls("", calls),

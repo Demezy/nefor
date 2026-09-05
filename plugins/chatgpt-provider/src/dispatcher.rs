@@ -39,8 +39,8 @@ use crate::responses::request::{
 use crate::responses::stream::{ResponseEvent, ResponseStream};
 use crate::responses::{ModelEntry, ResponsesClient, ResponsesTurnContext, UsageSnapshot};
 use crate::state::{
-    ChatId, ChatStats, Chats, ChatsError, HistoryEntry, Message, MessageRestore, ToolCall,
-    ToolCallFunction, TurnToken,
+    ChatId, ChatStats, Chats, ChatsError, HistoryEntry, Message, MessageRestore, ServiceTier,
+    ToolCall, ToolCallFunction, TurnToken,
 };
 use crate::translator;
 use nefor_plugin_sdk::TransportError;
@@ -1590,6 +1590,28 @@ enum DirectCompletionTools {
     Allowlist(Vec<String>),
 }
 
+#[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct CompletionProviderOptions {
+    #[serde(default)]
+    service_tier: Option<ServiceTier>,
+}
+
+fn parse_completion_provider_options(value: Option<&Value>) -> Result<Option<ServiceTier>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !value.is_object() {
+        return Err("`provider_options` must be an object".into());
+    }
+    if value.get("service_tier").is_some_and(Value::is_null) {
+        return Err("`provider_options.service_tier` must be `fast` when present".into());
+    }
+    serde_json::from_value::<CompletionProviderOptions>(value.clone())
+        .map(|options| options.service_tier)
+        .map_err(|error| format!("invalid `provider_options`: {error}"))
+}
+
 fn parse_direct_completion_tools(value: Option<&Value>) -> Result<DirectCompletionTools, String> {
     let Some(value) = value else {
         // Direct completions are an untyped, single-shot boundary. Absence must not
@@ -1716,6 +1738,16 @@ async fn handle_completion_request(
         }
     };
     let chat_id = ChatId::new(request_id.clone());
+    let provider_options = match parse_completion_provider_options(body.get("provider_options")) {
+        Ok(options) => options,
+        Err(error) => {
+            send_completion_event(ctx, Some(&request_id), "failed", |event| {
+                event.insert("error".into(), Value::String(error));
+            })
+            .await?;
+            return Ok(());
+        }
+    };
     let model = body
         .get("model")
         .and_then(Value::as_str)
@@ -1875,6 +1907,7 @@ async fn handle_completion_request(
             tool_overrides,
             tool_allowlist,
             reasoning_effort,
+            service_tier: provider_options,
             history,
         })
         .await
@@ -2020,6 +2053,13 @@ async fn handle_chat_create(
             return Ok(());
         }
     };
+    let provider_options = match parse_completion_provider_options(body.get("provider_options")) {
+        Ok(options) => options,
+        Err(error) => {
+            send_event(out_tx, chat_error_body(args, &chat_id, error)).await?;
+            return Ok(());
+        }
+    };
 
     match chats
         .recreate(
@@ -2029,6 +2069,7 @@ async fn handle_chat_create(
             tool_overrides,
             tool_allowlist,
             reasoning_effort,
+            provider_options,
         )
         .await
     {
@@ -2143,6 +2184,13 @@ async fn handle_chat_restore(
             return Ok(());
         }
     };
+    let provider_options = match parse_completion_provider_options(body.get("provider_options")) {
+        Ok(options) => options,
+        Err(error) => {
+            send_event(out_tx, chat_error_body(args, &chat_id, error)).await?;
+            return Ok(());
+        }
+    };
 
     let mut history = Vec::new();
     if let Some(items) = body.get("history").and_then(Value::as_array) {
@@ -2187,6 +2235,7 @@ async fn handle_chat_restore(
             tool_overrides,
             tool_allowlist,
             reasoning_effort,
+            service_tier: provider_options,
             history,
         })
         .await
@@ -2436,7 +2485,9 @@ async fn compact_chat(
         store: false,
         stream: true,
         include: vec![],
-        service_tier: None,
+        service_tier: snapshot
+            .service_tier
+            .map(|tier| tier.as_wire_value().to_owned()),
         prompt_cache_key: Some(provider_routing.thread_id),
         text: None,
     };
@@ -3263,7 +3314,9 @@ fn spawn_turn(
                 store: false,
                 stream: true,
                 include,
-                service_tier: None,
+                service_tier: snapshot
+                    .service_tier
+                    .map(|tier| tier.as_wire_value().to_owned()),
                 prompt_cache_key: Some(cache_key.clone()),
                 text,
             };
@@ -4211,6 +4264,35 @@ mod tests {
             assert!(
                 parse_direct_completion_tools(Some(&invalid)).is_err(),
                 "accepted invalid tools value {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_provider_options_are_closed_and_typed() {
+        assert_eq!(parse_completion_provider_options(None), Ok(None));
+        assert_eq!(
+            parse_completion_provider_options(Some(&serde_json::json!({}))),
+            Ok(None)
+        );
+        assert_eq!(
+            parse_completion_provider_options(Some(&serde_json::json!({
+                "service_tier": "fast"
+            }))),
+            Ok(Some(ServiceTier::Fast))
+        );
+
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!("fast"),
+            serde_json::json!({"service_tier": null}),
+            serde_json::json!({"service_tier": "standard"}),
+            serde_json::json!({"service_tier": "fast", "unknown": true}),
+        ] {
+            assert!(
+                parse_completion_provider_options(Some(&invalid)).is_err(),
+                "accepted invalid provider_options {invalid}"
             );
         }
     }
