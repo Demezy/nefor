@@ -166,6 +166,7 @@ pub enum BindingForce {
 
 #[derive(Debug)]
 pub struct Env {
+    observer: Option<crate::observation::Observer>,
     scopes: Vec<Scope>,
     source_dir: PathBuf,
     module_roots: Vec<PathBuf>,
@@ -184,6 +185,7 @@ impl Clone for Env {
             }
         }
         Self {
+            observer: self.observer.clone(),
             scopes: self.scopes.clone(),
             source_dir: self.source_dir.clone(),
             module_roots: self.module_roots.clone(),
@@ -234,6 +236,7 @@ impl Env {
     ) -> Self {
         let root = Self::allocate_frame_in(&state);
         let mut env = Self {
+            observer: None,
             scopes: vec![root],
             source_dir: source_dir.into(),
             module_roots,
@@ -967,6 +970,7 @@ impl Env {
     pub fn child_for_call(&self) -> Self {
         let frame = Self::allocate_frame_in(&self.state);
         Self {
+            observer: self.observer.clone(),
             scopes: vec![frame],
             source_dir: self.source_dir.clone(),
             module_roots: self.module_roots.clone(),
@@ -1084,10 +1088,26 @@ impl Env {
             self.state.clone(),
             self.profiler.clone(),
         );
+        env.observer = self.observer.clone();
         if let Ok(inputs) = self.lookup_by_type("inputs", &crate::types::MagType::HostInputs) {
             env.define("inputs", inputs);
         }
         env
+    }
+
+    pub(crate) fn set_observer(&mut self, observer: Option<crate::observation::Observer>) {
+        self.observer = observer;
+    }
+
+    pub(crate) fn observe(
+        &self,
+        query: impl FnOnce() -> crate::observation::Query,
+        path: &Path,
+        source: &str,
+    ) {
+        if let Some(observer) = &self.observer {
+            observer.record(query(), path, source);
+        }
     }
 
     pub fn read_file(&self, path: &Path, requested: &str) -> Result<String, MagError> {

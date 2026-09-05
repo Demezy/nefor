@@ -6,8 +6,10 @@ pub mod error;
 pub mod eval;
 pub mod json;
 pub mod lexer;
+pub mod observation;
 pub mod parser;
 pub mod profile;
+mod resolver;
 pub mod schema;
 pub mod session;
 pub mod types;
@@ -341,6 +343,14 @@ pub(crate) fn compile_file_cold(
     request: FileCompileRequest<'_>,
     profiler: Option<&CompileProfiler>,
 ) -> Result<serde_json::Value, MagError> {
+    compile_file_cold_observing(request, profiler, None)
+}
+
+pub(crate) fn compile_file_cold_observing(
+    request: FileCompileRequest<'_>,
+    profiler: Option<&CompileProfiler>,
+    observer: Option<observation::Observer>,
+) -> Result<serde_json::Value, MagError> {
     let _total = profiler.map(CompileProfiler::start_total);
     let FileCompileRequest {
         source_dir,
@@ -350,7 +360,7 @@ pub(crate) fn compile_file_cold(
         options,
     } = request;
     let _fuel = eval::fuel::install(options.limits);
-    let path = eval::resolve_workspace_path(source_dir, entry)?;
+    let path = resolver::resolve_workspace_path(source_dir, entry)?;
     let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryRead));
     let source = std::fs::read_to_string(&path)
         .map_err(|e| MagError::Eval(format!("cannot read program {}: {e}", path.display())))?;
@@ -361,6 +371,12 @@ pub(crate) fn compile_file_cold(
         module_roots.to_vec(),
         profiler.cloned(),
         options.limits,
+    );
+    env.set_observer(observer);
+    env.observe(
+        || observation::Query::entry(source_dir, entry),
+        &path,
+        &source,
     );
     env.define("inputs", Value::HostInputs(inputs));
     let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryLex));

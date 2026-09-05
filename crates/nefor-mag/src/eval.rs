@@ -4,9 +4,9 @@ use crate::ast::{
 use crate::env::{BindingForce, BindingHandle, Env};
 use crate::error::MagError;
 use crate::profile::Phase;
+use crate::resolver::resolve_workspace_path;
 use crate::types::{ConcreteType, MagType};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::path::{Component, Path, PathBuf};
 
 thread_local! {
     static FORCE_STACK: std::cell::RefCell<Vec<(FrameId, BindingId, String, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -1843,6 +1843,11 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 .ok_or_else(|| MagError::Eval("read path must be a string".into()))?;
             let full = resolve_workspace_path(env.source_dir(), path)?;
             let mut s = env.read_file(&full, path)?;
+            env.observe(
+                || crate::observation::Query::read(env.source_dir(), path),
+                &full,
+                &s,
+            );
             if let Some(Value::Map(m)) = args.get(1) {
                 for (k, v) in m.iter() {
                     s = s.replace(&format!("{{{{{k}}}}}"), &value_string(v));
@@ -1855,36 +1860,16 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             let path = args[0]
                 .as_str()
                 .ok_or_else(|| MagError::Eval("read-json path must be a string".into()))?;
-            let mut matches = std::iter::once(env.source_dir())
-                .chain(env.module_roots().iter().map(PathBuf::as_path))
-                .filter_map(|root| {
-                    let candidate = resolve_workspace_path(root, path).ok()?;
-                    candidate
-                        .is_file()
-                        .then(|| candidate.canonicalize().unwrap_or(candidate))
-                })
+            let roots = std::iter::once(env.source_dir().to_path_buf())
+                .chain(env.module_roots().iter().cloned())
                 .collect::<Vec<_>>();
-            matches.sort();
-            matches.dedup();
-            let full = match matches.as_slice() {
-                [path] => path,
-                [] => {
-                    return Err(MagError::Eval(format!(
-                        "cannot find JSON data {path} in source or module roots"
-                    )))
-                }
-                paths => {
-                    return Err(MagError::Eval(format!(
-                        "JSON data {path} is ambiguous across source and module roots: {}",
-                        paths
-                            .iter()
-                            .map(|path| path.display().to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )))
-                }
-            };
-            let source = env.read_file(full, path)?;
+            let full = crate::resolver::resolve_json(&roots, path)?;
+            let source = env.read_file(&full, path)?;
+            env.observe(
+                || crate::observation::Query::json(roots, path),
+                &full,
+                &source,
+            );
             let value = serde_json::from_str(&source)
                 .map_err(|error| MagError::Eval(format!("cannot parse JSON {path}: {error}")))?;
             Ok(crate::json::json_to_value(&value))
@@ -2274,18 +2259,6 @@ fn selected_value_type(
     }
 }
 
-fn module_path(name: &str) -> Result<String, MagError> {
-    if name.split('.').any(|p| {
-        p.is_empty()
-            || !p
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    }) {
-        return Err(MagError::Eval(format!("invalid module name: {name}")));
-    }
-    Ok(format!("{}.mag", name.replace('.', "/")))
-}
-
 fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
     if let Some(defs) = env.module_cached(name) {
         env.install_module(name, defs.clone());
@@ -2293,39 +2266,16 @@ fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
     }
     env.begin_module(name)?;
     let resolve_phase = env.profile_phase(Phase::ModuleResolve);
-    let relative = module_path(name)?;
-    let mut matches = env
-        .module_roots()
-        .iter()
-        .filter_map(|root| {
-            let path = resolve_workspace_path(root, &relative).ok()?;
-            path.is_file().then(|| path.canonicalize().unwrap_or(path))
-        })
-        .collect::<Vec<_>>();
-    matches.sort();
-    matches.dedup();
-    let path = match matches.as_slice() {
-        [path] => path.clone(),
-        [] => {
-            return Err(MagError::Eval(format!(
-                "cannot find module {name} in search roots"
-            )))
-        }
-        paths => {
-            return Err(MagError::Eval(format!(
-                "module {name} is ambiguous across search roots: {}",
-                paths
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )))
-        }
-    };
+    let path = crate::resolver::resolve_module(env.module_roots(), name)?;
     drop(resolve_phase);
     let read_phase = env.profile_phase(Phase::ModuleRead);
     let content = std::fs::read_to_string(&path)
         .map_err(|e| MagError::Eval(format!("cannot read module {name}: {e}")))?;
+    env.observe(
+        || crate::observation::Query::module(env.module_roots(), name),
+        &path,
+        &content,
+    );
     drop(read_phase);
     let lex_phase = env.profile_phase(Phase::ModuleLex);
     let source_snapshot = crate::diagnostic::SourceSnapshot::file(&path, &content);
@@ -2355,26 +2305,6 @@ fn module_value_map(defs: &BTreeMap<String, Vec<Value>>) -> BTreeMap<String, Val
     defs.iter()
         .filter_map(|(name, values)| values.first().cloned().map(|value| (name.clone(), value)))
         .collect()
-}
-
-pub(crate) fn resolve_workspace_path(root: &Path, relative: &str) -> Result<PathBuf, MagError> {
-    let p = Path::new(relative);
-    if p.is_absolute() || p.components().any(|c| matches!(c, Component::ParentDir)) {
-        return Err(MagError::Eval(format!(
-            "path escapes workspace: {relative}"
-        )));
-    }
-    let joined = root.join(p);
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.into());
-    if let Some(parent) = joined.parent() {
-        let canonical_parent = parent.canonicalize().unwrap_or_else(|_| parent.into());
-        if !canonical_parent.starts_with(canonical_root) {
-            return Err(MagError::Eval(format!(
-                "path escapes workspace: {relative}"
-            )));
-        }
-    }
-    Ok(joined)
 }
 
 // `require` needs its raw module name rather than an evaluated module symbol.
