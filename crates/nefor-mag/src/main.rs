@@ -1,6 +1,7 @@
 mod build_request;
 mod project_config;
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
@@ -106,7 +107,10 @@ fn main() {
     };
     match result {
         Ok((artifact, profile)) => {
-            print_json_stdout(&artifact);
+            if let Err(error) = std::io::stdout().lock().write_all(&artifact) {
+                eprintln!("mag: cannot write artifact: {error}");
+                std::process::exit(2);
+            }
             if let Some(profile) = profile {
                 print_json_stderr(&profile);
             }
@@ -119,9 +123,7 @@ fn main() {
 }
 
 #[allow(clippy::result_large_err)]
-fn compile(
-    args: CompileArgs,
-) -> Result<(Value, Option<nefor_mag::profile::CompileProfile>), Diagnostic> {
+fn compile(args: CompileArgs) -> Result<(Vec<u8>, Option<Value>), Diagnostic> {
     let CompileArgs {
         entry,
         source_dir,
@@ -158,7 +160,10 @@ fn compile(
         )
     };
     match artifact {
-        Ok(artifact) => Ok((artifact, profiler.map(|profiler| profiler.snapshot()))),
+        Ok(artifact) => Ok((
+            nefor_mag::project_cache::serialize_artifact(&artifact).map_err(mag_diagnostic)?,
+            profiler.map(|profiler| serde_json::json!(profiler.snapshot())),
+        )),
         Err(error) => {
             let mut diagnostic = mag_diagnostic(error);
             diagnostic.profile = profiler.map(|profiler| profiler.snapshot());
@@ -278,16 +283,6 @@ fn path_diagnostic(code: &'static str, path: &Path, message: String) -> Diagnost
     }
 }
 
-fn print_json_stdout<T: Serialize>(value: &T) {
-    match serde_json::to_string(value) {
-        Ok(json) => println!("{json}"),
-        Err(error) => {
-            eprintln!("mag: cannot serialize JSON response: {error}");
-            std::process::exit(2);
-        }
-    }
-}
-
 fn print_json_stderr<T: Serialize>(value: &T) {
     match serde_json::to_string(value) {
         Ok(json) => eprintln!("{json}"),
@@ -317,9 +312,7 @@ impl CommonArgs {
 }
 
 #[allow(clippy::result_large_err)]
-fn build(
-    args: BuildArgs,
-) -> Result<(Value, Option<nefor_mag::profile::CompileProfile>), Diagnostic> {
+fn build(args: BuildArgs) -> Result<(Vec<u8>, Option<Value>), Diagnostic> {
     let cwd = std::env::current_dir().map_err(|error| {
         path_diagnostic(
             "path_unavailable",
@@ -344,18 +337,21 @@ fn build(
         .common
         .profile
         .then(nefor_mag::profile::CompileProfiler::new);
-    // Both policies are cold until the project storage layer is integrated.
-    let artifact = match (policy, request.config_version) {
-        (build_request::CachePolicy::Use | build_request::CachePolicy::Bypass, _) => {
-            match &profiler {
-                Some(profiler) => nefor_mag::CompilerSession::new()
-                    .compile_file_with_profiler(request.as_file_request(), profiler),
-                None => nefor_mag::CompilerSession::new().compile_file(request.as_file_request()),
-            }
-        }
-    };
+    let artifact = nefor_mag::project_cache::build(
+        request.as_file_request(),
+        request.config_version,
+        policy,
+        profiler.as_ref(),
+    );
     match artifact {
-        Ok(artifact) => Ok((artifact, profiler.map(|profiler| profiler.snapshot()))),
+        Ok(output) => Ok((
+            output.bytes,
+            profiler.map(|profiler| {
+                let mut profile = serde_json::json!(profiler.snapshot());
+                profile["cache"] = serde_json::json!(output.cache);
+                profile
+            }),
+        )),
         Err(error) => {
             let mut diagnostic = mag_diagnostic(error);
             diagnostic.profile = profiler.map(|profiler| profiler.snapshot());

@@ -423,3 +423,104 @@ fn project_limits_and_profile_match_cold_compile() {
         }
     }
 }
+
+#[test]
+fn project_build_replays_exact_bytes_with_real_executable_identity_and_zero_work() {
+    use sha2::{Digest, Sha256};
+    let fixture = Fixture::new("project-cache");
+    fixture.write("mag.toml", "");
+    fixture.write(
+        "main.mag",
+        "(require \"value\")\n(artifact {:value value.number :text (read \"note.txt\")})",
+    );
+    fixture.write("value.mag", "(let number 7)");
+    fixture.write("note.txt", "hello\nworld");
+    let cold = run(&compile_args(&fixture.root, &[]));
+    let population = build_at(&fixture.root, &["--profile"]);
+    assert!(population.status.success());
+    assert_eq!(population.stdout, cold.stdout);
+    assert_eq!(json_stderr(&population)["cache"]["status"], "miss");
+    assert!(
+        json_stderr(&population)["counters"]["evaluator_steps"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    let executable_hash = format!(
+        "{:x}",
+        Sha256::digest(fs::read(env!("CARGO_BIN_EXE_mag")).unwrap())
+    );
+    assert!(fixture
+        .root
+        .join(".mag/cache/v1")
+        .join(executable_hash)
+        .is_dir());
+    fixture.write(
+        "mag.toml",
+        "# Same effective configuration\nversion = 1\nmodule-roots = []\n",
+    );
+    fixture.write("unrelated.txt", "changed");
+    let hit = build_at(&fixture.root, &["--profile"]);
+    assert!(hit.status.success());
+    assert_eq!(hit.stdout, cold.stdout);
+    assert_eq!(json_stderr(&hit)["cache"]["status"], "hit");
+    assert_eq!(
+        json_stderr(&hit)["counters"],
+        serde_json::to_value(nefor_mag::profile::OperationCounters::default()).unwrap()
+    );
+    assert_eq!(
+        json_stderr(&hit)["phases"],
+        serde_json::to_value(nefor_mag::profile::PhaseDurations::default()).unwrap()
+    );
+    let bypass = build_at(&fixture.root, &["--no-cache", "--profile"]);
+    assert_eq!(bypass.stdout, hit.stdout);
+    assert_eq!(json_stderr(&bypass)["cache"]["status"], "bypass");
+    assert!(
+        json_stderr(&bypass)["counters"]["evaluator_steps"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    fixture.write("note.txt", "different");
+    let changed = build_at(&fixture.root, &["--profile"]);
+    assert_eq!(json_stderr(&changed)["cache"]["status"], "miss");
+    assert_ne!(changed.stdout, hit.stdout);
+    fixture.write("note.txt", "hello\nworld");
+    assert_eq!(
+        json_stderr(&build_at(&fixture.root, &["--profile"]))["cache"]["status"],
+        "hit"
+    );
+}
+
+#[test]
+fn project_preparation_errors_still_precede_a_seeded_cache_hit() {
+    let fixture = Fixture::new("project-cache-inputs");
+    fixture.write("mag.toml", "");
+    fixture.write("main.mag", "(artifact 1)");
+    fixture.write("data.json", "{\"unused\":1}");
+    let flags = ["--input", "data=data.json", "--profile"];
+    assert_eq!(
+        json_stderr(&build_at(&fixture.root, &flags))["cache"]["status"],
+        "miss"
+    );
+    fixture.write("data.json", "{\"unused\":2}");
+    assert_eq!(
+        json_stderr(&build_at(&fixture.root, &flags))["cache"]["status"],
+        "miss"
+    );
+    fixture.write("data.json", "{\"unused\":1}");
+    assert_eq!(
+        json_stderr(&build_at(&fixture.root, &flags))["cache"]["status"],
+        "hit"
+    );
+    fixture.write("data.json", "not json");
+    let failed = build_at(&fixture.root, &flags);
+    assert!(!failed.status.success());
+    assert!(failed.stdout.is_empty());
+    assert_eq!(json_stderr(&failed)["code"], "input_json");
+    fixture.write("mag.toml", "version = 99");
+    assert_eq!(
+        json_stderr(&build_at(&fixture.root, &flags))["code"],
+        "project_version"
+    );
+}

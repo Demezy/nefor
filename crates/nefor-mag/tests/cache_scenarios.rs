@@ -158,3 +158,10 @@ fn worker_compatibility_rejects_protocol_and_catalog_mismatch() {
         Err("cache scenario catalog mismatch".into())
     );
 }
+
+#[test]
+fn project_storage_preserves_every_catalog_scenario() {
+    for definition in definitions() {
+        run_project_sample(&source_root(), &definition.name);
+    }
+}

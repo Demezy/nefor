@@ -26,11 +26,7 @@ impl ProjectBuildRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CachePolicy {
-    Use,
-    Bypass,
-}
+pub use nefor_mag::project_cache::CachePolicy;
 
 #[allow(clippy::result_large_err)]
 pub fn prepare(

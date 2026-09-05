@@ -9,6 +9,7 @@ pub mod lexer;
 pub mod observation;
 pub mod parser;
 pub mod profile;
+pub mod project_cache;
 mod resolver;
 pub mod schema;
 pub mod session;

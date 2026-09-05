@@ -181,6 +181,54 @@ pub fn run_sample(source_root: &Path, name: &str) -> CacheScenarioSample {
     execute_prepared(&prepared, name)
 }
 
+/// Exercise the historical semantic catalog against actual project storage,
+/// leaving the cold worker protocol and its measurements unchanged.
+pub fn run_project_sample(source_root: &Path, name: &str) {
+    use nefor_mag::project_cache::{
+        build_with_identity, CachePolicy, CacheStatus, CompilerBuildId,
+    };
+    let mut prepared = PreparedScenario::new(source_root, name);
+    prepared.project_cache = true;
+    prepared.write("mag.toml", "");
+    if !prepared.module_roots.contains(&prepared.source_dir) {
+        prepared.module_roots.insert(0, prepared.source_dir.clone());
+    }
+    prepared.setup(name);
+    let profiler = CompileProfiler::new();
+    let cached = build_with_identity(
+        prepared.request(),
+        1,
+        CachePolicy::Use,
+        Some(&profiler),
+        || Ok(CompilerBuildId::from_executable_bytes(b"scenario-endpoint")),
+    );
+    let cold = prepared.session.compile_file(prepared.request());
+    let cached = cached.map(|out| {
+        let hit = matches!(out.cache.status, CacheStatus::Hit);
+        assert_eq!(
+            hit,
+            matches!(
+                name,
+                "identical-repeat-module-chain" | "alternating-context-a-b-a-b"
+            ),
+            "{name}"
+        );
+        if hit {
+            assert_eq!(profiler.snapshot(), Default::default());
+        }
+        let cold_bytes =
+            nefor_mag::project_cache::serialize_artifact(cold.as_ref().expect("cold success"))
+                .expect("serialize");
+        assert_eq!(out.bytes, cold_bytes, "exact bytes: {name}");
+        serde_json::from_slice(&out.bytes).expect("artifact")
+    });
+    assert_eq!(
+        observe(cached, &prepared.root),
+        observe(cold, &prepared.root),
+        "{name}"
+    );
+}
+
 pub fn run_batch(
     source_root: &Path,
     name: &str,
@@ -295,6 +343,7 @@ struct PreparedScenario {
     inputs: Value,
     options: CompilerOptions,
     session: CompilerSession,
+    project_cache: bool,
 }
 
 impl PreparedScenario {
@@ -314,6 +363,7 @@ impl PreparedScenario {
             inputs: json!({}),
             options: CompilerOptions::default(),
             session: CompilerSession::new(),
+            project_cache: false,
         };
         this.seed(source_root, name);
         this
@@ -465,17 +515,24 @@ impl PreparedScenario {
         }
     }
 
+    fn compile_setup(&self) -> Result<Value, MagError> {
+        if self.project_cache {
+            use nefor_mag::project_cache::{build_with_identity, CachePolicy, CompilerBuildId};
+            build_with_identity(self.request(), 1, CachePolicy::Use, None, || {
+                Ok(CompilerBuildId::from_executable_bytes(b"scenario-endpoint"))
+            })
+            .map(|out| serde_json::from_slice(&out.bytes).expect("artifact"))
+        } else {
+            self.session.compile_file(self.request())
+        }
+    }
+
     fn compile_setup_success(&self) {
-        self.session
-            .compile_file(self.request())
-            .expect("scenario setup succeeds");
+        self.compile_setup().expect("scenario setup succeeds");
     }
 
     fn compile_setup_unresolved(&self, expected_symbol: &str) {
-        let error = self
-            .session
-            .compile_file(self.request())
-            .expect_err("scenario setup fails");
+        let error = self.compile_setup().expect_err("scenario setup fails");
         assert!(
             matches!(error, MagError::Unresolved(symbol) if symbol == expected_symbol),
             "scenario setup must fail on unresolved symbol {expected_symbol:?}"
