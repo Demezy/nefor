@@ -53,6 +53,8 @@ pub struct ExecutionResolvedModel {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<Map<String, JsonValue>>,
 }
 
 impl ExecutionResolvedModel {
@@ -79,6 +81,8 @@ pub struct ExecutionModelSnapshot {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<Map<String, JsonValue>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, ExecutionResolvedModel>,
 }
@@ -89,6 +93,7 @@ impl ExecutionModelSnapshot {
             provider: self.provider.clone(),
             model: self.model.clone(),
             reasoning_effort: self.reasoning_effort.clone(),
+            provider_options: self.provider_options.clone(),
         }
         .validate("model_snapshot")?;
         for (name, model) in &self.profiles {

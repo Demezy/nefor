@@ -287,12 +287,15 @@ eq(internal_context.messages[4].text, "[mag_run(run_id=sub) result] payload",
 receive({
   kind = "conversation.context.compact.request", request_id = "compact-1",
   conversation_id = "replayed", provider = "chatgpt", model = "gpt-5.6-sol",
+  provider_options = { service_tier = "fast" },
 })
 delta = last_body()
 eq(delta.change.kind, "context_compaction_pending")
 eq(delta.change.compaction.history_cutoff, 4)
 eq(delta.change.compaction.provider, "chatgpt", "pending compaction preserves routing provider")
 eq(delta.change.compaction.model, "gpt-5.6-sol", "pending compaction preserves the selected model")
+eq(delta.change.compaction.provider_options.service_tier, "fast",
+  "pending compaction preserves opaque provider options")
 receive({
   kind = "conversation.context.compact.complete",
   request_id = "compact-1",
@@ -356,6 +359,7 @@ receive({
   provider = "chatgpt",
   model = "gpt-test",
   reasoning_effort = "high",
+  provider_options = { service_tier = "fast", nested = { retained = true } },
   tools = empty_tools,
   output_schema = schema_with_empty_arrays,
   system = "must not leak",
@@ -369,6 +373,9 @@ eq(invoke.provider, "chatgpt")
 eq(invoke.watermark, invoke_watermark, "invoke captures the folded manager watermark")
 eq(invoke.model, "gpt-test")
 eq(invoke.reasoning_effort, "high")
+eq(invoke.provider_options.service_tier, "fast")
+eq(invoke.provider_options.nested.retained, true,
+  "manager relay preserves opaque nested provider options")
 assert(json.is_array(invoke.tools) and #invoke.tools == 0,
   "manager relay preserves an empty tools array")
 assert(json.is_array(invoke.output_schema.required),

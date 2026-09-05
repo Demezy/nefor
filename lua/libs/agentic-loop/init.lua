@@ -832,14 +832,25 @@ local function handle_chat_compaction_request(body)
   end
   local request_id = "conversation-compaction-" .. envelope.uuid_lite()
   local pending = { request_id = request_id, trigger = body.trigger or "manual" }
+  local run_model_snapshot, snapshot_error = resolve_run_model_snapshot()
+  if snapshot_error ~= nil then
+    compaction_failure(snapshot_error, pending)
+    return
+  end
   state.pending_compaction = pending
-  emit("conversation-manager", {
+  local request = {
     kind = "conversation.context.compact.request",
     request_id = request_id,
     conversation_id = state.conversation_id,
     provider = state.config.provider,
     model = state.config.model,
-  })
+  }
+  if run_model_snapshot ~= nil then
+    request.provider = run_model_snapshot.provider
+    request.model = run_model_snapshot.model
+    request.provider_options = run_model_snapshot.provider_options
+  end
+  emit("conversation-manager", request)
 end
 
 -- Mid-chat /model picker. A switch refreshes the manager-owned universal

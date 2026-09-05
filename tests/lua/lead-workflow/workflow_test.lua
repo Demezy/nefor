@@ -785,6 +785,12 @@ do
     { label = "empty-provider", value = { provider = "", model = "m" } },
     { label = "empty-model", value = { provider = "p", model = "" } },
     { label = "empty-effort", value = { provider = "p", model = "m", reasoning_effort = "" } },
+    { label = "scalar-provider-options", value = {
+      provider = "p", model = "m", provider_options = "fast",
+    } },
+    { label = "array-provider-options", value = {
+      provider = "p", model = "m", provider_options = { "fast" },
+    } },
     { label = "scalar-profiles", value = { provider = "p", model = "m", profiles = "bad" } },
     { label = "empty-profile-name", value = {
       provider = "p", model = "m", profiles = { [""] = { provider = "p", model = "m" } },

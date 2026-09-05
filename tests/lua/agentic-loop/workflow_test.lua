@@ -322,8 +322,10 @@ local function fresh_loop()
     provider = "mock",
     model = "test-model",
     reasoning_effort = "high",
+    provider_options = { service_tier = "fast", nested = { owned = true } },
     profiles = {
-      current = { provider = "mock", model = "test-model", reasoning_effort = "high" },
+      current = { provider = "mock", model = "test-model", reasoning_effort = "high",
+        provider_options = { service_tier = "fast" } },
     },
   }
   run_model_snapshot_resolutions = 0
@@ -528,9 +530,14 @@ do
     "root run carries the current model")
   assert_eq(exec.body.model_snapshot.profiles.current.model, "test-model",
     "root run carries the current named profile")
+  assert_eq(exec.body.model_snapshot.provider_options.nested.owned, true,
+    "root run carries opaque nested provider options")
   selected_run_model_snapshot.profiles.current.model = "mutated-after-submit"
+  selected_run_model_snapshot.provider_options.nested.owned = false
   assert_eq(exec.body.model_snapshot.profiles.current.model, "test-model",
     "root run owns its captured profile mapping")
+  assert_eq(exec.body.model_snapshot.provider_options.nested.owned, true,
+    "root run owns its captured provider options")
 end
 
 -- A terminal entry failure can precede every provider/conversation-manager

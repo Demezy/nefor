@@ -403,7 +403,8 @@ mod tests {
     #[test]
     fn execution_model_snapshot_is_closed_optional_and_required_for_subagents() {
         let valid = serde_json::json!({
-            "model_snapshot": {"provider": "p", "model": "m", "reasoning_effort": "high"}
+            "model_snapshot": {"provider": "p", "model": "m", "reasoning_effort": "high",
+                "provider_options": {"service_tier": "fast"}}
         });
         let parsed = parse_model_snapshot(valid.as_object().unwrap(), RunPrincipal::Subagent)
             .expect("valid subagent snapshot")
@@ -411,6 +412,10 @@ mod tests {
         assert_eq!(parsed.provider, "p");
         assert_eq!(parsed.model, "m");
         assert_eq!(parsed.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            parsed.provider_options.as_ref().unwrap()["service_tier"],
+            "fast"
+        );
         assert!(parsed.profiles.is_empty());
 
         let with_profiles = serde_json::json!({
@@ -461,12 +466,15 @@ mod tests {
             serde_json::json!({"provider": "p", "model": ""}),
             serde_json::json!({"provider": "p", "model": "m", "reasoning_effort": null}),
             serde_json::json!({"provider": "p", "model": "m", "reasoning_effort": ""}),
+            serde_json::json!({"provider": "p", "model": "m", "provider_options": null}),
+            serde_json::json!({"provider": "p", "model": "m", "provider_options": []}),
             serde_json::json!({"provider": "p", "model": "m", "profiles": null}),
             serde_json::json!({"provider": "p", "model": "m", "profiles": {"": {"provider": "p", "model": "m"}}}),
             serde_json::json!({"provider": "p", "model": "m", "profiles": {"fast": {"provider": "", "model": "m"}}}),
             serde_json::json!({"provider": "p", "model": "m", "profiles": {"fast": {"provider": "p", "model": ""}}}),
             serde_json::json!({"provider": "p", "model": "m", "profiles": {"fast": {"provider": "p", "model": "m", "reasoning_effort": null}}}),
             serde_json::json!({"provider": "p", "model": "m", "profiles": {"fast": {"provider": "p", "model": "m", "reasoning_effort": ""}}}),
+            serde_json::json!({"provider": "p", "model": "m", "profiles": {"fast": {"provider": "p", "model": "m", "provider_options": null}}}),
             serde_json::json!({"provider": "p", "model": "m", "profiles": {"fast": {"provider": "p", "model": "m", "extra": true}}}),
             serde_json::json!({"provider": "p", "model": "m", "extra": true}),
         ] {

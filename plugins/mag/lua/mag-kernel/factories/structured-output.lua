@@ -30,6 +30,7 @@ M.declaration = {
   params = {
     model = "string", provider = "string",
     reasoning_effort = "string?",
+    provider_options = "table?",
     system = "string?", tools = "table?", history = "table?", schema = "table",
     output_type = "string", error_type = "string",
     provider_error_type = "string", validation_error_type = "string",

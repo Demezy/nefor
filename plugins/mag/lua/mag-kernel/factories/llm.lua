@@ -25,6 +25,7 @@ M.declaration = {
   params = {
     model = "string", system = "string?", tools = "table?",
     reasoning_effort = "string?",
+    provider_options = "table?",
     provider = "string", history = "table?",
     max_tool_call_corrections = "number?",
     output_type = "string", error_type = "string", provider_error_type = "string",

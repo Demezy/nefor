@@ -280,6 +280,7 @@ function M.spawn_spec(name, command, opts)
       request_additions = clone_table(opts.request_additions),
       model = body.model,
       reasoning_effort = body.reasoning_effort,
+      provider_options = clone_table(body.provider_options),
       tools = clone_table(body.tools),
       output_schema = clone_table(body.output_schema),
       max_corrections = body.max_corrections,

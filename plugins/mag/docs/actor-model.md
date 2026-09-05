@@ -345,6 +345,7 @@ Authored data on the llm actor spec:
 | `system`           | system prompt; rides the request's `system` field every round                                                                                                                                                                                                                         |
 | `tools`            | advertised tool list for the call                                                                                                                                                                                                                                                     |
 | `reasoning_effort` | optional reasoning effort for the call; omission reaches the provider wire as omission, while an explicit string is forwarded unchanged                                                                                                                                               |
+| `provider_options` | optional opaque JSON object forwarded unchanged to the selected provider; interpretation belongs to that provider                                                                                                                                                                     |
 | `history`          | transcript seed: an array of provider-dialect messages (role-tagged turns; assistant tool-call turns in the wire shape the transcript records) that becomes the owned transcript's initial contents at construct — every round replays it ahead of the turns the instance accumulates |
 
 `history` is the turn-as-function seam: the lead's turn is a short-lived
@@ -366,11 +367,12 @@ fails construction with the offending detail; the instance never binds and
 the kernel escalates the construct failure as a run failure.
 
 The direct `llm` factory schema is the table above: `provider`, `model`,
-`system`, `tools`, `reasoning_effort`, and `history`. The MAG bridge
-forwards `model`, `system`, `tools`, and `reasoning_effort` into the provider
-`chat.create` request. For typed agents it also places the converted
-`output_schema` on `chat.complete`; `provider` selects the provider actor at
-construction. For explicitly concrete authoring, `ResolvedModel` carries the
+`system`, `tools`, `reasoning_effort`, `provider_options`, and `history`. The MAG bridge
+forwards `model`, `tools`, `reasoning_effort`, `provider_options`, and a typed
+agent's converted `output_schema` through `conversation.provider.invoke`; the
+selected provider compositor reconstructs its canonical direct-completion
+request from that command and conversation-manager's owned context. `provider`
+selects the provider actor at construction. For explicitly concrete authoring, `ResolvedModel` carries the
 provider, model, and reasoning effort and represents effort with
 `nefor.actors.reasoning-effort` or `nefor.actors.no-reasoning-effort`; the
 kernel lowers that closed record once to a non-empty string or field absence.
@@ -381,9 +383,12 @@ path unless both the bridge and the provider schema add them; use
 knobs.
 
 A fresh delegated execution may carry an immutable `model_snapshot` with a
-non-empty current provider/model, optional non-empty reasoning effort, and a
+non-empty current provider/model, optional non-empty reasoning effort, optional
+opaque JSON-object provider options, and a
 closed `profiles` map from configuration-owned names to the same concrete
-fields. The control plane resolves that whole value once; the kernel stores one
+fields. Selecting a profile replaces all four model fields; omission therefore
+clears options from the current model instead of inheriting them. The control
+plane resolves that whole value once; the kernel stores one
 owned copy in the run context and applies it only while constructing `llm` and
 `structured-output` actors. It therefore covers initial actors, resident-rule
 expansion, and actors added through `mag.apply` without rewriting their

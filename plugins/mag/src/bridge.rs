@@ -76,6 +76,7 @@ impl CapabilityBridge {
             "conversation_id",
             "model",
             "reasoning_effort",
+            "provider_options",
             "tools",
             "output_schema",
             "max_corrections",

@@ -197,6 +197,7 @@ function M.build(options)
       history_cutoff = projection.context(conversation).history_length,
       provider = body.provider,
       model = body.model,
+      provider_options = domain.copy(body.provider_options),
     })
   end
 
@@ -260,7 +261,7 @@ function M.build(options)
   end
 
   local invocation_fields = {
-    "model", "tools", "reasoning_effort", "output_schema",
+    "model", "tools", "reasoning_effort", "provider_options", "output_schema",
     "max_corrections", "invocation",
   }
 

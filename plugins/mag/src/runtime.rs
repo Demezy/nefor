@@ -832,6 +832,12 @@ fn parse_model_snapshot(
     {
         return Err("model_snapshot.reasoning_effort cannot be null".to_owned());
     }
+    if raw
+        .as_object()
+        .is_some_and(|snapshot| snapshot.get("provider_options") == Some(&Value::Null))
+    {
+        return Err("model_snapshot.provider_options cannot be null".to_owned());
+    }
     if let Some((name, _)) = raw
         .as_object()
         .and_then(|snapshot| snapshot.get("profiles"))
@@ -846,6 +852,22 @@ fn parse_model_snapshot(
     {
         return Err(format!(
             "model_snapshot.profiles[{name:?}].reasoning_effort cannot be null"
+        ));
+    }
+    if let Some((name, _)) = raw
+        .as_object()
+        .and_then(|snapshot| snapshot.get("profiles"))
+        .and_then(Value::as_object)
+        .and_then(|profiles| {
+            profiles.iter().find(|(_, model)| {
+                model
+                    .as_object()
+                    .is_some_and(|model| model.get("provider_options") == Some(&Value::Null))
+            })
+        })
+    {
+        return Err(format!(
+            "model_snapshot.profiles[{name:?}].provider_options cannot be null"
         ));
     }
     serde_json::from_value::<ExecutionModelSnapshot>(raw.clone())

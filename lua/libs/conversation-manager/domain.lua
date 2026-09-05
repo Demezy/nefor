@@ -355,6 +355,7 @@ handlers.context_compaction_requested = function(c, event)
     requested_sequence = event.sequence,
     provider = event.provider,
     model = event.model,
+    provider_options = copy(event.provider_options),
   }
   c.compactions[#c.compactions + 1] = compaction
   c.compaction_by_id[compaction.request_id] = compaction

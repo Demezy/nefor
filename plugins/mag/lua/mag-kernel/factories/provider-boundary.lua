@@ -329,6 +329,7 @@ function M.construct(id, params, emit, options)
       model = params.model,
       tools = params.tools,
       reasoning_effort = params.reasoning_effort,
+      provider_options = params.provider_options,
       output_schema = params.schema,
       max_corrections = params.max_corrections,
     }

@@ -1,4 +1,20 @@
 local M = {}
+local json_data = require("core.json_data")
+
+local function copy_json_object(value, label)
+  if type(value) ~= "table" then
+    return nil, label .. " must be a JSON object when present"
+  end
+  local encoded, decoded
+  local ok
+  ok, encoded = pcall(nefor.json.encode, value)
+  if not ok then return nil, label .. " must contain only JSON values" end
+  ok, decoded = pcall(nefor.json.decode, encoded)
+  if not ok or type(decoded) ~= "table" or json_data.is_array(decoded) then
+    return nil, label .. " must be a JSON object when present"
+  end
+  return decoded
+end
 
 local function copy_resolved_model(model, label)
   if type(model) ~= "table" then
@@ -6,7 +22,8 @@ local function copy_resolved_model(model, label)
   end
   local copy = {}
   for key, value in pairs(model) do
-    if key ~= "provider" and key ~= "model" and key ~= "reasoning_effort" then
+    if key ~= "provider" and key ~= "model" and key ~= "reasoning_effort"
+        and key ~= "provider_options" then
       return nil, label .. " has unknown field " .. tostring(key)
     end
     copy[key] = value
@@ -21,6 +38,12 @@ local function copy_resolved_model(model, label)
       and (type(copy.reasoning_effort) ~= "string" or copy.reasoning_effort == "") then
     return nil, label .. " reasoning_effort must be a non-empty string when present"
   end
+  if copy.provider_options ~= nil then
+    local options, options_error = copy_json_object(
+      copy.provider_options, label .. " provider_options")
+    if options == nil then return nil, options_error end
+    copy.provider_options = options
+  end
   return copy
 end
 
@@ -31,6 +54,7 @@ function M.copy(snapshot)
   local current = {}
   for key, value in pairs(snapshot) do
     if key ~= "provider" and key ~= "model" and key ~= "reasoning_effort"
+        and key ~= "provider_options"
         and key ~= "profiles" then
       return nil, "model snapshot has unknown field " .. tostring(key)
     end

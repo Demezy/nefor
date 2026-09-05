@@ -371,10 +371,14 @@ pub mod kernel {
                 ),
             ] {
                 let modification = compile_mag_source(&host, run_id, &source);
-                let snapshot = ExecutionModelSnapshot {
+                let mut snapshot = ExecutionModelSnapshot {
                     provider: "snapshot-provider".to_owned(),
                     model: "snapshot-model".to_owned(),
                     reasoning_effort: None,
+                    provider_options: Some(serde_json::Map::from_iter([(
+                        "service_tier".to_owned(),
+                        serde_json::Value::String("fast".to_owned()),
+                    )])),
                     profiles: Default::default(),
                 };
                 let begun = host
@@ -388,6 +392,11 @@ pub mod kernel {
                     )
                     .expect("begin snapshotted run");
                 assert!(begun.ok, "begin failed: {:?}", begun.error);
+                snapshot
+                    .provider_options
+                    .as_mut()
+                    .unwrap()
+                    .insert("service_tier".to_owned(), serde_json::json!("mutated"));
                 host.drain_emits().expect("drain begin");
                 let outcome = host.start(run_id, &modification).expect("start run");
                 assert!(outcome.ok, "start failed: {:?}", outcome.error);
@@ -407,6 +416,7 @@ pub mod kernel {
                 );
                 let invoke = tool_invoke(&emits, "snapshot-provider");
                 assert_eq!(invoke["args"]["model"], "snapshot-model");
+                assert_eq!(invoke["args"]["provider_options"]["service_tier"], "fast");
                 assert!(
                     invoke["args"].get("reasoning_effort").is_none(),
                     "snapshot omission clears authored effort: {invoke:?}"
@@ -417,6 +427,7 @@ pub mod kernel {
                         provider: "later-provider".to_owned(),
                         model: "later-model".to_owned(),
                         reasoning_effort: Some("low".to_owned()),
+                        provider_options: None,
                         profiles: Default::default(),
                     };
                     let begun = host
@@ -454,6 +465,10 @@ pub mod kernel {
                     let patch_invoke = tool_invoke(&patch_emits, "snapshot-provider");
                     assert_eq!(patch_invoke["args"]["model"], "snapshot-model");
                     assert!(patch_invoke["args"].get("reasoning_effort").is_none());
+                    assert_eq!(
+                        patch_invoke["args"]["provider_options"]["service_tier"],
+                        "fast"
+                    );
                     let patch_spawn = patch_emits
                         .iter()
                         .find(|event| {
@@ -480,6 +495,7 @@ pub mod kernel {
                 provider: "snapshot-provider".to_owned(),
                 model: "snapshot-model".to_owned(),
                 reasoning_effort: Some("high".to_owned()),
+                provider_options: None,
                 profiles: Default::default(),
             };
             let begun = host
@@ -616,12 +632,17 @@ pub mod kernel {
                         provider: "fast-provider".to_owned(),
                         model: "fast-model".to_owned(),
                         reasoning_effort: Some("low".to_owned()),
+                        provider_options: Some(serde_json::Map::from_iter([(
+                            "service_tier".to_owned(),
+                            serde_json::Value::String("fast".to_owned()),
+                        )])),
                     },
                 );
                 let snapshot = ExecutionModelSnapshot {
                     provider: "current-provider".to_owned(),
                     model: "current-model".to_owned(),
                     reasoning_effort: Some("high".to_owned()),
+                    provider_options: None,
                     profiles,
                 };
                 let begun = host
@@ -651,6 +672,7 @@ pub mod kernel {
                 let invoke = tool_invoke(&emits, "fast-provider");
                 assert_eq!(invoke["args"]["model"], "fast-model");
                 assert_eq!(invoke["args"]["reasoning_effort"], "low");
+                assert_eq!(invoke["args"]["provider_options"]["service_tier"], "fast");
                 assert!(invoke["args"].get("model_profile").is_none());
 
                 if run_id == "profile-direct" {
@@ -675,11 +697,63 @@ pub mod kernel {
                 host.drain_emits().expect("drain profiled end");
             }
 
+            let standard_source =
+                direct.replace("model-profile \"fast\"", "model-profile \"standard\"");
+            let modification =
+                compile_mag_source(&host, "profile-clears-options", &standard_source);
+            let mut profiles = BTreeMap::new();
+            profiles.insert(
+                "standard".to_owned(),
+                ExecutionResolvedModel {
+                    provider: "standard-provider".to_owned(),
+                    model: "standard-model".to_owned(),
+                    reasoning_effort: Some("medium".to_owned()),
+                    provider_options: None,
+                },
+            );
+            let snapshot = ExecutionModelSnapshot {
+                provider: "current-provider".to_owned(),
+                model: "current-model".to_owned(),
+                reasoning_effort: Some("high".to_owned()),
+                provider_options: Some(serde_json::Map::from_iter([(
+                    "service_tier".to_owned(),
+                    serde_json::Value::String("fast".to_owned()),
+                )])),
+                profiles,
+            };
+            let begun = host
+                .begin_run_with_principal(
+                    "profile-clears-options",
+                    "profile-clears-options",
+                    Some("session"),
+                    Some("subagent"),
+                    Some("conversation"),
+                    Some(&snapshot),
+                )
+                .expect("begin standard-profile run");
+            assert!(begun.ok, "begin failed: {:?}", begun.error);
+            host.drain_emits().expect("drain begin");
+            let outcome = host
+                .start("profile-clears-options", &modification)
+                .expect("start standard-profile run");
+            assert!(outcome.ok, "start failed: {:?}", outcome.error);
+            let emits = host.drain_emits().expect("drain standard-profile invoke");
+            let invoke = tool_invoke(&emits, "standard-provider");
+            assert_eq!(invoke["args"]["model"], "standard-model");
+            assert!(
+                invoke["args"].get("provider_options").is_none(),
+                "profile omission clears root provider options: {invoke:?}"
+            );
+            host.end_run("profile-clears-options", TeardownReason::Killed)
+                .expect("end standard-profile run");
+            host.drain_emits().expect("drain standard-profile end");
+
             let modification = compile_mag_source(&host, "missing-profile", direct);
             let snapshot = ExecutionModelSnapshot {
                 provider: "current-provider".to_owned(),
                 model: "current-model".to_owned(),
                 reasoning_effort: None,
+                provider_options: None,
                 profiles: Default::default(),
             };
             let begun = host

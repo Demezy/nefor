@@ -46,6 +46,12 @@ structured output, and reasoning controls each enter through their one wire
 representation. Events carry only counts and accuracy, never request content.
 Aggregate input/output usage remains separate from current request occupancy.
 
+Direct completions and compaction chats accept an optional closed
+`provider_options` object. Its only supported field is
+`service_tier: "fast"`, which is sent unchanged on Responses requests;
+omission (or an empty object) keeps the standard service tier. ChatGPT owns
+this validation and rejects unknown fields or tier values before HTTP.
+
 Image media returned by tools such as `read_image` is converted to Responses
 API `InputImage` items for vision-capable models. If the active model cannot
 accept images, the provider returns an explicit model-capability error instead

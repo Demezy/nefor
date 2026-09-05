@@ -478,6 +478,7 @@ local function new_run_context(meta)
         actor_params.provider = selected.provider
         actor_params.model = selected.model
         actor_params.reasoning_effort = selected.reasoning_effort
+        actor_params.provider_options = selected.provider_options
       end
     end
     local explicit_conversation_id = type(actor_params.conversation_id) == "string"
