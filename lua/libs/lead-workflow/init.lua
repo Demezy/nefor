@@ -258,6 +258,7 @@ local state = {
   -- `mag.run_complete`) carries its run_id, and the tracker keys straight
   -- into state.active_runs by it — overlapping runs track independently,
   -- no "the in-flight run" singleton.
+  mag_authority_lost = false,
 }
 
 local SOURCE_NAME = "lead-workflow"
@@ -1605,6 +1606,58 @@ graph_status = function(firing_id, args, metadata)
   emit_tool_result_ok(firing_id, { active = active, recent = recent })
 end
 
+local function reconcile_mag_authority_loss(reason)
+  if state.mag_authority_lost then return 0 end
+  state.mag_authority_lost = true
+  local message = tostring(reason or "MAG execution authority was lost")
+  local al_ok, al = pcall(require, "libs.agentic-loop")
+  if al_ok and type(al.mag_authority_lost) == "function" then
+    -- Force the request-level unknown outcome before any obligation release can
+    -- recheck and publish a previously recorded success.
+    al.mag_authority_lost({
+      code = "mag_authority_lost",
+      message = message,
+      authority = "mag",
+      outcome = "unknown",
+    })
+  end
+
+  for load_id, pending in pairs(state.pending_mag_load) do
+    state.pending_mag_load[load_id] = nil
+    emit_tool_result_err(pending.firing_id, "mag: authority lost: " .. message)
+  end
+  for request_id, pending in pairs(state.pending_mag_apply) do
+    state.pending_mag_apply[request_id] = nil
+    require("libs.agentic-loop").settle_request_obligation(
+      pending.attached_request_ids, "run:" .. pending.run_id)
+    emit_tool_result_err(pending.firing_id, "mag apply: authority lost: " .. message)
+  end
+  mag_eval.authority_lost(message)
+
+  for run_id in pairs(state.completion_grace_waiters) do
+    local waiter = cancel_completion_grace(run_id)
+    if waiter then emit_tool_result_err(waiter.firing_id, "mag: authority lost: " .. message) end
+  end
+  for run_id, waiters in pairs(state.termination_waiters) do
+    take_termination_waiters(run_id)
+    for _, waiter in ipairs(waiters) do
+      emit_tool_result_err(waiter.firing_id,
+        "terminate-graph: MAG authority was lost before terminal confirmation")
+    end
+  end
+
+  local lost = run_registry:lose_authority(message)
+  state.active_runs = run_registry.active_runs
+  state.completed_runs = run_registry.completed_runs
+  refresh_active_run_id()
+  for _, settlement in ipairs(lost.waiter_settlements) do
+    emit_await_outcome(settlement.firing_id, settlement.outcome)
+  end
+  for _, run in ipairs(lost.runs) do settle_request_run(run) end
+
+  return #lost.runs
+end
+
 local function terminate_active_graph(session_id)
   invalidate_pending_mag_loads(nil)
   invalidate_pending_mag_applies(nil)
@@ -2584,6 +2637,7 @@ local M = {
 
   has_approved_plan = has_approved_plan,
   cancel_request = cancel_request,
+  reconcile_mag_authority_loss = reconcile_mag_authority_loss,
 
   _internals = {
     state = state,
@@ -2646,6 +2700,7 @@ local M = {
       end
       state.termination_waiters = {}
       termination_scheduler = nil
+      state.mag_authority_lost = false
       monotonic_now_ms = function()
         if type(nefor.now_ms) == "function" then return nefor.now_ms() end
         return nil

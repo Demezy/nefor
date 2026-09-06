@@ -9,6 +9,7 @@ use std::pin::Pin;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
+use tokio::sync::oneshot;
 
 /// A boxed `AsyncRead + Send + Unpin`. This is the broker's read half of a
 /// plugin connection — stdout for stdio transports, or a
@@ -33,6 +34,9 @@ pub struct Transport {
     /// Stderr channel (optional). For stdio transports this is the child's
     /// stderr; broker pipes it to `tracing` and never forwards to plugins.
     pub stderr: BoxedStderr,
+    /// Requests forced termination of an engine-owned subprocess tree after
+    /// the cooperative close grace expires.
+    pub terminate: Option<oneshot::Sender<()>>,
     /// On stdio transports this drives the subprocess to completion and
     /// reports its exit status. `None` for in-memory transports that have
     /// no process to wait on.
@@ -69,12 +73,14 @@ pub fn stdio_transport(
     stdin: ChildStdin,
     stdout: ChildStdout,
     stderr: ChildStderr,
+    terminate: oneshot::Sender<()>,
     exit: ExitWatcher,
 ) -> Transport {
     Transport {
         reader: Box::pin(stdout),
         writer: Box::pin(stdin),
         stderr: Some(Box::pin(stderr)),
+        terminate: Some(terminate),
         exit: Some(exit),
     }
 }

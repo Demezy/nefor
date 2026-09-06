@@ -9,7 +9,7 @@
 //!    `init.lua`. Cache the global `dispatch` function — fatal if missing.
 //! 4. Branch on [`cli::EngineMode`]:
 //!    - `Serve`: build a [`Broker`], spawn every registered plugin, install
-//!      a `ctrl_c` shutdown hook, and run the broker until it exits.
+//!      a `ctrl_c` interrupt reporter, and run the broker until Lua requests shutdown.
 //!    - `PluginList`: print the engine version + every plugin that
 //!      registered a `cli` function, exit 0.
 //!    - `PluginDispatch`: spawn every registered subprocess plugin, find
@@ -174,11 +174,11 @@ async fn run_serve(
 
     let abnormal_exits = broker.abnormal_exits_handle();
     let (exit_code, exit_requested) = broker.requested_exit_code_handle();
-    let shutdown = broker.shutdown_handle();
+    let interrupt = broker.interrupt_handle();
     let ctrl_c_task = tokio::spawn(async move {
         if let Ok(()) = tokio::signal::ctrl_c().await {
-            tracing::info!("ctrl_c received; requesting broker shutdown");
-            shutdown.shutdown(2000).await;
+            tracing::info!("ctrl_c received; reporting interrupt to composition");
+            interrupt.interrupt().await;
         }
     });
 
@@ -257,11 +257,11 @@ async fn run_plugin_dispatch(
     let mut broker = Broker::new(Arc::clone(&shared), host);
     spawn_specs(&mut broker, &specs);
 
-    let shutdown = broker.shutdown_handle();
+    let interrupt = broker.interrupt_handle();
     let ctrl_c_task = tokio::spawn(async move {
         if let Ok(()) = tokio::signal::ctrl_c().await {
-            tracing::info!("ctrl_c received; requesting broker shutdown");
-            shutdown.shutdown(2000).await;
+            tracing::info!("ctrl_c received; reporting interrupt to composition");
+            interrupt.interrupt().await;
         }
     });
 
@@ -355,12 +355,13 @@ fn spawn_specs(broker: &mut Broker, specs: &[PluginSpec]) {
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
-    use nefor::ncp::PluginKind;
+    use nefor::ncp::{PluginKind, TerminalMode};
     use nefor_protocol::PluginName;
 
     fn spec(name: &str, has_cli: bool) -> PluginSpec {
         PluginSpec {
             name: PluginName::new(name).expect("valid"),
+            terminal: TerminalMode::Detached,
             kind: if has_cli {
                 PluginKind::Both {
                     command: vec!["echo".into()],

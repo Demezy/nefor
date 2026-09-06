@@ -3805,3 +3805,45 @@ do
   assert_eq(completed.body.status, "error")
   assert_eq(completed.body.error.code, "completion_undeliverable")
 end
+
+-- MAG authority loss finalizes registry handles and whole requests without
+-- inventing a kernel terminal.
+do
+  fresh()
+  local registry = lw._internals.run_registry
+  local run_id = registry:mint_run_id()
+  local request_id = "request-authority-lost"
+  lw._internals.register_active_run(run_id, {}, "terminal", "authority-dispatch",
+    "authority-run", sessions.current_id(), nil, nil, { request_id })
+  agentic_loop._internals.request_lifecycle:set_terminal(
+    { request_id }, "success", "stale success")
+  invoke_tool("authority-waiter", "await-run", { run_id = run_id })
+  _test.calls_clear()
+
+  assert_eq(lw.reconcile_mag_authority_loss("MAG process disappeared"), 1)
+  assert_eq(lw.reconcile_mag_authority_loss("duplicate death"), 0,
+    "authority reconciliation is idempotent")
+  local calls = decode_calls()
+  local waiter = find_call(calls, function(c)
+    return c.body.kind == "tool.result" and c.body.id == "authority-waiter"
+  end)
+  assert_true(waiter ~= nil and waiter.body.error_code == "await_run_authority_lost",
+    "awaiters receive an explicit unknown authority-loss outcome")
+  local completed = find_call(calls, function(c)
+    return c.body.kind == "agentic_loop.request_completed" and c.body.request_id == request_id
+  end)
+  assert_true(completed ~= nil, "accepted request receives durable completion")
+  assert_eq(completed.body.status, "error")
+  assert_eq(completed.body.error.code, "mag_authority_lost")
+  assert_eq(completed.body.error.outcome, "unknown")
+  assert_eq(find_call(calls, function(c) return c.body.kind == "mag.run_result" end), nil,
+    "surviving lifecycle owners never fabricate mag.run_result")
+  local retained = registry:get(run_id)
+  assert_eq(retained.status, "unknown")
+  assert_eq(retained.canonical_body, nil)
+  assert_eq(next(registry.active_runs), nil)
+
+  _test.calls_clear()
+  feed("mag", { kind = "mag.run_result", run_id = run_id, status = "completed" })
+  assert_eq(#decode_calls(), 0, "late terminals cannot reclassify authority loss")
+end

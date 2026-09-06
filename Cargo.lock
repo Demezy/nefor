@@ -1651,6 +1651,7 @@ dependencies = [
  "clap",
  "dirs",
  "futures",
+ "libc",
  "mlua",
  "nefor-mag",
  "nefor-protocol",

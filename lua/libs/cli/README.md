@@ -77,9 +77,15 @@ Direct `agentic_loop.submit` is not a frontend persistence boundary.
 Invalid startup arguments must exit during composition loading, before spawning
 processes. The starter uses `os.exit(2)` there: the broker shutdown sink is not
 yet installed during `init.lua`. After startup the frontend uses cooperative
-`nefor.engine.shutdown`. External shutdown interrupts an unfinished CLI request
-and uses the engine's existing process teardown rather than restarting a lead
-continuation.
+`nefor.engine.shutdown`. SIGINT is first reported as
+`engine.interrupt_requested`; required-process termination is reported as
+`engine.plugin_process_terminated`. For accepted CLI work, either fact starts
+request cancellation while surviving plugins remain live. The CLI waits for the
+canonical MAG result, correlated whole-request completion, and session flush
+before it prints and asks the engine to tear down processes. If MAG itself
+dies, lead-workflow marks its live handles unknown and request lifecycle emits a
+correlated `mag_authority_lost` completion after releasing obligations. This is
+not a `mag.run_result`: only MAG can author that canonical execution terminal.
 
 The development-only `plugin agentic-cli` spelling calls the same `start`
 implementation. Its one positional prompt is translated to `--prompt`;

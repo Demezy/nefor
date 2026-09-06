@@ -59,32 +59,51 @@ local cfg            = require("config").active
 local lead_role      = require("libs.lead-workflow.role")
 
 function dispatch(current_log)
-  ncp.dispatch(current_log)
   local entry = current_log[#current_log]
   if entry and entry.origin == "engine" then
     local ok, decoded = pcall(nefor.json.decode, entry.payload)
     local body = ok and type(decoded) == "table" and decoded.body or nil
-    if type(body) == "table" and body.kind == "engine.plugin_process_terminated" then
-      plugin_process_terminated(body)
+    if type(body) == "table" then
+      if body.kind == "engine.plugin_process_terminated" then
+        plugin_process_terminated(body)
+      elseif body.kind == "engine.interrupt_requested" then
+        interrupt_requested(body)
+      end
     end
   end
+  ncp.dispatch(current_log)
 end
 
 function invoke_from_plugin(source, payload)
   ncp.invoke_from_plugin(source, payload)
 end
 
--- Starter lifecycle policy: every spawned-process termination ends this
--- composition. Rust reports the fact before invoking this callback.
+-- Starter lifecycle policy: interactive mode tears down immediately. The CLI
+-- settles before teardown. MAG death is reconciled explicitly as unknown by
+-- the surviving run/request owners; it is never fabricated as mag.run_result.
 function plugin_process_terminated(fact)
+  if fact.plugin == "mag" then
+    require("libs.lead-workflow").reconcile_mag_authority_loss(
+      "MAG process terminated; accepted run outcomes are unknown")
+  end
+  if startup and startup.frontend == "cli" then return end
   nefor.engine.shutdown {
-    code = startup and startup.frontend == "cli" and 1 or 0,
+    code = 0,
     reason = "plugin " .. tostring(fact.plugin) .. " terminated",
     grace_ms = 2000,
   }
 end
 
 local MAG_PROJECT_BUILD = { cache_dir = nefor.fs.data_root() .. "/mag/cache" }
+
+function interrupt_requested(_fact)
+  if startup and startup.frontend == "cli" then return end
+  nefor.engine.shutdown {
+    code = 0,
+    reason = "external interrupt",
+    grace_ms = 2000,
+  }
+end
 
 actor.install()
 require("libs.mag-workspace").configure {

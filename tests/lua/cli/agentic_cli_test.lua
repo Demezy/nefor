@@ -2,10 +2,11 @@
 local subscriptions, sent, exits, timers = {}, {}, {}, {}
 local out, err = {}, {}
 local ready = false
-local failures = {}
+local failures, interruptions = {}, {}
 package.loaded["libs.agentic-loop"] = {
   is_ready = function() return ready end,
   fail_request = function(id, error) failures[#failures + 1] = { id = id, error = error } end,
+  interrupt_request = function(id) interruptions[#interruptions + 1] = id end,
 }
 package.loaded["libs.sessions"] = { ready = function() return false end }
 package.loaded["core.replay_window"] = { active = function() return false end }
@@ -23,17 +24,20 @@ local function emit(body)
   for _, sub in ipairs(subscriptions) do if sub[1] == "*" or sub[1] == body.kind then sub[2](entry) end end
 end
 local function reset()
-  subscriptions, sent, exits, timers, out, err, failures = {}, {}, {}, {}, {}, {}, {}
+  subscriptions, sent, exits, timers, out, err, failures, interruptions = {}, {}, {}, {}, {}, {}, {}, {}
   ready = false
 end
 local function start(format)
   return cli.start { prompt = "question", format = format, readiness = {
-    required_plugins = { "provider" }, required_tools = { "read_file" },
+    required_plugins = { "tool-gate" },
+    required_provider = function() return "provider" end,
+    required_tools = { "read_file" },
   } }
 end
 local function activate()
   emit { kind = "sessions.session_start", session_id = "s1", from_resume = true }
   emit { kind = "provider.hello" }
+  emit { kind = "tool-gate.hello" }
   emit { kind = "tool.register", tools = { { name = "read_file" } } }
   assert(#sent == 0, "no submit during replay or before context ready")
   emit { kind = "sessions.replay.end" }
@@ -83,6 +87,8 @@ do
   local id = start("json")
   activate()
   emit { kind = "agentic_loop.request_completed", request_id = id, status = "success", answer = "not durable" }
+  emit { kind = "engine.plugin_process_terminated", plugin = "basic-tools" }
+  assert(#exits == 0, "plugin death during flush must not bypass the barrier")
   emit { kind = "sessions.flush_done", request_id = id, error = { code = "persistence_failed", message = "disk full" } }
   assert(exits[1].code == 1)
   assert(nefor.json.decode(table.concat(out)).status == "error")
@@ -91,9 +97,55 @@ reset()
 do
   local id = start("json")
   activate()
+  emit { kind = "agentic_loop.request_completed", request_id = id,
+    status = "success", answer = "canonical" }
+  emit { kind = "engine.plugin_process_terminated", plugin = "basic-tools" }
+  emit { kind = "engine.plugin_process_terminated", plugin = "tool-gate" }
+  assert(#exits == 0 and #out == 0, "later plugin deaths preserve the flush barrier")
+  emit { kind = "sessions.flush_done", request_id = id }
+  local result = nefor.json.decode(table.concat(out))
+  assert(result.status == "success" and result.answer == "canonical",
+    "canonical request completion is immutable while flushing")
+  assert(exits[1].code == 0)
+end
+reset()
+do
+  local id = start("json")
+  activate()
   emit { kind = "agentic_loop.request_completed", request_id = id, status = "interrupted" }
   emit { kind = "sessions.flush_done", request_id = id }
   assert(exits[1].code == 130)
+end
+reset()
+do
+  local id = start("json")
+  activate()
+  emit { kind = "engine.interrupt_requested", signal = "SIGINT" }
+  emit { kind = "engine.interrupt_requested", signal = "SIGINT" }
+  assert(interruptions[1] == id and #interruptions == 1)
+  assert(#exits == 0 and #out == 0, "SIGINT waits for canonical request settlement")
+  emit { kind = "mag.run_result", run_id = "lead-run", status = "killed" }
+  assert(#exits == 0, "run terminal alone is not request completion")
+  emit { kind = "agentic_loop.request_completed", request_id = id, session_id = "s1",
+    status = "interrupted", error = { code = "interrupted", message = "request interrupted" } }
+  assert(sent[#sent].body.kind == "sessions.flush_request" and #exits == 0)
+  emit { kind = "sessions.flush_done", request_id = id }
+  assert(exits[1].code == 130)
+end
+reset()
+do
+  local id = start("json")
+  activate()
+  emit { kind = "engine.plugin_process_terminated", plugin = "mock-plugin" }
+  assert(#failures == 0 and #exits == 0, "optional plugin death must not cancel accepted work")
+  emit { kind = "engine.plugin_process_terminated", plugin = "provider" }
+  assert(failures[1].id == id and failures[1].error.code == "plugin_terminated")
+  assert(#exits == 0 and #out == 0, "required plugin death waits for canonical request settlement")
+  emit { kind = "agentic_loop.request_completed", request_id = id, session_id = "s1",
+    status = "error", error = failures[1].error }
+  assert(sent[#sent].body.kind == "sessions.flush_request" and #exits == 0)
+  emit { kind = "sessions.flush_done", request_id = id }
+  assert(exits[1].code == 1)
 end
 reset()
 start("json")

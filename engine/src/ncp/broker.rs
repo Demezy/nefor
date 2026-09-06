@@ -263,6 +263,7 @@ struct ConnectionRecord {
     name: PluginName,
     closing: bool,
     transport_failure: Option<String>,
+    terminate: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 /// The broker's single event loop.
@@ -283,9 +284,13 @@ pub struct Broker {
     /// Shared channel all per-connection exit watchers drop outcomes onto.
     exit_tx: mpsc::Sender<(ConnectionId, ExitOutcome)>,
     exit_rx: mpsc::Receiver<(ConnectionId, ExitOutcome)>,
-    /// Triggered by [`Broker::shutdown_handle`] or an external signal.
+    /// Triggered only after Lua composition has completed its shutdown policy.
     shutdown_rx: mpsc::Receiver<ShutdownRequest>,
     shutdown_tx: mpsc::Sender<ShutdownRequest>,
+    /// External interrupt observations are facts, not teardown authority. The
+    /// broker reports them to Lua while every surviving plugin remains live.
+    interrupt_rx: mpsc::Receiver<()>,
+    interrupt_tx: mpsc::Sender<()>,
     /// Count of `event_log` entries already handed to `invoke_dispatch`.
     /// The broker clones just `event_log[mirrored_count..]` under its lock
     /// and passes the small tail to the hook; the Lua VM appends those
@@ -330,6 +335,7 @@ impl Broker {
         let (inbound_tx, inbound_rx) = mpsc::channel(1024);
         let (exit_tx, exit_rx) = mpsc::channel(64);
         let (shutdown_tx, shutdown_rx) = mpsc::channel::<ShutdownRequest>(4);
+        let (interrupt_tx, interrupt_rx) = mpsc::channel::<()>(4);
 
         // Install the shutdown-request sink so `nefor.engine.shutdown { code, reason, grace_ms }` can
         // signal cooperative shutdown. The shutdown handle is the same
@@ -360,6 +366,8 @@ impl Broker {
             exit_rx,
             shutdown_rx,
             shutdown_tx,
+            interrupt_rx,
+            interrupt_tx,
             mirrored_count: 0,
             pending_engine_envelopes: Vec::new(),
             exit_code_slot,
@@ -468,6 +476,13 @@ impl Broker {
         ShutdownHandle(self.shutdown_tx.clone())
     }
 
+    /// Clone a handle that reports an external interrupt to the composition.
+    /// Unlike shutdown, this keeps the broker and surviving plugins live so
+    /// accepted work can reach its authoritative terminal result.
+    pub fn interrupt_handle(&self) -> InterruptHandle {
+        InterruptHandle(self.interrupt_tx.clone())
+    }
+
     /// Attach an arbitrary transport to the broker under a pre-assigned
     /// plugin name. Returns the assigned [`ConnectionId`]. The broker
     /// does not wait for a ready handshake — the first inbound line flows
@@ -498,6 +513,7 @@ impl Broker {
                 name,
                 closing: false,
                 transport_failure: None,
+                terminate: transport.terminate,
             },
         );
         id
@@ -573,6 +589,7 @@ impl Broker {
     pub async fn run(mut self) -> BrokerStopReason {
         let mut shutdown_grace: Option<u64> = None;
         let mut shutdown_deadline: Option<Instant> = None;
+        let mut forced_exit_deadline: Option<Instant> = None;
 
         loop {
             // Synthetic engine envelopes (queued via `queue_engine_envelope`)
@@ -582,20 +599,24 @@ impl Broker {
             // arm fires this iteration.
             self.drain_engine_envelopes();
 
-            // If we're past the shutdown deadline, force-close everything
-            // before running any further cooperative Lua work.
-            if let Some(deadline) = shutdown_deadline {
-                if Instant::now() >= deadline {
-                    self.force_close_all();
-                    return BrokerStopReason::Shutdown;
-                }
+            // Cooperative close gets one grace window. After it expires,
+            // terminate every still-owned process tree and keep consuming exit
+            // watchers so teardown cannot turn children into unaccounted work.
+            if shutdown_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                self.force_terminate_all();
+                shutdown_deadline = None;
+                forced_exit_deadline = Some(Instant::now() + Duration::from_secs(2));
+            }
+            if forced_exit_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                self.account_unreaped_processes();
+                return BrokerStopReason::Shutdown;
             }
 
             // Run one deferred Lua continuation per broker turn while live.
             // Each continuation may publish one bounded replay chunk;
             // draining its tail now makes progress visible before the next
             // chunk runs.
-            if shutdown_deadline.is_none() && self.host.has_cooperative_tasks() {
+            if shutdown_grace.is_none() && self.host.has_cooperative_tasks() {
                 if let Err(error) = self.host.run_one_cooperative_task() {
                     tracing::error!(error = %error, "cooperative Lua task errored at VM level");
                 }
@@ -604,19 +625,24 @@ impl Broker {
 
             // If the engine said to shut down and there are no connections
             // left, exit immediately without waiting out the grace.
-            if shutdown_deadline.is_some() && self.conns_by_id.is_empty() {
+            if shutdown_grace.is_some()
+                && self.conns_by_id.is_empty()
+                && self.host.active_runtime_processes() == 0
+            {
                 return BrokerStopReason::Shutdown;
             }
 
             // If no shutdown in flight and all connections have quietly
             // left, return. This handles the "empty config" case (no
             // plugins spawned) and the "last plugin exited" case.
-            if shutdown_deadline.is_none() && self.conns_by_id.is_empty() {
+            if shutdown_grace.is_none() && self.conns_by_id.is_empty() {
                 return BrokerStopReason::AllPluginsGone;
             }
 
-            let sleep_dur = if self.host.has_cooperative_tasks() {
+            let sleep_dur = if shutdown_grace.is_none() && self.host.has_cooperative_tasks() {
                 Duration::ZERO
+            } else if forced_exit_deadline.is_some() {
+                Duration::from_millis(10)
             } else if let Some(deadline) = shutdown_deadline {
                 deadline.saturating_duration_since(Instant::now())
             } else {
@@ -624,7 +650,7 @@ impl Broker {
             };
 
             tokio::select! {
-                Some(callback) = self.runtime_callbacks.recv(), if shutdown_deadline.is_none() => {
+                Some(callback) = self.runtime_callbacks.recv(), if shutdown_grace.is_none() => {
                     self.handle_runtime_callbacks(callback);
                 }
                 Some((conn_id, msg)) = self.inbound_rx.recv() => {
@@ -633,13 +659,21 @@ impl Broker {
                 Some((conn_id, outcome)) = self.exit_rx.recv() => {
                     self.handle_exit(conn_id, outcome).await;
                 }
+                Some(()) = self.interrupt_rx.recv(), if shutdown_grace.is_none() => {
+                    tracing::info!("external interrupt received; reporting to composition");
+                    self.queue_engine_envelope(serde_json::json!({
+                        "kind": "engine.interrupt_requested",
+                        "signal": "SIGINT",
+                    }));
+                    self.drain_engine_envelopes();
+                }
                 Some(request) = self.shutdown_rx.recv(), if shutdown_grace.is_none() => {
                     tracing::info!(code = request.code, reason = %request.reason, grace_ms = request.grace_ms, "engine shutdown requested");
                     shutdown_grace = Some(request.grace_ms);
                     shutdown_deadline = Some(Instant::now() + Duration::from_millis(request.grace_ms));
                     self.begin_shutdown();
                 }
-                _ = tokio::time::sleep(sleep_dur), if shutdown_deadline.is_some() || self.host.has_cooperative_tasks() => {
+                _ = tokio::time::sleep(sleep_dur), if shutdown_grace.is_some() || self.host.has_cooperative_tasks() => {
                     // Loop iteration to re-check shutdown or advance a deferred task.
                 }
             }
@@ -904,6 +938,7 @@ impl Broker {
         // only appends to the bus log. Route that tail before queuing Close
         // so peers observe final session events before EOF.
         self.drain_pending_dispatch();
+        self.host.terminate_runtime_processes();
 
         // Close every connection's writer channel. Writer tasks drain their
         // queues, flush, and exit. The shutdown-grace deadline in the run
@@ -914,11 +949,43 @@ impl Broker {
         }
     }
 
-    fn force_close_all(&mut self) {
+    fn force_terminate_all(&mut self) {
+        self.host.terminate_runtime_processes();
+        let mut transport_only = Vec::new();
+        for (id, record) in &mut self.conns_by_id {
+            if let Some(terminate) = record.terminate.take() {
+                let _ = terminate.send(());
+            } else {
+                transport_only.push((*id, record.name.clone()));
+            }
+        }
+        // In-memory transports have no owned OS process or exit watcher to
+        // reap. Their writer was already closed at begin_shutdown.
+        for (id, name) in transport_only {
+            self.conns_by_id.remove(&id);
+            lock_shared(&self.shared).conns.remove(&name);
+        }
+    }
+
+    fn account_unreaped_processes(&mut self) {
         let ids: Vec<ConnectionId> = self.conns_by_id.keys().copied().collect();
         for id in ids {
-            self.force_close(id);
+            let Some(record) = self.conns_by_id.remove(&id) else {
+                continue;
+            };
+            let name = record.name.as_str().to_owned();
+            lock_shared(&self.shared).conns.remove(&record.name);
+            if let Ok(mut exits) = self.abnormal_exits.lock() {
+                exits.push((name.clone(), "unknown"));
+            }
+            self.queue_engine_envelope(process_fact_body(
+                name,
+                ExitOutcome::Unknown {
+                    reason: "process did not exit after forced teardown".to_owned(),
+                },
+            ));
         }
+        self.drain_engine_envelopes();
     }
 
     fn force_close(&mut self, id: ConnectionId) {
@@ -979,6 +1046,16 @@ fn lock_shared(m: &Arc<Mutex<BrokerShared>>) -> std::sync::MutexGuard<'_, Broker
     }
 }
 
+/// Handle for reporting an external interrupt without beginning teardown.
+#[derive(Debug, Clone)]
+pub struct InterruptHandle(mpsc::Sender<()>);
+
+impl InterruptHandle {
+    pub async fn interrupt(&self) {
+        let _ = self.0.send(()).await;
+    }
+}
+
 /// Handle for requesting shutdown from outside the loop.
 #[derive(Debug, Clone)]
 pub struct ShutdownHandle(mpsc::Sender<ShutdownRequest>);
@@ -1027,6 +1104,7 @@ mod tests {
             reader: Box::pin(broker_read),
             writer: Box::pin(broker_write),
             stderr: None,
+            terminate: None,
             exit: None,
         };
         (
@@ -1602,6 +1680,7 @@ mod tests {
             reader: Box::pin(broker_read),
             writer: Box::pin(broker_write),
             stderr: None,
+            terminate: None,
             exit: Some(watcher),
         };
         (
@@ -1643,6 +1722,42 @@ mod tests {
         assert_eq!(outcome, BrokerStopReason::Shutdown);
         assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(code.load(std::sync::atomic::Ordering::SeqCst), 7);
+    }
+
+    #[tokio::test]
+    async fn external_interrupt_reports_fact_without_initiating_shutdown() {
+        let shared = shared_state();
+        let host = build_host(
+            &shared,
+            r#"
+            facts = {}
+            function dispatch(current)
+                local last = current[#current]
+                if last.origin == "engine" then facts[#facts + 1] = last.payload end
+            end
+        "#,
+        );
+        let lua = host.lua().clone();
+        let mut broker = Broker::new(Arc::clone(&shared), host);
+        let (_plugin, transport) = make_transport();
+        broker.attach_transport(transport, pn("a"));
+        let interrupt = broker.interrupt_handle();
+        let shutdown = broker.shutdown_handle();
+        let run = tokio::spawn(broker.run());
+
+        interrupt.interrupt().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!run.is_finished(), "interrupt fact must leave peers live");
+        let facts: mlua::Table = lua.globals().get("facts").unwrap();
+        let fact: String = facts.get(1).unwrap();
+        assert!(fact.contains("engine.interrupt_requested"));
+        assert!(fact.contains("SIGINT"));
+
+        shutdown.shutdown(0).await;
+        tokio::time::timeout(Duration::from_secs(1), run)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

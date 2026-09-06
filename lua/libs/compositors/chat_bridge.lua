@@ -65,6 +65,7 @@ function M.spawn_spec(command)
   return {
     name        = name,
     command     = command,
+    terminal    = "foreground",
     from_plugin = from_plugin,
     to_plugin   = to_plugin,
     to_plugin_readonly = true,

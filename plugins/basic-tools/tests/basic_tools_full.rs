@@ -222,8 +222,8 @@ mod tests {
         .clone();
 
         let cancels: Cancels = Arc::new(Mutex::new(HashMap::new()));
-        spawn_tool_invoke(&out_tx, &slow, &cancels);
-        spawn_tool_invoke(&out_tx, &fast, &cancels);
+        let slow_task = spawn_tool_invoke(&out_tx, &slow, &cancels);
+        let fast_task = spawn_tool_invoke(&out_tx, &fast, &cancels);
 
         let first = recv_result_body(&mut out_rx).await;
         let second = recv_result_body(&mut out_rx).await;
@@ -244,6 +244,8 @@ mod tests {
             .and_then(|output| output.get("stdout"))
             .and_then(Value::as_str)
             .is_some_and(|s| s.contains("SLOW_DONE")));
+        slow_task.await.unwrap();
+        fast_task.await.unwrap();
     }
 
     async fn recv_result_body(rx: &mut mpsc::Receiver<PluginOutgoing>) -> Map<String, Value> {

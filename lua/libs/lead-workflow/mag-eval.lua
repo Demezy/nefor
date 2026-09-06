@@ -381,6 +381,16 @@ function M.cancel_request(request_id)
   end
 end
 
+function M.authority_lost(message)
+  local count = 0
+  for _, pending in pairs(state.pending_loads) do
+    tool_err(pending.firing_id, "mag-eval: " .. tostring(message))
+    count = count + 1
+  end
+  state.pending_loads = {}
+  return count
+end
+
 -- Session-end fails pending compile capabilities. Submitted runs are owned by
 -- init.lua's standard active-run cleanup.
 local function on_session_end()

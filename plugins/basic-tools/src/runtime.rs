@@ -134,6 +134,9 @@ async fn run_dispatch_loop(
     in_rx: &mut mpsc::Receiver<Result<Envelope, TransportError>>,
 ) -> Result<(), TransportError> {
     let cancels: Cancels = Arc::new(Mutex::new(HashMap::new()));
+    let mut tasks = Vec::new();
+    let termination = termination_signal();
+    tokio::pin!(termination);
     loop {
         tokio::select! {
             maybe = in_rx.recv() => {
@@ -141,14 +144,15 @@ async fn run_dispatch_loop(
                     Some(Ok(env)) => match &env.body {
                         Body::System(SystemBody::Shutdown { .. }) => {
                             tracing::info!("shutdown received");
-                            return Ok(());
+                            break;
                         }
                         Body::System(_) => {
                             tracing::warn!(?env, "unexpected system envelope after handshake");
                         }
                         Body::Event(map) => {
                             if is_tool_invoke_event(map) {
-                                spawn_tool_invoke(out_tx, map, &cancels);
+                                tasks.retain(|task: &tokio::task::JoinHandle<()>| !task.is_finished());
+                                tasks.push(spawn_tool_invoke(out_tx, map, &cancels));
                             } else if is_tool_cancel_event(map) {
                                 handle_tool_cancel(&cancels, map);
                             } else {
@@ -161,16 +165,52 @@ async fn run_dispatch_loop(
                     }
                     None => {
                         tracing::info!("stdin closed; exiting");
-                        return Ok(());
+                        break;
                     }
                 }
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("ctrl-c; exiting");
-                return Ok(());
+                break;
+            }
+            _ = &mut termination => {
+                tracing::info!("termination signal; cancelling active tools");
+                break;
             }
         }
     }
+    cancel_and_wait(&cancels, tasks).await;
+    Ok(())
+}
+
+async fn termination_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut signal) => { signal.recv().await; }
+            Err(error) => {
+                tracing::error!(%error, "failed to install termination signal handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    std::future::pending::<()>().await;
+}
+
+async fn cancel_and_wait(cancels: &Cancels, tasks: Vec<tokio::task::JoinHandle<()>>) {
+    let pending = match cancels.lock() {
+        Ok(mut registrations) => registrations.drain().map(|(_, tx)| tx).collect::<Vec<_>>(),
+        Err(error) => {
+            tracing::error!(%error, "process cancellation registry poisoned during shutdown");
+            return;
+        }
+    };
+    for cancel in pending { let _ = cancel.send(()); }
+    // Cancellation drives each process group through kill + reap. Joining the
+    // invocation owners keeps plugin exit from racing that accounting.
+    for task in tasks { let _ = task.await; }
 }
 
 /// Route a bus event body based on its `kind`. The engine's prefix-routing
@@ -238,7 +278,7 @@ fn spawn_tool_invoke(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     body: &Map<String, Value>,
     cancels: &Cancels,
-) {
+) -> tokio::task::JoinHandle<()> {
     let out_tx = out_tx.clone();
     let body = body.clone();
     let cancels = Arc::clone(cancels);
@@ -278,7 +318,7 @@ fn spawn_tool_invoke(
                 Err(error) => tracing::error!(%error, "process cancellation registry poisoned"),
             }
         }
-    });
+    })
 }
 
 async fn handle_tool_invoke(

@@ -22,15 +22,81 @@ fn binaries() -> PathBuf {
         .join("debug")
 }
 
+#[derive(Clone, Copy)]
+enum Intervention<'a> {
+    None,
+    Sigint {
+        started_runs: usize,
+    },
+    KillPlugin {
+        executable: &'a str,
+        require_descendant: bool,
+    },
+}
+
 fn run(dir: &Path, args: &[&str]) -> Output {
-    run_inner(dir, args, false, &[])
+    run_inner(dir, args, Intervention::None, &[])
 }
 
 fn run_with_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
-    run_inner(dir, args, false, env)
+    run_inner(dir, args, Intervention::None, env)
 }
 
-fn run_inner(dir: &Path, args: &[&str], interrupt: bool, extra_env: &[(&str, &str)]) -> Output {
+fn processes() -> Vec<(u32, u32, u32, String)> {
+    let output = Command::new("/bin/ps")
+        .env_clear()
+        .args(["-axo", "pid=,ppid=,pgid=,command="])
+        .output()
+        .expect("list fixture processes");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((
+                fields.next()?.parse().ok()?,
+                fields.next()?.parse().ok()?,
+                fields.next()?.parse().ok()?,
+                line.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+fn plugin_process(parent: u32, executable: &str) -> Option<(u32, u32)> {
+    processes()
+        .into_iter()
+        .find_map(|(pid, ppid, pgid, command)| {
+            let binary = command
+                .split_whitespace()
+                .nth(3)
+                .and_then(|path| Path::new(path).file_name())
+                .and_then(|name| name.to_str());
+            (ppid == parent && binary == Some(executable)).then_some((pid, pgid))
+        })
+}
+
+fn group_is_empty(group: u32) -> bool {
+    !processes().into_iter().any(|(_, _, pgid, _)| pgid == group)
+}
+
+fn accepted_session_text(dir: &Path, prompt: &str) -> String {
+    std::fs::read_dir(dir.join("data/nefor/sessions"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .find(|text| text.contains(prompt))
+        .unwrap_or_default()
+}
+
+fn run_inner(
+    dir: &Path,
+    args: &[&str],
+    intervention: Intervention<'_>,
+    extra_env: &[(&str, &str)],
+) -> Output {
     let mut cmd = Command::new(binaries().join("nefor"));
     cmd.env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -67,32 +133,55 @@ fn run_inner(dir: &Path, args: &[&str], interrupt: bool, extra_env: &[(&str, &st
     };
     let out = drain(Box::new(stdout));
     let err = drain(Box::new(stderr));
+    let prompt = args
+        .windows(2)
+        .find_map(|pair| (pair[0] == "--prompt").then_some(pair[1]))
+        .unwrap_or_default();
     let deadline = Instant::now() + Duration::from_secs(45);
-    let mut interrupted = false;
+    let mut intervened = false;
+    let mut killed_process_groups = Vec::new();
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
         }
-        if interrupt && !interrupted {
-            let accepted = std::fs::read_dir(dir.join("data/nefor/sessions"))
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
-                .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
-                .any(|text| {
-                    text.contains("SLOW_STREAM_REGRESSION_INTERRUPT")
-                        && text.contains("mag.run_started")
-                });
-            if accepted {
+        if !intervened {
+            let persisted = accepted_session_text(dir, prompt);
+            let started_runs = persisted.matches("mag.run_started").count();
+            let target = match intervention {
+                Intervention::None => None,
+                Intervention::Sigint {
+                    started_runs: required,
+                } if started_runs >= required => Some((child.id(), "-INT")),
+                Intervention::KillPlugin {
+                    executable,
+                    require_descendant,
+                } if started_runs >= 1 => {
+                    plugin_process(child.id(), executable).and_then(|(pid, group)| {
+                        let child_groups = processes()
+                            .into_iter()
+                            .filter_map(|(_, ppid, pgid, _)| (ppid == pid).then_some(pgid))
+                            .collect::<Vec<_>>();
+                        let same_group_descendant = processes()
+                            .into_iter()
+                            .any(|(member, _, pgid, _)| pgid == group && member != pid);
+                        if require_descendant && child_groups.is_empty() && !same_group_descendant {
+                            return None;
+                        }
+                        killed_process_groups.push(group);
+                        killed_process_groups.extend(child_groups);
+                        Some((pid, "-TERM"))
+                    })
+                }
+                _ => None,
+            };
+            if let Some((pid, signal)) = target {
                 assert!(Command::new("/bin/kill")
                     .env_clear()
-                    .args(["-INT", &child.id().to_string()])
+                    .args([signal, &pid.to_string()])
                     .status()
                     .unwrap()
                     .success());
-                interrupted = true;
+                intervened = true;
             }
         }
         if Instant::now() >= deadline {
@@ -109,14 +198,129 @@ fn run_inner(dir: &Path, args: &[&str], interrupt: bool, extra_env: &[(&str, &st
         }
         thread::sleep(Duration::from_millis(10));
     };
-    if interrupt {
-        assert!(interrupted, "the test must interrupt accepted work");
+    if !matches!(intervention, Intervention::None) {
+        assert!(intervened, "the test must intervene after accepted work");
+    }
+    for group in killed_process_groups {
+        let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+        while !group_is_empty(group) && Instant::now() < cleanup_deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            group_is_empty(group),
+            "runtime left descendants in process group {group}"
+        );
     }
     Output {
         status,
         stdout: out.join().unwrap(),
         stderr: err.join().unwrap(),
     }
+}
+
+fn assert_canonical_settlement(dir: &Path, output: &Output, minimum_runs: usize) {
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let session_id = result["session_id"].as_str().expect("result session id");
+    let persisted = std::fs::read_to_string(
+        dir.join("data/nefor/sessions")
+            .join(format!("{session_id}.jsonl")),
+    )
+    .unwrap();
+    let mut started = std::collections::HashSet::new();
+    let mut terminal = std::collections::HashSet::new();
+    let mut request_completed = None;
+    for line in persisted.lines().skip(1) {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        let Some(payload) = row["payload"].as_str() else {
+            continue;
+        };
+        let envelope: serde_json::Value = serde_json::from_str(payload).unwrap();
+        let body = &envelope["body"];
+        match body["kind"].as_str() {
+            Some("mag.run_started") => {
+                started.insert(body["run_id"].as_str().unwrap().to_owned());
+            }
+            Some("mag.run_result") => {
+                terminal.insert(body["run_id"].as_str().unwrap().to_owned());
+            }
+            Some("agentic_loop.request_completed")
+                if body["request_id"] == result["request_id"] =>
+            {
+                request_completed = Some(body.clone())
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        started.len() >= minimum_runs,
+        "expected real child/descendant run"
+    );
+    assert_eq!(
+        started, terminal,
+        "every accepted MAG run must settle canonically"
+    );
+    let completion = request_completed.expect("correlated request completion must be durable");
+    assert_eq!(
+        completion["status"], result["status"],
+        "stdout status must equal durable request completion"
+    );
+    assert_eq!(
+        completion["error"], result["error"],
+        "stdout error must equal durable request completion"
+    );
+    assert!(
+        result["status"] == "interrupted" || result["status"] == "error",
+        "CLI output is emitted only after sessions.flush_done"
+    );
+}
+
+fn assert_authority_loss(dir: &Path, output: &Output) {
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["status"], "error");
+    assert_eq!(result["error"]["code"], "mag_authority_lost");
+    assert_eq!(result["error"]["outcome"], "unknown");
+    let session_id = result["session_id"].as_str().expect("result session id");
+    let persisted = std::fs::read_to_string(
+        dir.join("data/nefor/sessions")
+            .join(format!("{session_id}.jsonl")),
+    )
+    .unwrap();
+    let mut started = std::collections::HashSet::new();
+    let mut terminal = std::collections::HashSet::new();
+    let mut completion = None;
+    for line in persisted.lines().skip(1) {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        let Some(payload) = row["payload"].as_str() else {
+            continue;
+        };
+        let envelope: serde_json::Value = serde_json::from_str(payload).unwrap();
+        let body = &envelope["body"];
+        match body["kind"].as_str() {
+            Some("mag.run_started") => {
+                started.insert(body["run_id"].as_str().unwrap().to_owned());
+            }
+            Some("mag.run_result") => {
+                terminal.insert(body["run_id"].as_str().unwrap().to_owned());
+            }
+            Some("agentic_loop.request_completed")
+                if body["request_id"] == result["request_id"] =>
+            {
+                completion = Some(body.clone());
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        !started.is_empty(),
+        "MAG must die after accepting real work"
+    );
+    assert!(
+        started.difference(&terminal).next().is_some(),
+        "authority loss must not be fabricated as mag.run_result"
+    );
+    let completion = completion.expect("authority loss completion must be persisted before stdout");
+    assert_eq!(completion["status"], result["status"]);
+    assert_eq!(completion["error"], result["error"]);
 }
 
 fn success(out: &Output) -> String {
@@ -352,9 +556,9 @@ fn headless_starter_request_resume_tools_and_failures() {
             "--format",
             "json",
             "--prompt",
-            "SLOW_STREAM_REGRESSION_INTERRUPT",
+            "summarise octopuses and lighthouses in parallel and combine into one paragraph INTERRUPTION_DESCENDANT",
         ],
-        true,
+        Intervention::Sigint { started_runs: 2 },
         &[],
     );
     assert_eq!(
@@ -367,5 +571,61 @@ fn headless_starter_request_resume_tools_and_failures() {
         serde_json::from_slice::<serde_json::Value>(&interrupted.stdout).unwrap()["status"],
         "interrupted"
     );
+    assert_canonical_settlement(&dir, &interrupted, 2);
+
+    for (executable, marker, require_descendant) in [
+        ("basic-tools", "BASIC_TOOLS_ACTIVE_DEATH", true),
+        ("tool-gate", "TOOL_GATE_DEATH", false),
+        ("mock-plugin", "SLOW_STREAM_REGRESSION_PROVIDER_DEATH", true),
+    ] {
+        let prompt = format!("SLOW_STREAM_REGRESSION_{marker}");
+        let plugin_death = run_inner(
+            &dir,
+            &[
+                "--frontend",
+                "cli",
+                "--format",
+                "json",
+                "--mode",
+                "yolo",
+                "--prompt",
+                &prompt,
+            ],
+            Intervention::KillPlugin {
+                executable,
+                require_descendant,
+            },
+            &[],
+        );
+        assert_eq!(plugin_death.status.code(), Some(1));
+        let plugin_result: serde_json::Value =
+            serde_json::from_slice(&plugin_death.stdout).unwrap();
+        assert_eq!(plugin_result["status"], "error");
+        assert_eq!(plugin_result["error"]["code"], "plugin_terminated");
+        assert!(plugin_result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(executable));
+        assert_canonical_settlement(&dir, &plugin_death, 1);
+    }
+
+    let mag_death = run_inner(
+        &dir,
+        &[
+            "--frontend",
+            "cli",
+            "--format",
+            "json",
+            "--prompt",
+            "SLOW_STREAM_REGRESSION_MAG_AUTHORITY_DEATH",
+        ],
+        Intervention::KillPlugin {
+            executable: "mag-plugin",
+            require_descendant: false,
+        },
+        &[],
+    );
+    assert_eq!(mag_death.status.code(), Some(1));
+    assert_authority_loss(&dir, &mag_death);
     println!("retained headless artifacts: {}", dir.display());
 }

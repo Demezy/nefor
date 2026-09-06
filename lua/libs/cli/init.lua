@@ -22,6 +22,18 @@ function M.start(opts)
   local phase = "starting"
   local session_id, result
   local gate_mode = "safe"
+  local settlement_requested = false
+
+  local function required_plugin(name)
+    local plugins = opts.readiness.required_plugins
+    if type(plugins) == "function" then plugins = plugins() end
+    for _, plugin in ipairs(plugins or {}) do
+      if plugin == name then return true end
+    end
+    local provider = opts.readiness.required_provider
+    if type(provider) == "function" then provider = provider() end
+    return provider == name
+  end
 
   local function finish(outcome)
     if phase == "finished" then return end
@@ -44,9 +56,23 @@ function M.start(opts)
   local function fail(code, message)
     local err = { code = code, message = tostring(message) }
     if phase == "submitted" then
+      if settlement_requested then return end
+      settlement_requested = true
       loop.fail_request(request_id, err)
-    else
+    elseif phase ~= "flushing" then
       finish { status = "error", error = err }
+    end
+  end
+
+  local function interrupt()
+    if phase == "submitted" then
+      if settlement_requested then return end
+      settlement_requested = true
+      loop.interrupt_request(request_id)
+    elseif phase ~= "flushing" then
+      finish { status = "interrupted", error = {
+        code = "interrupted", message = "Request interrupted by runtime signal",
+      } }
     end
   end
 
@@ -62,10 +88,10 @@ function M.start(opts)
         session_id = body.session_id
         stderr("session_id: " .. tostring(session_id) .. "\n")
       end
-    elseif kind == "engine.plugin_process_terminated" then
-      finish { status = "error", error = {
-        code = "plugin_terminated", message = "Required runtime process terminated: " .. tostring(body.plugin),
-      } }
+    elseif kind == "engine.interrupt_requested" then
+      interrupt()
+    elseif kind == "engine.plugin_process_terminated" and required_plugin(body.plugin) then
+      fail("plugin_terminated", "Required runtime process terminated: " .. tostring(body.plugin))
     elseif kind == "sessions.transition_failed" or kind == "sessions.persistence_failed" then
       fail("session_failure", body.message)
     elseif kind == "tool-gate.mode_changed" then
@@ -98,13 +124,7 @@ function M.start(opts)
 
   if nefor.events and nefor.events.on then
     nefor.events.on("shutdown", function()
-      if phase == "finished" then return end
-      -- External shutdown owns cancellation, including process teardown. It is
-      -- not successful request settlement and must not inherit exit code zero.
-      loop.interrupt_request(request_id)
-      finish { status = "interrupted", error = {
-        code = "interrupted", message = "Request interrupted by runtime shutdown",
-      } }
+      if phase == "submitted" then loop.interrupt_request(request_id) end
     end)
   end
 

@@ -25,12 +25,24 @@ pub struct PluginSpec {
     /// Validated plugin name. The engine stamps `from = name` on every
     /// envelope this connection emits.
     pub name: PluginName,
+    /// Relationship between a subprocess and the engine's controlling terminal.
+    pub terminal: TerminalMode,
     /// What this plugin does: subprocess, CLI entry point, or both.
     /// Replaces the previous `command: Option<Vec<String>>` + `has_cli: bool`
     /// pair — the old representation allowed an invalid state (neither
     /// command nor cli) that was caught at runtime. The enum makes it
     /// unrepresentable at the type level.
     pub kind: PluginKind,
+}
+
+/// Relationship between a subprocess and the controlling terminal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TerminalMode {
+    /// Isolate the plugin in its own process group without terminal foreground authority.
+    #[default]
+    Detached,
+    /// Give the plugin's process group foreground authority for the controlling terminal.
+    Foreground,
 }
 
 /// How a plugin is launched. Every variant carries at least one capability,
@@ -76,12 +88,23 @@ pub enum RegisterError {
         /// The offending plugin name.
         name: String,
     },
+    /// Foreground terminal authority is exclusive within one composition.
+    #[error(
+        "plugin {requested:?} cannot own the foreground terminal; plugin {owner:?} already owns it"
+    )]
+    ForegroundTerminalAlreadyOwned {
+        /// The plugin which registered foreground authority first.
+        owner: String,
+        /// The later plugin whose registration was rejected.
+        requested: String,
+    },
 }
 
 /// In-memory list of plugin specs.
 #[derive(Debug, Default)]
 pub struct PluginRegistry {
     specs: Vec<PluginSpec>,
+    foreground_owner: Option<PluginName>,
 }
 
 /// Shared handle on the registry. `init.lua` writes to this through the
@@ -108,6 +131,15 @@ impl PluginRegistry {
         }
         if self.specs.iter().any(|s| s.name == spec.name) {
             return Err(RegisterError::DuplicateName(spec.name.as_str().to_owned()));
+        }
+        if spec.terminal == TerminalMode::Foreground {
+            if let Some(owner) = &self.foreground_owner {
+                return Err(RegisterError::ForegroundTerminalAlreadyOwned {
+                    owner: owner.as_str().to_owned(),
+                    requested: spec.name.as_str().to_owned(),
+                });
+            }
+            self.foreground_owner = Some(spec.name.clone());
         }
         self.specs.push(spec);
         Ok(())
@@ -149,6 +181,7 @@ mod tests {
     fn cmd_spec(name: &str) -> PluginSpec {
         PluginSpec {
             name: PluginName::new(name).expect("valid"),
+            terminal: TerminalMode::Detached,
             kind: PluginKind::Command(vec!["echo".into()]),
         }
     }
@@ -156,7 +189,16 @@ mod tests {
     fn cli_only_spec(name: &str) -> PluginSpec {
         PluginSpec {
             name: PluginName::new(name).expect("valid"),
+            terminal: TerminalMode::Detached,
             kind: PluginKind::Cli,
+        }
+    }
+
+    fn foreground_spec(name: &str) -> PluginSpec {
+        PluginSpec {
+            name: PluginName::new(name).expect("valid"),
+            terminal: TerminalMode::Foreground,
+            kind: PluginKind::Command(vec!["echo".into()]),
         }
     }
 
@@ -181,10 +223,28 @@ mod tests {
         let mut r = PluginRegistry::new();
         let empty = PluginSpec {
             name: PluginName::new("p").expect("valid"),
+            terminal: TerminalMode::Detached,
             kind: PluginKind::Command(vec![]),
         };
         let err = r.register(empty).unwrap_err();
         assert_eq!(err, RegisterError::EmptyCommand { name: "p".into() });
+    }
+
+    #[test]
+    fn register_rejects_a_second_foreground_terminal_owner() {
+        let mut registry = PluginRegistry::new();
+        registry.register(foreground_spec("first-ui")).unwrap();
+
+        let error = registry.register(foreground_spec("second-ui")).unwrap_err();
+
+        assert_eq!(
+            error,
+            RegisterError::ForegroundTerminalAlreadyOwned {
+                owner: "first-ui".into(),
+                requested: "second-ui".into(),
+            }
+        );
+        assert_eq!(registry.list().len(), 1);
     }
 
     #[test]
@@ -203,6 +263,7 @@ mod tests {
         r.register(cli_only_spec("only-cli")).unwrap();
         r.register(PluginSpec {
             name: PluginName::new("both").expect("valid"),
+            terminal: TerminalMode::Detached,
             kind: PluginKind::Both {
                 command: vec!["bin".into()],
             },

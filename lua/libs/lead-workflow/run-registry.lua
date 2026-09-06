@@ -304,6 +304,47 @@ function M:claim_delivery(run_id)
   return true
 end
 
+-- Reconcile runs whose sole execution authority disappeared. The retained
+-- outcome belongs to this registry, not MAG: canonical_body stays absent and
+-- no mag.run_result is constructed or emitted.
+function M:lose_authority(reason)
+  local run_ids = {}
+  for run_id in pairs(self.active_runs) do run_ids[#run_ids + 1] = run_id end
+  table.sort(run_ids)
+  local lost, waiter_settlements = {}, {}
+  for _, run_id in ipairs(run_ids) do
+    local run = self.active_runs[run_id]
+    local outcome = typed_error("await_run_authority_lost",
+      tostring(reason or "MAG execution authority was lost"), run_id, "unknown")
+    outcome.run_name = run.run_name
+    outcome.invocation_label = run.invocation_label
+    run.phase = "terminal"
+    run.status = "unknown"
+    run.terminal_status = "authority_lost"
+    run.updated_at = self.now()
+    run.canonical = outcome
+    run.canonical_body = nil
+    run.error = tostring(reason or "MAG execution authority was lost")
+    local waiters = {}
+    for firing_id in pairs(run.waiters) do waiters[#waiters + 1] = firing_id end
+    table.sort(waiters)
+    for _, firing_id in ipairs(waiters) do
+      self.waiter_runs[firing_id] = nil
+      waiter_settlements[#waiter_settlements + 1] = {
+        firing_id = firing_id,
+        outcome = outcome,
+      }
+    end
+    run.waiters = {}
+    self.active_runs[run_id] = nil
+    self.completed_runs[#self.completed_runs + 1] = run
+    self.terminal_order[#self.terminal_order + 1] = run_id
+    lost[#lost + 1] = run
+    self:enforce_terminal_limit(run.session_id)
+  end
+  return { runs = lost, waiter_settlements = waiter_settlements }
+end
+
 function M:end_session(session_id)
   local run_ids = {}
   for run_id, run in pairs(self.runs) do

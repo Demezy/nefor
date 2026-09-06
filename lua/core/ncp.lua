@@ -705,6 +705,7 @@ end
 local SPAWN_VALID_KEYS = {
   name        = true,
   command     = true,
+  terminal    = true,
   from_plugin = true,
   to_plugin   = true,
   to_plugin_readonly = true,
@@ -757,8 +758,9 @@ function M.spawn(cfg)
   }
 
   nefor.plugins.spawn({
-    name    = cfg.name,
-    command = cfg.command,
+    name     = cfg.name,
+    command  = cfg.command,
+    terminal = cfg.terminal,
   })
 end
 

@@ -44,7 +44,7 @@
 use mlua::{Lua, Table, Value};
 use nefor_protocol::PluginName;
 
-use crate::ncp::{PluginKind, PluginSpec, SharedPluginRegistry};
+use crate::ncp::{PluginKind, PluginSpec, SharedPluginRegistry, TerminalMode};
 
 /// Lua global holding the per-plugin CLI dispatch table. Populated by
 /// `nefor.plugins.spawn` and read by the engine when running
@@ -155,6 +155,24 @@ pub fn install_plugins(
             }
         };
 
+        let terminal = match opts.get::<Value>("terminal")? {
+            Value::Nil => TerminalMode::Detached,
+            Value::String(value) if value.to_str()?.as_ref() == "foreground" => {
+                TerminalMode::Foreground
+            }
+            Value::String(_) => {
+                return Err(mlua::Error::runtime(
+                    "nefor.plugins.spawn: 'terminal' must be 'foreground' when provided",
+                ));
+            }
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "nefor.plugins.spawn: 'terminal' must be a string (got {})",
+                    other.type_name(),
+                )));
+            }
+        };
+
         let kind = match (command, cli_fn.is_some()) {
             (Some(cmd), false) => PluginKind::Command(cmd),
             (Some(cmd), true) => PluginKind::Both { command: cmd },
@@ -166,8 +184,14 @@ pub fn install_plugins(
                 )));
             }
         };
+        if terminal == TerminalMode::Foreground && matches!(kind, PluginKind::Cli) {
+            return Err(mlua::Error::runtime(
+                "nefor.plugins.spawn: 'terminal' requires a subprocess command",
+            ));
+        }
         let spec = PluginSpec {
             name: name.clone(),
+            terminal,
             kind,
         };
 
@@ -245,6 +269,55 @@ mod tests {
             specs[0].command(),
             Some(&["bin".to_string(), "--flag".to_string(), "x".to_string()][..])
         );
+    }
+
+    #[test]
+    fn spawn_registers_explicit_terminal_foreground_capability() {
+        let (lua, plugins) = setup();
+        lua.load(
+            r#"nefor.plugins.spawn {
+                name = "terminal-ui",
+                command = { "ui-bin" },
+                terminal = "foreground",
+            }"#,
+        )
+        .exec()
+        .expect("ok");
+        let guard = plugins.lock().unwrap();
+        assert_eq!(guard.list()[0].terminal, TerminalMode::Foreground);
+    }
+
+    #[test]
+    fn spawn_rejects_a_second_foreground_terminal_owner() {
+        let (lua, plugins) = setup();
+        let error = lua
+            .load(
+                r#"
+                nefor.plugins.spawn {
+                    name = "first-ui",
+                    command = { "first-ui" },
+                    terminal = "foreground",
+                }
+                nefor.plugins.spawn {
+                    name = "second-ui",
+                    command = { "second-ui" },
+                    terminal = "foreground",
+                }
+                "#,
+            )
+            .exec()
+            .expect_err("second foreground owner must be rejected");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("first-ui"),
+            "owner missing from: {message}"
+        );
+        assert!(
+            message.contains("second-ui"),
+            "requester missing from: {message}"
+        );
+        assert_eq!(plugins.lock().unwrap().list().len(), 1);
     }
 
     #[test]

@@ -224,6 +224,7 @@ fn transport_pair() -> (
             reader: Box::pin(broker_read),
             writer: Box::pin(broker_write),
             stderr: None,
+            terminate: None,
             exit: None,
         },
     )

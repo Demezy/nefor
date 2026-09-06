@@ -135,12 +135,17 @@ function M.spawn(spec)
       ncp.spawn {
         name        = spec.name,
         command     = spec.command,
+        terminal    = spec.terminal,
         from_plugin    = spec.from_plugin,
         to_plugin      = spec.to_plugin,
         to_plugin_readonly = spec.to_plugin_readonly,
       }
     else
-      nefor.plugins.spawn { name = spec.name, command = spec.command }
+      nefor.plugins.spawn {
+        name = spec.name,
+        command = spec.command,
+        terminal = spec.terminal,
+      }
     end
   end
 end

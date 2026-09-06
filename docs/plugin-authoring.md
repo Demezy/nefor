@@ -23,6 +23,18 @@ The engine starts `command[0]` directly with the remaining entries as argv. It d
 
 A plugin owns its CLI and settings schema. The engine validates the composition's `name` and non-empty command strings; it does not interpret plugin flags. Use an explicit shell/wrapper when custom environment, cwd, shell expansion, supervision, or a daemon bridge is required.
 
+On Unix, subprocess plugins lead isolated process groups so shutdown can terminate their complete descendant trees. A plugin that directly owns the controlling terminal must declare that capability explicitly:
+
+```lua
+ncp.spawn {
+  name = "terminal-ui",
+  command = { bin("terminal-ui") },
+  terminal = "foreground",
+}
+```
+
+The engine gives that process group foreground terminal authority for its lifetime and restores the prior foreground group when it exits. Ordinary plugins remain detached from terminal foreground semantics.
+
 ### JSON Lines and handshake
 
 Stdout contains one complete JSON value per line. Stderr is logging. The canonical startup exchange is:

@@ -29,13 +29,12 @@
 //! "no stdin data received" warning after a few seconds.
 
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as SyncMutex};
 
 use mlua::{Function, Lua, RegistryKey, Table, UserData, UserDataMethods};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
-use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::task::JoinHandle;
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
 /// Errors-as-data sentinel for `nefor.process.run` spawn failures. The
 /// caller branches on `code` (any non-zero value) rather than handling
@@ -59,12 +58,34 @@ pub enum RuntimeCallback {
 
 pub type RuntimeCallbackSender = mpsc::UnboundedSender<RuntimeCallback>;
 pub type RuntimeCallbackReceiver = mpsc::UnboundedReceiver<RuntimeCallback>;
+pub type RuntimeProcessRegistry = Arc<SyncMutex<Vec<watch::Sender<bool>>>>;
+
+pub fn terminate_runtime_processes(registry: &RuntimeProcessRegistry) {
+    let mut controls = lock_runtime_processes(registry);
+    controls.retain(|control| control.send(true).is_ok());
+}
+
+pub fn active_runtime_processes(registry: &RuntimeProcessRegistry) -> usize {
+    let mut controls = lock_runtime_processes(registry);
+    controls.retain(|control| !control.is_closed());
+    controls.len()
+}
+
+fn lock_runtime_processes(
+    registry: &RuntimeProcessRegistry,
+) -> std::sync::MutexGuard<'_, Vec<watch::Sender<bool>>> {
+    match registry.lock() {
+        Ok(controls) => controls,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// Install `nefor.process.spawn` onto `nefor_tbl`.
 pub fn install_process(
     lua: &Lua,
     nefor_tbl: &Table,
     runtime_callbacks: RuntimeCallbackSender,
+    runtime_processes: RuntimeProcessRegistry,
 ) -> mlua::Result<()> {
     let process = lua.create_table()?;
 
@@ -73,6 +94,7 @@ pub fn install_process(
     let spawn_lua = lua.clone();
     let spawn_fn = lua.create_function(move |_, opts: Table| {
         let runtime_callbacks = runtime_callbacks.clone();
+        let runtime_processes = Arc::clone(&runtime_processes);
         let cmd_name: String = opts.get("cmd").map_err(|e| {
             mlua::Error::runtime(format!(
                 "nefor.process.spawn: missing or invalid 'cmd' field: {e}"
@@ -117,7 +139,10 @@ pub fn install_process(
         cmd.args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .stdin(stdin_cfg);
+            .stdin(stdin_cfg)
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
@@ -210,9 +235,24 @@ pub fn install_process(
         // Exit waiter — converts `child.wait().await` into a dispatch message.
         // We also provide `wait_done_rx` for the userdata's `wait()` method.
         let (exit_tx_user, exit_rx_user) = oneshot::channel::<i32>();
+        let (terminate_tx, mut terminate_rx) = watch::channel(false);
+        match runtime_processes.lock() {
+            Ok(mut controls) => controls.push(terminate_tx.clone()),
+            Err(poisoned) => poisoned.into_inner().push(terminate_tx.clone()),
+        }
+        let process_group = child.id();
         let tx_exit = tx.clone();
-        let exit_waiter: JoinHandle<()> = tokio::spawn(async move {
-            let code = match child.wait().await {
+        tokio::spawn(async move {
+            let waited = tokio::select! {
+                status = child.wait() => status,
+                changed = terminate_rx.changed() => {
+                    if changed.is_ok() && *terminate_rx.borrow() {
+                        terminate_process_tree(&mut child, process_group);
+                    }
+                    child.wait().await
+                }
+            };
+            let code = match waited {
                 Ok(status) => status.code().unwrap_or(-1),
                 Err(e) => {
                     tracing::warn!(error = %e, "process wait failed");
@@ -232,15 +272,6 @@ pub fn install_process(
             let _ = exit_tx_user.send(code);
             let _ = tx_exit.send(DispatchMsg::Exit(code));
         });
-        // The waiter owns `child`; to kill we use tokio's built-in kill, which
-        // takes `&mut Child` we no longer have. Workaround: put the pid-based
-        // kill inside the waiter's scope by routing a kill request through
-        // the channel. Simplest MVP: shelve the Child itself inside the
-        // waiter, and provide kill via a separate channel + select. But for
-        // MVP simplicity we accept "kill() is best-effort" via unix signal.
-        // Stash an Option<KillSignal> in the ProcessHandle; if Some, the
-        // waiter task listens. See ProcessHandle.
-
         // Serialization task: preserve the process stream order while
         // forwarding handler invocations to the broker-owned callback queue.
         // Registry keys drop when this task and the queued callback release them.
@@ -283,7 +314,7 @@ pub fn install_process(
         Ok(ProcessHandle {
             exit_rx: Arc::new(Mutex::new(Some(exit_rx_user))),
             stdin: shared_stdin,
-            waiter: Arc::new(Mutex::new(Some(exit_waiter))),
+            terminate: terminate_tx,
         })
     })?;
     process.set("spawn", spawn_fn)?;
@@ -293,6 +324,26 @@ pub fn install_process(
 
     nefor_tbl.set("process", process)?;
     Ok(())
+}
+
+fn terminate_process_tree(child: &mut tokio::process::Child, process_group: Option<u32>) {
+    if terminate_descendants(process_group) {
+        return;
+    }
+    let _ = child.start_kill();
+}
+
+fn terminate_descendants(process_group: Option<u32>) -> bool {
+    #[cfg(unix)]
+    if let Some(process_group) = process_group {
+        unsafe {
+            libc::killpg(process_group as libc::pid_t, libc::SIGKILL);
+        }
+        return true;
+    }
+    #[cfg(not(unix))]
+    let _ = process_group;
+    false
 }
 
 /// Synchronous subprocess invocation. Blocks the calling thread until
@@ -462,7 +513,7 @@ fn invoke_exit_handler(lua: &Lua, key: &RegistryKey, code: i32) {
 pub struct ProcessHandle {
     exit_rx: Arc<Mutex<Option<oneshot::Receiver<i32>>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
-    waiter: Arc<Mutex<Option<JoinHandle<()>>>>,
+    terminate: watch::Sender<bool>,
 }
 
 impl UserData for ProcessHandle {
@@ -497,24 +548,14 @@ impl UserData for ProcessHandle {
             }
         });
 
-        // kill() -> bool. MVP: abort the waiter task, which in turn drops
-        // the Child, which (per tokio docs) does *not* automatically kill
-        // the process — Children are "detach-on-drop" by default. For a
-        // real kill we'd need the pid + `nix::sys::signal::kill`; that's
-        // post-MVP. We return `true` when we successfully dropped the
-        // waiter (the caller can interpret that as "we're no longer
-        // tracking it") and `false` when the waiter was already done.
         methods.add_async_method("kill", |_, this, ()| async move {
-            let mut guard = this.waiter.lock().await;
-            match guard.take() {
-                Some(handle) => {
-                    handle.abort();
-                    Ok(true)
-                }
-                None => Ok(false),
-            }
+            Ok(signal_termination(&this.terminate))
         });
     }
+}
+
+fn signal_termination(terminate: &watch::Sender<bool>) -> bool {
+    terminate.send(true).is_ok()
 }
 
 #[cfg(test)]
@@ -526,7 +567,13 @@ mod tests {
         let lua = Lua::new();
         let nefor = lua.create_table().unwrap();
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
-        install_process(&lua, &nefor, callback_tx).unwrap();
+        install_process(
+            &lua,
+            &nefor,
+            callback_tx,
+            Arc::new(SyncMutex::new(Vec::new())),
+        )
+        .unwrap();
         lua.globals().set("nefor", nefor).unwrap();
         (lua, callback_rx)
     }
@@ -745,5 +792,87 @@ mod tests {
             .expect("run ok — spawn failure must be data, not a Lua error");
         assert_eq!(code, -1);
         assert!(stderr.contains("spawn failed"), "got: {stderr}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kill_terminates_and_reaps_spawned_process_group() {
+        let (lua, _callback_rx) = setup();
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("descendant.pid");
+        let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        lua.globals().set("script", script).unwrap();
+        let (killed, code): (bool, i32) = lua
+            .load(
+                r#"
+            local proc = nefor.process.spawn({ cmd = "sh", args = { "-c", script } })
+            local delay = nefor.process.spawn({ cmd = "sh", args = { "-c", "sleep 0.1" } })
+            delay:wait()
+            local killed = proc:kill()
+            return killed, proc:wait()
+        "#,
+            )
+            .eval_async()
+            .await
+            .unwrap();
+        assert!(killed);
+        assert_ne!(code, 0);
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while unsafe { libc::kill(pid, 0) } == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "descendant remained alive after kill"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_teardown_terminates_unretained_process_tree() {
+        let lua = Lua::new();
+        let nefor = lua.create_table().unwrap();
+        let (callback_tx, _callback_rx) = mpsc::unbounded_channel();
+        let registry = Arc::new(SyncMutex::new(Vec::new()));
+        install_process(&lua, &nefor, callback_tx, Arc::clone(&registry)).unwrap();
+        lua.globals().set("nefor", nefor).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("runtime-descendant.pid");
+        let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        lua.globals().set("script", script).unwrap();
+        lua.load(
+            r#"
+            nefor.process.spawn({ cmd = "sh", args = { "-c", script } })
+            collectgarbage("collect")
+        "#,
+        )
+        .exec()
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !pid_file.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(active_runtime_processes(&registry), 1);
+        terminate_runtime_processes(&registry);
+        while active_runtime_processes(&registry) != 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(active_runtime_processes(&registry), 0);
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "engine teardown left an unretained runtime descendant alive"
+        );
     }
 }

@@ -143,6 +143,32 @@ function M:recheck_all()
   for request_id in pairs(self.requests) do self:recheck(request_id) end
 end
 
+-- Settle every accepted request when the executor that could author its normal
+-- terminal facts has disappeared. This is not a synthetic executor result:
+-- request lifecycle owns only the coarser fact that completion is unknowable,
+-- and releases its own obligations so that fact can become durable.
+function M:authority_lost(err)
+  local settled = 0
+  for _, request in pairs(self.requests) do
+    if not request.completed then
+      request.forced = { status = "error", answer = "", error = err }
+      request.terminal = request.forced
+      request.obligations = {}
+      request.completed = true
+      self.emit({
+        kind = "agentic_loop.request_completed",
+        request_id = request.request_id,
+        session_id = request.session_id,
+        status = "error",
+        answer = "",
+        error = err,
+      })
+      settled = settled + 1
+    end
+  end
+  return settled
+end
+
 function M:reset()
   self.requests = {}
 end

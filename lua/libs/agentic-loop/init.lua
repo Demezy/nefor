@@ -1712,6 +1712,22 @@ function M.interrupt_request(request_id)
   return changed
 end
 
+-- MAG authority loss has no canonical run terminal to consume. Request
+-- lifecycle authors only the coarser fact it owns: accepted outcomes are now
+-- unknowable, and its correlated obligations are released.
+function M.mag_authority_lost(err)
+  err = err or {
+    code = "mag_authority_lost",
+    message = "MAG execution authority was lost before accepted work settled",
+  }
+  state.current_run_id = nil
+  state.current_turn = nil
+  state.pending_user_inputs = {}
+  state.deferred_queue = {}
+  state.pending_steer = nil
+  return request_lifecycle:authority_lost(err)
+end
+
 function M.prepare()
   -- Fresh sessions deliberately keep the root lazy so the first canonical
   -- chat.input.submit opens persistence before any conversation facts exist.
@@ -1941,6 +1957,7 @@ M.receive_msg = receive_msg
 M.send_msg    = function(_) end  -- no internal-output translation
 M._internals  = {
   state = state,
+  request_lifecycle = request_lifecycle,
   reset = function()
     state.config = {
       provider = "ollama",

@@ -33,4 +33,4 @@ pub mod transport;
 pub use broker::{Broker, BrokerOps, BrokerShared};
 pub use error::BrokerError;
 pub use runner::spawn_plugin;
-pub use spawn::{PluginKind, PluginRegistry, PluginSpec, SharedPluginRegistry};
+pub use spawn::{PluginKind, PluginRegistry, PluginSpec, SharedPluginRegistry, TerminalMode};
