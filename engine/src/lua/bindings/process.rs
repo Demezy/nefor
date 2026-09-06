@@ -801,13 +801,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("descendant.pid");
         let script = format!("sleep 30 & echo $! > '{}'; wait", pid_file.display());
+        let wait_for_pid = format!(
+            "i=0; while [ ! -s '{}' ] && [ $i -lt 200 ]; do sleep 0.01; i=$((i + 1)); done; [ -s '{}' ]",
+            pid_file.display(),
+            pid_file.display()
+        );
         lua.globals().set("script", script).unwrap();
+        lua.globals().set("wait_for_pid", wait_for_pid).unwrap();
         let (killed, code): (bool, i32) = lua
             .load(
                 r#"
             local proc = nefor.process.spawn({ cmd = "sh", args = { "-c", script } })
-            local delay = nefor.process.spawn({ cmd = "sh", args = { "-c", "sleep 0.1" } })
-            delay:wait()
+            local ready = nefor.process.spawn({ cmd = "sh", args = { "-c", wait_for_pid } })
+            assert(ready:wait() == 0, "descendant pid was not published")
             local killed = proc:kill()
             return killed, proc:wait()
         "#,
