@@ -1371,37 +1371,83 @@ async fn retained_dynamic_program_survives_source_disposal_and_process_restart()
     assert_eq!(request_actor(&planner_a), "planner.llm");
     assert_eq!(request_actor(&planner_b), "planner.llm");
     for planner in [&planner_a, &planner_b] {
+        let run = planner["invocation"]["run_id"].as_str().unwrap();
         complete_chat(
             &mut reader,
             &mut stdin,
             planner["request_id"].as_str().expect("planner request id"),
-            r#"{"value":[]}"#,
+            &json!({"value":[{"task":run,"description":run,"dependent_tasks":[]}]}).to_string(),
         )
         .await;
     }
-    let summary_a = next_provider_request(&mut reader, "mock-provider").await;
-    let summary_b = next_provider_request(&mut reader, "mock-provider").await;
-    assert_eq!(request_actor(&summary_a), "summarizer.llm");
-    assert_eq!(request_actor(&summary_b), "summarizer.llm");
-    for (summary, content) in [(&summary_a, "first"), (&summary_b, "second")] {
+    let worker_a = next_provider_request(&mut reader, "mock-provider").await;
+    let worker_b = next_provider_request(&mut reader, "mock-provider").await;
+    assert_ne!(
+        worker_a["invocation"]["run_id"],
+        worker_b["invocation"]["run_id"]
+    );
+    for worker in [&worker_b, &worker_a] {
+        assert_eq!(request_actor(worker), "expand.worker.0.llm");
+        let run = worker["invocation"]["run_id"].as_str().unwrap();
         complete_chat(
             &mut reader,
             &mut stdin,
-            summary["request_id"].as_str().expect("summary request id"),
-            &format!(r#"{{"content":"{content}"}}"#),
+            worker["request_id"].as_str().unwrap(),
+            &json!({"task":run,"description":format!("done-{run}")}).to_string(),
+        )
+        .await;
+    }
+    let mut trace = Vec::new();
+    let mut events = Vec::new();
+    let mut summaries = Vec::new();
+    for _ in 0..2 {
+        let (summary, facts) =
+            next_provider_request_recording(&mut reader, "mock-provider", &mut trace, &mut events)
+                .await;
+        assert_eq!(request_actor(&summary), "summarizer.llm");
+        let run = summary["invocation"]["run_id"].as_str().unwrap();
+        let input = facts
+            .iter()
+            .find_map(|fact| {
+                (fact["actor_id"] == "summarizer.llm"
+                    && fact["run_id"] == run
+                    && fact["kind"] == "content_chunk_appended"
+                    && fact.pointer("/chunk/kind") == Some(&json!("structured")))
+                .then(|| fact.pointer("/chunk/data/value").unwrap())
+            })
+            .expect("summary receives structured worker results");
+        assert_eq!(input.as_array().unwrap().len(), 1);
+        assert_eq!(
+            input[0]["value"],
+            json!({"task":run,"description":format!("done-{run}")})
+        );
+        summaries.push(summary);
+    }
+    for summary in summaries {
+        let run = summary["invocation"]["run_id"].as_str().unwrap();
+        complete_chat(
+            &mut reader,
+            &mut stdin,
+            summary["request_id"].as_str().unwrap(),
+            &json!({"content":format!("summary-{run}")}).to_string(),
         )
         .await;
     }
     let first = next_event_of_kind(&mut reader, "mag.run_result").await;
     let second = next_event_of_kind(&mut reader, "mag.run_result").await;
-    let mut run_ids = [
-        first["run_id"].as_str().expect("first run id"),
-        second["run_id"].as_str().expect("second run id"),
-    ];
+    let mut run_ids = Vec::new();
+    for result in [&first, &second] {
+        let run = result["run_id"].as_str().unwrap();
+        run_ids.push(run);
+        assert_eq!(result["status"], "completed");
+        assert_typed_result(result);
+        assert_eq!(
+            result["result"]["value"]["content"],
+            format!("summary-{run}")
+        );
+    }
     run_ids.sort();
     assert_eq!(run_ids, ["retained-a", "retained-b"]);
-    assert_eq!(first["status"], "completed");
-    assert_eq!(second["status"], "completed");
     shutdown(stdin, runtime_process).await;
     std::fs::remove_dir_all(root).ok();
 }
