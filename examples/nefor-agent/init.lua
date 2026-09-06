@@ -1,3 +1,4 @@
+local startup
 -- init.lua — starter composition.
 --
 -- Runtime source and plugin commands are selected by the distribution helper.
@@ -77,7 +78,7 @@ end
 -- composition. Rust reports the fact before invoking this callback.
 function plugin_process_terminated(fact)
   nefor.engine.shutdown {
-    code = 0,
+    code = startup and startup.frontend == "cli" and 1 or 0,
     reason = "plugin " .. tostring(fact.plugin) .. " terminated",
     grace_ms = 2000,
   }
@@ -101,8 +102,15 @@ actor.spawn(require("libs.conversation-manager.runtime").build({
 }))
 
 local startup_args = require("startup")
-local startup = startup_args.parse((nefor.runtime and nefor.runtime.argv) or {})
-sessions.init(startup.session_id)
+local parsed, options = pcall(startup_args.parse, (nefor.runtime and nefor.runtime.argv) or {})
+if not parsed then
+  io.stderr:write("nefor: " .. tostring(options) .. "\n")
+  io.stderr:flush()
+  -- The broker's shutdown sink is installed only after init returns. No
+  -- process has been spawned at this point, so usage exits directly.
+  os.exit(2)
+end
+startup = options
 
 -- Spawn order matters: type-tag registrations must complete before the
 -- kernel queries on submit. Order:
@@ -312,8 +320,7 @@ actor.spawn(require("tool-validator"))
 actor.spawn(tools.gate_spec("tool-gate", tool_gate_argv))
 actor.spawn(tools.git_worktree_actor_spec())
 actor.spawn(tools.basic_actor_spec { max_read_bytes = model_context_policy.item_limit })
-startup_args.apply_mode(startup, agentic_loop)
-
+if startup.frontend == "tui" then
 actor.spawn(require("libs.compositors.chat_bridge").spawn_spec({
   require("config").bin("nefor-tui"),
   "--script", STARTER_ROOT .. "/chat/init.lua",
@@ -323,10 +330,11 @@ actor.spawn(require("libs.compositors.chat_bridge").spawn_spec({
   "--lua-root", NEFOR_ROOT .. "/lua",
 }))
 
-if startup.prompt ~= nil then
-  require("libs.startup-readiness").wait {
+end
+
+local composition_readiness = {
     required_plugins = {
-      cfg.default_provider, "mag", "tool-gate", "git-worktree", "basic-tools", "chat-surface",
+      cfg.default_provider, "mag", "tool-gate", "git-worktree", "basic-tools",
     },
     required_tools = {
       "read_file", "read_image", "write_file", "edit_file", "search_text", "process.exec", "shell.script",
@@ -341,18 +349,29 @@ if startup.prompt ~= nil then
       ["lead-workflow"] = { "graph-status", "await-run", "terminate-graph", "write-review", "mag", "mag-eval" },
     },
     timeout_ms = tonumber(os.getenv("NEFOR_STARTUP_TIMEOUT_MS")) or 10000,
-    on_ready = function()
-      nefor.engine.send(nefor.json.encode({
-        type = "event",
-        from = "startup",
-        ts   = nefor.engine.now(),
-        body = { kind = "chat.input.submit", text = startup.prompt },
-      }))
-    end,
-    on_error = function(message)
-      io.stderr:write("nefor: " .. message .. "\n")
-      io.stderr:flush()
-      nefor.engine.shutdown { code = 1, reason = "composition requested shutdown", grace_ms = 2000 }
-    end,
+}
+if startup.frontend == "cli" then
+  require("libs.cli").start {
+    prompt = startup.prompt, format = startup.format, readiness = composition_readiness,
   }
+elseif startup.prompt ~= nil then
+  composition_readiness.required_plugins[#composition_readiness.required_plugins + 1] = "chat-surface"
+  composition_readiness.is_ready = function() return sessions.ready() and agentic_loop.is_ready() end
+  composition_readiness.on_ready = function()
+    require("core.envelope").emit_as("startup", nil, {
+      kind = "chat.input.submit", text = startup.prompt,
+      submission_id = "request-" .. require("core.envelope").uuid_lite(),
+    })
+  end
+  composition_readiness.on_error = function(message)
+    io.stderr:write("nefor: " .. message .. "\n")
+    io.stderr:flush()
+    nefor.engine.shutdown { code = 1, reason = "startup failed", grace_ms = 2000 }
+  end
+  require("libs.startup-readiness").wait(composition_readiness)
 end
+
+-- Register all replay consumers and frontend observers before session activation:
+-- resume may synchronously emit its first chunk during init.
+sessions.init(startup.session_id)
+startup_args.apply_mode(startup, agentic_loop)

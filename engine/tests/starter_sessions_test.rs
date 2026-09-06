@@ -1623,3 +1623,45 @@ fn set_package_path(lua: &Lua) -> mlua::Result<()> {
     );
     lua.load(&script).exec()
 }
+
+#[test]
+fn headless_persistence_filters_display_and_reports_flush_failure() {
+    std::fs::create_dir_all(repo_root().join("tmp")).unwrap();
+    let tempdir = tempfile::tempdir_in(repo_root().join("tmp")).unwrap();
+    let _data_dir = ScopedEnvVar::set(&ENV_LOCK, "NEFOR_DATA_DIR", tempdir.path());
+    let lua = Lua::new();
+    install_stub_nefor(&lua).unwrap();
+    set_package_path(&lua).unwrap();
+    lua.load(r#"
+      local sessions = require("libs.sessions")
+      sessions.configure { root = os.getenv("NEFOR_DATA_DIR") .. "/sessions" }
+      sessions.init()
+      local sent = {}
+      nefor.engine.send = function(payload) sent[#sent + 1] = nefor.json.decode(payload).body end
+      local function deliver(body)
+        sessions.receive_msg { origin = "engine", payload = nefor.json.encode({ from = "test", body = body }) }
+      end
+      deliver { kind = "chat.input.submit", text = "test", submission_id = "request-1" }
+      deliver { kind = "tools.advertise", tools = { { name = "test", display = { marker = "not-canonical" }, input_schema = {} } } }
+      deliver { kind = "tool.register", tools = { { name = "test", display = { marker = "not-canonical" } } } }
+      deliver { kind = "sessions.flush_request", request_id = "request-1" }
+      assert(sent[#sent].kind == "sessions.flush_done" and sent[#sent].error == nil)
+      local file = assert(io.open(sessions.current_path(), "r"))
+      local contents = file:read("*a"); file:close()
+      assert(contents:find("tools.advertise", 1, true))
+      assert(not contents:find("not-canonical", 1, true))
+      assert(not contents:find("tool.register", 1, true))
+      local state = sessions._internals.state
+      state.current_session_file:close()
+      state.current_session_file = {
+        write = function() return nil, "simulated disk full" end,
+        flush = function() return nil, "simulated disk full" end,
+        close = function() end,
+      }
+      deliver { kind = "tool.result", id = "test", result = "not durable" }
+      assert(sent[#sent].kind == "sessions.persistence_failed")
+      deliver { kind = "sessions.flush_request", request_id = "request-1" }
+      assert(sent[#sent].kind == "sessions.flush_done")
+      assert(sent[#sent].error.code == "persistence_failed")
+    "#).exec().unwrap();
+}

@@ -127,7 +127,7 @@ fn conversation_manager_runtime_contract() {
         .find("actor.spawn(require(\"libs.conversation-manager.runtime\").build({")
         .expect("CLI conversation manager actor spawn");
     let cli_sessions_init = cli_init
-        .find("sessions.init()")
+        .find("sessions.init(session_id)")
         .expect("CLI session initialization");
     assert!(
         cli_sessions_spawn < cli_manager_service

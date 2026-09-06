@@ -74,6 +74,8 @@ local state = {
 }
 
 local sessions_dir = nil
+local persistence_failed
+local persistence_error = nil
 
 local function configure(options)
   options = options or {}
@@ -145,9 +147,12 @@ local function open_session_file(path, session_id)
       session_id = session_id,
       started_at = nefor.engine.now(),
     })
-    fh:write(header_line)
-    fh:write("\n")
-    fh:flush()
+    local written, write_error = fh:write(header_line .. "\n")
+    local flushed, flush_error = fh:flush()
+    if not written or not flushed then
+      fh:close()
+      return nil, tostring(write_error or flush_error)
+    end
   end
 
   return fh, nil, has_content
@@ -193,6 +198,7 @@ local function ensure_current_session_file()
         path = state.current_session_path, error = err,
       })
     end
+    persistence_failed(err)
     return nil
   end
   state.current_session_file = fh
@@ -219,7 +225,14 @@ local function send_msg(internal)
   end
 end
 
--- Persistence — write each non-control envelope verbatim to jsonl.
+persistence_failed = function(message)
+  if persistence_error then return end
+  persistence_error = { code = "persistence_failed", message = tostring(message) }
+  send_msg({ kind = "control", event = "sessions.persistence_failed",
+    extra = { session_id = state.current_session_id, message = tostring(message) } })
+end
+
+-- Persistence keeps semantic facts and provenance, never a frontend catalog.
 ---@param entry { ts: string?, origin: string?, target: string?, payload: string }
 local function persist_envelope(entry)
   -- Drop everything inside the replay window. Pure-Lua actors process
@@ -235,6 +248,11 @@ local function persist_envelope(entry)
   local ok, decoded = pcall(json.decode, entry.payload)
   if ok and type(decoded) == "table" and type(decoded.body) == "table" then
     local kind = decoded.body.kind
+    if kind == "tool.register" or (type(kind) == "string" and kind:match("%.tool%.register$")) then return end
+    if kind == "tools.advertise" or (type(kind) == "string" and kind:match("%.tools%.advertise$")) then
+      for _, schema in ipairs(decoded.body.tools or {}) do schema.display = nil end
+      entry = { ts = entry.ts, origin = entry.origin, target = entry.target, payload = json.encode(decoded) }
+    end
     if type(kind) == "string" and kind:sub(1, 9) == "sessions." then return end
     -- Permission mode is process/session-scoped runtime authority, not
     -- conversation history. Persisting either the request or the gate's UI
@@ -266,9 +284,12 @@ local function persist_envelope(entry)
   }
   if entry.target then row.target = entry.target end
 
-  fh:write(json.encode(row))
-  fh:write("\n")
-  fh:flush()
+  local written, write_error = fh:write(json.encode(row) .. "\n")
+  local flushed, flush_error = fh:flush()
+  if not written or not flushed then
+    persistence_failed(write_error or flush_error)
+    return
+  end
 
   if is_user_submit then
     state.should_prune_session = false
@@ -612,6 +633,20 @@ local function receive_msg(entry)
     return
   end
 
+  if kind == "sessions.flush_request" then
+    if state.current_session_file then
+      local ok, err = state.current_session_file:flush()
+      if not ok then persistence_failed(err) end
+    elseif not persistence_error then
+      persistence_failed("No session transcript was opened for the request")
+    end
+    send_msg({ kind = "control", event = "sessions.flush_done", extra = {
+      request_id = decoded.body.request_id, session_id = state.current_session_id,
+      error = persistence_error,
+    } })
+    return
+  end
+
   -- Drop sessions.* control events from persistence.
   if type(kind) == "string" and kind:sub(1, 9) == "sessions." then return end
 
@@ -630,6 +665,7 @@ return {
   init             = do_init,
   resume           = do_resume,
   new              = do_new,
+  ready            = function() return state.initialised and state.current_session_id ~= nil and state.replay_session_id == nil end,
   current_id       = function() return state.current_session_id end,
   current_path     = function() return state.current_session_path end,
   -- handle_shutdown is a no-op now: the actor.lua runtime synthesizes
@@ -649,6 +685,7 @@ return {
     current_sessions_root = current_sessions_root,
     reset_state        = function()
       close_session_file()
+      persistence_error = nil
       state.current_session_id    = nil
       state.current_session_path  = nil
       state.should_prune_session  = true

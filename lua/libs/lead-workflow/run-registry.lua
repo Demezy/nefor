@@ -152,6 +152,8 @@ function M:register(spec)
     dispatch_firing_id = spec.dispatch_firing_id,
     dispatcher_id = spec.dispatcher_id,
     owner_resume = spec.owner_resume and copy(spec.owner_resume) or nil,
+    request_ids = spec.request_ids and copy(spec.request_ids) or {},
+    owner_delivery_from = {},
     nodes_order = spec.nodes_order or {},
     nodes = spec.nodes or {},
     waiters = {},

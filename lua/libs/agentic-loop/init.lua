@@ -57,6 +57,7 @@ local replay_window   = require("core.replay_window")
 local conversation_projection = require("libs.agentic-loop.conversation_projection")
 local model_snapshot_data = require("libs.model-snapshot")
 local mag_workspace = require("libs.mag-workspace")
+local RequestLifecycle = require("libs.agentic-loop.request-lifecycle")
 
 local state = {
   -- Orchestrator config — mutated by configure() / chat.model.set.
@@ -94,6 +95,9 @@ local state = {
   pending_system_seed = nil,    ---@type table|nil
   pending_compaction = nil,     ---@type table|nil
   pending_context_request = nil,
+  prepare_requested = false,
+  ready_announced = false,
+  context_error = nil,
 
   current_run_id = nil,         ---@type string|nil
   -- The in-flight turn: { run_id, user_text, scope }.
@@ -121,6 +125,8 @@ local state = {
 local emit           = envelope.emit
 
 local format_deferred = results_lib.format_deferred
+local request_lifecycle
+local fail_open_requests
 
 local function conversation_history()
   return state.conversation:history()
@@ -130,6 +136,14 @@ local function conversation_commit_pending()
   return state.pending_compaction ~= nil
       or state.pending_context_request ~= nil
 end
+
+request_lifecycle = RequestLifecycle.new({
+  emit = function(body) emit(nil, body) end,
+  blocked = function()
+    return conversation_commit_pending() or state.pending_conversation_create ~= nil
+      or state.pending_system_seed ~= nil
+  end,
+})
 
 local function append_conversation_fact(fact)
   emit("conversation-manager", {
@@ -193,6 +207,26 @@ local function conversation_ready()
       and state.pending_system_seed == nil
 end
 
+local function loop_ready()
+  if replay_window.active() or state.context_error ~= nil
+      or conversation_commit_pending() then return false end
+  if state.conversation_id == nil then
+    return state.pending_conversation_create == nil
+  end
+  return conversation_ready()
+end
+
+local function emit_ready_if_ready()
+  if not state.prepare_requested or state.ready_announced or not loop_ready() then return false end
+  state.ready_announced = true
+  emit(nil, {
+    kind = "agentic_loop.ready",
+    session_id = require("libs.sessions").current_id(),
+    conversation_id = state.conversation_id,
+  })
+  return true
+end
+
 local function record_configuration()
   if not conversation_ready() then return end
   append_conversation_fact({
@@ -206,6 +240,8 @@ end
 local function request_context(reason)
   if not conversation_ready() then return false end
   local request_id = "conversation-context-" .. envelope.uuid_lite()
+  state.ready_announced = false
+  state.context_error = nil
   state.pending_context_request = { id = request_id, reason = reason }
   emit("conversation-manager", {
     kind = "conversation.context.request",
@@ -442,6 +478,10 @@ local function handle_lead_program_loaded(body)
   local artifact = body.artifact
   local decoded, decode_error = mag_workspace.decode_artifact(artifact)
   if not decoded or decoded.kind ~= "program" then
+    fail_open_requests({
+      code = "lead_program_unavailable",
+      message = tostring(decode_error or "Lead program has no executable data"),
+    })
     emit("nefor-tui", {
       kind = "chat.error.append", title = "Lead program unavailable",
       message = tostring(decode_error or "mag.loaded did not carry a program envelope"),
@@ -451,6 +491,7 @@ local function handle_lead_program_loaded(body)
   end
   local seams, err = derive_program_seams(decoded.modification)
   if not seams then
+    fail_open_requests({ code = "lead_program_invalid", message = tostring(err) })
     emit("nefor-tui", {
       kind = "chat.error.append", title = "Lead program invalid",
       message = tostring(err), retryable = false,
@@ -479,7 +520,7 @@ local function handle_lead_program_error(body)
     message = tostring(body.message),
     retryable = true,
   })
-  -- Queued submits stay queued; the next submit retries the load.
+  fail_open_requests({ code = "lead_program_failed", message = tostring(body.message) })
   emit_idle_state("lead-program-load-failed")
 end
 
@@ -488,7 +529,7 @@ end
 -- canonical conversation identity onto the lead llm actor, and submits
 -- `mag.execute`. The provider actor reads history from conversation-manager;
 -- duplicating it in this persisted command would make session growth quadratic.
-local function submit_orchestrator_run(user_text, submission_ids, input_cause)
+local function submit_orchestrator_run(user_text, submission_ids, input_cause, release_obligations)
   if state.current_run_id ~= nil then return nil end
   local conversation_id = ensure_conversation_id()
   if not conversation_ready() then
@@ -527,6 +568,10 @@ local function submit_orchestrator_run(user_text, submission_ids, input_cause)
       message = snapshot_error,
       retryable = true,
     })
+    fail_open_requests({ code = "model_unavailable", message = snapshot_error })
+    for _, obligation in ipairs(release_obligations or {}) do
+      request_lifecycle:release_all(obligation.request_ids, obligation.id)
+    end
     emit_idle_state("lead-model-snapshot-unavailable")
     return nil
   end
@@ -539,10 +584,17 @@ local function submit_orchestrator_run(user_text, submission_ids, input_cause)
     scope     = nil,
     manager_terminal = false,
     result_body = nil,
+    request_ids = RequestLifecycle.copy_ids(submission_ids),
   }
+  local sessions = require("libs.sessions")
+  local turn_obligation = "turn:" .. run_id
+  request_lifecycle:acquire_all(state.current_turn.request_ids, turn_obligation,
+    sessions.current_id())
+  for _, obligation in ipairs(release_obligations or {}) do
+    request_lifecycle:release_all(obligation.request_ids, obligation.id)
+  end
   emit_runtime_state("agentic_loop.run_start", { run_id = run_id })
 
-  local sessions = require("libs.sessions")
   local execute = {
     kind           = "mag.execute",
     id             = run_id,
@@ -581,15 +633,25 @@ end
 -- once per result.
 local function drain_deferred_text()
   if #state.deferred_queue == 0 then return nil end
-  local parts = {}
+  local parts, request_ids, obligations = {}, {}, {}
   for _, entry in ipairs(state.deferred_queue) do
     if type(entry.text) == "string" and #entry.text > 0 then
       parts[#parts + 1] = entry.text
     end
+    for _, request_id in ipairs(entry.request_ids or {}) do
+      request_ids[#request_ids + 1] = request_id
+    end
+    if entry.obligation_id ~= nil then
+      obligations[#obligations + 1] = {
+        id = entry.obligation_id,
+        request_ids = entry.request_ids or {},
+      }
+    end
   end
   state.deferred_queue = {}
   if #parts == 0 then return nil end
-  return table.concat(parts, "\n\n---\n\n")
+  return table.concat(parts, "\n\n---\n\n"),
+    RequestLifecycle.copy_ids(request_ids), obligations
 end
 
 -- Deferred relay queue. Carries any text that needs to land as the next
@@ -598,12 +660,12 @@ end
 local function flush_deferred()
   if state.current_run_id ~= nil then return end
   if conversation_commit_pending() or not conversation_ready() then return end
-  local merged = drain_deferred_text()
+  local merged, request_ids, obligations = drain_deferred_text()
   if type(merged) ~= "string" then return end
   nefor.log.info("agentic-loop: flushing deferred run completions", {
     text_preview = string.sub(merged, 1, 80),
   })
-  submit_orchestrator_run(merged, nil, "internal_async_completion")
+  submit_orchestrator_run(merged, request_ids, "internal_async_completion", obligations)
 end
 
 flush_pending_user_inputs = function()
@@ -624,7 +686,14 @@ flush_pending_user_inputs = function()
   })
   state.pending_user_inputs = {}
   emit("nefor-tui", { kind = "chat.queue.steered" })
-  submit_orchestrator_run(combined, submission_ids)
+  local obligations = {}
+  for _, request_id in ipairs(RequestLifecycle.copy_ids(submission_ids)) do
+    obligations[#obligations + 1] = {
+      id = "input:" .. request_id,
+      request_ids = { request_id },
+    }
+  end
+  submit_orchestrator_run(combined, submission_ids, nil, obligations)
 end
 
 -- ── interrupt = kill ──────────────────────────────────────────────────
@@ -719,6 +788,17 @@ local function handle_run_steered(body)
   if body.accepted == true and body.run_id == pending.run_id then
     -- Acceptance is the ownership boundary: the queued text is now part of
     -- model-visible history. Conversation-manager owns its durable projection.
+    local turn = state.current_turn
+    if turn ~= nil and turn.run_id == pending.run_id then
+      for _, input in ipairs(pending.inputs) do
+        for _, request_id in ipairs(input.submission_ids or {}) do
+          turn.request_ids[#turn.request_ids + 1] = request_id
+          request_lifecycle:acquire(request_id, "turn:" .. turn.run_id)
+          request_lifecycle:release(request_id, "input:" .. request_id)
+        end
+      end
+      turn.request_ids = RequestLifecycle.copy_ids(turn.request_ids)
+    end
     emit("nefor-tui", { kind = "chat.queue.steered" })
     return
   end
@@ -768,6 +848,8 @@ local function new_chat()
   state.pending_system_seed = nil
   state.pending_compaction = nil
   state.pending_context_request = nil
+  state.ready_announced = false
+  state.context_error = nil
   ensure_conversation_id()
 end
 
@@ -874,8 +956,13 @@ end
 
 local function handle_chat_input_submit(body)
   local text = body.text or ""
-  local submission_ids = type(body.submission_id) == "string" and { body.submission_id } or {}
   if type(text) ~= "string" or #text == 0 then return end
+  local request_id = type(body.submission_id) == "string" and body.submission_id
+    or "submission-" .. envelope.uuid_lite()
+  local submission_ids = { request_id }
+  local sessions = require("libs.sessions")
+  request_lifecycle:accept(request_id, sessions.current_id())
+  request_lifecycle:acquire(request_id, "input:" .. request_id, sessions.current_id())
 
   nefor.log.info("agentic-loop: chat.input.submit received", {
     text_len = #text,
@@ -899,17 +986,20 @@ local function handle_chat_input_submit(body)
     return
   end
 
-  local deferred = drain_deferred_text()
+  local deferred, deferred_request_ids, deferred_obligations = drain_deferred_text()
   if type(deferred) == "string" then
     state.pending_user_inputs[#state.pending_user_inputs + 1] = {
       text = text,
       submission_ids = submission_ids,
     }
-    submit_orchestrator_run(deferred, nil, "internal_async_completion")
+    submit_orchestrator_run(deferred, deferred_request_ids,
+      "internal_async_completion", deferred_obligations)
     return
   end
 
-  submit_orchestrator_run(text, submission_ids)
+  submit_orchestrator_run(text, submission_ids, nil, {
+    { id = "input:" .. request_id, request_ids = submission_ids },
+  })
 end
 
 local function handle_chat_reset()
@@ -1110,6 +1200,8 @@ local function finish_mag_run_result(body)
   local turn = state.current_turn
   if turn == nil or body.run_id ~= turn.run_id then return end
   local run_id = turn.run_id
+  local request_ids = turn.request_ids or {}
+  local turn_obligation = "turn:" .. run_id
   state.current_run_id = nil
   state.current_turn = nil
 
@@ -1128,6 +1220,11 @@ local function finish_mag_run_result(body)
         history_len = #conversation_history(),
       })
       fire_observers(state.complete_observers, run_id, "error")
+      request_lifecycle:set_terminal(request_ids, "error", "", {
+        code = "agent_error",
+        message = agent_error.message,
+      })
+      request_lifecycle:release_all(request_ids, turn_obligation)
       flush_deferred()
       flush_pending_user_inputs()
       emit_idle_if_idle(run_id)
@@ -1139,6 +1236,8 @@ local function finish_mag_run_result(body)
       answer_len = #answer, history_len = #conversation_history(),
     })
     fire_observers(state.complete_observers, run_id, "success", answer)
+    request_lifecycle:set_terminal(request_ids, "success", answer)
+    request_lifecycle:release_all(request_ids, turn_obligation)
     flush_deferred()
     flush_pending_user_inputs()
     emit_idle_if_idle(run_id)
@@ -1153,6 +1252,11 @@ local function finish_mag_run_result(body)
       run_id = run_id, history_len = #conversation_history(),
     })
     fire_observers(state.complete_observers, run_id, "killed")
+    request_lifecycle:set_terminal(request_ids, "interrupted", "", {
+      code = "interrupted",
+      message = "request interrupted",
+    })
+    request_lifecycle:release_all(request_ids, turn_obligation)
     if #state.pending_user_inputs > 0 then
       flush_pending_user_inputs()
     else
@@ -1176,6 +1280,11 @@ local function finish_mag_run_result(body)
     history_len = #conversation_history(),
   })
   fire_observers(state.complete_observers, run_id, tostring(body.status))
+  request_lifecycle:set_terminal(request_ids, "error", "", {
+    code = tostring(body.status or "failed"),
+    message = tostring(body.error or "agent run failed"),
+  })
+  request_lifecycle:release_all(request_ids, turn_obligation)
   flush_deferred()
   flush_pending_user_inputs()
   emit_idle_if_idle(run_id)
@@ -1241,6 +1350,7 @@ local function handle_conversation_projection_delta(body)
     if not record_system_prompt(body.conversation_id) then
       flush_pending_user_inputs()
       flush_deferred()
+      emit_ready_if_ready()
     end
     return
   end
@@ -1255,6 +1365,8 @@ local function handle_conversation_projection_delta(body)
     state.pending_system_seed = nil
     flush_pending_user_inputs()
     flush_deferred()
+    request_lifecycle:recheck_all()
+    emit_ready_if_ready()
     return
   end
 
@@ -1299,6 +1411,8 @@ local function handle_conversation_context_snapshot(body)
   if type(pending) ~= "table" or body.request_id ~= pending.id then return end
   state.pending_context_request = nil
   if body.found ~= true or not state.conversation:apply_snapshot(body) then
+    state.context_error = "conversation context unavailable"
+    fail_open_requests({ code = "context_unavailable", message = state.context_error })
     emit("nefor-tui", {
       kind = "chat.error.append",
       title = "Conversation context unavailable",
@@ -1307,8 +1421,11 @@ local function handle_conversation_context_snapshot(body)
     })
     return
   end
+  state.context_error = nil
   flush_pending_user_inputs()
   flush_deferred()
+  request_lifecycle:recheck_all()
+  emit_ready_if_ready()
   emit_idle_if_idle()
 end
 
@@ -1316,6 +1433,7 @@ local function handle_conversation_rejection(body)
   if body.event_id == state.pending_conversation_create then
     state.pending_conversation_create = nil
     state.conversation_id = nil
+    fail_open_requests({ code = "conversation_rejected", message = tostring(body.code) })
     emit("nefor-tui", {
       kind = "chat.error.append",
       title = "Conversation unavailable",
@@ -1328,6 +1446,7 @@ local function handle_conversation_rejection(body)
   if type(pending_system) == "table"
       and body.event_id == pending_system.completed_event_id then
     state.pending_system_seed = nil
+    fail_open_requests({ code = "conversation_rejected", message = tostring(body.code) })
     emit("nefor-tui", {
       kind = "chat.error.append",
       title = "Conversation unavailable",
@@ -1351,10 +1470,12 @@ local function handle_conversation_query_rejection(body)
   local pending = state.pending_context_request
   if type(pending) ~= "table" or body.request_id ~= pending.id then return end
   state.pending_context_request = nil
+  state.context_error = tostring(body.code or "conversation context query rejected")
+  fail_open_requests({ code = "context_unavailable", message = state.context_error })
   emit("nefor-tui", {
     kind = "chat.error.append",
     title = "Conversation context unavailable",
-    message = tostring(body.code or "conversation context query rejected"),
+    message = state.context_error,
     retryable = true,
   })
   flush_pending_user_inputs()
@@ -1531,9 +1652,132 @@ end
 -- dispatched via its `mag` tool.
 -- `completion` shape: { run_id, status = "success"|"failed", output|error }.
 function M.relay_run_completion(completion)
-  if type(completion) ~= "table" then return end
-  state.deferred_queue[#state.deferred_queue + 1] = { text = format_deferred(completion) }
+  if type(completion) ~= "table" then return false end
+  local request_ids = RequestLifecycle.copy_ids(completion.request_ids)
+  local obligation_id = "delivery:" .. tostring(completion.run_id or envelope.uuid_lite())
+  if #request_ids == 0 then
+    state.deferred_queue[#state.deferred_queue + 1] = { text = format_deferred(completion) }
+    flush_deferred()
+    return true
+  end
+  request_lifecycle:acquire_all(request_ids, obligation_id)
+  local deliverable = {}
+  for _, request_id in ipairs(request_ids) do
+    if not request_lifecycle:is_forced(request_id) then deliverable[#deliverable + 1] = request_id end
+  end
+  if #deliverable == 0 then
+    request_lifecycle:release_all(request_ids, obligation_id)
+    return true
+  end
+  state.deferred_queue[#state.deferred_queue + 1] = {
+    text = format_deferred(completion),
+    request_ids = deliverable,
+    obligation_id = obligation_id,
+  }
   flush_deferred()
+  return true
+end
+
+-- Explicit seam used by lead-workflow's canonical run registry. Obligations
+-- are acquired before an async acknowledgement and released only after result
+-- delivery has transferred to a continuation or an owning actor has settled.
+function M.acquire_request_obligation(request_ids, obligation_id, session_id)
+  request_lifecycle:acquire_all(request_ids, obligation_id, session_id)
+end
+
+function M.settle_request_obligation(request_ids, obligation_id)
+  request_lifecycle:release_all(request_ids, obligation_id)
+end
+
+function M.record_request_outcome(request_ids, status, err)
+  request_lifecycle:record_outcome(request_ids, status, err)
+end
+
+function M.current_request_ids()
+  local turn = state.current_turn
+  return RequestLifecycle.copy_ids(turn and turn.request_ids or {})
+end
+
+function M.request_is_failing(request_id)
+  return request_lifecycle:is_forced(request_id)
+end
+
+function M.interrupt_request(request_id)
+  if type(request_id) ~= "string" or request_id == "" then return false end
+  local changed = request_lifecycle:force(request_id, "interrupted", {
+    code = "interrupted",
+    message = "request interrupted",
+  })
+  request_lifecycle:recheck(request_id)
+  return changed
+end
+
+function M.prepare()
+  -- Fresh sessions deliberately keep the root lazy so the first canonical
+  -- chat.input.submit opens persistence before any conversation facts exist.
+  -- Resumed roots are rebuilt by replay and refreshed on sessions.resume_done.
+  state.prepare_requested = true
+  emit_ready_if_ready()
+  return true
+end
+
+function M.is_ready()
+  return loop_ready()
+end
+
+function M.fail_request(request_id, err)
+  if type(request_id) ~= "string" or request_id == "" then return false end
+  if not request_lifecycle:force(request_id, "error", err) then return false end
+
+  local retained = {}
+  for _, input in ipairs(state.pending_user_inputs) do
+    local ids_for_input, matches = {}, false
+    for _, id in ipairs(input.submission_ids or {}) do
+      if id == request_id then matches = true else ids_for_input[#ids_for_input + 1] = id end
+    end
+    if matches then request_lifecycle:release(request_id, "input:" .. request_id) end
+    if #ids_for_input > 0 then
+      input.submission_ids = ids_for_input
+      retained[#retained + 1] = input
+    end
+  end
+  state.pending_user_inputs = retained
+  request_lifecycle:release(request_id, "input:" .. request_id)
+
+  local deferred = {}
+  for _, entry in ipairs(state.deferred_queue) do
+    local retained_ids, matched = {}, false
+    for _, id in ipairs(entry.request_ids or {}) do
+      if id == request_id then matched = true else retained_ids[#retained_ids + 1] = id end
+    end
+    if matched then
+      request_lifecycle:release(request_id, entry.obligation_id)
+    end
+    if #retained_ids > 0 or #(entry.request_ids or {}) == 0 then
+      entry.request_ids = retained_ids
+      deferred[#deferred + 1] = entry
+    end
+  end
+  state.deferred_queue = deferred
+
+  local turn = state.current_turn
+  if turn ~= nil then
+    for _, id in ipairs(turn.request_ids or {}) do
+      if id == request_id then kill_active_lead_run(); break end
+    end
+  end
+  local ok, workflow = pcall(require, "libs.lead-workflow")
+  if ok and type(workflow.cancel_request) == "function" then
+    workflow.cancel_request(request_id, err)
+  end
+  request_lifecycle:recheck(request_id)
+  return true
+end
+
+fail_open_requests = function(err)
+  for request_id, request in pairs(request_lifecycle.requests) do
+    if not request.completed then M.fail_request(request_id, err) end
+  end
 end
 
 -- Whether a gate correlation id belongs to the lead's ACTIVE turn (ids are
@@ -1670,6 +1914,8 @@ end
 -- `sessions.replay.start` / `sessions.replay.end` independently.
 if nefor.bus and nefor.bus.on_event then
   nefor.bus.on_event("sessions.session_end", function(_entry)
+    state.prepare_requested = false
+    state.ready_announced = false
     teardown_for_session_end()
     -- Modes are session-scoped authority. A session switch must reset the
     -- live gate rather than letting the previous session's process state leak
@@ -1679,9 +1925,13 @@ if nefor.bus and nefor.bus.on_event then
   -- Replay is chunked; settle the restored conversation only after the whole
   -- resume, never at each chunk boundary.
   nefor.bus.on_event("sessions.resume_done", function(_entry)
+    state.prepare_requested = true
+    state.ready_announced = false
     if conversation_ready() then
       restore_configuration_from_projection()
       request_context("resume")
+    else
+      emit_ready_if_ready()
     end
   end)
 end
@@ -1718,6 +1968,9 @@ M._internals  = {
     state.pending_system_seed = nil
     state.pending_compaction = nil
     state.pending_context_request = nil
+    state.prepare_requested = false
+    state.ready_announced = false
+    state.context_error = nil
     state.current_run_id = nil
     state.current_turn = nil
     state.deferred_queue = {}
@@ -1728,6 +1981,7 @@ M._internals  = {
     state.tool_start_observers = {}
     state.tool_end_observers = {}
     state.complete_observers = {}
+    request_lifecycle:reset()
     state.mag_context = {
       workspace = nil,
       workspace_session = nil,

@@ -111,10 +111,10 @@ local conversation_reader = conversation_service:reader()
 actor.spawn(require("libs.conversation-manager.runtime").build({
   service = conversation_service,
 }))
-sessions.init()
 
 local agentic_cli = require("libs.cli")
 agentic_cli.configure {
+  initialize_session = function(session_id) sessions.init(session_id) end,
   readiness = {
     required_plugins = { cfg.provider.name, "mag", "tool-gate", "basic-tools" },
     required_tools = {

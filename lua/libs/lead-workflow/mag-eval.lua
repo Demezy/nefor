@@ -315,6 +315,7 @@ function M.handle(firing_id, args, metadata)
     dispatcher_id = provenance.dispatcher_id,
     conversation_id = provenance.conversation_id,
     owner_run_id = provenance.owner_run_id,
+    request_ids = provenance.request_ids,
     wrapper = wrapper,
   }
   emit_as(SOURCE_NAME, "mag", mag.compile_request(load_id, ws, rel,
@@ -370,6 +371,14 @@ function M.cancel(firing_id)
     end
   end
   return hit
+end
+
+function M.cancel_request(request_id)
+  for _, pending in pairs(state.pending_loads) do
+    for _, id in ipairs(pending.request_ids or {}) do
+      if id == request_id then M.cancel(pending.firing_id); break end
+    end
+  end
 end
 
 -- Session-end fails pending compile capabilities. Submitted runs are owned by

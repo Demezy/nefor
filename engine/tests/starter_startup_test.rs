@@ -92,8 +92,8 @@ fn starter_startup_parser_and_mode_application() {
         .expect("startup prompt readiness barrier");
 
     assert!(sessions < conversation && conversation < session_init);
-    assert!(session_init < agentic_loop && agentic_loop < lead_workflow);
+    assert!(agentic_loop < lead_workflow && prompt < session_init);
     assert!(lead_workflow < read_only_tools && read_only_tools < tool_validator);
-    assert!(tool_validator < gate && gate < basic_tools && basic_tools < mode);
-    assert!(mode < chat && chat < prompt);
+    assert!(tool_validator < gate && gate < basic_tools && basic_tools < chat);
+    assert!(chat < prompt && session_init < mode);
 }

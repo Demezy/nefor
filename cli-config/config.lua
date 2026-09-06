@@ -19,9 +19,8 @@ M.active = {
     mock_script = "mock-provider/init.lua",
   },
   tool_gate = {
-    -- CLI surface has no permission-prompt UI in v1. Default `auto`
-    -- keeps the agent unblocked. --yolo on agentic-cli is the
-    -- documented user override (currently a placeholder).
+    -- Deterministic fixture policy, not the starter's default permission mode.
+    -- The shared frontend never grants an interactive approval.
     default_action = "auto",
     prompt_tools   = {},
   },

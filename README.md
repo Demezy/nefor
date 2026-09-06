@@ -90,6 +90,18 @@ Run the example:
 nefor
 ```
 
+The same starter can run without a terminal, or resume a session in either frontend:
+
+```sh
+nefor run --frontend cli --prompt "question"
+nefor run --frontend cli --resume SESSION --prompt "follow-up" --format json
+nefor run --frontend tui --resume SESSION
+```
+
+CLI requires an explicit prompt and prints the final whole-request answer, not
+intermediate acknowledgments. The session ID goes to stderr. See the
+[CLI reference](docs/reference/cli.md) for output, permission and exit contracts.
+
 The example defaults to the deterministic `mock-plugin` / `mock-model`, so no
 credentials are needed. Edit the copied config to use a real provider, different
 tools, or different wiring:

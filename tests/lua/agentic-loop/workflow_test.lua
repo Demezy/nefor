@@ -423,6 +423,49 @@ local function project_pending_conversation(calls)
   return true
 end
 
+-- A fresh headless session is ready with an empty model context, but prepare
+-- keeps root creation lazy so chat.input.submit remains the persistence opener.
+do
+  fresh_loop()
+  agentic_loop.prepare()
+  local calls = decode_calls()
+  assert_eq(find_kind(calls, "conversation.fact.append"), nil,
+    "prepare does not create facts before the canonical submit is persisted")
+  assert_eq(agentic_loop.is_ready(), true,
+    "an uncreated fresh root has a ready empty model context")
+  local ready = find_kind(calls, "agentic_loop.ready")
+  assert(ready ~= nil, "prepare announces lazy fresh-session readiness")
+  assert_eq(ready.body.session_id, require("libs.sessions").current_id(),
+    "readiness names the active session")
+end
+
+-- Noninteractive approval failure can settle a request which was accepted but
+-- is still queued behind canonical conversation creation.
+do
+  fresh_loop()
+  send_to_loop("agentic-cli", {
+    kind = "chat.input.submit",
+    text = "requires approval",
+    submission_id = "request-approval-failure",
+  })
+  local pending_creation = decode_calls()
+  _test.calls_clear()
+  assert_eq(agentic_loop.fail_request("request-approval-failure", {
+    code = "approval_required",
+    message = "interactive approval is unavailable",
+  }), true, "fail_request accepts a known unresolved request")
+  assert_eq(find_kind(decode_calls(), "agentic_loop.request_completed"), nil,
+    "failure waits for already accepted conversation creation/seed commit")
+  project_pending_conversation(pending_creation)
+  local completed = find_kind(decode_calls(), "agentic_loop.request_completed")
+  assert(completed ~= nil, "fail_request settles queued accepted work")
+  assert_eq(completed.body.status, "error", "approval failure is terminal error")
+  assert_eq(completed.body.error.code, "approval_required",
+    "approval failure retains structured error data")
+  assert_eq(#agentic_loop._internals.state.pending_user_inputs, 0,
+    "failed queued input is removed instead of executing later")
+end
+
 -- The standard composition explicitly selects canonical and config roots.
 do
   fresh_loop()
@@ -485,9 +528,13 @@ end
 
 -- Submit `text`; drive the load handshake when the program isn't cached
 -- yet; return the emitted mag.execute call.
-local function begin_turn(text)
+local function begin_turn(text, submission_id)
   _test.calls_clear()
-  send_to_loop("nefor-tui", { kind = "chat.input.submit", text = text })
+  send_to_loop("nefor-tui", {
+    kind = "chat.input.submit",
+    text = text,
+    submission_id = submission_id,
+  })
   local calls = decode_calls()
   if project_pending_conversation(calls) then calls = decode_calls() end
   local load = find_kind(calls, "mag.load")
@@ -1328,6 +1375,42 @@ do
     "history gains the {user, answer} pair — the interrupted turn is remembered")
 end
 
+-- Whole-request completion waits for explicit registry settlement even after
+-- the final lead turn and its canonical manager projection are terminal.
+do
+  fresh_loop()
+  local exec = begin_turn("account for all work", "request-lifecycle-1")
+  agentic_loop.acquire_request_obligation({ "request-lifecycle-1" },
+    "run:mag-run-detached", require("libs.sessions").current_id())
+  _test.calls_clear()
+  send_to_loop("mag", {
+    kind = "mag.run_result",
+    run_id = exec.body.run_id,
+    status = "completed",
+    result = { text = "initial answer" },
+  })
+  assert_eq(find_kind(decode_calls(), "agentic_loop.request_completed"), nil,
+    "a terminal lead turn cannot cross an unsettled detached-run obligation")
+  agentic_loop.settle_request_obligation({ "request-lifecycle-1" },
+    "run:mag-run-detached")
+  local completed = find_kind(decode_calls(), "agentic_loop.request_completed")
+  assert(completed ~= nil, "explicit detached-run settlement completes the request")
+  assert_eq(completed.body.request_id, "request-lifecycle-1",
+    "completion preserves canonical submission identity")
+  assert_eq(completed.body.status, "success", "completion preserves terminal status")
+  assert_eq(completed.body.answer, "initial answer", "completion carries the final answer")
+  agentic_loop.settle_request_obligation({ "request-lifecycle-1" },
+    "run:mag-run-detached")
+  local completion_count = 0
+  for _, call in ipairs(decode_calls()) do
+    if call.body.kind == "agentic_loop.request_completed" then
+      completion_count = completion_count + 1
+    end
+  end
+  assert_eq(completion_count, 1,
+    "duplicate settlement cannot emit duplicate request completion")
+end
+
 -- (relay) a dispatched run's completion relays as a fresh turn through
 -- the deferred queue (lead-workflow drives relay_run_completion).
 do
@@ -1592,4 +1675,67 @@ for _, status in ipairs({ "miss", "hit" }) do
   send_to_loop("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
     build = { status = status }, artifact = {}, hash = "sha256:late" })
   assert_eq(find_kind(decode_calls(), "mag.execute"), nil, "reset ignores late build reply")
+end
+
+-- Multiple detached deliveries transfer through queued continuations, including
+-- a continuation that dispatches again. No graph-count observation participates.
+do
+  fresh_loop()
+  local request = "request-redispatch"
+  local exec = begin_turn("start parallel work", request)
+  local function acquire(run)
+    agentic_loop.acquire_request_obligation({ request }, "run:" .. run, require("libs.sessions").current_id())
+  end
+  local function terminal(run, text)
+    send_to_loop("mag", { kind = "mag.run_result", run_id = run, status = "completed", result = { text = text } })
+  end
+  local function relay(run, text)
+    agentic_loop.relay_run_completion({ run_id = run, status = "success", output = text, request_ids = { request } })
+    agentic_loop.settle_request_obligation({ request }, "run:" .. run)
+  end
+  acquire("detached-a"); acquire("detached-b")
+  _test.calls_clear()
+  terminal(exec.body.run_id, "acknowledgment")
+  assert_eq(find_kind(decode_calls(), "agentic_loop.request_completed"), nil)
+  _test.calls_clear()
+  relay("detached-a", "first result")
+  local second = assert(find_kind(decode_calls(), "mag.execute"))
+  relay("detached-b", "second result")
+  assert_eq(find_kind(decode_calls(), "agentic_loop.request_completed"), nil,
+    "zero external runs still has a current turn and queued delivery")
+  _test.calls_clear()
+  terminal(second.body.run_id, "partial answer")
+  local third = assert(find_kind(decode_calls(), "mag.execute"))
+  assert_eq(find_kind(decode_calls(), "agentic_loop.request_completed"), nil,
+    "queued delivery transfers before the prior turn releases")
+  acquire("detached-c")
+  _test.calls_clear()
+  terminal(third.body.run_id, "redispatched")
+  assert_eq(find_kind(decode_calls(), "agentic_loop.request_completed"), nil,
+    "continuation redispatch retains root request identity")
+  _test.calls_clear()
+  relay("detached-c", "last result")
+  local fourth = assert(find_kind(decode_calls(), "mag.execute"))
+  _test.calls_clear()
+  terminal(fourth.body.run_id, "whole answer")
+  local completed = assert(find_kind(decode_calls(), "agentic_loop.request_completed"))
+  assert_eq(completed.body.request_id, request)
+  assert_eq(completed.body.answer, "whole answer")
+end
+
+-- A terminal outcome arriving after an acknowledgement must update the request
+-- even when delivery is consumed by a synchronous waiter (no new lead turn).
+do
+  local emitted = {}
+  local lifecycle = require("libs.agentic-loop.request-lifecycle").new {
+    emit = function(body) emitted[#emitted + 1] = body end,
+  }
+  lifecycle:accept("r", "s")
+  lifecycle:acquire("r", "delivery")
+  lifecycle:set_terminal({ "r" }, "success", "ack")
+  lifecycle:record_outcome({ "r" }, "error", { code = "failed", message = "failed later" })
+  lifecycle:release("r", "delivery")
+  assert_eq(emitted[1].status, "error")
+  lifecycle:release("r", "delivery")
+  assert_eq(#emitted, 1)
 end

@@ -2587,11 +2587,8 @@ do
   local resume = find_call(decode_calls(), function(c)
     return c.body.kind == "mag.resume_actor"
   end)
-  assert_true(resume ~= nil, "worker-owned completion automatically wakes its owner")
-  assert_eq(resume.body.run_id, "parent-run", "owner wake targets the exact parent run")
-  assert_eq(resume.body.actor_id, "worker.llm", "owner wake targets the dispatching model")
-  assert_true(resume.body.message.content:find("owner-only output", 1, true) ~= nil,
-    "owner wake carries the formatted terminal result")
+  assert_eq(resume, nil,
+    "worker-owned completion cannot claim delivery to an unregistered owner")
   assert_eq(find_call(decode_calls(), function(c)
     return c.body.kind == "chat.graph_result.append"
   end), nil, "automatic worker wake remains isolated from the root transcript")
@@ -3779,4 +3776,32 @@ for _, action in ipairs({ "compile", "apply", "eval" }) do
     assert_eq(execute.body.model_snapshot.model, "snapshot-model", "snapshot remains execution-only")
     assert_eq(load.body.model_snapshot, nil, "live snapshot is not a build input")
   end
+end
+
+-- A negative kernel delivery receipt is not merely a warning. The child
+-- obligation settles as undeliverable and its still-live owner is canceled.
+do
+  fresh()
+  local registry = lw._internals.run_registry
+  local parent_id, child_id = registry:mint_run_id(), registry:mint_run_id()
+  local request = "request-delivery-rejected"
+  lw._internals.register_active_run(parent_id, {}, "terminal", "parent-dispatch",
+    "parent", sessions.current_id(), nil, nil, { request })
+  lw._internals.register_active_run(child_id, {}, "terminal", "child-dispatch",
+    "child", sessions.current_id(), "owner.run-tool",
+    { run_id = parent_id, actor_id = "owner.llm" }, { request })
+  feed("mag", { kind = "mag.run_result", run_id = child_id, status = "completed", result = { text = "child result" } })
+  assert_true(find_call(decode_calls(), function(c) return c.body.kind == "mag.resume_actor" end) ~= nil,
+    "completion is routed to the live nested owner")
+  _test.calls_clear()
+  feed("mag", { kind = "mag.actor_resumed", run_id = parent_id, actor_id = "owner.llm", accepted = false })
+  assert_true(find_call(decode_calls(), function(c) return c.body.kind == "mag.interrupt_run" and c.body.run_id == parent_id end) ~= nil,
+    "rejected delivery cancels the owning request work")
+  assert_eq(find_call(decode_calls(), function(c) return c.body.kind == "agentic_loop.request_completed" end), nil,
+    "request failure still waits for accepted owner cancellation")
+  feed("mag", { kind = "mag.run_result", run_id = parent_id, status = "failed", error = "canceled after undeliverable completion" })
+  local completed = find_call(decode_calls(), function(c) return c.body.kind == "agentic_loop.request_completed" end)
+  assert_true(completed ~= nil, "owner terminal releases the final obligation")
+  assert_eq(completed.body.status, "error")
+  assert_eq(completed.body.error.code, "completion_undeliverable")
 end

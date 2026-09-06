@@ -1,201 +1,106 @@
--- examples/nefor-agent/agentic_cli_test.lua — unit tests for agentic_cli's argv parser.
---
--- Loaded by `crates/nefor/tests/starter_agentic_cli_test.rs`. The Rust
--- harness installs a stub `nefor` surface (json + bus.on_event +
--- engine.exit + io.read_line + log) so `require("libs.cli")`
--- succeeds; this file then drives the parser directly without
--- spawning anything on the bus.
---
--- We test only the parser because the full run flow needs the broker;
--- those scenarios live in the smoke-test path (Phase 3 e2e suite).
-
-local agentic_cli = require("libs.cli")
-
-local function assert_eq(actual, expected, msg)
-  if actual ~= expected then
-    error(string.format(
-      "assertion failed: %s\n  expected: %s\n  actual:   %s",
-      msg or "values differ",
-      tostring(expected), tostring(actual)), 2)
-  end
+-- Frontend contract tests: no provider, tty, stdin, or timing heuristic.
+local subscriptions, sent, exits, timers = {}, {}, {}, {}
+local out, err = {}, {}
+local ready = false
+local failures = {}
+package.loaded["libs.agentic-loop"] = {
+  is_ready = function() return ready end,
+  fail_request = function(id, error) failures[#failures + 1] = { id = id, error = error } end,
+}
+package.loaded["libs.sessions"] = { ready = function() return false end }
+package.loaded["core.replay_window"] = { active = function() return false end }
+nefor.bus.on_event = function(pattern, callback) subscriptions[#subscriptions + 1] = { pattern, callback } end
+nefor.process = { spawn = function(spec) timers[#timers + 1] = spec; return #timers end }
+nefor.engine.send = function(payload) sent[#sent + 1] = nefor.json.decode(payload) end
+nefor.engine.shutdown = function(spec) exits[#exits + 1] = spec end
+nefor.io.read_line = function() error("headless must never read stdin") end
+local old_out, old_err = io.stdout, io.stderr
+io.stdout = { write = function(_, s) out[#out + 1] = s end, flush = function() end }
+io.stderr = { write = function(_, s) err[#err + 1] = s end, flush = function() end }
+local cli = require("libs.cli")
+local function emit(body)
+  local entry = { payload = nefor.json.encode({ from = "tool-gate", body = body }) }
+  for _, sub in ipairs(subscriptions) do if sub[1] == "*" or sub[1] == body.kind then sub[2](entry) end end
+end
+local function reset()
+  subscriptions, sent, exits, timers, out, err, failures = {}, {}, {}, {}, {}, {}, {}
+  ready = false
+end
+local function start(format)
+  return cli.start { prompt = "question", format = format, readiness = {
+    required_plugins = { "provider" }, required_tools = { "read_file" },
+  } }
+end
+local function activate()
+  emit { kind = "sessions.session_start", session_id = "s1", from_resume = true }
+  emit { kind = "provider.hello" }
+  emit { kind = "tool.register", tools = { { name = "read_file" } } }
+  assert(#sent == 0, "no submit during replay or before context ready")
+  emit { kind = "sessions.replay.end" }
+  assert(#sent == 0, "chunk end is not resume completion")
+  emit { kind = "sessions.resume_done", session_id = "s1" }
+  assert(#sent == 0, "resume does not bypass context commit")
+  ready = true
+  emit { kind = "agentic_loop.ready" }
+  assert(#sent == 1 and sent[1].body.kind == "chat.input.submit")
+  assert(sent[1].body.text == "question" and sent[1].body.submission_id)
 end
 
-local function parse(...)
-  return agentic_cli._parse_argv({ ... })
-end
-
--- Empty argv → REPL mode (no prompt), text format default, no flags.
 do
-  local opts, err = parse()
-  assert(opts ~= nil, "expected opts; got error: " .. tostring(err))
-  assert_eq(err, nil, "no error on empty argv")
-  assert_eq(opts.prompt, nil, "no prompt for REPL")
-  assert_eq(opts.format, "text", "default format")
-  assert_eq(opts.yolo, false, "yolo off by default")
-  assert_eq(opts.mode, nil, "mode unset by default")
-  assert_eq(opts.help, false, "help off by default")
+  local id = start("json")
+  activate()
+  assert(sent[1].body.submission_id == id)
+  emit { kind = "agentic_loop.idle" }
+  emit { kind = "mag.run_result", status = "completed" }
+  emit { kind = "agentic_loop.request_completed", request_id = "unrelated", status = "success" }
+  assert(#out == 0 and #exits == 0, "no activity/count/turn heuristics")
+  emit { kind = "agentic_loop.request_completed", request_id = id, session_id = "s1", status = "success", answer = "final" }
+  assert(#exits == 0 and #out == 0, "wait for durable session flush")
+  assert(sent[2].body.kind == "sessions.flush_request")
+  emit { kind = "sessions.flush_done", request_id = id }
+  local answer = nefor.json.decode(table.concat(out))
+  assert(answer.session_id == "s1" and answer.request_id == id and answer.answer == "final")
+  assert(exits[1].code == 0 and #exits == 1)
+  emit { kind = "agentic_loop.request_completed", request_id = id, status = "success", answer = "duplicate" }
+  assert(#exits == 1)
+  assert(table.concat(err) == "session_id: s1\n")
 end
 
--- Single positional → single-shot prompt.
+reset()
 do
-  local opts, err = parse("hello world")
-  assert_eq(err, nil, "no error")
-  assert_eq(opts.prompt, "hello world", "single positional")
+  local id = start("text")
+  activate()
+  emit { kind = "chat.tool.popup_request", id = "permission-1" }
+  assert(sent[2].body.kind == "tool.permission_response" and sent[2].body.decision == "deny")
+  assert(failures[1].id == id and failures[1].error.code == "approval_required")
+  assert(#exits == 0, "approval failure must settle accepted work")
+  emit { kind = "agentic_loop.request_completed", request_id = id, status = "error", error = failures[1].error }
+  emit { kind = "sessions.flush_done", request_id = id }
+  assert(exits[1].code == 1 and #out == 0)
 end
-
--- Multiple positionals → joined with space.
+reset()
 do
-  local opts, err = parse("hello", "world", "foo")
-  assert_eq(err, nil, "no error")
-  assert_eq(opts.prompt, "hello world foo", "joined positionals")
+  local id = start("json")
+  activate()
+  emit { kind = "agentic_loop.request_completed", request_id = id, status = "success", answer = "not durable" }
+  emit { kind = "sessions.flush_done", request_id = id, error = { code = "persistence_failed", message = "disk full" } }
+  assert(exits[1].code == 1)
+  assert(nefor.json.decode(table.concat(out)).status == "error")
 end
-
--- -m / --model.
+reset()
 do
-  local opts, err = parse("-m", "gpt-5", "test prompt")
-  assert_eq(err, nil, "no error")
-  assert_eq(opts.model, "gpt-5", "short model flag")
-  assert_eq(opts.prompt, "test prompt", "prompt parsed after flag")
-
-  opts, err = parse("--model", "claude", "x")
-  assert_eq(err, nil, "no error")
-  assert_eq(opts.model, "claude", "long model flag")
+  local id = start("json")
+  activate()
+  emit { kind = "agentic_loop.request_completed", request_id = id, status = "interrupted" }
+  emit { kind = "sessions.flush_done", request_id = id }
+  assert(exits[1].code == 130)
 end
-
--- --think / --reasoning-effort.
-do
-  local opts, err = parse("--think", "high", "test prompt")
-  assert_eq(err, nil, "no error")
-  assert_eq(opts.reasoning_effort, "high", "think flag")
-  assert_eq(opts.prompt, "test prompt", "prompt parsed after --think")
-
-  opts, err = parse("--reasoning-effort", "medium", "x")
-  assert_eq(err, nil, "no error")
-  assert_eq(opts.reasoning_effort, "medium", "reasoning-effort alias")
-end
-
--- --yolo.
-do
-  local opts, err = parse("--yolo", "do dangerous things")
-  assert_eq(err, nil, "no error")
-  assert_eq(opts.yolo, true, "yolo set")
-  assert_eq(opts.mode, "yolo", "--yolo maps to mode=yolo")
-  assert_eq(opts.prompt, "do dangerous things", "prompt after --yolo")
-end
-
--- --mode safe|auto|yolo.
-do
-  for _, mode in ipairs({ "safe", "auto", "yolo" }) do
-    local opts, err = parse("--mode", mode, "p")
-    assert_eq(err, nil, "no error for mode=" .. mode)
-    assert_eq(opts.mode, mode, "mode=" .. mode)
-  end
-
-  local opts, err = parse("--mode", "normal", "p")
-  assert_eq(opts, nil, "nil opts on bad mode")
-  assert(err ~= nil and string.find(err, "invalid --mode", 1, true),
-    "error mentions invalid mode; got: " .. tostring(err))
-end
-
--- --format with each valid value.
-for _, fmt in ipairs({ "text", "json", "stream-json" }) do
-  local opts, err = parse("--format", fmt, "p")
-  assert_eq(err, nil, "no error for format=" .. fmt)
-  assert_eq(opts.format, fmt, "format=" .. fmt)
-end
-
--- --format invalid value.
-do
-  local opts, err = parse("--format", "yaml", "p")
-  assert_eq(opts, nil, "nil opts on bad format")
-  assert(err ~= nil and string.find(err, "yaml"),
-    "error mentions invalid value; got: " .. tostring(err))
-end
-
--- Missing value for flag that requires one.
-do
-  local opts, err = parse("--model")
-  assert_eq(opts, nil, "nil opts on missing value")
-  assert(err ~= nil and string.find(err, "missing value"),
-    "error mentions missing value; got: " .. tostring(err))
-
-  opts, err = parse("--think")
-  assert_eq(opts, nil, "nil opts on missing --think value")
-  assert(err ~= nil and string.find(err, "missing value"),
-    "error mentions missing value; got: " .. tostring(err))
-
-  opts, err = parse("-f")
-  assert_eq(opts, nil, "nil opts on missing -f value")
-  assert(err ~= nil and string.find(err, "missing value"),
-    "error mentions missing value; got: " .. tostring(err))
-end
-
--- -h / --help short-circuits.
-do
-  local opts, err = parse("-h")
-  assert_eq(err, nil, "no error")
-  assert_eq(opts.help, true, "help set by -h")
-
-  opts, err = parse("--help")
-  assert_eq(err, nil, "no error")
-  assert_eq(opts.help, true, "help set by --help")
-end
-
--- --debug is recognised (no-op for v1).
-do
-  local opts, err = parse("--debug", "x")
-  assert_eq(err, nil, "no error")
-  assert_eq(opts.debug, true, "debug set")
-  assert_eq(opts.prompt, "x", "prompt parsed")
-end
-
--- Unknown flag rejected.
-do
-  local opts, err = parse("--unknown")
-  assert_eq(opts, nil, "nil opts on unknown flag")
-  assert(err ~= nil and string.find(err, "unknown flag"),
-    "error mentions unknown flag; got: " .. tostring(err))
-end
-
--- `--` ends flag parsing; subsequent args are positional even if they
--- look like flags.
-do
-  local opts, err = parse("--", "--not-a-flag", "other")
-  assert_eq(err, nil, "no error")
-  assert_eq(opts.prompt, "--not-a-flag other", "positional after --")
-end
-
--- -f / --file just stores the path (file IO happens later).
-do
-  local opts, err = parse("-f", "/tmp/x", "prompt")
-  assert_eq(err, nil, "no error")
-  assert_eq(opts.file, "/tmp/x", "file path stored")
-  assert_eq(opts.prompt, "prompt", "prompt also parsed")
-end
-
--- Combined: --yolo --format json -m gpt --think high -f path "the prompt"
-do
-  local opts, err = parse(
-    "--yolo", "--format", "json", "-m", "gpt", "--think", "high", "-f", "/p", "the prompt")
-  assert_eq(err, nil, "no error on combined")
-  assert_eq(opts.yolo, true, "yolo")
-  assert_eq(opts.mode, "yolo", "mode")
-  assert_eq(opts.format, "json", "format")
-  assert_eq(opts.model, "gpt", "model")
-  assert_eq(opts.reasoning_effort, "high", "reasoning effort")
-  assert_eq(opts.file, "/p", "file")
-  assert_eq(opts.prompt, "the prompt", "prompt")
-end
-
--- Usage text exists and mentions key flags.
-do
-  local usage = agentic_cli._usage()
-  assert(type(usage) == "string" and #usage > 0, "usage non-empty")
-  assert(string.find(usage, "%-%-format"), "usage mentions --format")
-  assert(string.find(usage, "%-%-mode"), "usage mentions --mode")
-  assert(string.find(usage, "%-%-yolo"), "usage mentions --yolo")
-  assert(string.find(usage, "%-%-model"), "usage mentions --model")
-  assert(string.find(usage, "%-%-think"), "usage mentions --think")
-end
-
+reset()
+start("json")
+timers[1].on_exit()
+assert(exits[1].code == 1 and nefor.json.decode(table.concat(out)).error.code == "startup_failure")
+reset()
+cli.start { prompt = " ", readiness = {} }
+assert(exits[1].code == 2 and #timers == 0)
+io.stdout, io.stderr = old_out, old_err
 print("agentic_cli_test: all assertions passed")

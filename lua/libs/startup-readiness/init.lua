@@ -64,7 +64,7 @@ local function new_barrier(opts)
     local plugins = missing(required_plugins, live_plugins)
     local tools = missing(required_tools, advertised_tools)
     return {
-      ready = #plugins == 0 and #tools == 0,
+      ready = #plugins == 0 and #tools == 0 and (opts.is_ready == nil or opts.is_ready()),
       missing_plugins = plugins,
       missing_tools = tools,
       missing_sources = missing_source_hints(tools),
@@ -116,6 +116,7 @@ local function new_barrier(opts)
     local message = "startup readiness timed out; missing plugin hello(s): "
       .. join(state.missing_plugins)
       .. "; missing required tool(s): " .. join(state.missing_tools)
+      .. (opts.is_ready and not opts.is_ready() and "; session/conversation activation incomplete" or "")
     if #state.missing_sources > 0 then
       message = message .. "; expected advertisement source(s): "
         .. table.concat(state.missing_sources, "; ")

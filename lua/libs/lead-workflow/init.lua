@@ -813,7 +813,7 @@ end
 -- actor lifecycle event. Node summaries carry the factory under `reasoner`,
 -- matching what the chat surface renders (chat/run_panel.lua).
 register_active_run = function(run_id, inventory, terminal, firing_id, run_name, session_id,
-    dispatcher_id, owner_resume)
+    dispatcher_id, owner_resume, request_ids)
   local nodes_order, nodes = {}, {}
   for _, entry in ipairs(inventory or {}) do
     local actor = entry.actor
@@ -836,10 +836,15 @@ register_active_run = function(run_id, inventory, terminal, firing_id, run_name,
     dispatch_firing_id = firing_id,
     dispatcher_id = dispatcher_id,
     owner_resume = owner_resume,
+    request_ids = request_ids,
     nodes_order = nodes_order,
     nodes = nodes,
   })
   state.active_run_id = run_id
+  local al_ok, al = pcall(require, "libs.agentic-loop")
+  if al_ok and type(al.acquire_request_obligation) == "function" then
+    al.acquire_request_obligation(run.request_ids, "run:" .. run_id, session_id)
+  end
   return run
 end
 
@@ -1042,10 +1047,30 @@ local function completion_payload(run_id, run_name, ok, content, err)
   }
 end
 
-local function relay_kernel_completion(run_id, run_name, ok, content, err)
+local function relay_kernel_completion(run, ok, content, err)
   local al = require("libs.agentic-loop")
-  if type(al.relay_run_completion) ~= "function" then return end
-  al.relay_run_completion(completion_payload(run_id, run_name, ok, content, err))
+  if type(al.relay_run_completion) ~= "function" then return false end
+  local completion = completion_payload(run.run_id, run.run_name, ok, content, err)
+  completion.request_ids = run.request_ids
+  return al.relay_run_completion(completion)
+end
+
+local function settle_request_run(run)
+  local al_ok, al = pcall(require, "libs.agentic-loop")
+  if al_ok and type(al.settle_request_obligation) == "function" then
+    al.settle_request_obligation(run.request_ids, "run:" .. run.run_id)
+  end
+end
+
+local function record_request_run_failure(run, body, err)
+  local al_ok, al = pcall(require, "libs.agentic-loop")
+  if not al_ok or type(al.record_request_outcome) ~= "function" then return end
+  local status = body.status == "killed" and "interrupted" or "error"
+  al.record_request_outcome(run.request_ids, status, {
+    code = body.status == "killed" and "interrupted" or "mag_run_failed",
+    message = tostring(err),
+    run_id = run.run_id,
+  })
 end
 
 local function resume_run_owner(run, completion)
@@ -1125,6 +1150,13 @@ local function handle_mag_run_result(body)
   local run = state.active_runs[run_id]
   if not run then return end
 
+  -- A parent terminal result proves that every nested completion previously
+  -- resumed into that owner was consumed and the owner itself settled.
+  for _, child_run in ipairs(run.owner_delivery_from or {}) do
+    settle_request_run(child_run)
+  end
+  run.owner_delivery_from = {}
+
   local settled, transitioned = run_registry:settle(run_id, body)
   if not transitioned then return end
   run = settled.run
@@ -1134,6 +1166,7 @@ local function handle_mag_run_result(body)
   local failed = body.status == "failed" or body.status == "killed"
   local err = body.error
     or (body.status == "killed" and "run killed" or "mag run failed")
+  if failed then record_request_run_failure(run, body, err) end
   local results = {}
   if not failed and type(run.terminal) == "string" and body.output_path ~= nil then
     results[run.terminal] = { output = { output_path = body.output_path } }
@@ -1182,17 +1215,38 @@ local function handle_mag_run_result(body)
     emit_mag_result_block(run, failed and "failed" or "success",
       failed and nil or body.output_path, failed and err or nil)
   end
-  if grace_waiter or termination_waiters or #settled.waiters > 0 then return end
+  if grace_waiter or termination_waiters or #settled.waiters > 0 then
+    settle_request_run(run)
+    return
+  end
   local content = not failed and (mag_result_text(body.result)
     or read_output_file(body.output_path)) or nil
   local completion = completion_payload(run_id, run.run_name, not failed, content, err)
   if not root_owned then
-    if not resume_run_owner(run, completion) then
+    local owner = run.owner_resume and state.active_runs[run.owner_resume.run_id] or nil
+    if owner then
+      -- Install the pending receipt before routing; a kernel rejection must
+      -- settle this obligation explicitly rather than leave it on a dead actor.
+      owner.owner_delivery_from[#owner.owner_delivery_from + 1] = run
+      run.owner_delivery_acked = false
+    end
+    if not owner or not resume_run_owner(run, completion) then
       nefor.log.warn("lead-workflow: detached result owner is no longer resumable", {
         run_id = run_id,
         owner_run_id = run.owner_resume and run.owner_resume.run_id,
         owner_actor_id = run.owner_resume and run.owner_resume.actor_id,
       })
+      local al_ok, al = pcall(require, "libs.agentic-loop")
+      if al_ok and type(al.fail_request) == "function" then
+        for _, request_id in ipairs(run.request_ids or {}) do
+          al.fail_request(request_id, {
+            code = "completion_undeliverable",
+            message = "detached result owner is no longer resumable",
+            run_id = run_id,
+          })
+        end
+      end
+      settle_request_run(run)
     end
     return
   end
@@ -1200,11 +1254,18 @@ local function handle_mag_run_result(body)
     -- A TUI termination is already a user decision. Settlement and visibility
     -- still happen, but feeding the kill back as a task would restart the lead.
     if run.terminate_reason ~= "user-tui-termination" then
-      relay_kernel_completion(run_id, run.run_name, false, nil, err)
+      relay_kernel_completion(run, false, nil, err)
+    else
+      local al_ok, al = pcall(require, "libs.agentic-loop")
+      if al_ok and type(al.interrupt_request) == "function" then
+        for _, request_id in ipairs(run.request_ids or {}) do al.interrupt_request(request_id) end
+      end
     end
+    settle_request_run(run)
     return
   end
-  relay_kernel_completion(run_id, run.run_name, true, content, nil)
+  relay_kernel_completion(run, true, content, nil)
+  settle_request_run(run)
 end
 
 local function handle_mag_pre_start_error(body)
@@ -1286,7 +1347,16 @@ local function resolve_invocation(metadata, direct_default_principal)
         and al.lead_scoped_id(caller_id) == true then
       principal = "lead"
     end
-    return { session_id = session_id, principal = principal, direct = true }
+    local request_ids = {}
+    if principal == "lead" and al_ok and type(al.current_request_ids) == "function" then
+      request_ids = al.current_request_ids()
+    end
+    return {
+      session_id = session_id,
+      principal = principal,
+      direct = true,
+      request_ids = request_ids,
+    }
   end
 
   local invocation, validation_error = chat_emitter.validate_invocation(metadata.invocation)
@@ -1296,6 +1366,16 @@ local function resolve_invocation(metadata, direct_default_principal)
   if sessions.current_id() ~= invocation.session_id then
     return nil, "invocation session is no longer active"
   end
+  local request_ids = {}
+  if invocation.principal == "subagent" then
+    local owner_run = run_registry:get(invocation.run_id)
+    request_ids = owner_run and owner_run.request_ids or {}
+  else
+    local al_ok, al = pcall(require, "libs.agentic-loop")
+    if al_ok and type(al.current_request_ids) == "function" then
+      request_ids = al.current_request_ids()
+    end
+  end
   return {
     session_id = invocation.session_id,
     principal = invocation.principal,
@@ -1303,6 +1383,7 @@ local function resolve_invocation(metadata, direct_default_principal)
     dispatcher_id = invocation.principal == "subagent" and invocation.actor_id or nil,
     conversation_id = invocation.conversation_id,
     owner_run_id = invocation.principal == "subagent" and invocation.run_id or nil,
+    request_ids = request_ids,
   }
 end
 
@@ -1806,6 +1887,7 @@ local function begin_mag_load(firing_id, action, args, ws, provenance)
     dispatcher_id = provenance.dispatcher_id,
     conversation_id = provenance.conversation_id,
     owner_run_id = provenance.owner_run_id,
+    request_ids = provenance.request_ids,
   }
 
   emit_as(SOURCE_NAME, "mag", mag.compile_request(load_id, ws, args.file,
@@ -1942,7 +2024,8 @@ submit_loaded_run = function(pending, body, error_prefix)
       conversation_id = pending.conversation_id }
   end
   local run = register_active_run(pending.run_id, inventory, terminal_id,
-    pending.firing_id, pending.run_name, pending.session_id, pending.dispatcher_id, owner_resume)
+    pending.firing_id, pending.run_name, pending.session_id, pending.dispatcher_id,
+    owner_resume, pending.request_ids)
   run.invocation_label = pending.invocation_label or pending.run_name
   run.invocation_kind = pending.invocation_kind
   begin_completion_grace(run, async_run_ack(pending, body))
@@ -1967,13 +2050,46 @@ local function submit_loaded_apply(pending, body)
   local overlay = compose_agent_params(inventory, pending.session_id)
   local request_id = "mag-apply-" .. envelope.uuid_lite()
   state.pending_mag_apply[request_id] = {
-    firing_id = pending.firing_id, run_id = pending.run_id, hash = body.hash,
+    firing_id = pending.firing_id,
+    run_id = pending.run_id,
+    hash = body.hash,
+    request_ids = pending.request_ids,
   }
+  local target = state.active_runs[pending.run_id]
+  state.pending_mag_apply[request_id].attached_request_ids = {}
+  if target then
+    local seen = {}
+    for _, id in ipairs(target.request_ids or {}) do seen[id] = true end
+    for _, id in ipairs(pending.request_ids or {}) do
+      if not seen[id] then
+        target.request_ids[#target.request_ids + 1] = id
+        state.pending_mag_apply[request_id].attached_request_ids[#state.pending_mag_apply[request_id].attached_request_ids + 1] = id
+        seen[id] = true
+      end
+    end
+    require("libs.agentic-loop").acquire_request_obligation(
+      pending.request_ids, "run:" .. pending.run_id, pending.session_id)
+  end
   local apply = { kind = "mag.apply", id = request_id, run_id = pending.run_id,
     source = "lead-workflow.mag.apply", artifact = body.artifact }
   if next(overlay) ~= nil then apply.params_overlay = overlay end
   emit_as(SOURCE_NAME, "mag", apply)
   return true
+end
+
+local function detach_rejected_apply(pending)
+  local target = state.active_runs[pending.run_id]
+  local remove = {}
+  for _, id in ipairs(pending.attached_request_ids or {}) do remove[id] = true end
+  if target then
+    local retained = {}
+    for _, id in ipairs(target.request_ids or {}) do
+      if not remove[id] then retained[#retained + 1] = id end
+    end
+    target.request_ids = retained
+  end
+  require("libs.agentic-loop").settle_request_obligation(
+    pending.attached_request_ids, "run:" .. pending.run_id)
 end
 
 local function resolve_pending_apply(body)
@@ -1991,6 +2107,7 @@ local function resolve_pending_apply(body)
       message = "Modification applied atomically to the live MAG run.",
     })
   else
+    detach_rejected_apply(pending)
     emit_tool_result_err(pending.firing_id,
       "mag apply rejected: " .. tostring(body.error or "unknown rejection"))
   end
@@ -2003,6 +2120,7 @@ local function fail_pending_apply(body)
     and state.pending_mag_apply[request_id] or nil
   if not pending then return false end
   state.pending_mag_apply[request_id] = nil
+  detach_rejected_apply(pending)
   emit_tool_result_err(pending.firing_id,
     "mag apply failed: " .. tostring(body.message or "unknown error"))
   return true
@@ -2346,11 +2464,26 @@ local function receive_msg(entry)
     handle_mag_run_result(body)
     return
   end
-  if kind == "mag.actor_resumed" and body.accepted == false then
-    nefor.log.warn("lead-workflow: detached result owner was not resumable", {
-      owner_run_id = body.run_id,
-      owner_actor_id = body.actor_id,
-    })
+  if kind == "mag.actor_resumed" then
+    local owner = run_registry:get(body.run_id)
+    for _, delivered in ipairs(owner and owner.owner_delivery_from or {}) do
+      if not delivered.owner_delivery_acked and delivered.owner_resume.actor_id == body.actor_id then
+        -- The kernel serializes resume receipts for each run/actor pair.
+        delivered.owner_delivery_acked = true
+        if body.accepted ~= true then
+          local al = require("libs.agentic-loop")
+          for _, request_id in ipairs(delivered.request_ids or {}) do
+            al.fail_request(request_id, {
+              code = "completion_undeliverable",
+              message = "Kernel rejected detached completion delivery to its owner",
+              run_id = delivered.run_id,
+            })
+          end
+          settle_request_run(delivered)
+        end
+        break
+      end
+    end
     return
   end
   -- Kernel actor lifecycle: keep the tracked run's node statuses at the same
@@ -2415,12 +2548,42 @@ if nefor.bus and nefor.bus.on_event then
   end)
 end
 
+local function cancel_request(request_id, _err)
+  local count = 0
+  for _, pending in pairs(state.pending_mag_load) do
+    for _, id in ipairs(pending.request_ids or {}) do
+      if id == request_id then
+        invalidate_pending_mag_loads(pending.firing_id)
+        count = count + 1
+        break
+      end
+    end
+  end
+  mag_eval.cancel_request(request_id)
+  for run_id, run in pairs(state.active_runs) do
+    for _, owned_request_id in ipairs(run.request_ids or {}) do
+      if owned_request_id == request_id then
+        run_registry:mark_terminating(run_id, "request-failed")
+        emit_as(SOURCE_NAME, "mag", {
+          kind = "mag.interrupt_run",
+          run_id = run_id,
+          terminate = true,
+        })
+        count = count + 1
+        break
+      end
+    end
+  end
+  return count
+end
+
 local M = {
   name        = "lead-workflow",
   receive_msg = receive_msg,
   send_msg    = function(_) end,
 
   has_approved_plan = has_approved_plan,
+  cancel_request = cancel_request,
 
   _internals = {
     state = state,

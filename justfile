@@ -69,6 +69,27 @@ test-example:
     cargo test -p nefor --test instruction_files_test
     cargo test -p nefor --test read_only_tools_test
 
+# Build only the deterministic headless starter's runtime processes.
+build-headless:
+    cargo build -p nefor -p mag-plugin -p mock-plugin -p tool-gate-plugin -p basic-tools-plugin -p git-worktree-plugin
+
+# Headless startup, persistence, and non-TTY process acceptance (mock provider only).
+test-headless: build-headless
+    just test-engine starter_startup_test
+    just test-engine starter_agentic_cli_test
+    just test-engine starter_sessions_test
+    just test-engine starter_agentic_workflow_test
+    just test-engine starter_lead_workflow_test
+    just test-engine agentic_cli_mock_e2e
+
+# Format Rust without touching unrelated Markdown files.
+fmt-rust:
+    cargo fmt --all
+
+# One engine integration target, including Lua contract harnesses.
+test-engine target *args:
+    cargo test -p nefor --features full-tests --test {{target}} {{args}}
+
 # Provider/API translation tests; may need local socket binding permissions.
 test-provider:
     cargo test -p openai-provider --lib
@@ -183,10 +204,6 @@ test-integration: test-release-bundle test-tui-scenarios
 # Clippy across the workspace with warnings promoted to errors — matches CI.
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
-
-# Format Rust without rewriting unrelated Markdown or resolving external tools.
-fmt-rust:
-    cargo fmt --all
 
 # Format every Rust file with rustfmt, every markdown file with prettier.
 fmt: fmt-rust
