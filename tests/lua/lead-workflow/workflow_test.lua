@@ -1224,8 +1224,11 @@ end
 
 -- mag apply compiles a Delta artifact, resolves params for newly spawned
 -- actors, and waits for the kernel's correlated atomic-application ack.
-do
+for _, cache_status in ipairs({ "cold", "miss", "hit" }) do
   fresh()
+  if cache_status ~= "cold" then
+    lw.configure { project_build = { cache_dir = "/persistent/cache" } }
+  end
   write_mag_file("firing-mag-write-apply", "live-delta.mag", "(artifact nil)")
   local run_id = "mag-run-live-apply"
   lw._internals.register_active_run(run_id, {}, "terminal", "dispatch-live",
@@ -1238,9 +1241,10 @@ do
     run_id = run_id,
   })
   local load = find_call(decode_calls(), function(c)
-    return c.body.kind == "mag.load" and c.target == "mag"
+    return c.body.kind == (cache_status == "cold" and "mag.load" or "mag.build")
+      and c.target == "mag"
   end)
-  assert_true(load ~= nil, "mag apply compiles through mag.load")
+  assert_true(load ~= nil, "mag apply uses its explicit compilation policy")
   assert_eq(tool_result("firing-mag-apply"), nil,
     "mag apply does not settle before compilation and kernel acknowledgement")
 
@@ -1268,6 +1272,7 @@ do
     kind = "mag.loaded",
     in_reply_to = load.body.id,
     hash = "sha256:delta",
+    build = cache_status ~= "cold" and { status = cache_status } or nil,
     factories = KERNEL_FACTORIES,
     factory_contracts = factory_contracts(KERNEL_FACTORIES),
     artifact = { format = "nefor.mag", version = 1, kind = "delta", delta = delta },
