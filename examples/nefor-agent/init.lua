@@ -83,6 +83,8 @@ function plugin_process_terminated(fact)
   }
 end
 
+local MAG_PROJECT_BUILD = { cache_dir = nefor.fs.data_root() .. "/mag/cache" }
+
 actor.install()
 require("libs.mag-workspace").configure {
   sessions_root = sessions_root,
@@ -165,6 +167,7 @@ agentic_loop.configure {
   -- authored INSIDE the program (:tools on the agent config); the system
   -- prompt / provider / model above overlay onto its llm actor per turn.
   lead_program = {
+    project_build = MAG_PROJECT_BUILD,
     source_dir = STARTER_ROOT,
     entry      = "agentic-loop/lead-turn.mag",
     module_roots = MAG_MODULE_ROOTS,
@@ -283,6 +286,7 @@ tool_gate_argv[#tool_gate_argv + 1] = cfg.tool_gate.default_action
 -- tool" at runtime.
 local lead_workflow = require("libs.lead-workflow")
 lead_workflow.configure {
+  project_build = MAG_PROJECT_BUILD,
   dependency_module_roots = MAG_MODULE_ROOTS,
   ambient_context = mag_context,
   agent_system = lead_role.WORKER_SYSTEM_PROMPT,

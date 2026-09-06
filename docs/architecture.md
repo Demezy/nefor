@@ -182,3 +182,35 @@ Detached runtime tasks never invoke Lua directly. Process stdout, stderr, and ex
 The lead operates on run statuses and results, not by inspecting every internal message in a graph. MAG run results are delivered inline on bus events, and the lead-workflow tools expose graph status and output lookup as control-plane conveniences.
 
 Persistence is not an engine promise. The engine keeps an in-memory log for dispatch/replay while the process is alive. Long-term session and MAG-output persistence are Lua/plugin mechanisms owned by the starter libraries and MAG kernel integration.
+
+## Session MAG project builds
+
+The starter opts into `mag.build` at the lead, file preview/apply, and generated
+expression sites. It selects one persistent writable store at
+`nefor.fs.data_root() .. "/mag/cache"`, shared across sessions. Config and package
+sources stay in their original (potentially immutable) roots; no lead source is
+copied into session storage. Compiler identity and exact project inputs partition
+the store. Runtime provider/model snapshots remain execute-only overlays.
+
+Composition passes the same policy table to
+`agentic_loop.configure { lead_program = { project_build = policy, ... } }` and
+`lead_workflow.configure { project_build = policy, ... }`. The latter forwards it
+to mag-eval. Policy is `{ cache_dir = "/absolute/writable/path", no_cache = false }`;
+`no_cache` is optional. Omitting `project_build` or supplying `false` selects cold
+`mag.load`. Settings are copied at configuration time. The shared
+`libs.mag-workspace.compile_request(id, project_root, entry, module_roots, policy)`
+constructs either request without selecting global paths or altering correlations.
+
+Config roots supply `mag.toml`. Session workspace initialization creates only a
+missing minimal `version = 1` manifest, never replacing authored content (even an
+invalid manifest). Files and deltas need no per-entry manifest edits; generated
+`eval/eval-N.mag` names remain distinct compile identities. The lead retains its
+loaded artifact once per session; subsequent turns execute it without rebuilding.
+Across sessions the same config project and store can hit. Pending-request
+cancellation and session rollover still discard late replies, regardless of build
+status. Neither cancellation nor session end evicts inert cache records.
+
+`mag.loaded.build` diagnostics are outside the immutable artifact. They do not
+change preview, run ownership, or execute/apply behavior. Source readiness does
+not activate an installed generation: adoption requires a separately authorized
+compatible runtime/config installation and a new process.

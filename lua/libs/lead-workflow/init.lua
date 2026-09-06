@@ -138,6 +138,7 @@ local run_registry = RunRegistry.new({
 })
 
 local dependency_module_roots = {}
+local project_build = nil
 local agent_system = nil
 local ambient_context = nil
 local resolve_model_snapshot = nil
@@ -1807,13 +1808,8 @@ local function begin_mag_load(firing_id, action, args, ws, provenance)
     owner_run_id = provenance.owner_run_id,
   }
 
-  emit_as(SOURCE_NAME, "mag", {
-    kind       = "mag.load",
-    id         = load_id,
-    source_dir = ws,
-    module_roots = module_roots_for(ws),
-    entry      = args.file,
-  })
+  emit_as(SOURCE_NAME, "mag", mag.compile_request(load_id, ws, args.file,
+    module_roots_for(ws), project_build))
 end
 
 
@@ -2492,6 +2488,7 @@ local M = {
         return nil
       end
       dependency_module_roots = {}
+      project_build = nil
       agent_system = nil
       ambient_context = nil
       resolve_model_snapshot = nil
@@ -2506,6 +2503,7 @@ function M.configure(opts)
   if type(opts) ~= "table" then
     error("lead-workflow: configure options must be a table", 2)
   end
+  project_build = mag.project_build_options(opts.project_build)
   local roots = opts.dependency_module_roots
   if roots == nil then roots = {} end
   validate_dependency_module_roots(roots)
@@ -2535,6 +2533,7 @@ function M.configure(opts)
   end
   mag_eval.configure({
     dependency_module_roots = copy_roots(roots),
+    project_build = project_build,
     resolve_invocation = resolve_invocation,
     mint_run_id = function() return run_registry:mint_run_id() end,
     submit_run = function(pending, body)

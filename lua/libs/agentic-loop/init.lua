@@ -415,13 +415,8 @@ local function ensure_lead_program_loaded()
   p.load_id = "lead-turn-load-" .. envelope.uuid_lite()
   local source_dir = lead_program_source_dir()
   local module_roots = lead_program_module_roots(source_dir)
-  emit("mag", {
-    kind       = "mag.load",
-    id         = p.load_id,
-    source_dir = source_dir,
-    module_roots = module_roots,
-    entry      = p.entry,
-  })
+  emit("mag", mag_workspace.compile_request(p.load_id, source_dir, p.entry,
+    module_roots, p.project_build))
   nefor.log.info("agentic-loop: loading lead turn-program", {
     source_dir = source_dir, entry = p.entry,
   })
@@ -1494,6 +1489,7 @@ function M.configure(opts)
   -- `module_roots`, when present, is the complete ordered MAG module search
   -- path. It is copied so later caller mutation cannot alter live config.
   if type(opts.lead_program) == "table" then
+    state.lead_program.project_build = mag_workspace.project_build_options(opts.lead_program.project_build)
     if type(opts.lead_program.source_dir) == "string" and #opts.lead_program.source_dir > 0 then
       state.lead_program.source_dir = opts.lead_program.source_dir
     end

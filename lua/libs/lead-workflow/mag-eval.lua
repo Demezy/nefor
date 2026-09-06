@@ -29,6 +29,7 @@ local SOURCE_NAME = "lead-workflow"
 local M = {}
 
 local dependency_module_roots = {}
+local project_build = nil
 
 local function copy_roots(roots)
   local copy = {}
@@ -66,6 +67,7 @@ function M.configure(opts)
   if type(opts) ~= "table" then
     error("lead-workflow mag-eval: configure options must be a table", 2)
   end
+  project_build = mag.project_build_options(opts.project_build)
   local roots = opts.dependency_module_roots
   if roots == nil then roots = {} end
   validate_roots(roots)
@@ -315,13 +317,8 @@ function M.handle(firing_id, args, metadata)
     owner_run_id = provenance.owner_run_id,
     wrapper = wrapper,
   }
-  emit_as(SOURCE_NAME, "mag", {
-    kind       = "mag.load",
-    id         = load_id,
-    source_dir = ws,
-    module_roots = module_roots_for(ws),
-    entry      = rel,
-  })
+  emit_as(SOURCE_NAME, "mag", mag.compile_request(load_id, ws, rel,
+    module_roots_for(ws), project_build))
 end
 
 local function take(map, key)

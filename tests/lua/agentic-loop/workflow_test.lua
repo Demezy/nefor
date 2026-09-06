@@ -1570,3 +1570,26 @@ do
   assert(find_kind(decode_calls(), "mag.load") ~= nil,
     "the next submit retries the program load")
 end
+
+-- Project builds preserve the once-per-session handshake and late-reply guard.
+for _, status in ipairs({ "miss", "hit" }) do
+  fresh_loop()
+  local options = { cache_dir = "/persistent/cache", no_cache = true }
+  agentic_loop.configure { lead_program = { project_build = options } }
+  options.cache_dir = "/mutated"
+  send_to_loop("nefor-tui", { kind = "chat.input.submit", text = "cached lead" })
+  local load = find_kind(decode_calls(), "mag.build")
+  assert(load ~= nil, "opt-in lead emits project build")
+  assert_eq(load.body.cache_dir, "/persistent/cache", "build settings are copied")
+  assert_eq(load.body.no_cache, true, "bypass policy is forwarded")
+  assert_eq(load.body.project_root, _starter_dir, "lead source stays config-owned")
+  assert_eq(load.body.source_dir, nil, "build uses explicit project root")
+  _test.calls_clear()
+  send_to_loop("nefor-tui", { kind = "chat.input.submit", text = "queued" })
+  assert_eq(find_kind(decode_calls(), "mag.build"), nil, "pending lead is not rebuilt")
+  agentic_loop._internals.reset()
+  _test.calls_clear()
+  send_to_loop("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
+    build = { status = status }, artifact = {}, hash = "sha256:late" })
+  assert_eq(find_kind(decode_calls(), "mag.execute"), nil, "reset ignores late build reply")
+end

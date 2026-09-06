@@ -19,6 +19,31 @@ function M.configure(options)
   configured_sessions_root = options.sessions_root or configured_sessions_root
 end
 
+-- Explicit per-consumer opt-in; the composition owns storage selection.
+function M.project_build_options(options)
+  if options == nil or options == false then return nil end
+  assert(type(options) == "table", "project_build must be a table or false")
+  assert(type(options.cache_dir) == "string" and options.cache_dir:sub(1, 1) == "/",
+    "project_build.cache_dir must be an absolute path")
+  assert(options.no_cache == nil or type(options.no_cache) == "boolean",
+    "project_build.no_cache must be a boolean")
+  return { cache_dir = options.cache_dir, no_cache = options.no_cache or false }
+end
+
+function M.compile_request(id, project_root, entry, module_roots, project_build)
+  local request = { id = id, entry = entry, module_roots = module_roots }
+  if project_build then
+    request.kind = "mag.build"
+    request.project_root = project_root
+    request.cache_dir = project_build.cache_dir
+    request.no_cache = project_build.no_cache
+  else
+    request.kind = "mag.load"
+    request.source_dir = project_root
+  end
+  return request
+end
+
 local function sh_quote(value)
   return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
 end
@@ -55,6 +80,14 @@ function M.init_workspace(session_id, _config_dir)
     return nil, "failed to create workspace: " .. ws
   end
 
+  -- noclobber also protects an authored manifest created concurrently. Existing
+  -- content (even invalid TOML) belongs to the author, not initialization.
+  local manifest = sh_quote(ws .. "/mag.toml")
+  local ok = os.execute("test -e " .. manifest
+    .. " || (set -C; printf 'version = 1\\n' > " .. manifest .. ")")
+  if ok ~= true and ok ~= 0 then
+    return nil, "failed to initialize project manifest: " .. ws .. "/mag.toml"
+  end
   return ws, nil
 end
 

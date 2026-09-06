@@ -3692,3 +3692,86 @@ do
     "displaced terminal outcome leaves an expired tombstone")
   registry.terminal_limit = 64
 end
+
+-- Build routing is shared by preview/apply/eval; diagnostic status cannot
+-- resurrect canceled work. The cold-path suite above remains opt-out coverage.
+for _, status in ipairs({ "miss", "hit" }) do
+  for _, action in ipairs({ "compile", "apply", "eval" }) do
+    fresh()
+    lw.configure { project_build = { cache_dir = "/persistent/cache" },
+      dependency_module_roots = { "/immutable/modules" } }
+    write_mag_file("build-write", "build.mag", READ_ONLY_MAG)
+    _test.calls_clear()
+    if action == "eval" then
+      invoke_tool("build-request", "mag-eval", { intent = "Build test", expr = "nil" })
+    else
+      invoke_tool("build-request", "mag", { action = action, file = "build.mag" })
+    end
+    local load = find_call(decode_calls(), function(c) return c.body.kind == "mag.build" end)
+    assert_true(load ~= nil, action .. " opts into project build")
+    local ws = require("libs.mag-workspace").workspace_dir(sessions.current_id())
+    assert_eq(load.body.project_root, ws, "session project root")
+    assert_eq(load.body.cache_dir, "/persistent/cache", "composition-selected cache")
+    assert_eq(load.body.module_roots[1], "/immutable/modules", "ordered dependency roots")
+    assert_eq(load.body.no_cache, false, "cache enabled by default")
+    if action == "eval" then
+      assert_true(load.body.entry:match("^eval/eval%-%d+%.mag$") ~= nil, "unique eval entry preserved")
+    else
+      assert_eq(load.body.entry, "build.mag", "relative file entry")
+    end
+    feed("tool-gate", { kind = "lead-workflow.tool.cancel", id = "build-request" })
+    _test.calls_clear()
+    feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
+      build = { status = status }, hash = "sha256:test",
+      artifact = envelope_from_modification(read_only_modification()) })
+    assert_eq(find_call(decode_calls(), function(c)
+      return c.body.kind == "mag.execute" or c.body.kind == "mag.apply"
+    end), nil, "late " .. status .. " cannot execute canceled " .. action)
+  end
+end
+
+do
+  local workspace = require("libs.mag-workspace")
+  local ws = assert(workspace.init_workspace("manifest-test"))
+  local path = ws .. "/mag.toml"
+  local file = assert(io.open(path, "r"))
+  assert_eq(file:read("*a"), "version = 1\n", "minimal project created")
+  file:close()
+  file = assert(io.open(path, "w")); file:write("invalid authored manifest"); file:close()
+  assert(workspace.init_workspace("manifest-test"))
+  file = assert(io.open(path, "r"))
+  assert_eq(file:read("*a"), "invalid authored manifest", "authored manifest is never repaired")
+  file:close()
+  assert_eq(workspace.compile_request("cold", ws, "x.mag", {}, nil).kind,
+    "mag.load", "helper preserves explicit cold opt-out")
+  for _, options in ipairs({ true, { cache_dir = "relative" },
+      { cache_dir = "/cache", no_cache = "yes" } }) do
+    assert_true(not pcall(workspace.project_build_options, options), "invalid policy rejected")
+  end
+end
+
+for _, action in ipairs({ "compile", "apply", "eval" }) do
+  fresh()
+  lw.configure { project_build = { cache_dir = "/persistent/cache" } }
+  write_mag_file("build-success-write", "build.mag", READ_ONLY_MAG)
+  _test.calls_clear()
+  if action == "eval" then
+    invoke_tool("build-success", "mag-eval", { intent = "Build success", expr = "nil" })
+  else
+    invoke_tool("build-success", "mag", { action = action, file = "build.mag" })
+  end
+  local load = find_call(decode_calls(), function(c) return c.body.kind == "mag.build" end)
+  feed("mag", { kind = "mag.loaded", in_reply_to = load.body.id,
+    build = { status = "hit" }, hash = "sha256:test", factories = KERNEL_FACTORIES,
+    factory_contracts = factory_contracts(),
+    artifact = envelope_from_modification(read_only_modification()) })
+  local execute = find_call(decode_calls(), function(c) return c.body.kind == "mag.execute" end)
+  if action == "compile" then
+    assert_eq(execute, nil, "build preview never executes")
+    assert_true(tool_result("build-success") ~= nil, "build preview replies")
+  else
+    assert_true(execute ~= nil, "build " .. action .. " submits retained artifact")
+    assert_eq(execute.body.model_snapshot.model, "snapshot-model", "snapshot remains execution-only")
+    assert_eq(load.body.model_snapshot, nil, "live snapshot is not a build input")
+  end
+end
