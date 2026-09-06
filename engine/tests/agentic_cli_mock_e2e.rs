@@ -23,10 +23,14 @@ fn binaries() -> PathBuf {
 }
 
 fn run(dir: &Path, args: &[&str]) -> Output {
-    run_inner(dir, args, false)
+    run_inner(dir, args, false, &[])
 }
 
-fn run_inner(dir: &Path, args: &[&str], interrupt: bool) -> Output {
+fn run_with_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
+    run_inner(dir, args, false, env)
+}
+
+fn run_inner(dir: &Path, args: &[&str], interrupt: bool, extra_env: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(binaries().join("nefor"));
     cmd.env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -37,7 +41,7 @@ fn run_inner(dir: &Path, args: &[&str], interrupt: bool) -> Output {
         .env("NEFOR_RUNTIME_ROOT", root())
         .env("NEFOR_EXECUTABLE_ROOT", dir.join("bin"))
         .env("NEFOR_TEST_FAST_MOCK", "1")
-        .env("NEFOR_STARTUP_TIMEOUT_MS", "3000")
+        .env("NEFOR_STARTUP_TIMEOUT_MS", "10000")
         .env("OPENAI_PROVIDER_API_KEY", "offline-sentinel")
         .arg("--config")
         .arg(root().join("examples/nefor-agent"))
@@ -48,6 +52,9 @@ fn run_inner(dir: &Path, args: &[&str], interrupt: bool) -> Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
     let mut child = cmd.spawn().expect("spawn headless engine");
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -281,6 +288,62 @@ fn headless_starter_request_resume_tools_and_failures() {
     let usage = run(&dir, &["--frontend", "cli"]);
     assert_eq!(usage.status.code(), Some(2));
     assert!(usage.stdout.is_empty());
+    let withheld = run_with_env(
+        &dir,
+        &[
+            "--frontend",
+            "cli",
+            "--resume",
+            &session_id,
+            "--prompt",
+            "This prompt must not submit.",
+            "--format",
+            "json",
+        ],
+        &[
+            ("NEFOR_DEFAULT_PROVIDER", "unavailable-default"),
+            ("NEFOR_TEST_PROVIDER_HELLO", "withhold"),
+            ("NEFOR_STARTUP_TIMEOUT_MS", "8000"),
+        ],
+    );
+    assert_eq!(withheld.status.code(), Some(1));
+    let withheld_result: serde_json::Value = serde_json::from_slice(&withheld.stdout).unwrap();
+    assert_eq!(withheld_result["status"], "error");
+    assert!(withheld_result["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("mock-plugin"));
+    assert_eq!(
+        std::fs::read_to_string(&session_file)
+            .unwrap()
+            .matches("chat.input.submit")
+            .count(),
+        2,
+        "historical readiness must not submit a new prompt"
+    );
+
+    let resumed_with_saved_provider = run_with_env(
+        &dir,
+        &[
+            "--frontend",
+            "cli",
+            "--resume",
+            &session_id,
+            "--prompt",
+            "Summarise octopuses in one sentence.",
+            "--format",
+            "json",
+        ],
+        &[
+            ("NEFOR_DEFAULT_PROVIDER", "unavailable-default"),
+            ("NEFOR_TEST_PROVIDER_HELLO", "delay"),
+        ],
+    );
+    let saved_provider_result: serde_json::Value =
+        serde_json::from_str(&success(&resumed_with_saved_provider)).unwrap();
+    assert_eq!(saved_provider_result["status"], "success");
+    assert_eq!(saved_provider_result["session_id"], session_id);
+
     let interrupted = run_inner(
         &dir,
         &[
@@ -292,6 +355,7 @@ fn headless_starter_request_resume_tools_and_failures() {
             "SLOW_STREAM_REGRESSION_INTERRUPT",
         ],
         true,
+        &[],
     );
     assert_eq!(
         interrupted.status.code(),

@@ -27,7 +27,6 @@ end
 
 local function new_barrier(opts)
   opts = opts or {}
-  local required_plugins = set(opts.required_plugins)
   local required_tools = set(opts.required_tools)
   local tool_sources = opts.tool_sources or {}
   local live_plugins = {}
@@ -60,8 +59,19 @@ local function new_barrier(opts)
     return hints
   end
 
+  local function required_plugin_set()
+    local values = opts.required_plugins
+    if type(values) == "function" then values = values() end
+    local required = set(values)
+    if type(opts.required_provider) == "function" then
+      local provider = opts.required_provider()
+      if type(provider) == "string" and provider ~= "" then required[provider] = true end
+    end
+    return required
+  end
+
   local function snapshot()
-    local plugins = missing(required_plugins, live_plugins)
+    local plugins = missing(required_plugin_set(), live_plugins)
     local tools = missing(required_tools, advertised_tools)
     return {
       ready = #plugins == 0 and #tools == 0 and (opts.is_ready == nil or opts.is_ready()),
@@ -79,23 +89,14 @@ local function new_barrier(opts)
     if opts.on_ready then opts.on_ready() end
   end
 
-  local function observe(body, from)
-    if settled or type(body) ~= "table" then return end
+  local function observe(body, from, replayed)
+    if settled or replayed or type(body) ~= "table" then return end
     local kind = body.kind
     if type(kind) ~= "string" then return end
 
     local plugin = kind:match("^(.+)%.hello$")
-    if plugin and required_plugins[plugin] then live_plugins[plugin] = true end
-    if kind == "chat.surface.ready" and required_plugins["chat-surface"] then
-      live_plugins["chat-surface"] = true
-    end
-    -- Provider compositors intentionally translate private `<name>.hello`
-    -- into the public model acknowledgement. Its provider field remains the
-    -- stable liveness identity for both real and scripted providers.
-    if kind == "chat.model.set_ack" and type(body.provider) == "string"
-        and required_plugins[body.provider] then
-      live_plugins[body.provider] = true
-    end
+    if plugin then live_plugins[plugin] = true end
+    if kind == "chat.surface.ready" then live_plugins["chat-surface"] = true end
 
     if kind == "tool.register" and (from == nil or from == "tool-gate") then
       local replacement = {}
@@ -137,13 +138,14 @@ end
 function M.wait(opts)
   opts = opts or {}
   local barrier = new_barrier(opts)
+  local replay_window = require("core.replay_window")
 
   nefor.bus.on_event("*", function(entry)
     local payload = type(entry) == "table" and entry.payload or nil
     if type(payload) ~= "string" then return end
     local ok, env = pcall(nefor.json.decode, payload)
     if not ok or type(env) ~= "table" then return end
-    barrier.observe(env.body, env.from)
+    barrier.observe(env.body, env.from, replay_window.active())
   end)
 
   local timeout_ms = tonumber(opts.timeout_ms) or 10000

@@ -39,6 +39,44 @@ do
   assert_eq(ready, 1, "readiness fires once")
 end
 
+-- Model-selection acknowledgements, including restored/replayed ones, are not
+-- process liveness. The selected provider must announce a current hello.
+do
+  local selected = "saved-provider"
+  local ready = 0
+  local barrier = readiness._new {
+    required_plugins = { "mag" },
+    required_provider = function() return selected end,
+    required_tools = {},
+    on_ready = function() ready = ready + 1 end,
+  }
+  barrier.observe({ kind = "chat.model.set_ack", provider = selected, model = "saved-model" })
+  barrier.observe({ kind = selected .. ".hello" }, selected, true)
+  barrier.observe({ kind = "mag.hello" }, "mag")
+  assert_eq(ready, 0, "acknowledgements and replayed hellos cannot establish current readiness")
+  barrier.observe({ kind = selected .. ".hello" }, selected)
+  assert_eq(ready, 1, "current selected-provider hello establishes readiness")
+end
+
+-- Provider selection is sampled from the resumed conversation rather than
+-- frozen to the composition default.
+do
+  local selected = "default-provider"
+  local activated = false
+  local barrier = readiness._new {
+    required_plugins = {},
+    required_provider = function() return selected end,
+    required_tools = {},
+    is_ready = function() return activated end,
+  }
+  barrier.observe({ kind = "default-provider.hello" }, "default-provider")
+  selected = "saved-provider"
+  activated = true
+  assert_eq(barrier.snapshot().ready, false, "saved provider replaces default readiness requirement")
+  barrier.observe({ kind = "saved-provider.hello" }, "saved-provider")
+  assert_eq(barrier.snapshot().ready, true, "saved provider current hello releases readiness")
+end
+
 -- A partial catalog is replaced atomically. Seeing required names spread over
 -- separate advertisements must not manufacture a complete catalog.
 do

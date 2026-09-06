@@ -804,9 +804,13 @@ local function emit_stream(request_id, text, opts, cancellation)
 end
 
 nefor.on_ready_ok(function()
-  -- Synthetic `<name>.hello { model = ... }` so chat_orchestrator's
-  -- adapter learns the model name. Mirrors openai-provider's hello.
-  nefor.emit("hello", { model = "mock-model" })
+  -- Deterministic startup-readiness fixture. Production/default behavior is
+  -- unchanged; isolated process tests may delay or withhold the current hello.
+  local hello_behavior = os.getenv("NEFOR_TEST_PROVIDER_HELLO")
+  if hello_behavior == "delay" then nefor.sleep(500) end
+  if hello_behavior ~= "withhold" then
+    nefor.emit("hello", { model = "mock-model" })
+  end
   -- Announce auth state so the chat reducer marks this provider
   -- "connected" — the /model picker fans out a list_requested per
   -- connected provider, so without this the mock would be invisible

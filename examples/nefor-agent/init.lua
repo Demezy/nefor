@@ -334,8 +334,9 @@ end
 
 local composition_readiness = {
     required_plugins = {
-      cfg.default_provider, "mag", "tool-gate", "git-worktree", "basic-tools",
+      "mag", "tool-gate", "git-worktree", "basic-tools",
     },
+    required_provider = function() return agentic_loop.model_snapshot().provider end,
     required_tools = {
       "read_file", "read_image", "write_file", "edit_file", "search_text", "process.exec", "shell.script",
       "git_worktree_create", "git_worktree_open", "list_dir", "python-read",
