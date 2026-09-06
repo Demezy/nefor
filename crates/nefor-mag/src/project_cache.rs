@@ -117,10 +117,10 @@ impl Identity {
             memoized_calls: limits.memoized_calls,
         })
     }
-    fn bucket(&self) -> Option<PathBuf> {
+    fn bucket(&self, cache_dir: &Path) -> Option<PathBuf> {
         Some(
-            Path::new(&self.root)
-                .join(".mag/cache/v1")
+            cache_dir
+                .join("v1")
                 .join(&self.compiler.0)
                 .join(digest(&serde_json::to_vec(self).ok()?)),
         )
@@ -169,6 +169,46 @@ pub fn build_with_identity(
     profiler: Option<&CompileProfiler>,
     identity: impl FnOnce() -> io::Result<CompilerBuildId>,
 ) -> Result<BuildOutput, MagError> {
+    let cache_dir = request.source_dir.join(".mag/cache");
+    build_in_with_identity(
+        request,
+        config_version,
+        &cache_dir,
+        policy,
+        profiler,
+        identity,
+    )
+}
+
+/// Build using caller-owned writable storage, without changing request identity.
+/// `cache_dir` is the cache root (containing `v1`), not a project root.
+/// Unavailable storage falls back to cold compilation as with root-local builds.
+pub fn build_in(
+    request: FileCompileRequest<'_>,
+    config_version: u32,
+    cache_dir: &Path,
+    policy: CachePolicy,
+    profiler: Option<&CompileProfiler>,
+) -> Result<BuildOutput, MagError> {
+    build_in_with_identity(
+        request,
+        config_version,
+        cache_dir,
+        policy,
+        profiler,
+        CompilerBuildId::current,
+    )
+}
+
+/// Explicit executable identity seam for embedding tests and benchmarks.
+pub fn build_in_with_identity(
+    request: FileCompileRequest<'_>,
+    config_version: u32,
+    cache_dir: &Path,
+    policy: CachePolicy,
+    profiler: Option<&CompileProfiler>,
+    identity: impl FnOnce() -> io::Result<CompilerBuildId>,
+) -> Result<BuildOutput, MagError> {
     let started = Instant::now();
     let identity = if policy == CachePolicy::Use {
         identity()
@@ -177,7 +217,7 @@ pub fn build_with_identity(
     } else {
         None
     };
-    let bucket = identity.as_ref().and_then(Identity::bucket);
+    let bucket = identity.as_ref().and_then(|id| id.bucket(cache_dir));
     if let (Some(identity), Some(bucket)) = (&identity, &bucket) {
         if let Some(bytes) = lookup(bucket, identity) {
             return Ok(BuildOutput {

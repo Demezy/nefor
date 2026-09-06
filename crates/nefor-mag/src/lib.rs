@@ -10,6 +10,7 @@ pub mod observation;
 pub mod parser;
 pub mod profile;
 pub mod project_cache;
+pub mod project_config;
 mod resolver;
 pub mod schema;
 pub mod session;

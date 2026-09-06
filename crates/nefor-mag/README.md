@@ -31,6 +31,36 @@ does not alter successful artifacts or the CLI's artifact stdout.
 table of the program currently being compiled. It is deterministic per-program
 work accounting, not a hit from a future cache shared across compilations.
 
+## Explicit project builds for embedders
+
+`project_config::prepare(project_root, extra_roots)` loads exactly
+`<project_root>/mag.toml`, rejects unsupported versions and unknown fields,
+and validates the project and effective root directories. It returns
+`PreparedProject { project_root, module_roots, config_version }`. Effective
+roots are the project root, manifest roots, then extra roots, preserving order
+and duplicates; relative roots are joined to the explicit project root. There is
+no parent discovery or canonicalization. `ProjectError` exposes the input-stage
+`code`, `path`, and `message`; CLI diagnostics preserve these fields.
+
+Pass these roots and freshly materialized host inputs in a `FileCompileRequest`
+to `project_cache::build_in(request, config_version, cache_dir, policy, profiler)`
+when immutable project source needs separate writable storage. The directory
+contains the existing `v1/compiler/request/record` hierarchy. Its location is
+not an identity input: original project root, entry, ordered roots, full host
+inputs, options, manifest version, and compiler executable bytes still are.
+Embedders should supply absolute project and cache paths. The compiler identity
+is the current embedding executable, not a separate CLI binary.
+
+`build` and `build_with_identity` retain root-local `.mag/cache` storage, as does
+CLI `mag build`. `build_in_with_identity` supplies the isolated test/benchmark
+identity seam for explicit storage. `CachePolicy::Bypass` neither looks up nor
+publishes records nor hashes the executable. Successful output bytes remain
+exact; `BuildOutput.cache` is diagnostic metadata outside the artifact.
+Unavailable identity reports `Unavailable`; an unsuccessful lookup reports
+`Miss`, including when later publication fails. Storage failures never prevent
+successful cold output. This cache contains compiler successes, not runtime
+acceptance: embedders must still validate artifacts against their current runtime.
+
 ## Documentation
 
 - [The MAG Book](../../mag/book/README.md)

@@ -60,7 +60,9 @@ impl Fixture {
         .unwrap()
     }
     fn bucket(&self) -> PathBuf {
-        self.identity(b"A").bucket().unwrap()
+        self.identity(b"A")
+            .bucket(&self.root.join(".mag/cache"))
+            .unwrap()
     }
     fn records(&self) -> Vec<PathBuf> {
         fs::read_dir(self.bucket())
@@ -407,4 +409,111 @@ fn non_utf8_request_paths_bypass_without_lossy_identity() {
     status(&output, "unavailable");
     assert_eq!(output.bytes, b"1\n");
     assert!(!f.root.join(".mag").exists());
+}
+
+#[test]
+fn external_storage_preserves_identity_and_root_isolation() {
+    let a = Fixture::new();
+    let b = Fixture::new();
+    let storage = Fixture::new();
+    let cache = storage.root.join("shared-cache");
+    let run = |fixture: &Fixture, policy| {
+        build_in_with_identity(fixture.request(), 1, &cache, policy, None, || {
+            Ok(CompilerBuildId::from_executable_bytes(b"A"))
+        })
+        .unwrap()
+    };
+    let miss = run(&a, CachePolicy::Use);
+    assert!(matches!(miss.cache.status, CacheStatus::Miss));
+    assert!(matches!(
+        run(&a, CachePolicy::Use).cache.status,
+        CacheStatus::Hit
+    ));
+    assert!(matches!(
+        run(&b, CachePolicy::Use).cache.status,
+        CacheStatus::Miss
+    ));
+    assert!(!a.root.join(".mag").exists());
+    assert!(!b.root.join(".mag").exists());
+    assert_eq!(miss.bytes, run(&a, CachePolicy::Bypass).bytes);
+    // Moving the store to the legacy destination does not change semantic identity.
+    fs::create_dir(a.root.join(".mag")).unwrap();
+    fs::rename(&cache, a.root.join(".mag/cache")).unwrap();
+    assert!(matches!(a.run(b"A").cache.status, CacheStatus::Hit));
+}
+
+#[test]
+fn external_storage_failure_and_bypass_preserve_cold_output() {
+    let fixture = Fixture::new();
+    let blocked = fixture.root.join("note.txt");
+    let output = build_in_with_identity(
+        fixture.request(),
+        1,
+        &blocked,
+        CachePolicy::Use,
+        None,
+        || Ok(CompilerBuildId::from_executable_bytes(b"A")),
+    )
+    .unwrap();
+    // A failed publication preserves the existing lookup-status semantics.
+    assert!(matches!(output.cache.status, CacheStatus::Miss));
+    let bypass = build_in_with_identity(
+        fixture.request(),
+        1,
+        &blocked,
+        CachePolicy::Bypass,
+        None,
+        || panic!("bypass must not hash the executable"),
+    )
+    .unwrap();
+    assert_eq!(output.bytes, bypass.bytes);
+    assert!(matches!(bypass.cache.status, CacheStatus::Bypass));
+}
+
+#[test]
+fn shared_project_preparation_preserves_order_duplicates_and_error_precedence() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "mag.toml",
+        "version = 1\nmodule-roots = [\"extra\", \"extra\"]",
+    );
+    let prepared = crate::project_config::prepare(&fixture.root, &[fixture.root.clone()]).unwrap();
+    assert_eq!(prepared.config_version, 1);
+    assert_eq!(
+        prepared.module_roots,
+        vec![
+            fixture.root.clone(),
+            fixture.root.join("extra"),
+            fixture.root.join("extra"),
+            fixture.root.clone()
+        ]
+    );
+    fixture.write("mag.toml", "version = 2\nmodule-roots = [\"missing\"]");
+    assert_eq!(
+        crate::project_config::prepare(&fixture.root, &[])
+            .unwrap_err()
+            .code,
+        "project_version"
+    );
+    fixture.write("mag.toml", "version = 1\nmodule-roots = [\"missing\"]");
+    assert_eq!(
+        crate::project_config::prepare(&fixture.root, &[])
+            .unwrap_err()
+            .code,
+        "path_unavailable"
+    );
+    fixture.write("mag.toml", "unknown = 1");
+    assert_eq!(
+        crate::project_config::prepare(&fixture.root, &[])
+            .unwrap_err()
+            .code,
+        "project_config"
+    );
+    fs::remove_file(fixture.root.join("mag.toml")).unwrap();
+    assert_eq!(
+        crate::project_config::prepare(&fixture.root, &[])
+            .unwrap_err()
+            .code,
+        "project_read"
+    );
 }

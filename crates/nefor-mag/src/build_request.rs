@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use nefor_mag::{CompilerOptions, FileCompileRequest};
 use serde_json::Value;
 
-use crate::{load_inputs, project_config, require_directory, Diagnostic};
+use crate::{load_inputs, path_diagnostic, Diagnostic};
 
 pub struct ProjectBuildRequest {
     pub project_root: PathBuf,
@@ -38,27 +38,15 @@ pub fn prepare(
     options: CompilerOptions,
 ) -> Result<ProjectBuildRequest, Diagnostic> {
     let project_root = project.map_or_else(|| cwd.to_owned(), |path| cwd.join(path));
-    require_directory(&project_root, "project")?;
-    let config = project_config::load(&project_root)?;
-    let module_roots: Vec<_> = std::iter::once(project_root.clone())
-        .chain(
-            config
-                .module_roots
-                .iter()
-                .chain(extra_roots)
-                .map(|path| project_root.join(path)),
-        )
-        .collect();
-    for root in &module_roots {
-        require_directory(root, "module_root")?;
-    }
+    let project = nefor_mag::project_config::prepare(&project_root, extra_roots)
+        .map_err(|error| path_diagnostic(error.code, &error.path, error.message))?;
     let inputs = load_inputs(input_specs, Some(&project_root))?;
     Ok(ProjectBuildRequest {
         project_root,
         entry,
-        module_roots,
+        module_roots: project.module_roots,
         inputs,
         options,
-        config_version: config.version,
+        config_version: project.config_version,
     })
 }
