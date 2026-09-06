@@ -957,7 +957,15 @@ pub mod kernel {
 (nefor.artifact.delta
   (nefor.graph.delta-message (nefor.graph.node-delta command)
     (get command "input") text))"#;
-            let modification = compile_mag_source(&host, "unit-root-explicit", &explicit);
+            let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let artifact = nefor_mag::compile_with_inputs_and_module_roots(
+                explicit,
+                &manifest,
+                serde_json::json!({"factory_contracts": host.registry_contracts().unwrap()}),
+                &[manifest.join("../../mag/lib")],
+            )
+            .expect("compile explicit delta");
+            let modification = crate::artifact_delta(&artifact).expect("normalize delta envelope");
             let messages = modification["messages"].as_array().unwrap();
             assert_eq!(messages.len(), 1);
             assert_eq!(
@@ -970,11 +978,12 @@ pub mod kernel {
             for (name, definitions, expected) in [
                 ("text", "(let operation (nefor.graph.identity \"missing\" (type-tag nefor.contracts.Text)))", ["root validation failed", "nefor.contracts.Text"]),
                 ("product", "(let operation (nefor.graph.identity \"missing\" (type-tag (+ Unit Unit))))", ["root validation failed", "product"]),
+                ("singleton-product", "(let operation (nefor.graph.identity \"missing\" (type-tag (+ Unit))))", ["root validation failed", "product"]),
                 ("non-unit-sum", "(let operation (nefor.graph.identity \"missing\" (type-tag (| nefor.contracts.Text nefor.contracts.Task))))", ["root validation failed", "union"]),
                 ("internal", r#"
 (let command (nefor.shell.run "command" params))
 (let hidden (nefor.graph.identity "hidden" (type-tag Unit)))
-(let operation (nefor.graph.node-with-rules-and-nodes "wrapper" "ordinary"
+(let operation (nefor.graph.node-with-operations-and-nodes "wrapper" "ordinary"
   (concat (get command "actors") (get hidden "actors"))
   (get command "routes") [] []
   (concat (get command "nodes") (get hidden "nodes"))

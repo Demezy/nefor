@@ -184,9 +184,12 @@ test-integration: test-release-bundle test-tui-scenarios
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
-# Format every Rust file with rustfmt, every markdown file with prettier.
-fmt:
+# Format Rust without rewriting unrelated Markdown or resolving external tools.
+fmt-rust:
     cargo fmt --all
+
+# Format every Rust file with rustfmt, every markdown file with prettier.
+fmt: fmt-rust
     npx --yes prettier@latest --write '**/*.md'
 
 # Release build of the whole workspace into target/release/.

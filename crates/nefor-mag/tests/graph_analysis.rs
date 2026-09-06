@@ -586,3 +586,216 @@ fn nefor_artifact_emits_exact_versioned_program_and_delta_envelopes() {
     assert!(delta["delta"].get("operations").is_none());
     assert!(delta["delta"].get("rules").is_none());
 }
+
+#[test]
+fn unit_sum_root_cache_preserves_actual_activation_evidence() {
+    use nefor_mag::project_cache::{build, CachePolicy, CacheStatus};
+    let root = workspace("unit-sum-cache");
+    let roots = [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib")];
+    fs::write(
+        root.join("main.mag"),
+        r#"
+      (require "nefor.graph")
+      (require "nefor.artifact")
+      (type Arm {:text String})
+      (let start (nefor.graph.identity "start" (type-tag (| Unit Arm))))
+      (let result (nefor.graph.output-for "result" start))
+      (nefor.artifact.compile (fn [[g nefor.graph.Graph]] -> nefor.graph.Graph
+        (nefor.graph.add-edges g [(nefor.graph.edge start result)])))
+    "#,
+    )
+    .unwrap();
+    let compile = |policy| {
+        build(
+            nefor_mag::FileCompileRequest {
+                source_dir: &root,
+                entry: "main.mag",
+                inputs: contracts(json!([])),
+                module_roots: &roots,
+                options: Default::default(),
+            },
+            1,
+            policy,
+            None,
+        )
+        .unwrap()
+    };
+    let miss = compile(CachePolicy::Use);
+    let hit = compile(CachePolicy::Use);
+    let bypass = compile(CachePolicy::Bypass);
+    assert!(matches!(miss.cache.status, CacheStatus::Miss));
+    assert!(matches!(hit.cache.status, CacheStatus::Hit));
+    assert!(matches!(bypass.cache.status, CacheStatus::Bypass));
+    assert_eq!(miss.bytes, hit.bytes);
+    assert_eq!(miss.bytes, bypass.bytes);
+    let artifact: Value = serde_json::from_slice(&hit.bytes).unwrap();
+    let initial = &artifact["program"]["initial"];
+    assert_eq!(initial["messages"].as_array().unwrap().len(), 1);
+    let message = &initial["messages"][0];
+    assert_eq!(
+        message["semantic_type"],
+        json!({"kind":"primitive","name":"Unit"})
+    );
+    assert_eq!(message["content"]["value"]["value"], Value::Null);
+    assert_eq!(
+        initial["types"][message["semantic_type_id"].as_str().unwrap()],
+        message["semantic_type"]
+    );
+    assert_eq!(initial["actors"][0]["input"]["type"]["kind"], "union");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn delta_bootstrap_uses_exact_unit_and_full_input_address() {
+    let artifact = run(
+        "delta-bootstrap-address",
+        r#"
+      (require "nefor.graph")
+      (type Arm {:text String})
+      (let unit (nefor.graph.identity "unit" (type-tag Unit)))
+      (let sum (nefor.graph.identity "sum" (type-tag (| Unit Arm))))
+      (let base (nefor.graph.merge-delta (nefor.graph.node-delta unit) (nefor.graph.node-delta sum)))
+      (let actual (get unit "input"))
+      (let unrelated (nefor.graph.port "unit" (type-tag Unit) "other-wire"))
+      (let routed (nefor.graph.delta-route base (nefor.graph.port "external" (type-tag Unit) "out") actual))
+      (artifact {:base (nefor.graph.lower-delta base)
+                 :authored (nefor.graph.lower-delta (nefor.graph.delta-message base actual nil))
+                 :unrelated (nefor.graph.lower-delta (nefor.graph.delta-message base unrelated nil))
+                 :routed (nefor.graph.lower-delta routed)})
+    "#,
+        json!({}),
+    );
+    assert_eq!(artifact["base"]["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(artifact["base"]["messages"][0]["to"], "unit");
+    assert_eq!(
+        artifact["authored"]["messages"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        artifact["unrelated"]["messages"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        artifact["unrelated"]["messages"][1]["content"]["value"]["kind"],
+        "nefor.graph.Value"
+    );
+    assert!(artifact["routed"]["messages"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn indexed_output_diagnostics_include_explicit_operations_and_each_port() {
+    let artifact = run(
+        "operation-diagnostics",
+        r#"
+      (require "nefor.graph")
+      (require "nefor.mag")
+      (require "core.validated")
+      (type Arm {:text String})
+      (type Other {:number Int})
+      (let input (nefor.graph.port "worker" (type-tag Unit) "in"))
+      (let one (nefor.graph.port "worker" (type-tag (| Unit Arm Other)) "one"))
+      (let two (nefor.graph.port "worker" (type-tag (| Unit Arm Other)) "two"))
+      (let worker (nefor.graph.actor "worker" "custom" [] {}
+        (nefor.graph.store-port input)
+        [(nefor.graph.store-port one) (nefor.graph.store-port two)]))
+      (let node (nefor.graph.node "worker" "ordinary" [worker] [] [] input one))
+      (let result (nefor.graph.output "result" (type-tag Unit)))
+      (let graph (nefor.graph.graph [(nefor.graph.edge node result)]))
+      (let on (nefor.graph.port "worker" (type-tag Arm) "one"))
+      (let operation (nefor.graph.instantiate-delta-template "explicit-arm" on
+        (as (Map String nefor.mag.TypedCapture) {}) []
+        (as nefor.mag.DeltaTemplate {:types (as (Map String TypeDescriptor) {})
+          :actors [] :routes [] :messages [] :nodes [] :actor_reference_relocations []})))
+      (let validation (nefor.graph.validate-with-operations graph [operation] []))
+      (artifact (match validation
+        [(core.validated.Invalid String) invalid (get invalid "errors")]
+        [(core.validated.Valid nefor.graph.Graph) valid []]))
+    "#,
+        json!({}),
+    );
+    let errors = artifact.as_array().unwrap();
+    assert_eq!(errors.len(), 2, "{artifact}");
+    let details: Vec<Value> = errors
+        .iter()
+        .map(|error| {
+            serde_json::from_str(
+                error
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("output coverage failed: ")
+                    .unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(details[0]["output"], "worker.one");
+    assert_eq!(details[1]["output"], "worker.two");
+    assert_eq!(details[1]["available_handlers"], json!([]));
+    let handlers = details[0]["available_handlers"].as_array().unwrap();
+    assert_eq!(handlers.len(), 2);
+    let route: Value = serde_json::from_str(handlers[0].as_str().unwrap()).unwrap();
+    let operation: Value = serde_json::from_str(handlers[1].as_str().unwrap()).unwrap();
+    assert_eq!(route["kind"], "route");
+    assert_eq!(route["to"], "result.nefor.graph.Value");
+    assert_eq!(operation["kind"], "operation");
+    assert_eq!(operation["id"], "explicit-arm");
+    assert_eq!(operation["type"]["name"], "main.Arm");
+    assert!(operation.get("function").is_none());
+}
+
+#[test]
+fn input_diagnostics_keep_raw_occurrences_and_actual_message_evidence() {
+    let artifact = run(
+        "input-diagnostic-order",
+        r#"
+      (require "nefor.graph")
+      (let start (nefor.graph.source "start" (type-tag Unit) nil))
+      (let target (nefor.graph.identity "target" (type-tag (+ Unit Unit))))
+      (let first-route (as nefor.graph.StoredRoute (assoc (nefor.graph.stored-route
+        (nefor.graph.port "raw-first" (type-tag Unit) "out") (get target "input")) "id" "z")))
+      (let second (as nefor.graph.StoredRoute (assoc (nefor.graph.stored-route
+        (nefor.graph.port "raw-second" (type-tag Unit) "out") (get target "input")) "id" "a")))
+      (let third (as nefor.graph.StoredRoute (assoc second "id" "b")))
+      (let node (nefor.graph.node-with-operations-and-nodes "wrapper" "ordinary"
+        (get target "actors") [first-route second third] [] [] (get target "nodes")
+        (get target "input") (get target "output")))
+      (let graph (nefor.graph.graph [(nefor.graph.edge start node)]))
+      (let analysis (nefor.graph.analyze-graph graph))
+      (let actor (first (get target "actors")))
+      (let input (get actor "input"))
+      (let message (as nefor.graph.Message (assoc (nefor.graph.stored-message input {:kind "nefor.graph.Value" :value nil})
+                         "semantic_type" (type-evidence (type-tag Unit)))))
+      (let with-message (as nefor.graph.GraphAnalysis (assoc analysis "messages_by_input"
+        (assoc (get analysis "messages_by_input") (nefor.graph.port-address-key input) [message]))))
+      (artifact {:sources (nefor.graph.actor-input-sources with-message actor)
+        :covered (nefor.graph.actor-input-coverage-valid? with-message actor)
+        :assignment-order (map (fn [[r nefor.graph.StoredRoute]] -> String (get r "id"))
+          (or (get (get analysis "routes_by_input") (nefor.graph.port-address-key input)) (as (List nefor.graph.StoredRoute) [])))})
+    "#,
+        json!({}),
+    );
+    let sources = artifact["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 5);
+    for (index, expected) in [
+        "raw-first.out",
+        "raw-second.out",
+        "raw-second.out",
+        "start.nefor.graph.Value",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let source: Value = serde_json::from_str(sources[index].as_str().unwrap()).unwrap();
+        assert_eq!(source["from"], *expected);
+    }
+    assert_eq!(
+        sources[4],
+        "initial message type {\"kind\":\"primitive\",\"name\":\"Unit\"}"
+    );
+    assert_eq!(artifact["covered"], false);
+    let order = artifact["assignment-order"].as_array().unwrap();
+    assert_eq!(&order[..3], &[json!("a"), json!("b"), json!("z")]);
+}
