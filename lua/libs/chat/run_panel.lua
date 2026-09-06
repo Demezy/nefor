@@ -277,34 +277,57 @@ local function advance_group_activity(prev, nodes, now_ms)
   return next_activity
 end
 
--- Aggregate actor activity into logical-node progress. The kernel also calls
--- a newly constructed (but never fired) actor `idle`; `settled_at_ms`
--- distinguishes that ready state from an activation that actually completed.
--- An actor remains resident after settling, while a later busy event moves its
--- workflow node back to running. Actor teardown is tracked separately.
+-- Logical state follows the authored tree, not flattened runtime membership.
+-- Leaves reduce their directly owned actors while ignoring alternatives that
+-- never fired: running > failed > killed > any settled work > pending.
+-- Composites reduce only direct child states: running > pending > failed >
+-- killed > done. Locally owned routing actors remain inspectable members but
+-- cannot block or override the semantic child boundary.
 local LIVE_MEMBER_STATUS = { running = true, working = true }
 
-local function group_status(members, run_completed)
-  local any_killed, any_failed, any_running, any_pending =
+local function empty_leaf_status(run)
+  if run.completed_at_ms == nil then return "pending" end
+  if run.status == "failed" or run.status == "error" then return "failed" end
+  if run.status == "killed" or run.status == "reaped" then return "killed" end
+  return "done"
+end
+
+local function leaf_status(members, run)
+  local any_running, any_failed, any_killed, any_settled =
     false, false, false, false
-  local count = 0
-  for _, m in ipairs(members) do
-    count = count + 1
-    if m.node.status == "killed" then any_killed = true
-    elseif m.node.status == "failed" or m.node.status == "error" then
-      any_failed = true
-    elseif LIVE_MEMBER_STATUS[m.node.status] then
-      any_running = true
-    elseif m.node.status == "pending"
-        or (m.node.status == "idle" and m.node.started_at_ms == nil) then
-      any_pending = true
+  for _, member in ipairs(members) do
+    local node = member.node
+    if LIVE_MEMBER_STATUS[node.status] then any_running = true
+    elseif node.status == "failed" or node.status == "error" then any_failed = true
+    elseif node.status == "killed" then any_killed = true
+    elseif node.status == "done" or node.status == "skipped"
+        or (node.status == "idle"
+          and (node.started_at_ms ~= nil or node.settled_at_ms ~= nil)) then
+      any_settled = true
     end
   end
-  if count == 0 then return "pending" end
-  if any_killed then return "killed" end
-  if any_failed then return "failed" end
   if any_running then return "running" end
-  if any_pending and not run_completed then return "pending" end
+  if any_failed then return "failed" end
+  if any_killed then return "killed" end
+  if any_settled then return "done" end
+  if #members == 0 then return empty_leaf_status(run) end
+  return "pending"
+end
+
+local function composite_status(children)
+  local any_running, any_pending, any_failed, any_killed =
+    false, false, false, false
+  for _, child in ipairs(children) do
+    if child.status == "running" then any_running = true
+    elseif child.status == "pending" then any_pending = true
+    elseif child.status == "failed" then any_failed = true
+    elseif child.status == "killed" then any_killed = true
+    end
+  end
+  if any_running then return "running" end
+  if any_pending then return "pending" end
+  if any_failed then return "failed" end
+  if any_killed then return "killed" end
   return "done"
 end
 
@@ -399,7 +422,8 @@ local function build_nodes(run)
     end
     logical.members = members
     logical.children = linearize(logical.children, run)
-    logical.status = group_status(members, run.completed_at_ms ~= nil)
+    logical.status = #logical.children == 0
+      and leaf_status(members, run) or composite_status(logical.children)
     local activity = (run.group_activity or {})[logical.key] or {}
     logical.active_ms = activity.active_ms or 0
     logical.active_since_ms = activity.active_since_ms
@@ -455,7 +479,9 @@ end
 
 local function group_row_widget(group, depth, now_ms, selected)
   local style = selected and CURSOR_ROW_STYLE or NODE_STYLE[group.status] or STYLE.status_dim
-  local n = #group.members
+  -- Composite counts describe the same authored hierarchy as their state:
+  -- direct logical children, never flattened or locally owned routing actors.
+  local n = #group.children > 0 and #group.children or #group.members
   local count = n > 1 and (" (" .. n .. ")") or ""
   return tui.row { gap = 0, children = {
     text(string.rep("  ", depth) .. (GLYPHS[group.status] or "·") .. " ", style),

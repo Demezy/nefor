@@ -120,6 +120,138 @@ eq(roots[1].children[2].name, "retry", "cycle feedback remains after the forward
 eq(roots[1].children[1].children[1].name, "llm",
   "recursive hierarchy expands beyond one level")
 
+local function actor_node(status)
+  local node = { status = status }
+  if status == "working" or status == "running" then node.started_at_ms = 10 end
+  if status == "idle" then node.started_at_ms, node.settled_at_ms = 10, 20 end
+  if status == "done" or status == "failed" or status == "error"
+      or status == "killed" or status == "skipped" then
+    node.finished_at_ms = 20
+  end
+  return node
+end
+
+local function project(logical_nodes, actor_statuses, run_status)
+  local nodes = {}
+  for actor_id, status in pairs(actor_statuses or {}) do
+    nodes[actor_id] = actor_node(status)
+  end
+  return run_panel.build_nodes({
+    logical_nodes = logical_nodes,
+    nodes = nodes,
+    completed_at_ms = run_status and 30 or nil,
+    status = run_status,
+  })
+end
+
+local settled_children = project({
+  { path = { "parallel" }, members = { "parallel.split" } },
+  { path = { "parallel", "left" }, members = { "left.actor" } },
+  { path = { "parallel", "right" }, members = { "right.actor" } },
+}, {
+  ["parallel.split"] = "pending",
+  ["left.actor"] = "idle",
+  ["right.actor"] = "done",
+})[1]
+eq(settled_children.status, "done",
+  "settled logical children complete a composite despite its pending routing actor")
+eq(#settled_children.children, 2, "composite retains its direct logical child count")
+eq(#settled_children.members, 3, "routing actors remain inspectable in flattened membership")
+
+local recursive = project({
+  { path = { "root" }, members = {} },
+  { path = { "root", "child" }, members = {} },
+  { path = { "root", "child", "leaf" }, members = { "leaf.actor" } },
+}, { ["leaf.actor"] = "working" })[1]
+eq(recursive.status, "running", "working grandchild makes the root running")
+eq(recursive.children[1].status, "running", "working grandchild makes its parent running")
+eq(recursive.children[1].children[1].status, "running", "working leaf is running")
+
+recursive = project({
+  { path = { "root" }, members = {} },
+  { path = { "root", "child" }, members = {} },
+  { path = { "root", "child", "leaf" }, members = { "leaf.actor" } },
+}, { ["leaf.actor"] = "idle" })[1]
+eq(recursive.status, "done", "settled grandchild completes every ancestor")
+eq(recursive.children[1].status, "done", "settled grandchild completes its parent")
+eq(recursive.children[1].children[1].status, "done", "settled leaf is done")
+
+local composite_cases = {
+  { "done+pending", "done", "pending", "pending" },
+  { "failed+working", "failed", "working", "running" },
+  { "killed+working", "killed", "working", "running" },
+  { "done+done", "done", "done", "done" },
+  { "done+killed", "done", "killed", "killed" },
+  { "done+failed", "done", "failed", "failed" },
+  { "failed+killed", "failed", "killed", "failed" },
+}
+for _, case in ipairs(composite_cases) do
+  local root = project({
+    { path = { "root" }, members = {} },
+    { path = { "root", "one" }, members = { "one" } },
+    { path = { "root", "two" }, members = { "two" } },
+  }, { one = case[2], two = case[3] })[1]
+  eq(root.status, case[4], "composite state " .. case[1])
+end
+
+for _, case in ipairs({
+  { "idle", "done" }, { "failed", "failed" }, { "killed", "killed" },
+}) do
+  local leaf = project({
+    { path = { "leaf" }, members = { "executed", "inactive-alternative" } },
+  }, { executed = case[1], ["inactive-alternative"] = "pending" })[1]
+  eq(leaf.status, case[2],
+    "never-started alternative does not override executed leaf outcome " .. case[1])
+end
+
+local looping = { runs = {} }
+looping = run_panel.mag_run_started(looping, "loop", "loop", "lead", 0)
+looping = run_panel.nodes_declared(looping, "loop", {
+  { path = { "root" }, members = {} },
+  { path = { "root", "leaf" }, members = { "loop.actor" } },
+})
+looping = run_panel.actor_spawned(looping, "loop", "loop.actor", "fixture", 1)
+looping = run_panel.actor_busy(looping, "loop", "loop.actor", 10)
+looping = run_panel.actor_idle(looping, "loop", "loop.actor", 20)
+eq(run_panel.build_nodes(looping.runs.loop)[1].status, "done",
+  "idle loop actor settles leaf and ancestors")
+looping = run_panel.actor_busy(looping, "loop", "loop.actor", 30)
+eq(run_panel.build_nodes(looping.runs.loop)[1].status, "running",
+  "later busy event reopens leaf and ancestors")
+looping = run_panel.actor_idle(looping, "loop", "loop.actor", 40)
+eq(run_panel.build_nodes(looping.runs.loop)[1].status, "done",
+  "later idle event settles leaf and ancestors again")
+
+local function terminal_fixture(id)
+  local fixture = { runs = {} }
+  fixture = run_panel.mag_run_started(fixture, id, id, "lead", 0)
+  fixture = run_panel.nodes_declared(fixture, id, {
+    { path = { "leaf" }, members = { id .. ".actor" } },
+  })
+  return run_panel.actor_spawned(fixture, id, id .. ".actor", "fixture", 1)
+end
+
+local successful = terminal_fixture("successful")
+successful = run_panel.mag_run_complete(successful, "successful", "success", 10)
+eq(run_panel.build_nodes(successful.runs.successful)[1].status, "done",
+  "successful run completes an untouched leaf")
+successful = run_panel.actor_killed(successful, "successful", "successful.actor", 11,
+  "run_complete")
+eq(run_panel.build_nodes(successful.runs.successful)[1].status, "done",
+  "successful teardown cannot repaint a completed leaf")
+
+local failed_run = terminal_fixture("failed-run")
+failed_run = run_panel.mag_run_failed(failed_run, "failed-run", "failed", 10)
+eq(run_panel.build_nodes(failed_run.runs["failed-run"])[1].status, "failed",
+  "failed run fails an untouched leaf")
+
+for _, reason in ipairs({ "killed", "reaped" }) do
+  local killed_run = terminal_fixture(reason)
+  killed_run = run_panel.actor_killed(killed_run, reason, reason .. ".actor", 10, reason)
+  eq(run_panel.build_nodes(killed_run.runs[reason])[1].status, "killed",
+    reason .. " teardown keeps the leaf killed")
+end
+
 local stage_key = run_panel.path_key({ "camera-stage" })
 local agent_key = run_panel.path_key({ "camera-stage", "agent" })
 hierarchy.sidebar_folds.nested = { [stage_key] = true, [agent_key] = true }

@@ -9210,6 +9210,116 @@ fn authored_logical_nodes_render_as_a_recursive_sidebar_tree() {
 }
 
 #[test]
+fn recursive_sidebar_state_and_counts_ignore_hidden_routing_actors() {
+    let mut engine = Engine::new(120, 30).expect("engine");
+    load_chat_scenario(&mut engine);
+    let _ = render_str(&mut engine);
+
+    dispatch_event(
+        &mut engine,
+        json!({ "kind": "mag.run_started", "run_id": "recursive-state", "run_name": "sidebar-state" }),
+    );
+    dispatch_event(
+        &mut engine,
+        json!({
+            "kind": "mag.nodes_declared",
+            "run_id": "recursive-state",
+            "nodes": [
+                { "path": ["implement"], "members": [
+                    "implement.choose.input", "implement.error", "implement.choose.output"
+                ] },
+                { "path": ["implement", "entry"], "members": ["implement.entry"] },
+                { "path": ["implement", "llm"], "members": ["implement.llm"] },
+                { "path": ["implement", "run-tool"], "members": ["implement.run-tool"] },
+                { "path": ["implement", "tool-result"], "members": ["implement.tool-result"] }
+            ]
+        }),
+    );
+    for id in [
+        "implement.choose.input",
+        "implement.error",
+        "implement.choose.output",
+        "implement.entry",
+        "implement.llm",
+        "implement.run-tool",
+        "implement.tool-result",
+    ] {
+        dispatch_event(
+            &mut engine,
+            json!({ "kind": "mag.actor_spawned", "run_id": "recursive-state", "id": id,
+                "factory": "fixture", "spec": { "routes": {} } }),
+        );
+        dispatch_event(
+            &mut engine,
+            json!({ "kind": "mag.actor_ready", "run_id": "recursive-state", "id": id }),
+        );
+    }
+    for id in [
+        "implement.entry",
+        "implement.llm",
+        "implement.run-tool",
+        "implement.tool-result",
+    ] {
+        dispatch_event(
+            &mut engine,
+            json!({ "kind": "mag.actor_busy", "run_id": "recursive-state", "id": id }),
+        );
+        dispatch_event(
+            &mut engine,
+            json!({ "kind": "mag.actor_idle", "run_id": "recursive-state", "id": id }),
+        );
+    }
+
+    let settled = render_str(&mut engine);
+    assert!(
+        settled
+            .lines()
+            .any(|line| line.contains('✓') && line.contains("implement (4)")),
+        "settled logical children must complete their parent and determine its count:\n{settled}"
+    );
+    assert!(
+        !settled.contains("implement (7)"),
+        "three attached routing actors must not inflate the logical child count:\n{settled}"
+    );
+    assert!(
+        settled.contains("sidebar-state (1/1)"),
+        "the run header must count the recursively completed root:\n{settled}"
+    );
+
+    engine.handle_key(key("tab")).expect("focus sidebar");
+    let _ = render_str(&mut engine);
+    engine.handle_key(key("down")).expect("select implement");
+    engine.handle_key(key("enter")).expect("expand implement");
+    let expanded = render_str(&mut engine);
+    for child in ["entry", "llm", "run-tool", "tool-result"] {
+        assert!(
+            expanded
+                .lines()
+                .any(|line| line.contains('✓') && line.contains(child)),
+            "settled logical child {child} must render done:\n{expanded}"
+        );
+    }
+
+    dispatch_event(
+        &mut engine,
+        json!({ "kind": "mag.actor_busy", "run_id": "recursive-state", "id": "implement.llm" }),
+    );
+    let reopened = render_str(&mut engine);
+    assert!(
+        reopened
+            .lines()
+            .any(|line| line.contains('●') && line.contains("implement (4)")),
+        "working descendant must reopen its parent:\n{reopened}"
+    );
+    assert!(
+        reopened
+            .lines()
+            .any(|line| line.contains('●') && line.contains("llm")),
+        "reopened descendant must render running:\n{reopened}"
+    );
+}
+
+#[test]
 fn shift_tab_also_cycles_focus() {
     let mut engine = Engine::new(120, 30).expect("engine");
     load_chat_scenario(&mut engine);
