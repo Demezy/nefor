@@ -48,3 +48,63 @@ carry a kernel copy. Resolution order, highest precedence first:
 - [docs/ir.md](docs/ir.md) — program/delta envelopes, the fold, firing, operations, application semantics
 - [docs/lowering.md](docs/lowering.md) — MAG graph libraries → modification: edges into routes, namespacing, shell defaults
 - [docs/patterns.md](docs/patterns.md) — canonical shipped shapes for MAG programs (dependencies, joins, cycles, failure repair, fanout/timeouts)
+
+## Explicit project builds
+
+`mag.load` remains the cold, manifest-free compile request. `mag.build` is an
+additive opt-in request; neither request starts actors. Both reply with
+`mag.loaded` or `mag.error`, correlated by `in_reply_to` to the request `id`.
+
+```json
+{
+  "kind": "mag.build",
+  "id": "compile-1",
+  "project_root": "/installed/config",
+  "entry": "agentic-loop/lead-turn.mag",
+  "module_roots": ["/installed/runtime/mag/lib", "mag/lib"],
+  "cache_dir": "/writable/data/mag/cache",
+  "no_cache": false
+}
+```
+
+Project and cache roots must be explicit absolute paths. Entry must be nonempty
+and relative, without `..` components. Extra module roots are optional ordered
+nonempty paths; relative roots are anchored to the project. Shared compiler
+preparation reads exactly `project_root/mag.toml` and constructs roots in order:
+project, manifest roots, request roots (duplicates retained). Missing or invalid
+manifests fail normally. No parent discovery or source staging occurs.
+
+`mag.loaded` retains its normal `artifact`, `hash`, `factories`, and
+`factory_contracts` fields. Build replies additionally contain:
+
+```json
+{
+  "build": {
+    "status": "hit",
+    "lookup_duration_ns": 123,
+    "publication_duration_ns": 0
+  }
+}
+```
+
+Status is `hit`, `miss`, `bypass`, or `unavailable`. `no_cache` defaults false;
+true bypasses both lookup and publication. Unavailable identity disables caching;
+failed storage lookup/publication instead reports `miss` and preserves successful
+cold compilation. Diagnostics are outside the artifact and never affect its hash.
+Errors retain the existing error reply shape, without build diagnostics.
+
+Every build fetches fresh factory contracts. Their object keys are sorted at the
+Lua-to-JSON boundary because Lua table iteration order is process-local; contract
+array ordering and all values remain intact. The cache identity includes this
+complete host input, original project root, relative entry, effective ordered
+roots, manifest version, compiler options, and bytes of the running **mag-plugin**
+executable. Live execution model snapshots are not compile inputs. Cache placement
+is not identity; storage can persist independently of read-only installed source.
+
+Hits decode the exact successful compiler bytes with a depth-safe JSON Value
+parser and then use the same envelope, hash, kernel, and provider-schema preflight
+as cold loads and misses. A compiler success can be cached even when Nefor rejects
+its envelope. A hit is never proof of current kernel acceptance. Corrupt records
+fall back to compilation. No execution state, model snapshot, source environment,
+or failure is retained in this cache. Execute/apply and retained artifact lifetime
+remain unchanged; deleting cache/source after loading does not dispose an artifact.

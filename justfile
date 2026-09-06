@@ -435,3 +435,24 @@ install-example mode="safe":
 # Remove the entire target/ directory. Next build is a full cold compile.
 clean:
     cargo clean
+
+# Focused MAG plugin target through prepared, signed binaries and the watchdog.
+test-mag-plugin target="mag_plugin_default" *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo="$PWD"
+    mkdir -p tmp/prepared-tests
+    artifacts="$(mktemp -d "$repo/tmp/prepared-tests/mag-plugin.XXXXXX")"
+    cargo build -p nefor-test-watchdog --message-format=json-render-diagnostics > "$artifacts/helpers.jsonl"
+    cargo test -p mag-plugin --features full-tests --test {{target}} --no-run --message-format=json-render-diagnostics > "$artifacts/tests.jsonl"
+    cat "$artifacts/helpers.jsonl" "$artifacts/tests.jsonl" | jq -r 'select(.executable != null) | .executable' | sort -u > "$artifacts/executables.txt"
+    chmod a-w "$artifacts/executables.txt"
+    if [[ "$(uname -s)" == Darwin ]]; then
+        while IFS= read -r path; do codesign --force --sign - "$path"; codesign --verify --strict "$path"; done < "$artifacts/executables.txt"
+    fi
+    watchdog="$(jq -r 'select(.target.name == "nefor-test-watchdog" and .executable != null) | .executable' "$artifacts/helpers.jsonl")"
+    test_bin="$(jq -r 'select(.profile.test == true and .executable != null) | .executable' "$artifacts/tests.jsonl")"
+    "$watchdog" --phase mag-plugin --working-directory "$repo/plugins/mag" --artifact-root "$artifacts" -- "$test_bin" {{args}}
+    if [[ "$(uname -s)" == Darwin ]]; then
+        while IFS= read -r path; do codesign --verify --strict "$path"; done < "$artifacts/executables.txt"
+    fi

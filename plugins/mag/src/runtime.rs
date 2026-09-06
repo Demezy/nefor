@@ -58,6 +58,7 @@ const PONG_KIND: &str = "mag.pong";
 
 /// Compile a MAG source file and return its immutable versioned envelope.
 const LOAD_KIND: &str = "mag.load";
+const BUILD_KIND: &str = "mag.build";
 const LOADED_KIND: &str = "mag.loaded";
 /// Reply kind for compilation or control-plane validation failures.
 /// is data on the bus, not a plugin crash (ir.md: "the run continues").
@@ -467,6 +468,7 @@ async fn handle_event(
     match kind {
         PING_KIND => send_event(out_tx, pong_body(in_reply_to)).await,
         LOAD_KIND => handle_load(out_tx, body, in_reply_to, host).await,
+        BUILD_KIND => handle_build(out_tx, body, in_reply_to, host).await,
         EXECUTE_KIND => {
             handle_execute(
                 out_tx,
@@ -534,38 +536,130 @@ async fn handle_load(
     match nefor_mag::compile_file_with_inputs_and_module_roots(
         Path::new(source_dir), entry, inputs, &module_roots,
     ) {
-        Ok(artifact) => {
-            let hash = match immutable_artifact_hash(&artifact) {
-                Ok(hash) => hash,
-                Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
-            };
-            let decoded = match artifact.get("kind").and_then(Value::as_str) {
-                Some("program") => match artifact_program(&artifact) {
-                    Ok(decoded) => {
-                        let preflight = host.preflight_program(&decoded.initial, &decoded.operations)?;
-                        if !preflight.ok {
-                            return send_event(out_tx, error_body(in_reply_to,
-                                preflight.error.as_deref().unwrap_or("artifact preflight failed"))).await;
-                        }
-                        decoded
-                    }
-                    Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
-                },
-                Some("delta") => match artifact_delta(&artifact) {
-                    Ok(delta) => DecodedProgram { initial: delta, operations: Vec::new() },
-                    Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
-                },
-                _ => return send_event(out_tx, error_body(in_reply_to,
-                    "mag.load requires a nefor.mag program or delta envelope")).await,
-            };
-            if let Err(error) = preflight_provider_schemas(&decoded) {
-                return send_event(out_tx, error_body(in_reply_to, &error)).await;
-            }
-            let factories = host.registry_names().unwrap_or_default();
-            let contracts = host.registry_contracts().unwrap_or_else(|_| Value::Array(Vec::new()));
-            send_event(out_tx, loaded_body(in_reply_to, &hash, artifact, &factories, contracts)).await
-        }
+        Ok(artifact) => finish_compile(out_tx, in_reply_to, host, artifact, None).await,
         Err(e) => send_event(out_tx, mag_error_body(in_reply_to, &e)).await,
+    }
+}
+
+async fn finish_compile(
+    out_tx: &mpsc::Sender<PluginOutgoing>,
+    in_reply_to: Option<&str>,
+    host: &LuaHost,
+    artifact: Value,
+    build: Option<Value>,
+) -> Result<(), MagError> {
+    let hash = match immutable_artifact_hash(&artifact) {
+        Ok(hash) => hash,
+        Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
+    };
+    let decoded = match artifact.get("kind").and_then(Value::as_str) {
+        Some("program") => match artifact_program(&artifact) {
+            Ok(decoded) => {
+                let preflight = host.preflight_program(&decoded.initial, &decoded.operations)?;
+                if !preflight.ok {
+                    return send_event(out_tx, error_body(in_reply_to,
+                        preflight.error.as_deref().unwrap_or("artifact preflight failed"))).await;
+                }
+                decoded
+            }
+            Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
+        },
+        Some("delta") => match artifact_delta(&artifact) {
+            Ok(delta) => DecodedProgram { initial: delta, operations: Vec::new() },
+            Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
+        },
+        _ => return send_event(out_tx, error_body(in_reply_to,
+            "MAG requires a nefor.mag program or delta envelope")).await,
+    };
+    if let Err(error) = preflight_provider_schemas(&decoded) {
+        return send_event(out_tx, error_body(in_reply_to, &error)).await;
+    }
+    let factories = host.registry_names().unwrap_or_default();
+    let contracts = host.registry_contracts().unwrap_or_else(|_| Value::Array(Vec::new()));
+    let mut reply = loaded_body(in_reply_to, &hash, artifact, &factories, contracts);
+    if let Some(build) = build {
+        reply.insert("build".into(), build);
+    }
+    send_event(out_tx, reply).await
+}
+
+#[derive(serde::Deserialize)]
+struct BuildRequest {
+    project_root: PathBuf,
+    entry: String,
+    #[serde(default)]
+    module_roots: Vec<PathBuf>,
+    cache_dir: PathBuf,
+    #[serde(default)]
+    no_cache: bool,
+}
+
+fn parse_build_request(body: &Map<String, Value>) -> Result<BuildRequest, String> {
+    let request: BuildRequest = serde_json::from_value(Value::Object(body.clone()))
+        .map_err(|error| format!("mag.build invalid request: {error}"))?;
+    if !request.project_root.is_absolute() || !request.cache_dir.is_absolute() {
+        return Err("mag.build project_root and cache_dir must be absolute paths".into());
+    }
+    if request.entry.is_empty() || Path::new(&request.entry).is_absolute()
+        || Path::new(&request.entry).components().any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("mag.build entry must be a non-empty project-relative path without '..'".into());
+    }
+    if request.module_roots.iter().any(|root| root.as_os_str().is_empty()) {
+        return Err("mag.build module_roots entries must be non-empty paths".into());
+    }
+    Ok(request)
+}
+
+// Do not reintroduce serde_json's default 128-level parser limit: the
+// compiler's successful artifacts can exceed it (including nested type evidence).
+fn decode_build_artifact(bytes: &[u8]) -> Result<Value, serde_json::Error> {
+    use serde::Deserialize;
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    decoder.disable_recursion_limit();
+    let artifact = Value::deserialize(&mut decoder)?;
+    decoder.end()?;
+    Ok(artifact)
+}
+
+async fn handle_build(
+    out_tx: &mpsc::Sender<PluginOutgoing>,
+    body: &Map<String, Value>,
+    in_reply_to: Option<&str>,
+    host: &LuaHost,
+) -> Result<(), MagError> {
+    let request = match parse_build_request(body) {
+        Ok(request) => request,
+        Err(error) => return send_event(out_tx, error_body(in_reply_to, &error)).await,
+    };
+    let project = match nefor_mag::project_config::prepare(&request.project_root, &request.module_roots) {
+        Ok(project) => project,
+        Err(error) => return send_event(out_tx, error_body(in_reply_to,
+            &format!("{}: {}: {}", error.code, error.path.display(), error.message))).await,
+    };
+    let contracts = host.registry_contracts().unwrap_or_else(|_| Value::Array(Vec::new()));
+    let policy = if request.no_cache {
+        nefor_mag::project_cache::CachePolicy::Bypass
+    } else {
+        nefor_mag::project_cache::CachePolicy::Use
+    };
+    let output = nefor_mag::project_cache::build_in(nefor_mag::FileCompileRequest {
+        source_dir: &project.project_root,
+        entry: &request.entry,
+        module_roots: &project.module_roots,
+        inputs: serde_json::json!({ "factory_contracts": contracts }),
+        options: nefor_mag::CompilerOptions::default(),
+    }, project.config_version, &request.cache_dir, policy, None);
+    match output {
+        Ok(output) => {
+            let build = serde_json::json!(output.cache);
+            match decode_build_artifact(&output.bytes) {
+                Ok(artifact) => finish_compile(out_tx, in_reply_to, host, artifact, Some(build)).await,
+                Err(error) => send_event(out_tx, error_body(in_reply_to,
+                    &format!("mag.build artifact decoding failed: {error}"))).await,
+            }
+        }
+        Err(error) => send_event(out_tx, mag_error_body(in_reply_to, &error)).await,
     }
 }
 

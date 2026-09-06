@@ -222,7 +222,11 @@ impl LuaHost {
         match f {
             Some(f) => {
                 let value: Value = f.call(self.lua.array_metatable())?;
-                Ok(self.lua.from_value(value)?)
+                let mut contracts: JsonValue = self.lua.from_value(value)?;
+                // Lua table iteration order varies across VMs. Materialize the
+                // same host input bytes for the same registry in every process.
+                contracts.sort_all_objects();
+                Ok(contracts)
             }
             None => Ok(JsonValue::Array(Vec::new())),
         }

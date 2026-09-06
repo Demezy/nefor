@@ -1280,3 +1280,67 @@ async fn worktree_create_persists_opens_and_rejects_implicit_reuse() {
     let _ = timeout(Duration::from_secs(10), child.wait()).await;
     std::fs::remove_dir_all(root).ok();
 }
+
+#[tokio::test]
+async fn project_build_process_restart_hit_and_cold_load_equivalence() {
+    let project = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("mag.toml"), "version = 1\n").unwrap();
+    std::fs::write(project.path().join("main.mag"),
+        "(artifact {:format \"nefor.mag\" :version 1 :kind \"delta\" :delta {:types {} :actors [] :messages [] :nodes [] :kills []}})").unwrap();
+    let mut previous = None;
+    for status in ["miss", "hit"] {
+        let data = tempfile::tempdir().unwrap();
+        let mut child = spawn_mag(data.path()).await;
+        let mut stdin = child.stdin.take().unwrap();
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        assert!(matches!(
+            read_outgoing(&mut reader, "ready").await.body,
+            Body::System(SystemBody::Ready { .. })
+        ));
+        write_env(
+            &mut stdin,
+            Envelope::system(
+                PluginName::engine(),
+                Timestamp::now(),
+                SystemBody::ReadyOk {
+                    engine_version: "test".into(),
+                },
+            ),
+        )
+        .await;
+        for kind in ["mag.build", "mag.load"] {
+            send_event(
+                &mut stdin,
+                json!({"kind":kind, "id":"project-build",
+                "project_root":project.path(), "source_dir":project.path(),
+                "entry":"main.mag", "cache_dir":cache.path()})
+                .as_object()
+                .unwrap()
+                .clone(),
+            )
+            .await;
+            let reply = loop {
+                let outgoing = read_outgoing(&mut reader, "compiled").await;
+                if let Some(body) = event_body(&outgoing) {
+                    if body.get("in_reply_to").and_then(Value::as_str) == Some("project-build") {
+                        break body.clone();
+                    }
+                }
+            };
+            assert_eq!(reply["kind"], "mag.loaded", "{reply:?}");
+            if kind == "mag.build" {
+                assert_eq!(reply["build"]["status"], status);
+            } else {
+                assert!(!reply.contains_key("build"));
+            }
+            let result = (reply["artifact"].clone(), reply["hash"].clone());
+            if let Some(previous) = &previous {
+                assert_eq!(&result, previous);
+            }
+            previous = Some(result);
+        }
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+}

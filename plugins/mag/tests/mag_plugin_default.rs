@@ -1001,3 +1001,152 @@ mod tests {
         assert_eq!(b.get("message").and_then(Value::as_str), Some("boom"));
     }
 }
+
+#[cfg(test)]
+mod project_build_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn host() -> LuaHost {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        LuaHost::load_kernel(
+            &root.join("lua/mag-kernel/init.lua"),
+            Some(&root.join("../../lua")),
+        )
+        .unwrap()
+    }
+
+    async fn build(host: &LuaHost, request: Value) -> Map<String, Value> {
+        let (tx, mut rx) = mpsc::channel(4);
+        handle_build(&tx, request.as_object().unwrap(), Some("build-id"), host)
+            .await
+            .unwrap();
+        let body = rx.recv().await.unwrap().body;
+        let Body::Event(body) = body else {
+            panic!("body")
+        };
+        body
+    }
+
+    #[test]
+    fn project_build_decodes_deep_exact_values_and_rejects_trailing_data() {
+        let bytes = format!("{}0{}\n", "[".repeat(300), "]".repeat(300));
+        assert!(serde_json::from_str::<Value>(&bytes).is_err());
+        let value = decode_build_artifact(bytes.as_bytes()).unwrap();
+        assert_eq!(serde_json::to_string(&value).unwrap(), bytes.trim());
+        assert!(decode_build_artifact(b"{} {}").is_err());
+    }
+
+    #[tokio::test]
+    async fn project_build_cache_equivalence_corruption_bypass_and_preflight() {
+        let project = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("mag.toml"), "version = 1\n").unwrap();
+        // An empty delta is accepted without starting any actors.
+        let artifact = json!({"format":"nefor.mag", "version":1, "kind":"delta",
+            "delta":{"types":{},"actors":[],"messages":[],"nodes":[],"kills":[]}});
+        // Use read-json so the artifact and deeply nested extension are ordinary observed data.
+        std::fs::write(
+            project.path().join("main.mag"),
+            "(artifact (read-json \"artifact.json\"))",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("artifact.json"),
+            serde_json::to_vec(&artifact).unwrap(),
+        )
+        .unwrap();
+        let request =
+            json!({"project_root":project.path(), "entry":"main.mag", "cache_dir":cache.path()});
+        let host = host();
+        let miss = build(&host, request.clone()).await;
+        assert_eq!(miss["kind"], "mag.loaded", "{miss:?}");
+        assert_eq!(miss["build"]["status"], "miss");
+        let hit = build(&host, request.clone()).await;
+        assert_eq!(hit["build"]["status"], "hit");
+        assert_eq!(miss["artifact"], hit["artifact"]);
+        assert_eq!(miss["hash"], hit["hash"]);
+        let mut bypass = request.clone();
+        bypass["no_cache"] = json!(true);
+        let bypass = build(&host, bypass).await;
+        assert_eq!(bypass["build"]["status"], "bypass");
+        assert_eq!(bypass["hash"], hit["hash"]);
+        fn corrupt(path: &Path) {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    corrupt(&path);
+                } else {
+                    std::fs::write(path, b"{").unwrap();
+                }
+            }
+        }
+        corrupt(cache.path());
+        assert_eq!(
+            build(&host, request.clone()).await["build"]["status"],
+            "miss"
+        );
+        std::fs::write(project.path().join("artifact.json"), b"{}").unwrap();
+        for _ in 0..2 {
+            let rejected = build(&host, request.clone()).await;
+            assert_eq!(rejected["kind"], "mag.error");
+        }
+        let mut invalid = request;
+        invalid["cache_dir"] = json!("relative");
+        assert!(parse_build_request(invalid.as_object().unwrap()).is_err());
+    }
+}
+
+#[tokio::test]
+async fn project_build_deep_program_hit_rechecks_current_kernel() {
+    let project = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("mag.toml"), "version = 1\n").unwrap();
+    let bindings = (1..=140)
+        .map(|i| format!("(let n{i} {{:a n{}}})\n", i - 1))
+        .collect::<String>();
+    let nested = "n140";
+    let source = format!("(artifact {{:format \"nefor.mag\" :version 1 :kind \"program\" :program {{:initial {{:types {{:deep {nested}}} :actors [] :messages [] :nodes [] :kills [] :result {{}}}} :operations []}}}})");
+    std::fs::write(
+        project.path().join("main.mag"),
+        format!("(let n0 0)\n{bindings}{source}"),
+    )
+    .unwrap();
+    let kernel = project.path().join("kernel.lua");
+    std::fs::write(
+        &kernel,
+        "return {preflight_program = function() return {ok=true} end}",
+    )
+    .unwrap();
+    let accepted = LuaHost::load_kernel(&kernel, None).unwrap();
+    let request = serde_json::json!({"project_root":project.path(), "entry":"main.mag", "cache_dir":cache.path()});
+    let mut hash = None;
+    for status in ["miss", "hit"] {
+        let (tx, mut rx) = mpsc::channel(4);
+        handle_build(&tx, request.as_object().unwrap(), Some("deep"), &accepted)
+            .await
+            .unwrap();
+        let Body::Event(reply) = rx.recv().await.unwrap().body else {
+            panic!("event")
+        };
+        assert_eq!(reply["kind"], "mag.loaded", "{reply:?}");
+        assert_eq!(reply["build"]["status"], status);
+        if let Some(hash) = &hash {
+            assert_eq!(&reply["hash"], hash);
+        }
+        hash = Some(reply["hash"].clone());
+        let bytes = serde_json::to_vec(&reply["artifact"]).unwrap();
+        assert!(serde_json::from_slice::<Value>(&bytes).is_err());
+    }
+    std::fs::write(&kernel, "return {preflight_program = function() return {ok=false,error='current kernel rejection'} end}").unwrap();
+    let rejected = LuaHost::load_kernel(&kernel, None).unwrap();
+    let (tx, mut rx) = mpsc::channel(4);
+    handle_build(&tx, request.as_object().unwrap(), Some("deep"), &rejected)
+        .await
+        .unwrap();
+    let Body::Event(reply) = rx.recv().await.unwrap().body else {
+        panic!("event")
+    };
+    assert_eq!(reply["kind"], "mag.error");
+    assert_eq!(reply["message"], "current kernel rejection");
+}
