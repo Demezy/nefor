@@ -1,5 +1,6 @@
--- Strict declarative presentation contract for chat tools. The catalog owns
--- every compact/expanded choice; the renderer only interprets this data.
+-- Strict declarative presentation contract for chat tools. Live catalogs own
+-- specialized compact/expanded choices; uncataloged semantic tools use the
+-- generic contract below.
 local M = {}
 
 function M.fields(values)
@@ -167,6 +168,22 @@ local function validate_policy(policy, where)
   return validate_fields(policy.result.fields, where .. ".result.fields")
 end
 
+function M.generic(name)
+  if not nonempty(name) then error("tool_display.generic: name must be non-empty", 2) end
+  return {
+    compact = { label = name },
+    expanded = {
+      label = name,
+      fields = M.fields({ {
+        label = "arguments",
+        select = { source = "args", path = "$" },
+        kind = "structured",
+      } }),
+    },
+    result = { kind = "content", fields = M.fields({}) },
+  }
+end
+
 function M.validate(contract)
   if type(contract) ~= "table" then return nil, "display must be a table" end
   for key, _ in pairs(contract) do
@@ -217,10 +234,29 @@ local function selected(selector, args, result)
   return value
 end
 
+local function fallback_structured_text(value, seen)
+  local kind = type(value)
+  if kind == "string" then return string.format("%q", value) end
+  if kind ~= "table" then return tostring(value) end
+  seen = seen or {}
+  if seen[value] then return '"[cyclic]"' end
+  seen[value] = true
+  local keys = {}
+  for key, _ in pairs(value) do keys[#keys + 1] = key end
+  table.sort(keys, function(left, right) return tostring(left) < tostring(right) end)
+  local parts = {}
+  for _, key in ipairs(keys) do
+    parts[#parts + 1] = string.format("%q:%s", tostring(key),
+      fallback_structured_text(value[key], seen))
+  end
+  seen[value] = nil
+  return "{" .. table.concat(parts, ",") .. "}"
+end
+
 local function json_text(value)
   if type(value) ~= "table" then return tostring(value) end
   local ok, encoded = pcall(nefor.json.encode, value)
-  return ok and encoded or tostring(value)
+  return ok and encoded or fallback_structured_text(value)
 end
 
 local function utf8_prefix(value, cap)
@@ -286,7 +322,7 @@ end
 function M.project(contract, args, result, is_error)
   local ok, err = M.validate(contract)
   if not ok then return nil, err end
-  args = type(args) == "table" and args or {}
+  if args == nil then args = {} end
   local policy = active_policy(contract, args, result)
   local compact, expanded = policy.compact, policy.expanded
   local projection = {

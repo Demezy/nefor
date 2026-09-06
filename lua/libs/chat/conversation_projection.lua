@@ -130,10 +130,13 @@ local function snapshot_actions(state, projection, actions)
   local function complete_exchange(exchange)
     if type(exchange) ~= "table" then return end
     if exchange.status ~= "result" and exchange.status ~= "error" then return end
+    local is_error = exchange.status == "error"
+    local output = exchange.result
+    if is_error then output = exchange.error end
     action(actions, "tool_completed", {
       exchange_id = exchange.id,
-      output = exchange.result or exchange.error,
-      error = exchange.status == "error",
+      output = output,
+      error = is_error,
       completion_delivery = exchange.completion_delivery,
     })
   end
@@ -300,10 +303,13 @@ function M.reduce(previous, body)
   elseif kind == "tool_result_recorded" or kind == "tool_error_recorded" then
     local exchange = change.exchange or {}
     state.exchanges[exchange.id] = exchange.status
+    local is_error = kind == "tool_error_recorded"
+    local output = exchange.result
+    if is_error then output = exchange.error end
     action(actions, "tool_completed", {
       exchange_id = exchange.id,
-      output = exchange.result or exchange.error,
-      error = kind == "tool_error_recorded",
+      output = output,
+      error = is_error,
       completion_delivery = exchange.completion_delivery,
       turn_id = change.turn_id,
     })

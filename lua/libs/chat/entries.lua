@@ -148,7 +148,8 @@ local function semantic_projection(entry)
   local display = require("libs.chat.tool_display")
   local args = entry.raw_input
   if args == nil then args = entry.input_table or entry.input end
-  local projected, err = display.project(entry.display, args, entry.output, entry.error)
+  local contract = entry.display or display.generic(entry.name)
+  local projected, err = display.project(contract, args, entry.output, entry.error)
   if not projected then error("tool display invariant: " .. tostring(err)) end
   local delivery = delayed_mag_delivery(entry, args)
   if delivery then projected.label = projected.label .. " [" .. delivery .. "]" end

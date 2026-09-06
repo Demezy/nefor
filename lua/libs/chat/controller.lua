@@ -909,14 +909,23 @@ local function handle_usage_error(msg, state)
 end
 
 local function handle_tool_start(msg, state)
+  if type(msg.id) ~= "string" or msg.id == "" then
+    error("tool projection: exchange id must be a non-empty string")
+  end
+  if type(msg.name) ~= "string" or msg.name == "" then
+    error("tool projection " .. msg.id .. ": name must be a non-empty string")
+  end
+  if msg.input == nil then
+    error("tool projection " .. msg.id .. ": arguments must be present")
+  end
   local input_str
   if type(msg.input) == "string" then input_str = msg.input
   elseif type(msg.input) == "table" then input_str = "(object)"
-  else input_str = "" end
+  else input_str = tostring(msg.input) end
   local raw_input = msg.input
   local contract = (state.tool_displays or {})[msg.name]
   return transcript.push_entry(state, Entry.tool_call(
-    msg.id or "", msg.name or "?", input_str,
+    msg.id, msg.name, input_str,
     type(msg.input) == "table" and msg.input or nil,
     contract, raw_input, msg.turn_id)), {}
 end
@@ -941,9 +950,14 @@ local function handle_tool_register(msg, state)
 end
 
 local function handle_tool_end(msg, state)
+  if type(msg.id) ~= "string" or msg.id == "" then
+    error("tool projection: completed exchange id must be a non-empty string")
+  end
+  if msg.output == nil then
+    error("tool projection " .. msg.id .. ": result or error must be present")
+  end
   local next_state = transcript.attach_tool_end(
-    state, msg.id or "", msg.output or "", msg.error == true,
-    msg.completion_delivery)
+    state, msg.id, msg.output, msg.error == true, msg.completion_delivery)
   return transcript.flush_graph_results_if_stable(next_state), {}
 end
 
@@ -1624,9 +1638,12 @@ local function apply_conversation_action(state, item)
     }, state))
   end
   if item.kind == "tool_completed" then
-    return transcript.attach_tool_end(
-      state, item.exchange_id, item.output, item.error == true,
-      item.completion_delivery)
+    return select(1, handle_tool_end({
+      id = item.exchange_id,
+      output = item.output,
+      error = item.error,
+      completion_delivery = item.completion_delivery,
+    }, state))
   end
   if item.kind == "retry_started" then
     local retry = item.retry or {}

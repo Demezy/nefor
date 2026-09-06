@@ -16,7 +16,7 @@ use std::time::Duration;
 use nefor_tui::engine::Engine;
 use nefor_tui::input::KeyMessage;
 use nefor_tui::mouse::{MouseKind, MouseMessage};
-use serde_json::{json, Value as JsonValue};
+use serde_json::{json, Map as JsonMap, Value as JsonValue};
 
 /// Per-process tempdir kept alive for the lifetime of `cargo test` and
 /// pointed at by `NEFOR_DATA_DIR` on first access. Ensures chat.lua's
@@ -10430,6 +10430,204 @@ fn tool_path_summary_keeps_tail_collapsed_and_wraps_full_path_expanded() {
             "{name}: expanded path was not preserved across wrapped lines:\n{expanded}"
         );
     }
+}
+
+#[test]
+fn live_semantic_tools_render_without_a_display_catalog() {
+    let mut engine = Engine::new(120, 32).expect("engine");
+    load_chat_scenario(&mut engine);
+    let _ = render_str(&mut engine);
+    let conversation_id = "generic-live-tools";
+    activate_conversation(&mut engine, conversation_id);
+
+    for (id, name, arguments) in [
+        (
+            "live-one",
+            "custom.lookup",
+            json!({ "query": "fresh marker" }),
+        ),
+        (
+            "live-two",
+            "custom.write",
+            json!({ "path": "fresh.txt", "count": 2 }),
+        ),
+    ] {
+        dispatch_event(
+            &mut engine,
+            json!({
+                "kind": "conversation.projection.delta", "conversation_id": conversation_id,
+                "change": { "kind": "tool_call_completed", "turn_id": "fresh-turn",
+                    "exchange": { "id": id, "name": name, "status": "call_completed",
+                        "arguments": arguments } }
+            }),
+        );
+    }
+    for (id, kind, exchange) in [
+        (
+            "live-one",
+            "tool_result_recorded",
+            json!({ "id": "live-one", "status": "result", "result": { "value": "fresh result" } }),
+        ),
+        (
+            "live-two",
+            "tool_error_recorded",
+            json!({ "id": "live-two", "status": "error", "error": "fresh failure" }),
+        ),
+    ] {
+        dispatch_event(
+            &mut engine,
+            json!({
+                "kind": "conversation.projection.delta", "conversation_id": conversation_id,
+                "change": { "kind": kind, "turn_id": "fresh-turn", "exchange": exchange }
+            }),
+        );
+        let entries: mlua::Table = engine
+            .state_table()
+            .expect("state")
+            .get("entries")
+            .expect("entries");
+        let matching = (1..=entries.raw_len()).any(|index| {
+            entries
+                .get::<mlua::Table>(index)
+                .ok()
+                .and_then(|entry| entry.get::<String>("id").ok())
+                .as_deref()
+                == Some(id)
+        });
+        assert!(
+            matching,
+            "semantic exchange {id} must retain its own transcript row"
+        );
+    }
+
+    engine
+        .handle_key(key("ctrl_o"))
+        .expect("expand generic tools");
+    let rendered = render_snapshot(&mut engine);
+    for expected in [
+        "custom.lookup",
+        "fresh marker",
+        "fresh result",
+        "custom.write",
+        "fresh.txt",
+        "fresh failure",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "generic live projection lost {expected:?}:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn replayed_semantic_tools_render_without_a_display_catalog() {
+    let mut engine = Engine::new(120, 32).expect("engine");
+    load_chat_scenario(&mut engine);
+    let _ = render_str(&mut engine);
+    activate_conversation(&mut engine, "generic-replay-tools");
+    dispatch_event(
+        &mut engine,
+        json!({
+            "kind": "conversation.snapshot", "conversation_id": "generic-replay-tools",
+            "found": true,
+            "projection": {
+                "messages": [{
+                    "id": "replay-assistant", "role": "assistant", "status": "completed",
+                    "tool_calls": [
+                        { "id": "provider-one", "name": "archive.search",
+                            "arguments": { "needle": "replay marker" }, "status": "result" },
+                        { "id": "provider-two", "name": "archive.fetch",
+                            "arguments": { "record": 7 }, "status": "error" }
+                    ]
+                }],
+                "exchanges": [
+                    { "id": "replay-one", "tool_call_id": "provider-one",
+                        "name": "archive.search", "status": "result",
+                        "arguments": { "needle": "replay marker" },
+                        "result": { "matches": ["alpha", "beta"] } },
+                    { "id": "replay-two", "tool_call_id": "provider-two",
+                        "name": "archive.fetch", "status": "error",
+                        "arguments": { "record": 7 }, "error": "replay failure" }
+                ],
+                "turns": [], "compactions": []
+            }
+        }),
+    );
+
+    engine
+        .handle_key(key("ctrl_o"))
+        .expect("expand replayed tools");
+    let rendered = render_snapshot(&mut engine);
+    for expected in [
+        "archive.search",
+        "replay marker",
+        "alpha",
+        "archive.fetch",
+        "record",
+        "replay failure",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "generic replay projection lost {expected:?}:\n{rendered}"
+        );
+    }
+    let state = engine.state_table().expect("state");
+    let displays: mlua::Table = state.get("tool_displays").expect("display catalog");
+    assert_eq!(
+        displays.raw_len(),
+        0,
+        "generic replay must not manufacture a persisted/live display catalog"
+    );
+}
+
+#[test]
+fn malformed_semantic_tools_and_explicit_displays_still_fail() {
+    let mut semantic_engine = Engine::new(100, 24).expect("semantic engine");
+    load_chat_scenario(&mut semantic_engine);
+    activate_conversation(&mut semantic_engine, "malformed-semantic");
+    let malformed_semantic = json!({
+        "kind": "conversation.projection.delta", "conversation_id": "malformed-semantic",
+        "change": { "kind": "tool_call_completed", "turn_id": "turn",
+            "exchange": { "id": "broken-exchange", "status": "call_completed",
+                "arguments": {} } }
+    });
+    let semantic_map: JsonMap<String, JsonValue> = malformed_semantic
+        .as_object()
+        .expect("semantic body")
+        .clone();
+    let semantic_error = semantic_engine
+        .dispatch_envelope_from(&semantic_map, "test")
+        .expect_err("missing canonical tool name must fail");
+    assert!(
+        semantic_error
+            .to_string()
+            .contains("name must be a non-empty string"),
+        "unexpected malformed semantic diagnostic: {semantic_error}"
+    );
+
+    let mut display_engine = Engine::new(100, 24).expect("display engine");
+    load_chat_scenario(&mut display_engine);
+    let malformed_display = json!({
+        "kind": "tool.register", "tools": [{
+            "name": "broken-display",
+            "display": {
+                "compact": { "label": "broken" },
+                "expanded": { "label": "broken", "fields": [] },
+                "result": { "kind": "unknown", "fields": [] }
+            }
+        }]
+    });
+    let display_map: JsonMap<String, JsonValue> =
+        malformed_display.as_object().expect("display body").clone();
+    let display_error = display_engine
+        .dispatch_envelope_from(&display_map, "test")
+        .expect_err("explicit malformed display must fail");
+    assert!(
+        display_error
+            .to_string()
+            .contains("display.result.kind must be `content` or `receipt`"),
+        "unexpected malformed display diagnostic: {display_error}"
+    );
 }
 
 #[test]
