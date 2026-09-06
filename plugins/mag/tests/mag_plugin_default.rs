@@ -1,3 +1,6 @@
+mod declarative_operations_lua;
+mod integrity_lua;
+
 pub mod bridge {
     include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bridge.rs"));
 
