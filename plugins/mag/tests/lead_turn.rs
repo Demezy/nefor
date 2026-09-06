@@ -1321,23 +1321,35 @@ async fn retained_dynamic_program_survives_source_disposal_and_process_restart()
     let mut compiler_reader =
         BufReader::new(compiler_process.stdout.take().expect("compiler stdout"));
     handshake(&mut compiler_reader, &mut compiler_stdin).await;
-    send_event(
-        &mut compiler_stdin,
-        obj(json!({
-            "kind":"mag.load", "id":"retained-load",
-            "source_dir":root.join("source").to_string_lossy(),
-            "module_roots":[core_modules.to_string_lossy(), config_modules.to_string_lossy()],
-            "entry":"agentic-loop/dynamic-tasks.mag"
-        })),
-    )
-    .await;
-    let loaded = next_event_of_kind(&mut compiler_reader, "mag.loaded").await;
-    let artifact = loaded["artifact"].clone();
+    std::fs::write(root.join("source/mag.toml"), "version = 1\n").unwrap();
+    let mut retained = None;
+    for status in ["miss", "hit", "bypass"] {
+        send_event(
+            &mut compiler_stdin,
+            obj(json!({
+                "kind":"mag.build", "id":"retained-load",
+                "project_root":root.join("source"),
+                "cache_dir":root.join("cache"), "no_cache":status == "bypass",
+                "module_roots":[core_modules, config_modules],
+                "entry":"agentic-loop/dynamic-tasks.mag"
+            })),
+        )
+        .await;
+        let loaded = next_event_of_kind(&mut compiler_reader, "mag.loaded").await;
+        assert_eq!(loaded["build"]["status"], status);
+        let result = (loaded["artifact"].clone(), loaded["hash"].clone());
+        if let Some(previous) = &retained {
+            assert_eq!(&result, previous);
+        }
+        retained = Some(result);
+    }
+    let artifact = retained.unwrap().0;
     assert_dynamic_program_envelope(&artifact);
     shutdown(compiler_stdin, compiler_process).await;
 
     std::fs::remove_dir_all(root.join("source")).expect("dispose source tree");
     std::fs::remove_dir_all(root.join("modules")).expect("dispose module roots");
+    std::fs::remove_dir_all(root.join("cache")).expect("dispose build cache");
 
     let mut runtime_process = spawn_mag(&data_dir).await;
     let mut stdin = runtime_process.stdin.take().expect("runtime stdin");

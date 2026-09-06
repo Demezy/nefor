@@ -800,6 +800,49 @@ async fn load_worktree_program<R: AsyncBufReadExt + Unpin>(
     }
 }
 
+async fn build_twice<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+    stdin: &mut ChildStdin,
+    source: &std::path::Path,
+    entry: &str,
+) -> Value {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut retained = None;
+    for status in ["miss", "hit"] {
+        send_event(
+            stdin,
+            json!({
+                "kind":"mag.build", "id":"cached-preview", "project_root":source,
+                "entry":entry, "cache_dir":source.join(".mag/cache"),
+                "module_roots":[manifest.join("../../mag/lib"),
+                    manifest.join("../../examples/nefor-agent/mag/lib")]
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )
+        .await;
+        loop {
+            let outgoing = read_outgoing(reader, "cached preview").await;
+            let Some(body) = event_body(&outgoing) else {
+                continue;
+            };
+            if body.get("in_reply_to").and_then(Value::as_str) != Some("cached-preview") {
+                continue;
+            }
+            assert_eq!(body_kind(body), Some("mag.loaded"), "{body:?}");
+            assert_eq!(body["build"]["status"], status);
+            let result = (body["artifact"].clone(), body["hash"].clone());
+            if let Some(previous) = &retained {
+                assert_eq!(&result, previous);
+            }
+            retained = Some(result);
+            break;
+        }
+    }
+    retained.unwrap().0
+}
+
 async fn execute_worktree_program<R: AsyncBufReadExt + Unpin>(
     reader: &mut R,
     stdin: &mut ChildStdin,
@@ -914,14 +957,8 @@ async fn canonical_chat_approval_delta_crosses_the_typed_plugin_boundary() {
     )
     .await;
 
-    let artifact = load_worktree_program(
-        &mut reader,
-        &mut stdin,
-        "load-approval",
-        &source_dir,
-        "approval.mag",
-    )
-    .await;
+    std::fs::write(source_dir.join("mag.toml"), "version = 1\n").unwrap();
+    let artifact = build_twice(&mut reader, &mut stdin, &source_dir, "approval.mag").await;
     send_event(
         &mut stdin,
         json!({
@@ -1061,38 +1098,48 @@ async fn canonical_chat_approval_delta_crosses_the_typed_plugin_boundary() {
         }
     }
 
+    let delta = json!({
+        "format": "nefor.mag", "version": 1, "kind": "delta",
+        "delta": {
+            "types": {(reply_type_id.clone()): reply_type.clone()},
+            "actors": [],
+            "messages": [{
+                "to": "approval.human",
+                "semantic_type": reply_type,
+                "semantic_type_id": reply_type_id,
+                "content": {
+                    "$mag": "packed-value",
+                    "value": {
+                        "kind": "mag.ApprovalReply",
+                        "approved": true,
+                        "content": "approved in chat",
+                        "reason": ""
+                    }
+                }
+            }],
+            "kills": [], "nodes": []
+        }
+    });
+    std::fs::write(
+        source_dir.join("reply.json"),
+        serde_json::to_vec(&delta).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        source_dir.join("reply.mag"),
+        "(artifact (read-json \"reply.json\"))",
+    )
+    .unwrap();
+    let cached_delta = build_twice(&mut reader, &mut stdin, &source_dir, "reply.mag").await;
+    assert_eq!(cached_delta, delta);
     send_event(
         &mut stdin,
         json!({
-            "kind": "mag.apply",
-            "id": "chat-approval",
-            "run_id": "approval-run",
-            "source": "chat.human_approval",
-            "artifact": {
-                "format": "nefor.mag", "version": 1, "kind": "delta",
-                "delta": {
-                    "types": {(reply_type_id.clone()): reply_type.clone()},
-                    "actors": [],
-                    "messages": [{
-                        "to": "approval.human",
-                        "semantic_type": reply_type,
-                        "semantic_type_id": reply_type_id,
-                        "content": {
-                            "$mag": "packed-value",
-                            "value": {
-                                "kind": "mag.ApprovalReply",
-                                "approved": true,
-                                "content": "approved in chat",
-                                "reason": ""
-                            }
-                        }
-                    }],
-                    "kills": [], "nodes": []
-                }
-            }
+            "kind":"mag.apply", "id":"chat-approval", "run_id":"approval-run",
+            "source":"chat.human_approval", "artifact":cached_delta
         })
         .as_object()
-        .expect("chat approval apply body")
+        .unwrap()
         .clone(),
     )
     .await;
