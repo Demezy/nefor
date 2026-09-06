@@ -23,12 +23,21 @@ A program may type-check as code but return an invalid concrete topology. Compil
 
 ### Boundary structure
 
-- Only a real `source<T>` may have zero incoming edges.
+- Only nodes whose input accepts `Unit` may have zero incoming edges, including
+  `Unit`-containing sums. An unfed root receives exactly one automatic `Unit`
+  activation; an incoming route or explicit input message suppresses it. A
+  product containing `Unit` still needs its complete input.
 - Exactly one real `output<T>` must exist.
 - The output is terminal and cannot source another edge.
-- Every ordinary node must be source-reachable and able to reach the output.
+- Every ordinary node must be root-reachable and able to reach the output.
 
-Setting a role-like string on an ordinary node does not create source or output authority. Use public constructors.
+Setting a role-like string on an ordinary node does not create root eligibility or output authority. Use public constructors. Fresh-graph activation follows exposed node boundaries. Dynamic deltas retain only actors, so they preserve the narrower exact-`Unit` actor bootstrap rule; send an explicit message to start any other unfed delta actor.
+
+Diagnostics identify the offending boundary and semantic type, for example:
+
+```text
+root validation failed: {"input":"unfed.nefor.graph.Value","input_type":{"kind":"primitive","name":"String"},"node":"unfed","reason":"zero incoming edges; only inputs that accept Unit can be activated automatically"}
+```
 
 ### Node identity
 
@@ -36,11 +45,15 @@ One node id must denote one immutable definition. Reusing an id with different c
 
 ### Product coverage
 
-For input `A + B`, incoming edge types must exactly cover every occurrence. `T + T` needs two sender edges; one underfills it and three overfill it. If the workflow means “either,” use `A | B`. If it means ordering only, use `Unit` as a product component.
+For input `A + B`, incoming edge types must exactly cover every occurrence. `T + T` needs two sender edges; one underfills it and three overfill it. If the workflow means “either,” use `A | B`. If it means ordering only, use `Unit` as a product component. Coverage diagnostics include the input boundary and type plus every incoming route's source boundary and type, making missing or extra occurrences visible.
 
 ### Union coverage
 
-Every possible output alternative needs an ordinary route, a typed resident subscription, or the terminal output path. An agent's result is `O | AgentError`; routing only `O` leaves an uncovered error arm. Connect the whole union or handle both arms.
+Every possible output alternative needs an ordinary route, a typed resident subscription, or the terminal output path. An agent's result is `O | AgentError`; routing only `O` leaves an uncovered error arm. Connect the whole union or handle both arms. The diagnostic names the offending output boundary and type and lists the ordinary routes and resident rules currently available as handlers.
+
+### Sum construction
+
+Graph compatibility and value construction answer different questions. An edge carrying `Unit` can feed a `Unit | Text` input, but `(as (| Unit Text) nil)` does not manufacture a runtime sum constructor. Primitive and structural values have no explicit nominal constructor evidence. Construct a declared nominal arm first and then refine that value to the sum. The compiler reports both the source and target types; it does not currently attach a source span to this evaluation-time diagnostic.
 
 ### Forged values
 

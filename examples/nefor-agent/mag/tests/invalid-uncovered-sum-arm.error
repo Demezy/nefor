@@ -1,1 +1,1 @@
-actor start output alternatives must have an ordinary route, resident subscription, or terminal output path
+output coverage failed: {"actor":"start"

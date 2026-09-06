@@ -883,8 +883,11 @@ fn checked_typed_value(env: &Env, value: Value, ty: MagType) -> Result<Value, Ma
             )));
         }
         (crate::types::ConcreteType::Sum { .. }, None) => {
+            let source = crate::checker::value_type(&value)
+                .map(|actual| actual.to_string())
+                .unwrap_or_else(|| value.type_name().to_owned());
             return Err(MagError::Type(format!(
-                "value has no explicit constructor evidence accepted by {accepted:?}"
+                "cannot construct sum {ty} from source type {source}: the source has no explicit nominal constructor evidence; primitive and structural sum construction is unsupported, so first construct a declared nominal arm with `as`, then refine that value to the sum. This value-construction rule is distinct from graph-edge compatibility"
             )));
         }
         (crate::types::ConcreteType::Named { .. }, Some(constructor))
@@ -1537,19 +1540,23 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             };
             Ok(Value::Bool(valid))
         }
-        "descriptor-accepts?" => {
+        "descriptor-accepts?" | "descriptor-accepts-value?" => {
             arity(args, 2)?;
             let Value::TypeDescriptor(target) = raw(&args[0]) else {
-                return Err(MagError::Type(
-                    "descriptor-accepts? expects TypeDescriptor arguments".into(),
-                ));
+                return Err(MagError::Type(format!(
+                    "{name} expects TypeDescriptor arguments"
+                )));
             };
             let Value::TypeDescriptor(source) = raw(&args[1]) else {
-                return Err(MagError::Type(
-                    "descriptor-accepts? expects TypeDescriptor arguments".into(),
-                ));
+                return Err(MagError::Type(format!(
+                    "{name} expects TypeDescriptor arguments"
+                )));
             };
-            Ok(Value::Bool(target.accepts_edge_source(source)))
+            Ok(Value::Bool(if name == "descriptor-accepts-value?" {
+                target.accepts(source)
+            } else {
+                target.accepts_edge_source(source)
+            }))
         }
         "descriptor-input-covered-by?" => {
             arity(args, 2)?;

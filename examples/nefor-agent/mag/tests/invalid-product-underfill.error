@@ -1,1 +1,1 @@
-actor join input incoming types must be compatible and exactly cover every product occurrence
+input coverage failed: {"actor":"join"

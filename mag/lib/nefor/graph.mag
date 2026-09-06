@@ -323,34 +323,37 @@
   (flat-map (fn [[candidate StoredNode]] -> (List Message)
               (get candidate "messages"))
             (graph-nodes value))))
-(let route-feeds-actor? (fn [[candidate StoredRoute] [value Actor]] -> Bool
-  (= (get (get candidate "to") "actor") (get value "id"))))
-(let message-feeds-actor? (fn [[candidate Message] [value Actor]] -> Bool
-  (= (get (get candidate "to") "actor") (get value "id"))))
+;; Whole-value compatibility matters: edge compatibility also accepts one
+;; product component, which is not enough to activate a root.
 (let unit-input? (fn [[input StoredPort]] -> Bool
-  (= (get input "type") (type-evidence (type-tag Unit)))))
-(let actor-needs-bootstrap?
-  (fn [[routes (List StoredRoute)] [messages (List Message)] [value Actor]] -> Bool
-    (if (unit-input? (get value "input"))
-      (if (= (count (filter (fn [[candidate StoredRoute]] -> Bool
-                              (route-feeds-actor? candidate value)) routes)) 0)
-        (= (count (filter (fn [[candidate Message]] -> Bool
-                            (message-feeds-actor? candidate value)) messages)) 0)
+  (descriptor-accepts-value? (get input "type") (type-evidence (type-tag Unit)))))
+(let input-needs-bootstrap?
+  (fn [[routes (List StoredRoute)] [messages (List Message)] [input StoredPort]] -> Bool
+    (if (unit-input? input)
+      (if (= (count (incoming-routes-to routes input)) 0)
+        (= (count (messages-to messages input)) 0)
         false)
       false)))
-(let bootstrap-message (fn [[value Actor]] -> Message
-  (let input (get value "input"))
-  (stored-message input {:kind (get input "wire") :value nil})))
+(let bootstrap-message (fn [[input StoredPort]] -> Message
+  ;; Activation carries Unit evidence, not the receiving sum's descriptor.
+  (let unit-port (store-port (port (get input "actor") (type-tag Unit)
+                                 (get input "wire"))))
+  (stored-message unit-port {:kind (get input "wire") :value nil})))
 (let bootstrap-messages
-  (fn [[actors (List Actor)] [routes (List StoredRoute)]
+  (fn [[boundary-ports (List StoredPort)] [routes (List StoredRoute)]
        [messages (List Message)]] -> (List Message)
     (map bootstrap-message
-      (filter (fn [[candidate Actor]] -> Bool
-                (actor-needs-bootstrap? routes messages candidate)) actors))))
+      (filter (fn [[candidate StoredPort]] -> Bool
+                (input-needs-bootstrap? routes messages candidate)) boundary-ports))))
 (let graph-messages (fn [[value Graph]] -> (List Message)
   (let authored (authored-graph-messages value))
+  ;; Only exposed root boundaries are eligible. Internal actors must receive
+  ;; their inputs through the composite's routes, even when they accept Unit.
+  (let boundary-ports
+    (map (fn [[candidate StoredNode]] -> StoredPort
+           (get candidate "input")) (roots value)))
   (concat authored
-    (bootstrap-messages (graph-actors value) (graph-routes value) authored))))
+    (bootstrap-messages boundary-ports (graph-routes value) authored))))
 (let graph-logical-nodes (fn [[value Graph]] -> (List LogicalNode)
   (flat-map (fn [[candidate StoredNode]] -> (List LogicalNode)
               (get candidate "nodes"))
@@ -641,6 +644,20 @@
   (filter (fn [[candidate Message]] -> Bool
             (same-port-address? (get candidate "to") input))
           messages)))
+(let port-address (fn [[value StoredPort]] -> String
+  (str (get value "actor") (str "." (get value "wire")))))
+(let describe-route-source (fn [[route StoredRoute]] -> String
+  (let source (get route "from"))
+  (canonical {:kind "route"
+              :from (port-address source)
+              :type (get source "type")})))
+(let describe-message-source (fn [[message Message]] -> String
+  (str "initial message type " (canonical (get message "semantic_type")))))
+(let actor-input-sources (fn [[value Graph] [candidate Actor]] -> (List String)
+  (let input (get candidate "input"))
+  (concat
+    (map describe-route-source (incoming-routes-to (graph-routes value) input))
+    (map describe-message-source (messages-to (graph-messages value) input)))))
 (let actor-input-source-types (fn [[value Graph] [candidate Actor]]
   -> (List TypeDescriptor)
   (let input (get candidate "input"))
@@ -649,7 +666,7 @@
              (get (get route "from") "type"))
            (incoming-routes-to (graph-routes value) input))
       (map (fn [[message Message]] -> TypeDescriptor
-             (get (get message "to") "type"))
+             (get message "semantic_type"))
            (messages-to (graph-messages value) input)))))
 (let actor-input-coverage-valid? (fn [[value Graph] [candidate Actor]] -> Bool
   (descriptor-input-covered-by?
@@ -694,6 +711,26 @@
                  (not (actor-output-coverage-valid? value rules output)))
                (get candidate "outputs")))
      0)))
+(let describe-route-handler (fn [[route StoredRoute]] -> String
+  (let target (get route "to"))
+  (canonical {:kind "route"
+              :to (port-address target)
+              :type (get target "type")})))
+(let describe-rule-handler (fn [[candidate Rule]] -> String
+  (canonical {:kind "resident_rule"
+              :id (get candidate "id")
+              :function (get candidate "fn")
+              :type (get (get candidate "on") "type")})))
+(let output-handlers (fn [[value Graph] [rules (List Rule)] [output StoredPort]]
+  -> (List String)
+  (concat
+    (map describe-route-handler
+      (filter (fn [[candidate StoredRoute]] -> Bool
+                (same-port-address? (get candidate "from") output))
+              (graph-routes value)))
+    (map describe-rule-handler
+      (filter (fn [[candidate Rule]] -> Bool
+                (same-port-address? (get candidate "on") output)) rules)))))
 (let route-valid? (fn [[actors (List Actor)] [value StoredRoute]] -> Bool
   (if (port-is-output? actors (get value "from"))
     (if (port-is-input? actors (get value "to"))
@@ -726,17 +763,38 @@
                             (not (boundary-valid? candidate))) nodes))
     (let bad-input-coverage (filter (fn [[candidate Actor]] -> Bool
                                 (not (actor-input-coverage-valid? value candidate))) actors))
-    (let bad-output-coverage (filter (fn [[candidate Actor]] -> Bool
-                                 (not (actor-outputs-coverage-valid? value all-rules candidate))) actors))
+    (let bad-output-coverage
+      (flat-map (fn [[candidate Actor]] -> (List StoredPort)
+                  (filter (fn [[output StoredPort]] -> Bool
+                            (not (actor-output-coverage-valid? value all-rules output)))
+                          (get candidate "outputs"))) actors))
+    (let root-errors
+      (map (fn [[candidate StoredNode]] -> String
+             (let input (get candidate "input"))
+             (str "root validation failed: "
+               (canonical {:node (get candidate "id")
+                           :input (port-address input)
+                           :input_type (get input "type")
+                           :reason "zero incoming edges; only inputs that accept Unit can be activated automatically"})))
+           bad-roots))
     (let input-coverage-errors
       (map (fn [[candidate Actor]] -> String
-             (str "actor " (get candidate "id")
-                  " input incoming types must be compatible and exactly cover every product occurrence"))
+             (let input (get candidate "input"))
+             (str "input coverage failed: "
+               (canonical {:actor (get candidate "id")
+                           :input (port-address input)
+                           :expected_type (get input "type")
+                           :incoming_sources (actor-input-sources value candidate)
+                           :reason "sources must be compatible and exactly cover every product occurrence; check for missing, extra, or ambiguous occurrences"})))
            bad-input-coverage))
     (let output-coverage-errors
-      (map (fn [[candidate Actor]] -> String
-             (str "actor " (get candidate "id")
-                  " output alternatives must have an ordinary route, resident subscription, or terminal output path"))
+      (map (fn [[output StoredPort]] -> String
+             (str "output coverage failed: "
+               (canonical {:actor (get output "actor")
+                           :output (port-address output)
+                           :output_type (get output "type")
+                           :available_handlers (output-handlers value all-rules output)
+                           :reason "coverage is incomplete; every output alternative needs an ordinary route, resident subscription, or terminal output path"})))
            bad-output-coverage))
     (let bad-routes (filter (fn [[candidate StoredRoute]] -> Bool
                         (not (route-valid? actors candidate))) (graph-routes value)))
@@ -766,11 +824,11 @@
                               (core.validated.invalid ["graph contains an unknown or incompatible edge"]))
                             (core.validated.invalid contract-errors))
                           (core.validated.invalid ["every node must have a path to the output node"]))
-                        (core.validated.invalid ["every node must be reachable from a Unit-input root node"]))
+                        (core.validated.invalid ["every node must be reachable from a root node whose input accepts Unit"]))
                       (core.validated.invalid output-coverage-errors))
                     (core.validated.invalid input-coverage-errors))
                   (core.validated.invalid ["output nodes require an incoming edge and are terminal"]))
-                (core.validated.invalid ["only Unit-input nodes may have zero incoming edges"]))
+                (core.validated.invalid root-errors))
               (core.validated.invalid ["boundary node roles require their concrete source/output factory shape, and ordinary nodes cannot contain initial messages"])))))))))))
 
 (let validate (fn [[value Graph] [contracts (List FactoryContract)]]
@@ -942,13 +1000,20 @@
   (let actors (get value "actors"))
   (let routes (assigned-routes (get value "routes")))
   (let authored-messages (get value "messages"))
+  ;; Deltas retain no exposed Node boundaries. Preserve their existing exact
+  ;; Unit actor bootstrap rule rather than activate newly eligible internals.
+  (let unit-ports
+    (filter (fn [[input StoredPort]] -> Bool
+              (= (get input "type") (type-evidence (type-tag Unit))))
+      (map (fn [[candidate Actor]] -> StoredPort
+             (get candidate "input")) actors)))
   (as LowerDelta
     {:actors (map (fn [[candidate Actor]] -> LowerActor
                     (lower-actor-with-routes routes candidate))
                   actors)
      :messages (map lower-message
                  (concat authored-messages
-                   (bootstrap-messages actors (get value "routes") authored-messages)))
+                   (bootstrap-messages unit-ports (get value "routes") authored-messages)))
      :kills (get value "kills")
      :rules (as (List LowerRule) [])
      :types (descriptor-table (delta-descriptors value))

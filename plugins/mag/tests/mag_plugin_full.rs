@@ -878,6 +878,272 @@ pub mod kernel {
             );
         }
 
+        fn unit_root_program(definitions: &str) -> String {
+            format!(
+                r#"(require "nefor.artifact")
+(require "nefor.graph")
+(require "nefor.node")
+(require "nefor.shell")
+(require "nefor.contracts")
+(let params (as nefor.shell.ShellScriptParams
+  {{:script "printf root-ok" :cwd "." :timeout (nefor.contracts.no-timeout)}}))
+{definitions}
+(let result (nefor.graph.output-for "result" operation))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph [(nefor.graph.edge operation result)])))"#
+            )
+        }
+
+        #[test]
+        fn unit_accepting_roots_lower_only_the_exposed_unfed_boundary() {
+            let host = shipped_host();
+            for (name, definitions, expected) in [
+                (
+                    "unit-root-run",
+                    "(let operation (nefor.shell.run \"command\" params))",
+                    "command",
+                ),
+                (
+                    "unit-root-script",
+                    "(let operation (nefor.shell.script \"command\" params))",
+                    "command",
+                ),
+                (
+                    "unit-root-sequence",
+                    r#"
+(let one (nefor.shell.script "one" params))
+(let two (nefor.shell.script "two" params))
+(let inner (nefor.node.sequence "inner" [one two]))
+(let sequence (nefor.node.sequence "sequence" [inner]))
+(let operation (nefor.node.named "outer" sequence))"#,
+                    "sequence.input",
+                ),
+                (
+                    "unit-root-text-dependency",
+                    r#"
+(let text (as (| Unit nefor.contracts.Text)
+  (as nefor.contracts.Text {:content "stdin"})))
+(let start (nefor.graph.source "start"
+  (type-tag (| Unit nefor.contracts.Text)) text))
+(let command (nefor.shell.script "command" params))
+(let operation (nefor.node.>>> start command))"#,
+                    "start",
+                ),
+                (
+                    "unit-root-dependent",
+                    r#"
+(let operation (nefor.node.*> "ordered"
+  (nefor.shell.script "dependency" params)
+  (nefor.shell.run "command" params)))"#,
+                    "dependency",
+                ),
+            ] {
+                let source = unit_root_program(definitions);
+                let modification = compile_mag_source(&host, name, &source);
+                assert_eq!(
+                    modification,
+                    compile_mag_source(&host, name, &source),
+                    "deterministic lowering"
+                );
+                let messages = modification["messages"].as_array().unwrap();
+                assert_eq!(messages.len(), 1, "{name}: {messages:?}");
+                assert_eq!(messages[0]["to"], expected);
+                assert_eq!(
+                    messages[0]["semantic_type"],
+                    serde_json::json!({"kind": "primitive", "name": "Unit"})
+                );
+                assert_eq!(messages[0]["content"]["value"], JsonValue::Null);
+            }
+        }
+
+        #[test]
+        fn unit_accepting_roots_respect_explicit_messages_and_reject_missing_inputs() {
+            let host = shipped_host();
+            let explicit = r#"
+(require "nefor.artifact")
+(require "nefor.graph")
+(require "nefor.shell")
+(require "nefor.contracts")
+(let command (nefor.shell.script "command"
+  (as nefor.shell.ShellScriptParams
+    {:script "cat" :cwd "." :timeout (nefor.contracts.no-timeout)})))
+(let text (as (| Unit nefor.contracts.Text)
+  (as nefor.contracts.Text {:content "explicit"})))
+(nefor.artifact.delta
+  (nefor.graph.delta-message (nefor.graph.node-delta command)
+    (get command "input") text))"#;
+            let modification = compile_mag_source(&host, "unit-root-explicit", &explicit);
+            let messages = modification["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(
+                messages[0]["content"]["value"]["value"]["content"],
+                "explicit"
+            );
+            assert_eq!(messages[0]["semantic_type"]["name"], "nefor.contracts.Text");
+
+            let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            for (name, definitions, expected) in [
+                ("text", "(let operation (nefor.graph.identity \"missing\" (type-tag nefor.contracts.Text)))", ["root validation failed", "nefor.contracts.Text"]),
+                ("product", "(let operation (nefor.graph.identity \"missing\" (type-tag (+ Unit Unit))))", ["root validation failed", "product"]),
+                ("non-unit-sum", "(let operation (nefor.graph.identity \"missing\" (type-tag (| nefor.contracts.Text nefor.contracts.Task))))", ["root validation failed", "union"]),
+                ("internal", r#"
+(let command (nefor.shell.run "command" params))
+(let hidden (nefor.graph.identity "hidden" (type-tag Unit)))
+(let operation (nefor.graph.node-with-rules-and-nodes "wrapper" "ordinary"
+  (concat (get command "actors") (get hidden "actors"))
+  (get command "routes") [] []
+  (concat (get command "nodes") (get hidden "nodes"))
+  (get command "input") (get command "output")))"#, ["input coverage failed", "hidden.nefor.graph.Value"]),
+            ] {
+                let error = nefor_mag::compile_with_inputs_and_module_roots(
+                    &unit_root_program(definitions),
+                    &manifest,
+                    serde_json::json!({"factory_contracts": host.registry_contracts().unwrap()}),
+                    &[manifest.join("../../mag/lib")],
+                ).expect_err(name).to_string();
+                for fragment in expected {
+                    assert!(error.contains(fragment), "{name}: missing {fragment:?}: {error}");
+                }
+            }
+
+            let fixture_root = manifest.join("../../examples/nefor-agent/mag/tests");
+            for (fixture, expected) in [
+                (
+                    "invalid-product-underfill.mag",
+                    [
+                        "input coverage failed",
+                        "join.test.Value",
+                        "left.nefor.graph.Value",
+                        "missing, extra, or ambiguous occurrences",
+                    ],
+                ),
+                (
+                    "invalid-uncovered-sum-arm.mag",
+                    [
+                        "output coverage failed",
+                        "start.nefor.graph.Value",
+                        "left.test.Value",
+                        "available_handlers",
+                    ],
+                ),
+            ] {
+                let source = std::fs::read_to_string(fixture_root.join(fixture)).unwrap();
+                let error = nefor_mag::compile_with_inputs_and_module_roots(
+                    &source,
+                    &fixture_root,
+                    serde_json::json!({"factory_contracts": host.registry_contracts().unwrap()}),
+                    &[manifest.join("../../mag/lib")],
+                )
+                .expect_err(fixture)
+                .to_string();
+                for fragment in expected {
+                    assert!(
+                        error.contains(fragment),
+                        "{fixture}: missing {fragment:?}: {error}"
+                    );
+                }
+            }
+        }
+
+        // Execute only the harmless command requested by the shipped shell factory;
+        // the capability response then re-enters the real kernel routing path.
+        fn execute_unit_root_command(host: &LuaHost, invoke: &Map<String, JsonValue>) {
+            let args = &invoke["args"]["args"];
+            let output = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(args["script"].as_str().unwrap())
+                .current_dir(args["cwd"].as_str().unwrap())
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            host.bus_response(
+                invoke["id"].as_str().unwrap(),
+                Some(&serde_json::json!({
+                    "stdout": String::from_utf8(output.stdout).unwrap(),
+                    "stderr": String::from_utf8(output.stderr).unwrap(),
+                    "termination": {"kind": "code", "code": output.status.code().unwrap()}
+                })),
+                None,
+                Some("async"),
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn unit_accepting_roots_execute_once_and_dependencies_do_not_start_early() {
+            for (name, definitions, dependent) in [
+                (
+                    "unit-runtime-run",
+                    "(let operation (nefor.shell.run \"command\" params))",
+                    false,
+                ),
+                (
+                    "unit-runtime-script",
+                    "(let operation (nefor.shell.script \"command\" params))",
+                    false,
+                ),
+                (
+                    "unit-runtime-dependent",
+                    r#"
+(let operation (nefor.node.*> "ordered"
+  (nefor.shell.script "dependency" params)
+  (nefor.shell.run "command" params)))"#,
+                    true,
+                ),
+            ] {
+                let host = shipped_host();
+                let modification = compile_mag_source(&host, name, &unit_root_program(definitions));
+                assert!(host.begin_run(name, name, None).unwrap().ok);
+                host.drain_emits().unwrap();
+                let started = host.start(name, &modification).unwrap();
+                assert!(started.ok, "{:?}", started.error);
+                let emits = host.drain_emits().unwrap();
+                let invocations: Vec<_> = emits
+                    .iter()
+                    .filter(|event| event["kind"] == "tool.invoke")
+                    .collect();
+                assert_eq!(invocations.len(), 1, "only the root starts");
+                let invoke = tool_invoke(&emits, "shell.script");
+                assert_eq!(
+                    invoke["from"],
+                    if dependent { "dependency" } else { "command" }
+                );
+                assert!(host.take_run_complete(name).unwrap().is_none());
+                execute_unit_root_command(&host, invoke);
+                let emits = host.drain_emits().unwrap();
+                if dependent {
+                    assert!(host.take_run_complete(name).unwrap().is_none());
+                    assert_eq!(
+                        emits
+                            .iter()
+                            .filter(|event| event["kind"] == "tool.invoke")
+                            .count(),
+                        1
+                    );
+                    let invoke = tool_invoke(&emits, "shell.script");
+                    assert_eq!(invoke["from"], "command");
+                    execute_unit_root_command(&host, invoke);
+                } else {
+                    assert!(!emits.iter().any(|event| event["kind"] == "tool.invoke"));
+                }
+                let completion = host
+                    .take_run_complete(name)
+                    .unwrap()
+                    .expect("completed command");
+                assert_eq!(completion.result.unwrap()["value"]["stdout"], "root-ok");
+                assert!(
+                    !host
+                        .drain_emits()
+                        .unwrap()
+                        .iter()
+                        .any(|event| event["kind"] == "tool.invoke"),
+                    "no duplicate execution after completion"
+                );
+            }
+        }
+
         fn start_shell_expression(
             host: &LuaHost,
             run_id: &str,

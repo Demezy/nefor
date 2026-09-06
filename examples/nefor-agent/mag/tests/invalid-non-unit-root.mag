@@ -1,8 +1,8 @@
 (require "nefor.artifact")
 (require "nefor.graph")
 
-;; A root has no upstream value. Only Unit input can therefore receive the
-;; topology-derived initial activation.
+;; A root has no upstream value. Its input must therefore accept the
+;; topology-derived Unit activation.
 (let unfed (nefor.graph.identity "unfed" (type-tag String)))
 (let result (nefor.graph.output-for "result" unfed))
 (nefor.artifact.compile

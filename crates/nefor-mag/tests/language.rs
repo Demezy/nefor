@@ -1266,9 +1266,27 @@ fn sum_refinement_rejects_lookalikes_without_matching_constructor_evidence() {
     )
     .unwrap_err()
     .to_string();
+    assert!(untagged.contains("cannot construct sum"), "{untagged}");
+    assert!(untagged.contains("source type"), "{untagged}");
     assert!(
-        untagged.contains("no explicit constructor evidence"),
+        untagged.contains("no explicit nominal constructor evidence"),
         "{untagged}"
+    );
+    assert!(
+        untagged.contains("distinct from graph-edge compatibility"),
+        "{untagged}"
+    );
+
+    let primitive = compile("(artifact (as (| Unit String) nil))", &root)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        primitive.contains("cannot construct sum (Unit | String) from source type Unit"),
+        "{primitive}"
+    );
+    assert!(
+        primitive.contains("primitive and structural sum construction is unsupported"),
+        "{primitive}"
     );
 
     let lookalike = compile(
@@ -1813,6 +1831,39 @@ fn graph_descriptor_operations_are_compiler_owned() {
     .unwrap_err()
     .to_string();
     assert!(forged.contains("does not conform"), "{forged}");
+}
+
+#[test]
+fn whole_value_compatibility_does_not_supply_product_components() {
+    let root = workspace("whole-value-compatibility");
+    let artifact = compile(
+        r#"
+        (type Text {:content String})
+        (let unit (type-evidence (type-tag Unit)))
+        (let product (type-evidence (type-tag (+ Unit Unit))))
+        (artifact
+          {:unit (descriptor-accepts-value? unit unit)
+           :sum (descriptor-accepts-value?
+             (type-evidence (type-tag (| Unit Text))) unit)
+           :product (descriptor-accepts-value? product unit)
+           :singleton-product (descriptor-accepts-value?
+             (type-evidence (type-tag (+ Unit))) unit)
+           :whole-product (descriptor-accepts-value? product product)
+           :component-edge (descriptor-accepts? product unit)
+           :non-unit (descriptor-accepts-value?
+             (type-evidence (type-tag Text)) unit)})
+        "#,
+        &root,
+    )
+    .unwrap();
+    assert_eq!(
+        artifact,
+        json!({
+            "unit": true, "sum": true, "product": false,
+            "singleton-product": false, "whole-product": true,
+            "component-edge": true, "non-unit": false
+        })
+    );
 }
 
 #[test]

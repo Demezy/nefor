@@ -238,6 +238,10 @@ bench-mag *args:
 test-mag *args:
     cargo test -p nefor-mag {{args}}
 
+# Focused shipped-kernel tests, including graph lowering and deterministic capability execution.
+test-mag-kernel *args:
+    cargo test -p mag-plugin --features full-tests --test mag_plugin_full {{args}}
+
 # Build the MAG command-line compiler used for focused workflow replays.
 build-mag:
     cargo build -p nefor-mag --bin mag

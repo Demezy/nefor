@@ -877,6 +877,7 @@ fn infer_builtin(
             Ok(MagType::Bool)
         }
         "descriptor-accepts?"
+        | "descriptor-accepts-value?"
         | "descriptor-input-covered-by?"
         | "descriptor-input-assignments"
         | "descriptor-output-covered-by?" => {
@@ -889,7 +890,7 @@ fn infer_builtin(
                 &mut HashMap::new(),
             )
             .map_err(MagError::Type)?;
-            let expected = if name == "descriptor-accepts?" {
+            let expected = if matches!(name, "descriptor-accepts?" | "descriptor-accepts-value?") {
                 MagType::TypeDescriptor
             } else {
                 MagType::List(Box::new(MagType::TypeDescriptor))
@@ -1129,6 +1130,7 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "packed-record-has-only-keys?",
     "packed-field-conforms?",
     "descriptor-accepts?",
+    "descriptor-accepts-value?",
     "descriptor-input-covered-by?",
     "descriptor-input-assignments",
     "descriptor-output-covered-by?",
@@ -1220,7 +1222,7 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
             vec![packed, MagType::String, descriptor],
             MagType::Bool,
         )],
-        "descriptor-accepts?" => vec![function(
+        "descriptor-accepts?" | "descriptor-accepts-value?" => vec![function(
             vec![descriptor.clone(), descriptor.clone()],
             MagType::Bool,
         )],
