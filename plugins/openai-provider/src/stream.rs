@@ -105,6 +105,28 @@ pub(crate) fn body_signals_tools_unsupported(body: &str) -> bool {
     body.to_ascii_lowercase().contains("does not support tools")
 }
 
+/// Quota and billing denials carried by HTTP 429 are terminal rather than
+/// transient rate limits. Replaying them cannot succeed without an external
+/// account change and may multiply billed or budget-capped requests.
+fn response_signals_terminal_quota_denial(status: u16, body: &str) -> bool {
+    if status != 429 {
+        return false;
+    }
+    let normalized = body.to_ascii_lowercase();
+    [
+        "insufficient_quota",
+        "budget_exhausted",
+        "billing_hard_limit_reached",
+        "credits_exhausted",
+        "insufficient balance",
+        "payment required",
+        "quota exhausted",
+        "credit exhausted",
+    ]
+    .iter()
+    .any(|signal| normalized.contains(signal))
+}
+
 /// Boundary signal passed to the reasoning callback. The dispatcher
 /// uses this to drive `<prefix>.stream.reasoning_delta` (per-chunk) and
 /// `<prefix>.stream.reasoning_end` (one-shot, synthesised at the moment
@@ -521,8 +543,12 @@ where
                     wire.error(Some(attempt), "HTTP 400 tools unsupported".to_owned());
                     return Err(StreamError::ToolsUnsupported { body });
                 }
+                let terminal_quota_denial = response_signals_terminal_quota_denial(status, &body);
                 let err = StreamError::Http { status, body };
-                if attempt < CHAT_STREAM_MAX_ATTEMPTS && stream_error_is_retriable(&err) {
+                if attempt < CHAT_STREAM_MAX_ATTEMPTS
+                    && stream_error_is_retriable(&err)
+                    && !terminal_quota_denial
+                {
                     let delay = retry_delay(attempt, retry_after);
                     wire.retry(
                         attempt,
@@ -1151,6 +1177,22 @@ mod tests {
             r#"{"error":{"message":"model not found"}}"#
         ));
         assert!(!body_signals_tools_unsupported("invalid api key"));
+    }
+
+    #[test]
+    fn terminal_quota_denial_is_distinct_from_transient_retries() {
+        assert!(response_signals_terminal_quota_denial(
+            429,
+            r#"{"error":{"type":"insufficient_quota"}}"#
+        ));
+        assert!(!response_signals_terminal_quota_denial(
+            429,
+            r#"{"error":"rate limited"}"#
+        ));
+        assert!(!response_signals_terminal_quota_denial(
+            500,
+            r#"{"error":{"type":"insufficient_quota"}}"#
+        ));
     }
 
     #[test]

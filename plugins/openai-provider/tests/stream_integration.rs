@@ -358,6 +358,53 @@ async fn chat_stream_retries_429_then_succeeds_and_reports_progress() {
 }
 
 #[tokio::test]
+async fn chat_stream_does_not_retry_quota_denial() {
+    let (listener, addr) = bind_local().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_server = attempts.clone();
+
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let _ = read_request(&mut stream).await;
+        attempts_server.fetch_add(1, Ordering::SeqCst);
+        let body = r#"{"error":{"message":"quota exhausted","type":"insufficient_quota"}}"#;
+        let response = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("quota response");
+        stream.shutdown().await.expect("shutdown");
+    });
+
+    let mut progress = Vec::new();
+    let error = run_chat_stream_with_retry_progress(
+        &reqwest::Client::new(),
+        &format!("http://{addr}/v1/chat/completions"),
+        None,
+        "Authorization",
+        "fixture-model",
+        &[Message::user("fixture")],
+        None,
+        None,
+        CancellationToken::new(),
+        |_| {},
+        |_| {},
+        |retry| progress.push(retry),
+    )
+    .await
+    .expect_err("quota denial must be terminal");
+    server.await.expect("server");
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert!(progress.is_empty());
+    assert!(matches!(error, StreamError::Http { status: 429, .. }));
+}
+
+#[tokio::test]
 async fn chat_stream_429_retry_respects_retry_after_seconds() {
     let (listener, addr) = bind_local().await;
     let attempts = Arc::new(AtomicUsize::new(0));
