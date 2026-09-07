@@ -2,7 +2,7 @@
 
 NCP plugin: file, image, search, edit, and process capability primitives.
 
-The shipped tool set is `read_file`, `read_image`, `write_file`, `edit_file`,
+The shipped tool set is `read_file`, `read_image`, `write_file`,
 `process.exec`, `shell.script`, and `search_text`. Destructive or long-running
 operations are intended to be run behind `tool-gate` in the starter composition.
 
@@ -75,8 +75,10 @@ it with an explicit error when the active model does not support image input.
 
 ### Other shipped tools
 
-- `write_file` — write text content to a path.
-- `edit_file` — replace one exact string match in an existing text file.
+- `write_file` — with `path` and `new_string`, create or overwrite a complete
+  text file; add non-empty `old_string` to replace exactly one match in an
+  existing UTF-8 file. An empty `new_string` is valid in both forms. The tool
+  has no `cwd`, mode, action, or model-controlled policy fields.
 - `search_text` — search text under files/directories.
 
 ### Process capabilities

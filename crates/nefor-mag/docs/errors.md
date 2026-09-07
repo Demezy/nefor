@@ -71,7 +71,7 @@ The agent requests correction up to `:max-corrections`. When the budget is exhau
 
 ## Shell failures and hangs
 
-Process and shell nodes are unbounded when their required timeout record uses `no-timeout`. A process that never exits keeps its run nonterminal, so `await-run` also waits indefinitely. Use `timeout-ms` in the `process.exec` or `shell.script` parameter record when an operation needs a wall-clock bound. Never launch a persistent foreground server or watcher as a normal awaited run.
+Process and shell nodes are unbounded when their required timeout record uses `no-timeout`. A process that never exits keeps its run nonterminal, so `mag-await` also waits indefinitely. Use `timeout-ms` in the `process.exec` or `shell.script` parameter record when an operation needs a wall-clock bound. Never launch a persistent foreground server or watcher as a normal awaited run.
 
 A compile success proves the command node is well-formed, not that its executable, working directory, permissions, or exit status will succeed. Handle routeable command outcomes where the library exposes them; otherwise an unhandled runtime failure fails the run.
 
@@ -96,7 +96,7 @@ Run ids are opaque and session-scoped. Common outcomes include:
 - **expired** — its retained terminal outcome aged out;
 - **unauthorized** — a delegated agent tried to control a run it did not directly dispatch.
 
-Use the exact `run_id` returned by a fresh `mag apply` or lead `mag-eval`. Call `await-run` once when dependent work needs completion; use `graph-status` only as a one-shot snapshot. Canceling an await detaches that waiter but leaves the run alive. Use `terminate-graph(run_id)` to request termination, then wait for canonical confirmation rather than assuming the request itself killed the run.
+Use the exact `run_id` returned by a fresh `mag-apply`. Call `mag-await` once when dependent work needs completion; use `mag-status` only as a one-shot snapshot. Canceling an await detaches that waiter but leaves the run alive. Use `mag-terminate(run_id)` to request termination, then wait for canonical confirmation rather than assuming the request itself killed the run.
 
 ## Declarative-operation errors
 

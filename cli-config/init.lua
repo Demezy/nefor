@@ -118,12 +118,13 @@ agentic_cli.configure {
   readiness = {
     required_plugins = { cfg.provider.name, "mag", "tool-gate", "basic-tools" },
     required_tools = {
-      "read_file", "read_image", "write_file", "edit_file", "search_text", "process.exec", "shell.script",
-      "graph-status", "await-run", "terminate-graph", "write-review", "mag", "mag-eval",
+      "read_file", "read_image", "write_file", "search_text", "process.exec", "shell.script",
+      "mag-status", "mag-await", "mag-terminate", "write-review",
+      "mag-write-file", "mag-preview", "mag-apply",
     },
     tool_sources = {
-      ["basic-tools"] = { "read_file", "read_image", "write_file", "edit_file", "search_text", "process.exec", "shell.script" },
-      ["lead-workflow"] = { "graph-status", "await-run", "terminate-graph", "write-review", "mag", "mag-eval" },
+      ["basic-tools"] = { "read_file", "read_image", "write_file", "search_text", "process.exec", "shell.script" },
+      ["lead-workflow"] = { "mag-status", "mag-await", "mag-terminate", "write-review", "mag-write-file", "mag-preview", "mag-apply" },
     },
     timeout_ms = tonumber(os.getenv("NEFOR_STARTUP_TIMEOUT_MS")) or 10000,
   },
@@ -138,7 +139,7 @@ require("libs.generic-tool").declare()
 
 local agentic_loop = require("libs.agentic-loop")
 local cli_system = [[
-You are a helpful assistant. For decomposition tasks (multiple independent sub-questions whose answers roll up into one), use the `mag` tool: write a MAG program to the workspace with action='write', then run it with action='apply' and no run_id. The run's result arrives automatically as a follow-up turn — after applying, stop and wait for it. For simple chat turns, just answer directly.
+You are a helpful assistant. For decomposition tasks (multiple independent sub-questions whose answers roll up into one), create a MAG program with `mag-write-file`, then run it with `mag-apply` and no run_id. The run's result arrives automatically as a follow-up turn — after applying, stop and wait for it. For simple chat turns, just answer directly.
 ]]
 local mag_context = require("libs.mag-context").new {
   guides = {
@@ -202,7 +203,7 @@ tool_gate_argv[#tool_gate_argv + 1] = "--default"
 tool_gate_argv[#tool_gate_argv + 1] = cfg.tool_gate.default_action
 
 -- lead-workflow owns the lead's kernel-dispatch tool surface (mag /
--- mag-eval / graph-status / terminate-graph / write-review) and relays
+-- MAG lifecycle/source tools and write-review) and relays
 -- kernel-run completions back into agentic-loop's deferred queue.
 -- Mirrors examples/nefor-agent/init.lua: registered BEFORE tool-gate's spawn so its
 -- bus subscription is live when tool-gate.hello arrives — otherwise

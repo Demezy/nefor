@@ -45,7 +45,7 @@
 local NAME = nefor.name -- "mock-plugin"
 
 -- The MAG program the orchestrator turn writes + applies via the
--- lead's `mag` tool. A chain — sx feeds sy feeds
+-- lead's `mag-apply` tool. A chain — sx feeds sy feeds
 -- combine — rather than a parallel join: the agent template's entry
 -- adapter lifts exactly one boundary message per activation, so an
 -- all-of product join would silently drop one branch; the chain keeps
@@ -169,8 +169,8 @@ local HELP_BODY = table.concat({
   "|------|---------|-------------------|",
   "| mag dispatch | `summarize octopuses and lighthouses` | multi-agent kernel run |",
   "| read_file | `read readme` | 📄 tool-gate allowlist |",
-  "| mag-eval (pwd) | `what is my cwd` | one-off kernel eval |",
-  "| mag-eval (ls -la) | `list files` | 📁 one-off kernel eval |",
+  "| process.exec (pwd) | `what is my cwd` | direct structured process |",
+  "| process.exec (ls -la) | `list files` | 📁 direct structured process |",
   "| memory (set) | `the secret key is <v>` | 🔑 store in chat history |",
   "| memory (recall) | `what is the secret key?` | 🔑 history scan |",
   "| translation | `translate hello to japanese` | 🌐 CJK wide-char render |",
@@ -193,8 +193,8 @@ local HELP_BODY = table.concat({
   "",
   "- 📄 `read readme` — uses the `read_file` tool to fetch `README.md`",
   "  (requires `read_file` on the tool-gate allowlist, or auto)",
-  "- `what is my cwd` — uses `mag-eval` with `nefor.shell.script`",
-  "- 📁 `list files` — uses `mag-eval` with `nefor.shell.script`",
+  "- `what is my cwd` — uses `process.exec`",
+  "- 📁 `list files` — uses `process.exec`",
   "",
   "### 3. Memory",
   "",
@@ -375,7 +375,7 @@ local function pick_response_for(history)
   -- run. Scoped to the canonical octopus+lighthouse orchestrator turn
   -- so unrelated write-tool relays keep their generic handling below.
   if last_tool ~= nil and type(last_user) == "string"
-      and string.find(tostring(last_tool), "File written", 1, true)
+      and string.find(tostring(last_tool), '"operation"', 1, true)
       and string.find(last_user, "octopus") and string.find(last_user, "lighthouse") then
     return {
       text = "",
@@ -383,8 +383,8 @@ local function pick_response_for(history)
       tool_calls = {
         {
           id        = mint_tool_id("mag_apply"),
-          name      = "mag",
-          arguments = { action = "apply", file = CANNED_MAG_FILE },
+          name      = "mag-apply",
+          arguments = { file = CANNED_MAG_FILE },
         },
       },
     }
@@ -392,7 +392,7 @@ local function pick_response_for(history)
 
   -- ----------------------------------------------------------------
   -- Tool-result relay for the new interactive triggers. When the wrap
-  -- node fires after a read_file / mag-eval tool result, render a
+  -- node fires after a read_file / process tool result, render a
   -- friendly response that quotes the tool output. Keyed off the most
   -- recent user-role trigger string already in history.
   -- ----------------------------------------------------------------
@@ -464,11 +464,10 @@ local function pick_response_for(history)
       tool_calls = {
         {
           id        = mint_tool_id("mag_write"),
-          name      = "mag",
+          name      = "mag-write-file",
           arguments = {
-            action  = "write",
-            file    = CANNED_MAG_FILE,
-            content = CANNED_MAG_PROGRAM,
+            file       = CANNED_MAG_FILE,
+            new_string = CANNED_MAG_PROGRAM,
           },
         },
       },
@@ -509,10 +508,10 @@ local function pick_response_for(history)
       finish_reason = "tool_calls",
       tool_calls = {{
         id = mint_tool_id("active_shell"),
-        name = "mag-eval",
+        name = "process.exec",
         arguments = {
-          intent = "Run active shell",
-          expr = '(nefor.shell.script "active-shell" (as nefor.shell.ShellScriptParams {:script "sleep 30" :cwd "." :timeout (nefor.contracts.no-timeout)}))',
+          argv = { "sleep", "30" }, cwd = ".",
+          timeout = { present = false, milliseconds = 0 },
         },
       }},
     }
@@ -564,8 +563,8 @@ local function pick_response_for(history)
       tool_calls = {
         {
           id        = mint_tool_id("pwd"),
-          name      = "mag-eval",
-          arguments = { intent = "Inspect workspace", expr = '(nefor.shell.script "pwd" (as nefor.shell.ShellScriptParams {:script "pwd" :cwd "." :timeout (nefor.contracts.no-timeout)}) (type-tag Unit) "mag.Unit")' },
+          name      = "process.exec",
+          arguments = { argv = { "pwd" }, cwd = ".", timeout = { present = true, milliseconds = 5000 } },
         },
       },
     }
@@ -579,8 +578,8 @@ local function pick_response_for(history)
       tool_calls = {
         {
           id        = mint_tool_id("ls"),
-          name      = "mag-eval",
-          arguments = { intent = "Inspect workspace", expr = '(nefor.shell.script "ls" (as nefor.shell.ShellScriptParams {:script "ls -la" :cwd "." :timeout (nefor.contracts.no-timeout)}) (type-tag Unit) "mag.Unit")' },
+          name      = "process.exec",
+          arguments = { argv = { "ls", "-la" }, cwd = ".", timeout = { present = true, milliseconds = 5000 } },
         },
       },
     }

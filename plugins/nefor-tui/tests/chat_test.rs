@@ -269,8 +269,8 @@ fn fixture_tool_started(engine: &mut Engine, id: &str, name: &str, input: JsonVa
         let label = match name {
             "shell.script" => "Run command",
             "mag" => "MAG",
-            "mag-eval" => "mag eval",
-            "terminate-graph" => "terminate graph",
+            "mag-apply" => "apply MAG",
+            "mag-terminate" => "terminate graph",
             "read_file" => "Read file",
             _ => name,
         };
@@ -283,12 +283,12 @@ fn fixture_tool_started(engine: &mut Engine, id: &str, name: &str, input: JsonVa
             "expanded": { "label": label, "fields": [] },
             "result": { "kind": "content", "fields": [] }
         });
-        if name == "mag" || name == "mag-eval" {
+        if name == "mag" || name == "mag-apply" {
             display["lifecycle"] = json!("delayed");
-            if name == "mag-eval" {
+            if name == "mag-apply" {
                 display["expanded"]["fields"] = json!([{
-                    "label": "expression",
-                    "select": { "source": "args", "path": "expression" },
+                    "label": "content",
+                    "select": { "source": "args", "path": "content" },
                     "kind": "text", "max_lines": 80, "max_bytes": 8000,
                     "omit": "missing"
                 }]);
@@ -1379,7 +1379,12 @@ fn tool_start_closes_empty_provider_round_before_text_answer_projection() {
         None,
         json!({ "model": "gpt-test", "duration_ms": 1 }),
     );
-    fixture_tool_started(&mut engine, "t1", "mag-eval", json!({}));
+    fixture_tool_started(
+        &mut engine,
+        "t1",
+        "mag-apply",
+        json!({ "file": "work.mag" }),
+    );
     fixture_assistant_completed(
         &mut engine,
         None,
@@ -1389,7 +1394,7 @@ fn tool_start_closes_empty_provider_round_before_text_answer_projection() {
 
     let out = render_str(&mut engine);
     assert!(
-        out.contains("mag eval") && out.contains("interrupted"),
+        out.contains("apply MAG") && out.contains("interrupted"),
         "terminally interrupted delayed invocation must render once: {out}"
     );
     assert!(out.contains("final answer"), "{out}");
@@ -3453,8 +3458,7 @@ fn delayed_mag_lifecycle_renders_required_sync_async_and_result_rows() {
     dispatch_event(
         &mut engine,
         json!({ "kind": "tool.register", "tools": [
-        { "name": "mag", "display": {"compact":{"label":"mag","primary":{"label":"file","select":{"source":"args","path":"file"},"kind":"path"}},"expanded":{"label":"mag","fields":[]},"result":{"kind":"content","fields":[]},"lifecycle":"delayed"} },
-        { "name": "mag-eval", "display": {"compact":{"label":"mag eval","primary":{"label":"intent","select":{"source":"args","path":"intent"},"kind":"scalar"}},"expanded":{"label":"mag eval","fields":[]},"result":{"kind":"content","fields":[]},"lifecycle":"delayed"} }
+        { "name": "mag-apply", "display": {"compact":{"label":"mag apply","primary":{"label":"file","select":{"source":"args","path":"file"},"kind":"path"}},"expanded":{"label":"mag apply","fields":[]},"result":{"kind":"content","fields":[]},"lifecycle":"delayed"} }
     ] }),
     );
 
@@ -3463,22 +3467,22 @@ fn delayed_mag_lifecycle_renders_required_sync_async_and_result_rows() {
         "delivery-inline",
         "hidden",
         "hidden-call",
-        "mag",
-        json!({ "action": "apply", "file": "hidden.mag" }),
+        "mag-apply",
+        json!({ "file": "hidden.mag" }),
         json!({ "status": "completed" }),
         "sync",
     );
     let canonical = render_snapshot(&mut engine);
     assert!(
-        canonical.contains("▸ mag [sync] · hidden.mag"),
+        canonical.contains("▸ mag apply [sync] · hidden.mag"),
         "{canonical}"
     );
 
     fixture_tool_started(
         &mut engine,
         "legacy",
-        "mag",
-        json!({ "action": "apply", "file": "legacy.mag" }),
+        "mag-apply",
+        json!({ "file": "legacy.mag" }),
     );
     fixture_tool_completed(
         &mut engine,
@@ -3489,38 +3493,12 @@ fn delayed_mag_lifecycle_renders_required_sync_async_and_result_rows() {
     fixture_tool_started(
         &mut engine,
         "async",
-        "mag",
-        json!({ "action": "apply", "file": "ship.mag" }),
+        "mag-apply",
+        json!({ "file": "ship.mag" }),
     );
     fixture_tool_completed_with_delivery(
         &mut engine,
         "async",
-        json!({ "status": "executing" }),
-        false,
-        Some("async"),
-    );
-    fixture_tool_started(
-        &mut engine,
-        "eval-sync",
-        "mag-eval",
-        json!({ "intent": "Inspect workspace" }),
-    );
-    fixture_tool_completed_with_delivery(
-        &mut engine,
-        "eval-sync",
-        json!({ "status": "completed" }),
-        false,
-        Some("sync"),
-    );
-    fixture_tool_started(
-        &mut engine,
-        "eval-async",
-        "mag-eval",
-        json!({ "intent": "Probe dependencies" }),
-    );
-    fixture_tool_completed_with_delivery(
-        &mut engine,
-        "eval-async",
         json!({ "status": "executing" }),
         false,
         Some("async"),
@@ -3533,42 +3511,18 @@ fn delayed_mag_lifecycle_renders_required_sync_async_and_result_rows() {
             "duration_ms": 97_815_000,
         }),
     );
-    dispatch_event(
-        &mut engine,
-        json!({
-            "kind": "chat.graph_result.append", "run_id": "run-eval",
-            "invocation_label": "Probe dependencies", "invocation_kind": "eval",
-            "status": "success", "duration_ms": 432_000,
-        }),
-    );
     fixture_assistant_completed(&mut engine, None, json!({}));
     let out = render_snapshot(&mut engine);
-    assert!(out.contains("▸ mag · legacy.mag"), "{out}");
+    assert!(out.contains("▸ mag apply · legacy.mag"), "{out}");
     assert!(
-        !out.contains("mag [sync] · legacy.mag") && !out.contains("mag [async] · legacy.mag"),
+        !out.contains("mag apply [sync] · legacy.mag")
+            && !out.contains("mag apply [async] · legacy.mag"),
         "older records without metadata remain unlabeled: {out}"
     );
-    assert!(out.contains("▸ mag [async] · ship.mag"), "{out}");
-    assert!(
-        out.contains("▸ mag eval [sync] · Inspect workspace"),
-        "{out}"
-    );
-    assert!(
-        out.contains("▸ mag eval [async] · Probe dependencies"),
-        "{out}"
-    );
+    assert!(out.contains("▸ mag apply [async] · ship.mag"), "{out}");
     assert!(
         out.contains("mag result [async] · ship.mag · 01d 03h 10m 15s"),
         "{out}"
-    );
-    assert!(
-        out.contains("mag result [async] · Probe dependencies · 07m 12s"),
-        "{out}"
-    );
-    assert_eq!(
-        out.matches("Inspect workspace").count(),
-        1,
-        "sync mag-eval must remain represented by only its invocation row: {out}"
     );
     assert!(
         !out.contains("FAILED"),
@@ -4139,7 +4093,7 @@ fn run_aware_tools_render_result_owned_labels_with_distinct_provider_ids() {
     dispatch_event(
         &mut engine,
         json!({ "kind": "tool.register", "tools": [{
-            "name": "terminate-graph", "display": {"compact":{"label":"terminate graph","primary":{"label":"run","select":{"source":"result","path":"invocation_label","fallback":{"source":"args","path":"run_id"}},"kind":"scalar"}},"expanded":{"label":"terminate graph","fields":[]},"result":{"kind":"content","fields":[]}}
+            "name": "mag-terminate", "display": {"compact":{"label":"terminate graph","primary":{"label":"run","select":{"source":"result","path":"invocation_label","fallback":{"source":"args","path":"run_id"}},"kind":"scalar"}},"expanded":{"label":"terminate graph","fields":[]},"result":{"kind":"content","fields":[]}}
         }] }),
     );
 
@@ -4150,7 +4104,7 @@ fn run_aware_tools_render_result_owned_labels_with_distinct_provider_ids() {
         fixture_tool_started(
             &mut engine,
             provider_id,
-            "terminate-graph",
+            "mag-terminate",
             json!({ "run_id": run_id }),
         );
     }
@@ -4185,14 +4139,14 @@ fn run_aware_tool_unknown_result_keeps_raw_run_id() {
     dispatch_event(
         &mut engine,
         json!({ "kind": "tool.register", "tools": [{
-            "name": "terminate-graph", "display": {"compact":{"label":"terminate graph","primary":{"label":"run","select":{"source":"result","path":"invocation_label","fallback":{"source":"args","path":"run_id"}},"kind":"scalar"}},"expanded":{"label":"terminate graph","fields":[]},"result":{"kind":"content","fields":[]}}
+            "name": "mag-terminate", "display": {"compact":{"label":"terminate graph","primary":{"label":"run","select":{"source":"result","path":"invocation_label","fallback":{"source":"args","path":"run_id"}},"kind":"scalar"}},"expanded":{"label":"terminate graph","fields":[]},"result":{"kind":"content","fields":[]}}
         }] }),
     );
 
     fixture_tool_started(
         &mut engine,
         "call_provider_unknown",
-        "terminate-graph",
+        "mag-terminate",
         json!({ "run_id": "mag-run-unknown" }),
     );
     fixture_tool_completed(
@@ -10242,7 +10196,7 @@ fn tool_result_long_single_line_wraps_fully() {
     );
 }
 
-/// A long tool INPUT (a mag-eval expression, long path, write payload) is
+/// A long tool input (such as inline MAG source or a write payload) is
 /// fully visible — wrapped — in the unfolded tool entry. The collapsed row
 /// keeps its truncated one-line summary; the requirement is that the full
 /// input is visible somewhere in the unfolded entry.
@@ -10252,12 +10206,12 @@ fn tool_input_long_single_line_wraps_fully() {
     load_chat_scenario(&mut engine);
     let _ = render_str(&mut engine);
 
-    let expr = format!("(pipeline{})", "-step".repeat(40));
+    let source = format!("(pipeline{})", "-step".repeat(40));
     fixture_tool_started(
         &mut engine,
         "t1",
-        "mag-eval",
-        json!({ "expression": expr.clone() }),
+        "mag-apply",
+        json!({ "file": "long.mag", "content": source.clone() }),
     );
     fixture_tool_completed(&mut engine, "t1", json!({ "status": "submitted" }), false);
     engine.handle_key(key("ctrl_o")).expect("ctrl_o");
@@ -10278,7 +10232,7 @@ fn tool_input_long_single_line_wraps_fully() {
         .filter(|c| !c.is_whitespace())
         .collect();
     assert!(
-        joined.contains(&expr),
+        joined.contains(&source),
         "the full tool input must be visible (wrapped) in the unfolded tool entry"
     );
 }

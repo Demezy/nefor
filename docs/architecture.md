@@ -197,7 +197,7 @@ the store. Runtime provider/model snapshots remain execute-only overlays.
 Composition passes the same policy table to
 `agentic_loop.configure { lead_program = { project_build = policy, ... } }` and
 `lead_workflow.configure { project_build = policy, ... }`. The latter forwards it
-to mag-eval. Policy is `{ cache_dir = "/absolute/writable/path", no_cache = false }`;
+to every MAG source compilation. Policy is `{ cache_dir = "/absolute/writable/path", no_cache = false }`;
 `no_cache` is optional. Omitting `project_build` or supplying `false` selects cold
 `mag.load`. Settings are copied at configuration time. The shared
 `libs.mag-workspace.compile_request(id, project_root, entry, module_roots, policy)`

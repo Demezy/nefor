@@ -5,6 +5,7 @@
 
 local common = require("libs.chat.common")
 local preview_state = require("libs.chat.preview_state")
+local run_projection = require("libs.mag-run-projection")
 local STYLE   = common.STYLE
 local CURSOR_ROW_STYLE = common.CURSOR_ROW_STYLE
 local shallow_merge = common.shallow_merge
@@ -154,296 +155,15 @@ function M.any_active(runs, now_ms)
   return false
 end
 
--- ── MAG logical-node hierarchy (display model) ─────────────────────────
-
-local function group_of(actor_id)
-  return actor_id:match("^([^.]+)") or actor_id
-end
--- Raw lifecycle fixtures and hand-authored untyped modifications have no
--- logical metadata. Keep their old namespace projection as a boundary
--- fallback; compiled MAG programs never infer hierarchy from actor ids.
-M.group_of = group_of
-
-local function path_key(path)
-  local parts = {}
-  for _, name in ipairs(path or {}) do
-    parts[#parts + 1] = tostring(#name) .. ":" .. name
-  end
-  return table.concat(parts, "/")
-end
-M.path_key = path_key
-
-local function parent_path(path)
-  local parent = {}
-  for index = 1, #path - 1 do parent[index] = path[index] end
-  return parent
-end
-
-local function fallback_descriptors(nodes)
-  local buckets, order = {}, {}
-  for actor_id, node in pairs(nodes or {}) do
-    local name = group_of(actor_id)
-    local bucket = buckets[name]
-    if bucket == nil then
-      bucket = { name = name, members = {}, entries = {}, min_seq = math.huge }
-      buckets[name] = bucket
-      order[#order + 1] = bucket
-    end
-    bucket.entries[#bucket.entries + 1] = { id = actor_id, node = node }
-    bucket.min_seq = math.min(bucket.min_seq, node.seq or math.huge)
-  end
-  table.sort(order, function(left, right)
-    if left.min_seq ~= right.min_seq then return left.min_seq < right.min_seq end
-    return left.name < right.name
-  end)
-  local descriptors = {}
-  for _, bucket in ipairs(order) do
-    table.sort(bucket.entries, function(left, right)
-      local ls, rs = left.node.seq or math.huge, right.node.seq or math.huge
-      if ls ~= rs then return ls < rs end
-      return left.id < right.id
-    end)
-    if #bucket.entries == 1 and bucket.entries[1].id == bucket.name then
-      descriptors[#descriptors + 1] = { path = { bucket.name }, members = { bucket.name } }
-    else
-      descriptors[#descriptors + 1] = { path = { bucket.name }, members = {} }
-      for _, entry in ipairs(bucket.entries) do
-        descriptors[#descriptors + 1] = {
-          path = { bucket.name, M.member_label(bucket.name, entry.id) },
-          members = { entry.id },
-        }
-      end
-    end
-  end
-  return descriptors
-end
-
-local function descriptors_for(run, nodes)
-  if type(run.logical_nodes) == "table" and #run.logical_nodes > 0 then
-    return run.logical_nodes
-  end
-  return fallback_descriptors(nodes or run.nodes)
-end
-
-local function actor_ancestor_keys(run, nodes)
-  local out = {}
-  for _, descriptor in ipairs(descriptors_for(run, nodes)) do
-    for _, actor_id in ipairs(descriptor.members or {}) do
-      local keys = out[actor_id] or {}
-      for length = 1, #descriptor.path do
-        local prefix = {}
-        for index = 1, length do prefix[index] = descriptor.path[index] end
-        keys[path_key(prefix)] = true
-      end
-      out[actor_id] = keys
-    end
-  end
-  return out
-end
-
-local function active_groups(run, nodes)
-  local out = {}
-  local ancestors = actor_ancestor_keys(run, nodes)
-  for id, node in pairs(nodes or run.nodes or {}) do
-    if node.status == "running" or node.status == "working" then
-      for key in pairs(ancestors[id] or {}) do out[key] = true end
-    end
-  end
-  return out
-end
-
--- Track the union of yellow member intervals for each collapsed logical node.
--- Summing actor durations would double-count overlapping work; a first→last
--- window would count idle gaps. This state follows exactly what the group row
--- paints as active.
-local function advance_group_activity(prev, nodes, now_ms)
-  local current = prev.group_activity or {}
-  local next_activity, groups = {}, active_groups(prev, nodes)
-  for name, value in pairs(current) do
-    next_activity[name] = { active_ms = value.active_ms or 0,
-      active_since_ms = value.active_since_ms }
-    groups[name] = groups[name] or false
-  end
-  for name, is_active in pairs(groups) do
-    local item = next_activity[name] or { active_ms = 0 }
-    if is_active and item.active_since_ms == nil then
-      item.active_since_ms = now_ms
-    elseif not is_active and item.active_since_ms ~= nil then
-      item.active_ms = item.active_ms + now_ms - item.active_since_ms
-      item.active_since_ms = nil
-    end
-    next_activity[name] = item
-  end
-  return next_activity
-end
-
--- Logical state follows the authored tree, not flattened runtime membership.
--- Leaves reduce their directly owned actors while ignoring alternatives that
--- never fired: running > failed > killed > any settled work > pending.
--- Composites reduce only direct child states: running > pending > failed >
--- killed > done. Locally owned routing actors remain inspectable members but
--- cannot block or override the semantic child boundary.
-local LIVE_MEMBER_STATUS = { running = true, working = true }
-
-local function empty_leaf_status(run)
-  if run.completed_at_ms == nil then return "pending" end
-  if run.status == "failed" or run.status == "error" then return "failed" end
-  if run.status == "killed" or run.status == "reaped" then return "killed" end
-  return "done"
-end
-
-local function leaf_status(members, run)
-  local any_running, any_failed, any_killed, any_settled =
-    false, false, false, false
-  for _, member in ipairs(members) do
-    local node = member.node
-    if LIVE_MEMBER_STATUS[node.status] then any_running = true
-    elseif node.status == "failed" or node.status == "error" then any_failed = true
-    elseif node.status == "killed" then any_killed = true
-    elseif node.status == "done" or node.status == "skipped"
-        or (node.status == "idle"
-          and (node.started_at_ms ~= nil or node.settled_at_ms ~= nil)) then
-      any_settled = true
-    end
-  end
-  if any_running then return "running" end
-  if any_failed then return "failed" end
-  if any_killed then return "killed" end
-  if any_settled then return "done" end
-  if #members == 0 then return empty_leaf_status(run) end
-  return "pending"
-end
-
-local function composite_status(children)
-  local any_running, any_pending, any_failed, any_killed =
-    false, false, false, false
-  for _, child in ipairs(children) do
-    if child.status == "running" then any_running = true
-    elseif child.status == "pending" then any_pending = true
-    elseif child.status == "failed" then any_failed = true
-    elseif child.status == "killed" then any_killed = true
-    end
-  end
-  if any_running then return "running" end
-  if any_pending then return "pending" end
-  if any_failed then return "failed" end
-  if any_killed then return "killed" end
-  return "done"
-end
-
-local function linearize(children, run)
-  if #children < 2 then return children end
-  local owner = {}
-  for index, child in ipairs(children) do
-    for _, member in ipairs(child.members) do owner[member.id] = index end
-  end
-  local edges = {}
-  for index = 1, #children do edges[index] = {} end
-  for actor_id, node in pairs(run.nodes or {}) do
-    local from = owner[actor_id]
-    if from then
-      for _, destinations in pairs(((node.spec or {}).routes) or {}) do
-        for _, destination in ipairs(destinations) do
-          local to = owner[destination.actor]
-          if to and to ~= from then edges[from][to] = true end
-        end
-      end
-    end
-  end
-
-  local remaining, placed, ordered = {}, {}, {}
-  for index = 1, #children do remaining[index] = true end
-  while #ordered < #children do
-    local zero, reached
-    for candidate = 1, #children do
-      if remaining[candidate] then
-        local incoming = false
-        local from_placed = false
-        for from = 1, #children do
-          if edges[from][candidate] then
-            if remaining[from] then incoming = true elseif placed[from] then from_placed = true end
-          end
-        end
-        if not incoming and zero == nil then zero = candidate end
-        if from_placed and reached == nil then reached = candidate end
-      end
-    end
-    -- A cycle has no zero-incoming member. Continue from the earliest node
-    -- reached by the already-linearized prefix; otherwise declaration order
-    -- supplies the deterministic break. The remaining backward edge is the
-    -- displayed feedback edge.
-    local selected = zero or reached
-    if selected == nil then
-      for index = 1, #children do if remaining[index] then selected = index break end end
-    end
-    remaining[selected], placed[selected] = nil, true
-    ordered[#ordered + 1] = children[selected]
-  end
-  return ordered
-end
-
-local function build_nodes(run)
-  local by_key, roots = {}, {}
-  for index, descriptor in ipairs(descriptors_for(run)) do
-    local path = descriptor.path or {}
-    local key = path_key(path)
-    by_key[key] = {
-      name = path[#path], path = path, key = key, own_actors = descriptor.members or {},
-      children = {}, declaration_index = index,
-    }
-  end
-  for _, logical in pairs(by_key) do
-    if #logical.path == 1 then
-      roots[#roots + 1] = logical
-    else
-      local parent = by_key[path_key(parent_path(logical.path))]
-      if parent then parent.children[#parent.children + 1] = logical end
-    end
-  end
-  local function declaration_order(left, right)
-    return left.declaration_index < right.declaration_index
-  end
-  local function finish(logical)
-    table.sort(logical.children, declaration_order)
-    local members, seen = {}, {}
-    for _, actor_id in ipairs(logical.own_actors) do
-      local node = (run.nodes or {})[actor_id]
-      if node and not seen[actor_id] then
-        members[#members + 1], seen[actor_id] = { id = actor_id, node = node }, true
-      end
-    end
-    for _, child in ipairs(logical.children) do
-      finish(child)
-      for _, member in ipairs(child.members) do
-        if not seen[member.id] then
-          members[#members + 1], seen[member.id] = member, true
-        end
-      end
-    end
-    logical.members = members
-    logical.children = linearize(logical.children, run)
-    logical.status = #logical.children == 0
-      and leaf_status(members, run) or composite_status(logical.children)
-    local activity = (run.group_activity or {})[logical.key] or {}
-    logical.active_ms = activity.active_ms or 0
-    logical.active_since_ms = activity.active_since_ms
-    for _, member in ipairs(members) do
-      local started = member.node.started_at_ms
-      if started and (logical.first_start == nil or started < logical.first_start) then
-        logical.first_start = started
-      end
-      local finished = member.node.settled_at_ms or member.node.finished_at_ms
-      if finished and (logical.last_finish == nil or finished > logical.last_finish) then
-        logical.last_finish = finished
-      end
-    end
-  end
-  table.sort(roots, declaration_order)
-  for _, root in ipairs(roots) do finish(root) end
-  return linearize(roots, run)
-end
--- Exported for projection tests and other views that need the same recursive
--- logical-node tree.
+-- The sidebar and model-facing receipts deliberately share the same logical
+-- hierarchy, state reduction, and active-time semantics.
+M.group_of = run_projection.group_of
+M.path_key = run_projection.path_key
+M.member_label = run_projection.member_label
+local path_key = run_projection.path_key
+local advance_group_activity = run_projection.advance_group_activity
+local build_nodes = run_projection.build_nodes
+local group_elapsed_ms = run_projection.group_elapsed_ms
 M.build_nodes = build_nodes
 
 local function text(content, style, wrap)
@@ -456,25 +176,6 @@ end
 
 local function name_widget(name, style)
   return tui.expanded { fit = "loose", child = text(name, style, "ellipsis") }
-end
-
-local function group_elapsed_ms(group, now_ms)
-  if #group.children == 0 and #group.members == 1 then
-    local node = group.members[1].node
-    local started = node.activation_started_at_ms or node.started_at_ms
-    if group.status == "running" then
-      return started and math.max(0, now_ms - started) or nil
-    end
-    local finished = node.settled_at_ms or node.finished_at_ms
-    if group.status == "done" and started and finished then
-      return math.max(0, finished - started)
-    end
-  end
-  if group.status == "running" then
-    return group.active_ms + math.max(0, now_ms - (group.active_since_ms or now_ms))
-  end
-  if TERMINAL_STATUS[group.status] and group.first_start then return group.active_ms end
-  return nil
 end
 
 local function group_row_widget(group, depth, now_ms, selected)
@@ -522,15 +223,6 @@ local function run_header_widget(run, nodes, now_ms, selected)
     text(table.concat(extra), style),
   } }
 end
-
--- Member timers cover the current/cumulative activation. Pending and idle
--- members reserve the same quiet duration slot so sibling names stay aligned.
-local function member_label(parent_id, actor_id)
-  local prefix = parent_id .. "."
-  if actor_id:sub(1, #prefix) == prefix then return actor_id:sub(#prefix + 1) end
-  return actor_id
-end
-M.member_label = member_label
 
 local function actor_stale_text(node, stream, now_ms)
   if node.status == "working" and stream ~= nil and stream.last_activity_ms ~= nil then

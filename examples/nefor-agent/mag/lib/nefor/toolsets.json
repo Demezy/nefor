@@ -7,8 +7,8 @@
     "python-read",
     "instructions",
     "discover_instruction_files",
-    "graph-status",
-    "await-run"
+    "mag-status",
+    "mag-await"
   ],
   "general": [
     "read_file",
@@ -18,12 +18,12 @@
     "python-read",
     "instructions",
     "discover_instruction_files",
-    "edit_file",
     "write_file",
-    "mag",
-    "mag-eval",
-    "graph-status",
-    "await-run",
-    "terminate-graph"
+    "mag-write-file",
+    "mag-preview",
+    "mag-apply",
+    "mag-status",
+    "mag-await",
+    "mag-terminate"
   ]
 }

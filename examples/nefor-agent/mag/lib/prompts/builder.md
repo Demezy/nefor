@@ -5,7 +5,7 @@ Task: {task}
 Instructions:
 
 - Read relevant files first to understand existing patterns.
-- Use `mag-eval` for searches, commands, and other world queries. Prefer
+- Use direct context and process tools for searches, commands, and other world queries. Prefer
   structured process execution for a single command; use a shell script only
   when an explicit POSIX shell program is required.
 - Implement only the changes described in the task.

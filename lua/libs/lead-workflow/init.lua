@@ -60,9 +60,9 @@
 --
 --   * `mag` — write, compile, and apply MAG workflow graphs.
 --
---   * `graph-status` — report active/recent graph run state.
+--   * `mag-status` — report active/recent graph run state.
 --
---   * `terminate-graph` — cancel an active graph run by run_id.
+--   * `mag-terminate` — cancel an active graph run by run_id.
 --
 -- ## Termination on session exit
 --
@@ -74,7 +74,7 @@
 local json = nefor.json
 
 local mag            = require("libs.mag-workspace")
-local mag_eval       = require("libs.lead-workflow.mag-eval")
+local run_projection = require("libs.mag-run-projection")
 local RunRegistry    = require("libs.lead-workflow.run-registry")
 local chat_emitter   = require("libs.chat-emitter")
 local sessions       = require("libs.sessions")
@@ -204,7 +204,7 @@ local state = {
   completed_runs = run_registry.completed_runs,
   completed_run_limit = 64,
 
-  -- One anti-polling timestamp per graph-status target. The all-runs snapshot
+  -- One anti-polling timestamp per mag-status target. The all-runs snapshot
   -- has its own key, independent of every explicit run id.
   graph_status_cooldowns = {},
 
@@ -296,7 +296,7 @@ local function emit_await_outcome(firing_id, outcome, completion_delivery)
   if type(outcome) == "table" and outcome.output ~= nil then
     body.output = outcome.output
   else
-    body.error = type(outcome) == "table" and outcome.error or "await-run failed"
+    body.error = type(outcome) == "table" and outcome.error or "mag-await failed"
     if type(outcome) == "table" then
       body.error_code = outcome.error_code
       body.run_id = outcome.run_id
@@ -331,12 +331,13 @@ local function emit_termination_outcome(firing_id, run, terminal)
       run_id = run.run_id,
       invocation_label = run.invocation_label,
       status = status,
+      workflow_tree = run.terminal_workflow_tree,
       notice = "canonical termination confirmed",
     })
     return
   end
   emit_tool_result_err(firing_id,
-    "terminate-graph: incompatible canonical terminal status for " .. run.run_id ..
+    "mag-terminate: incompatible canonical terminal status for " .. run.run_id ..
     ": " .. tostring(status or "unknown"))
 end
 
@@ -375,7 +376,7 @@ end
 -- params.tools names a write-capable tool makes the program write-capable and
 -- subject to the plan-approval gate. Shell and read-tool actors run freely —
 -- the tool-gate and da-policies enforce runtime permissions.
-local WRITE_TOOLS = { ["fs/edit"] = true, ["edit_file"] = true, ["write_file"] = true }
+local WRITE_TOOLS = { ["fs/edit"] = true, ["write_file"] = true }
 
 local function actors_have_writers(inventory)
   for _, entry in ipairs(inventory or {}) do
@@ -808,7 +809,7 @@ now_ms = function()
   return os.time()
 end
 
--- Track a submitted run for graph-status. Definition inventory is used for
+-- Track a submitted run for mag-status. Definition inventory is used for
 -- validation and overlays, but only concrete initial actors become runtime
 -- nodes here; operation templates appear only after materialization emits an
 -- actor lifecycle event. Node summaries carry the factory under `reasoner`,
@@ -825,6 +826,7 @@ register_active_run = function(run_id, inventory, terminal, firing_id, run_name,
         id = id,
         role = actor.factory,
         reasoner = actor.factory,
+        spec = actor,
         status = "pending",
       }
     end
@@ -927,7 +929,7 @@ local function mark_mag_actor(body, status)
   local run = mag_event_run(body)
   local actor_id, factory = body.id, body.factory
   if not run or type(actor_id) ~= "string" or actor_id == "" then return end
-  local ts = now_ms()
+  local ts = monotonic_now_ms() or 0
   run.updated_at = ts
   local node = run.nodes[actor_id]
   if not node then
@@ -935,6 +937,7 @@ local function mark_mag_actor(body, status)
       id = actor_id,
       role = factory,
       reasoner = factory,
+      spec = body.spec or {},
       status = "pending",
     }
     run.nodes[actor_id] = node
@@ -944,9 +947,16 @@ local function mark_mag_actor(body, status)
     node.reasoner = factory
     node.role = node.role or factory
   end
-  if status == "running" then
+  if status == "ready" then
+    node.status = "pending"
+  elseif status == "running" or status == "working" then
     node.status = "running"
     node.started_at = node.started_at or ts
+    node.activation_started_at_ms = node.activation_started_at_ms or ts
+  elseif status == "idle" then
+    node.status = "done"
+    node.settled_at_ms = ts
+    node.activation_started_at_ms = nil
   elseif status == "killed" then
     node.status = "killed"
     node.completed_at = node.completed_at or ts
@@ -954,11 +964,18 @@ local function mark_mag_actor(body, status)
     -- A completed run's teardown sweep (mag.actor_killed reason
     -- "run_complete"): the node finished, it wasn't terminated. Terminal
     -- states (killed from a mid-run kill) keep their truth.
-    if node.status == "pending" or node.status == "running" then
+    if node.status == "pending" or node.status == "running"
+        or node.status == "working" or node.status == "idle" then
       node.status = "done"
       node.completed_at = node.completed_at or ts
+      node.settled_at_ms = ts
+      node.activation_started_at_ms = nil
     end
   end
+  -- Ready means resident, not active. The lead's compact status vocabulary
+  -- uses pending/running/done while busy/idle boundaries contribute the same
+  -- active-time intervals as the sidebar's idle/working states.
+  run.group_activity = run_projection.advance_group_activity(run, run.nodes, ts)
 end
 
 -- `mag.run_complete` (the sink's terminal signal, ahead of the terminal
@@ -968,15 +985,19 @@ end
 local function mark_mag_run_complete(body)
   local run = mag_event_run(body)
   if not run then return end
-  local ts = now_ms()
+  local ts = monotonic_now_ms() or 0
   run.updated_at = ts
   for _, id in ipairs(run.nodes_order or {}) do
     local node = run.nodes[id]
-    if node and (node.status == "pending" or node.status == "running") then
+    if node and (node.status == "pending" or node.status == "running"
+        or node.status == "working" or node.status == "idle") then
       node.status = "done"
       node.completed_at = node.completed_at or ts
+      node.settled_at_ms = node.settled_at_ms or ts
+      node.activation_started_at_ms = nil
     end
   end
+  run.group_activity = run_projection.advance_group_activity(run, run.nodes, ts)
 end
 
 -- Snapshot the kernel registry's factory names from a mag.hello / mag.loaded
@@ -1052,6 +1073,7 @@ local function relay_kernel_completion(run, ok, content, err)
   local al = require("libs.agentic-loop")
   if type(al.relay_run_completion) ~= "function" then return false end
   local completion = completion_payload(run.run_id, run.run_name, ok, content, err)
+  completion.workflow_tree = run.terminal_workflow_tree
   completion.request_ids = run.request_ids
   return al.relay_run_completion(completion)
 end
@@ -1121,7 +1143,7 @@ local function emit_mag_result_block(run, status, output_path, err)
   emit("nefor-tui", block)
 end
 
--- Close a kernel run on its terminal mag.run_result. Updates run/graph-status
+-- Close a kernel run on its terminal mag.run_result. Updates run/mag-status
 -- state with the sink's output PATH, appends the visible run-result block,
 -- then relays the completion to the model as a fresh turn (item 2 parity).
 -- The relayed content is the sink's final result carried INLINE on the reply
@@ -1150,6 +1172,8 @@ local function handle_mag_run_result(body)
   end
   local run = state.active_runs[run_id]
   if not run then return end
+  local terminal_ms = monotonic_now_ms() or 0
+  run.active_at_terminal = run_projection.active_groups(run, run.nodes)
 
   -- A parent terminal result proves that every nested completion previously
   -- resumed into that owner was consumed and the owner itself settled.
@@ -1163,7 +1187,7 @@ local function handle_mag_run_result(body)
   run = settled.run
   if state.active_run_id == run_id then refresh_active_run_id() end
 
-  local ts = now_ms()
+  local ts = terminal_ms
   local failed = body.status == "failed" or body.status == "killed"
   local err = body.error
     or (body.status == "killed" and "run killed" or "mag run failed")
@@ -1189,11 +1213,20 @@ local function handle_mag_run_result(body)
   end
   for _, id in ipairs(run.nodes_order or {}) do
     local node = run.nodes and run.nodes[id]
-    if node and (node.status == "pending" or node.status == "running") then
+    if node and (node.status == "pending" or node.status == "running"
+        or node.status == "working" or node.status == "idle") then
       node.status = failed and (body.status == "killed" and "killed" or "error") or "done"
       node.completed_at = node.completed_at or ts
+      node.settled_at_ms = node.settled_at_ms or ts
       if failed then node.error = err end
     end
+  end
+  run.group_activity = run_projection.advance_group_activity(run, run.nodes, ts)
+  run.terminal_workflow_tree = run_projection.format_tree(run, ts, true)
+  if type(settled.outcome) == "table" and type(settled.outcome.output) == "table" then
+    settled.outcome.output.workflow_tree = run.terminal_workflow_tree
+  elseif type(settled.outcome) == "table" and type(settled.outcome.error) == "string" then
+    settled.outcome.error = settled.outcome.error .. "\nWorkflow:\n" .. run.terminal_workflow_tree
   end
 
   for _, firing_id in ipairs(settled.waiters) do
@@ -1449,7 +1482,7 @@ expire_termination_waiter = function(run_id, firing_id)
       table.remove(waiters, index)
       if #waiters == 0 then state.termination_waiters[run_id] = nil end
       emit_tool_result_err(firing_id,
-        "terminate-graph: timed out awaiting canonical terminal confirmation for " .. run_id)
+        "mag-terminate: timed out awaiting canonical terminal confirmation for " .. run_id)
       return true
     end
   end
@@ -1459,7 +1492,7 @@ end
 terminate_graph = function(firing_id, args, metadata)
   local run_id = args and args.run_id
   if type(run_id) ~= "string" or run_id == "" then
-    emit_tool_result_err(firing_id, "terminate-graph: args.run_id must be a non-empty active graph run id")
+    emit_tool_result_err(firing_id, "mag-terminate: args.run_id must be a non-empty active graph run id")
     return
   end
 
@@ -1484,7 +1517,7 @@ terminate_graph = function(firing_id, args, metadata)
   end
 
   local first_request = run.phase ~= "terminating"
-  run_registry:mark_terminating(run_id, "terminate-graph")
+  run_registry:mark_terminating(run_id, "mag-terminate")
   if first_request then
     emit_as(SOURCE_NAME, "mag", { kind = "mag.kill_run", run_id = run_id })
   end
@@ -1533,7 +1566,7 @@ end
 graph_status = function(firing_id, args, metadata)
   local context, context_error = run_control_context(metadata)
   if not context then
-    emit_tool_result_err(firing_id, "graph-status: " .. tostring(context_error))
+    emit_tool_result_err(firing_id, "mag-status: " .. tostring(context_error))
     return
   end
   local now = graph_status_now()
@@ -1558,10 +1591,10 @@ graph_status = function(firing_id, args, metadata)
   local cooldown_count, oldest_key = prune_graph_status_cooldowns(now)
   if state.graph_status_cooldowns[target_key] ~= nil then
     emit_tool_result_err(firing_id,
-      "graph-status blocked for " .. target_label .. ": you called it less than " ..
+      "mag-status blocked for " .. target_label .. ": you called it less than " ..
       GRAPH_STATUS_COOLDOWN_SECONDS .. "s ago. " ..
       "Graph results arrive automatically — do not poll. " ..
-      "Stop calling graph-status and wait for the result to arrive, or address the user.")
+      "Stop calling mag-status and wait for the result to arrive, or address the user.")
     return
   end
   if cooldown_count >= GRAPH_STATUS_COOLDOWN_LIMIT then
@@ -1632,8 +1665,6 @@ local function reconcile_mag_authority_loss(reason)
       pending.attached_request_ids, "run:" .. pending.run_id)
     emit_tool_result_err(pending.firing_id, "mag apply: authority lost: " .. message)
   end
-  mag_eval.authority_lost(message)
-
   for run_id in pairs(state.completion_grace_waiters) do
     local waiter = cancel_completion_grace(run_id)
     if waiter then emit_tool_result_err(waiter.firing_id, "mag: authority lost: " .. message) end
@@ -1642,7 +1673,7 @@ local function reconcile_mag_authority_loss(reason)
     take_termination_waiters(run_id)
     for _, waiter in ipairs(waiters) do
       emit_tool_result_err(waiter.firing_id,
-        "terminate-graph: MAG authority was lost before terminal confirmation")
+        "mag-terminate: MAG authority was lost before terminal confirmation")
     end
   end
 
@@ -1668,7 +1699,7 @@ local function terminate_active_graph(session_id)
     take_termination_waiters(run_id)
     for _, waiter in ipairs(waiters) do
       emit_tool_result_err(waiter.firing_id,
-        "terminate-graph: session ended before canonical terminal confirmation")
+        "mag-terminate: session ended before canonical terminal confirmation")
     end
   end
   state.active_plan = nil
@@ -1699,7 +1730,7 @@ local advertised = false
 local function lead_workflow_tool_schemas()
   return {
     {
-      name        = "graph-status",
+      name        = "mag-status",
       display = display_contract("graph status", run_label_field(false), {}, "content", nil, { display_field("state", "result", "$", "structured") }),
       description =
         "Report active graph runs, or one active/recent completed run " ..
@@ -1709,6 +1740,7 @@ local function lead_workflow_tool_schemas()
         "to wait; run outcomes are delivered to you when they land.",
       parameters  = {
         type = "object",
+        additionalProperties = false,
         properties = {
           run_id = {
             type = "string",
@@ -1718,34 +1750,36 @@ local function lead_workflow_tool_schemas()
       },
     },
     {
-      name        = "await-run",
+      name        = "mag-await",
       display = display_contract("await run", run_label_field(true), {}, "content", nil, { display_field("outcome", "result", "$", "structured") }),
       description =
         "Block until a previously acknowledged detached MAG run reaches its canonical " ..
         "terminal result. The root lead may address same-session runs globally; a non-root " ..
         "agent may address only runs that exact actor directly dispatched. This attaches to " ..
-        "the existing run and does not poll graph-status or cancel it. Use this when your next " ..
+        "the existing run and does not poll mag-status or cancel it. Use this when your next " ..
         "step depends on completion. A run reaches terminal state only when its processes exit; " ..
         "awaiting a persistent foreground server or watcher therefore waits indefinitely. Never " ..
         "launch such a process as a normal run and await it. Cancellation detaches only this " ..
-        "waiter; use terminate-graph separately to stop the run.",
+        "waiter; use mag-terminate separately to stop the run.",
       parameters  = {
         type = "object",
+        additionalProperties = false,
         properties = {
           run_id = {
             type = "string",
-            description = "Stable opaque run_id returned by a fresh mag apply or lead mag-eval dispatch.",
+            description = "Stable opaque run_id returned by a fresh mag-apply dispatch.",
           },
         },
         required = { "run_id" },
       },
     },
     {
-      name        = "terminate-graph",
+      name        = "mag-terminate",
       display = display_contract("terminate graph", run_label_field(true), {}, "content", nil, { display_field("outcome", "result", "$", "structured") }),
       description = "Request termination of exactly one active graph run by explicit run_id and block until its exact canonical terminal confirmation. The confirmation is returned synchronously and the redundant owner completion is suppressed; a defensive named timeout returns an ordinary tool failure.",
       parameters  = {
         type = "object",
+        additionalProperties = false,
         properties = {
           run_id = {
             type = "string",
@@ -1777,126 +1811,57 @@ local function lead_workflow_tool_schemas()
       },
     },
     {
-      name        = "mag",
-      display = (function()
-        local contract = display_contract(
-          "mag compile",
-          display_field("file", "args", "file", "path"),
-          { display_field("action", "args", "action", "scalar", { omit = "missing" }) },
-          "content",
-          nil,
-          {
-            display_field("status", "result", "status", "status", { omit = "missing" }),
-            display_field("preview", "result", "preview", "text",
-              { omit = "missing", max_lines = 80, max_bytes = 8000 }),
-            display_field("source path", "result", "source_path", "path", { omit = "missing" }),
-            display_field("output path", "result", "output_path", "path", { omit = "missing" }),
-          },
-          "delayed")
-        contract.variant = {
-          select = { source = "args", path = "action", default = "compile" },
-          cases = {
-            write = display_contract(
-              "mag write",
-              display_field("file", "args", "file", "path"),
-              {},
-              "receipt",
-              "MAG source written",
-              { display_field("source path", "result", "source_path", "path", { omit = "missing" }) },
-              "delayed"),
-            apply = display_contract(
-              "mag apply",
-              display_field("file", "args", "file", "path"),
-              { display_field("run", "args", "run_id", "scalar", { omit = "missing" }) },
-              "receipt",
-              "MAG graph applied",
-              {
-                display_field("status", "result", "status", "status", { omit = "missing" }),
-                display_field("run", "result", "run_id", "scalar", { omit = "missing" }),
-                display_field("output path", "result", "output_path", "path", { omit = "missing" }),
-              },
-              "delayed"),
-          },
-        }
-        return contract
-      end)(),
-      description =
-        "Write, compile, and apply MAG programs on the actor kernel. " ..
-        "Use action='write' to create/update a .mag file in the workspace. " ..
-        "Use action='compile' (default) to compile and preview the actor " ..
-        "modification. Use action='apply' without run_id to compile, validate, and apply " ..
-        "a complete graph to a fresh run. Supply run_id to compile a Delta artifact and " ..
-        "atomically apply its spawns, messages, and kills to that directly dispatched live " ..
-        "run. A live-run delta cannot replace the result boundary. " ..
-        "A fresh apply waits briefly for that exact run's canonical terminal result. A quick " ..
-        "success or failure returns directly; otherwise the existing asynchronous " ..
-        "acknowledgment with a stable run_id is returned and completion arrives later " ..
-        "through the normal owner-scoped notification. Terminal results returned " ..
-        "synchronously remain usable immediately. If any run required for the requested " ..
-        "outcome returned an asynchronous acknowledgment, that outcome remains incomplete " ..
-        "until every required run reaches canonical terminal state. Do not narrate waiting " ..
-        "after a terminal result. MAG already owns the run lifecycle, so commands inside " ..
-        "the graph should normally stay in the foreground rather than using shell " ..
-        "backgrounding. Background only when a process intentionally needs a " ..
-        "separately retained lifecycle. Graph and agent semantics live in " ..
-        "namespaced MAG libraries. " ..
-        "A fresh-run program requires nefor.actors, nefor.graph, nefor.contracts, and " ..
-        "nefor.artifact; construct and compose typed nodes with nefor.node, place " ..
-        "the final composite behind one output edge in a Graph -> Graph function, then " ..
-        "pass that function to nefor.artifact.compile. Compile applies it to " ..
-        "empty-graph. A delta program instead ends in nefor.artifact.delta and " ..
-        "defines only spawns, messages, and kills. Use the agent constructor shown " ..
-        "by the injected canonical contract. " ..
-        "Pass compiler-checked semantic type witnesses such as " ..
-        "(type-tag nefor.contracts.Task) and (type-tag nefor.contracts.TextAnswer); " ..
-        "the libraries derive runtime wires. Exactly one " ..
-        "concrete output<T> identity node marks a fresh run's result boundary. " ..
-        "Authored graph transformations remain pure and retrieve no live state; " ..
-        "only explicit apply submits their compiled Delta to the named run. Agent loops are unbounded; " ..
-        "stop early via interrupt/kill. The ambient reasoner model plus core and Nefor five-minute guides are " ..
-        "the canonical complete examples: use literal (require \"...\") forms and " ..
-        "never copy historical session files or use removed import/bare-helper syntax. " ..
-        "For a one-off shell expression whose result you just need back, " ..
-        "use mag-eval instead — no file, no workspace ceremony.",
-      parameters  = {
-        type = "object",
-        properties = {
-          action = {
-            type        = "string",
-            enum        = { "write", "compile", "apply" },
-            description = "write: create/update a .mag file. compile: compile and preview (default). apply: omit run_id for a fresh graph or supply it to modify that directly dispatched live graph.",
-          },
-          file = {
-            type        = "string",
-            description = "Path to the .mag file, relative to the MAG workspace.",
-          },
-          content = {
-            type        = "string",
-            description = "File content (required for action=write).",
-          },
-          run_id = {
-            type        = "string",
-            description = "Optional directly dispatched live run to modify. Omit for a fresh graph.",
-          },
-        },
-        required = { "file" },
-      },
+      name = "mag-write-file",
+      display = display_contract("mag write file", display_field("file", "args", "file", "path"),
+        {}, "receipt", "MAG source written", {}),
+      description = "Create or overwrite a session MAG source file, or replace one exact unique string in it. The file path is relative to this session's MAG workspace; absolute, non-normalized, traversal, and symlink paths are rejected. Omit old_string to make new_string the complete contents. Supply old_string to edit an existing file. Empty new_string is valid.",
+      parameters = { type = "object", additionalProperties = false, properties = {
+        file = { type = "string", description = "Normalized path relative to the session MAG workspace." },
+        new_string = { type = "string", description = "Complete contents or replacement text; may be empty." },
+        old_string = { type = "string", description = "Optional non-empty exact text that must occur once." },
+      }, required = { "file", "new_string" } },
     },
-    mag_eval.schema,
+    {
+      name = "mag-preview",
+      display = display_contract("mag preview", display_field("file", "args", "file", "path"),
+        {}, "content", nil, { display_field("workflow", "result", "workflow_tree", "text",
+          { max_lines = 120, max_bytes = 12000 }) }, "delayed"),
+      description = "Compile and validate an existing session MAG source file without changing the file or running the workflow. Returns only the fully expanded authored node tree; compilation errors are returned as tool errors.",
+      parameters = { type = "object", additionalProperties = false, properties = {
+        file = { type = "string", description = "Existing normalized path relative to the session MAG workspace." },
+      }, required = { "file" } },
+    },
+    {
+      name = "mag-apply",
+      display = display_contract("mag apply", display_field("file", "args", "file", "path"),
+        { display_field("run", "args", "run_id", "scalar", { omit = "missing" }) },
+        "receipt", "MAG graph applied", {
+          display_field("status", "result", "status", "status", { omit = "missing" }),
+          display_field("run", "result", "run_id", "scalar", { omit = "missing" }),
+          display_field("workflow", "result", "workflow_tree", "text",
+            { omit = "missing", max_lines = 120, max_bytes = 12000 }),
+        }, "delayed"),
+      description = "Compile and apply a session MAG source file. Omit run_id for a fresh graph; supply a directly dispatched live run_id for a delta. Optional content atomically creates a new source file before compilation and fails if that file already exists. Without content, the file must already exist. A fresh run returns quick terminal results directly or an asynchronous run_id acknowledgment; the acknowledgment includes the complete authored node tree. Use mag-await when dependent work needs an asynchronous result, never mag-status for waiting.",
+      parameters = { type = "object", additionalProperties = false, properties = {
+        file = { type = "string", description = "Normalized path relative to the session MAG workspace." },
+        content = { type = "string", description = "Optional complete source for a new file. Existing files are never overwritten here." },
+        run_id = { type = "string", description = "Optional directly dispatched live run to modify. Omit for a fresh graph." },
+      }, required = { "file" } },
+    },
   }
 end
 
 local function advertise_tools(gate_name)
   if advertised then return end
   advertised = true
-    local schemas = lead_workflow_tool_schemas()
-    for _, schema in ipairs(schemas) do
-      local ok, err = tool_display.validate(schema.display)
-      if not ok then
-        error("lead-workflow: tool '" .. tostring(schema.name) .. "' has invalid display: " .. tostring(err))
-      end
+  local schemas = lead_workflow_tool_schemas()
+  for _, schema in ipairs(schemas) do
+    local ok, err = tool_display.validate(schema.display)
+    if not ok then
+      error("lead-workflow: tool '" .. tostring(schema.name) .. "' has invalid display: " .. tostring(err))
     end
-    emit_as(SOURCE_NAME, nil, {
+  end
+  emit_as(SOURCE_NAME, nil, {
     kind   = (gate_name or "tool-gate") .. ".tools.advertise",
     source = SOURCE_NAME,
     tools  = schemas,
@@ -1905,7 +1870,7 @@ end
 
 -- MAG tool handlers.
 --
--- mag: write a .mag file, or compile/apply it through the mag plugin. The
+-- The file tools write, compile, and apply .mag programs through the plugin. The
 -- workspace path and library shapes are ambient (agentic-loop injects them
 -- into the lead's system prompt each turn), so there is no discovery tool.
 
@@ -1979,13 +1944,13 @@ local function async_run_ack(pending, body)
   if pending.dispatcher_id == nil then
     message = "Program submitted to the MAG actor kernel. This acknowledgment is not " ..
       "completion; stop this turn and wait for the normal owner-scoped completion " ..
-      "notification. Do not call graph-status merely to wait. Synchronously terminal " ..
+      "notification. Do not call mag-status merely to wait. Synchronously terminal " ..
       "sibling findings remain usable. Compose dependent work into one MAG graph or bounded " ..
       "operation when it must continue within one workflow."
   else
     message = "Program submitted to the MAG actor kernel. This acknowledgment is not " ..
-      "completion. Use await-run with this run_id when dependent work requires the terminal " ..
-      "result; do not poll graph-status. Synchronously terminal sibling findings remain usable."
+      "completion. Use mag-await with this run_id when dependent work requires the terminal " ..
+      "result; do not poll mag-status. Synchronously terminal sibling findings remain usable."
   end
   return {
     status = "executing",
@@ -1993,6 +1958,7 @@ local function async_run_ack(pending, body)
     run_name = pending.run_name,
     hash = body.hash,
     engine = "mag-kernel",
+    workflow_tree = pending.workflow_tree,
     message = message,
   }
 end
@@ -2032,9 +1998,8 @@ local function cancel_completion_grace_by_firing(firing_id)
   return false
 end
 
--- Validate and submit one loaded artifact through the standard active-run
--- channel. Both a fresh file-based `mag apply` and `mag-eval` use this
--- path, so lifecycle/control/rendering/archival/cleanup have one owner.
+-- Validate and submit one loaded file artifact through the standard active-run
+-- channel, so lifecycle/control/rendering/archival/cleanup have one owner.
 submit_loaded_run = function(pending, body, error_prefix)
   local decoded, decode_error = mag.decode_artifact(body.artifact)
   local function reject(message)
@@ -2079,6 +2044,8 @@ submit_loaded_run = function(pending, body, error_prefix)
   local run = register_active_run(pending.run_id, inventory, terminal_id,
     pending.firing_id, pending.run_name, pending.session_id, pending.dispatcher_id,
     owner_resume, pending.request_ids)
+  run.logical_nodes = modification.nodes or {}
+  run.workflow_tree = pending.workflow_tree or mag.workflow_tree(run.logical_nodes)
   run.invocation_label = pending.invocation_label or pending.run_name
   run.invocation_kind = pending.invocation_kind
   begin_completion_grace(run, async_run_ack(pending, body))
@@ -2106,6 +2073,7 @@ local function submit_loaded_apply(pending, body)
     firing_id = pending.firing_id,
     run_id = pending.run_id,
     hash = body.hash,
+    workflow_tree = pending.workflow_tree,
     request_ids = pending.request_ids,
   }
   local target = state.active_runs[pending.run_id]
@@ -2157,6 +2125,7 @@ local function resolve_pending_apply(body)
       run_id = pending.run_id,
       hash = pending.hash,
       engine = "mag-kernel",
+      workflow_tree = pending.workflow_tree,
       message = "Modification applied atomically to the live MAG run.",
     })
   else
@@ -2203,13 +2172,12 @@ local function resume_pending_load(body)
     return
   end
 
-  if pending.action == "compile" then
+  local workflow_tree = mag.workflow_tree(decoded.modification.nodes)
+  pending.workflow_tree = workflow_tree
+
+  if pending.action == "preview" then
     emit_tool_result_ok(pending.firing_id, {
-      status  = "compiled",
-      preview = mag.preview(artifact, body.hash, body.factories),
-      hash    = body.hash,
-      message = "Program compiled successfully. Review the preview above. " ..
-        "Call mag with action='apply' to run it.",
+      workflow_tree = workflow_tree,
     })
     return
   end
@@ -2235,70 +2203,55 @@ local function fail_pending_load(body)
     "compilation failed:\n" .. tostring(body.message))
 end
 
-local function mag_handler(firing_id, args, metadata)
+local function mag_workspace(firing_id, args, metadata, tool_name)
   local provenance, provenance_error = resolve_invocation(metadata, "lead")
   if not provenance then
-    emit_tool_result_err(firing_id, "mag: " .. provenance_error)
-    return
+    emit_tool_result_err(firing_id, tool_name .. ": " .. provenance_error)
+    return nil
   end
-  local session_id = provenance.session_id
-
   if type(args.file) ~= "string" or #args.file == 0 then
-    emit_tool_result_err(firing_id, "mag: requires a non-empty 'file' argument")
-    return
+    emit_tool_result_err(firing_id, tool_name .. ": requires a non-empty 'file' argument")
+    return nil
   end
-  if args.file:sub(1, 1) == "/" then
-    emit_tool_result_err(firing_id, "mag: absolute paths not allowed: " .. args.file)
-    return
-  end
-  if args.file:find("%.%.") then
-    emit_tool_result_err(firing_id, "mag: path traversal not allowed: " .. args.file)
-    return
-  end
-
   local config_dir = os.getenv("NEFOR_CONFIG_DIR") or "."
-  local ws, ws_err = mag.init_workspace(session_id, config_dir)
+  local ws, ws_err = mag.init_workspace(provenance.session_id, config_dir)
   if not ws then
-    emit_tool_result_err(firing_id, "mag: workspace init failed: " .. tostring(ws_err))
-    return
+    emit_tool_result_err(firing_id, tool_name .. ": workspace init failed: " .. tostring(ws_err))
+    return nil
   end
-  local file_path = ws .. "/" .. args.file
-  local action = args.action or "compile"
-
-  -- Write action: create/update a .mag file in the workspace.
-  if action == "write" then
-    if type(args.content) ~= "string" then
-      emit_tool_result_err(firing_id, "mag write: requires 'content' string")
-      return
-    end
-    local dir = file_path:match("(.+)/[^/]+$")
-    if dir then mkdir_p(dir) end
-    local fh, open_err = io.open(file_path, "w")
-    if not fh then
-      emit_tool_result_err(firing_id, "mag write: cannot create " .. args.file .. ": " .. tostring(open_err))
-      return
-    end
-    fh:write(args.content)
-    fh:close()
-    emit_tool_result_ok(firing_id, {
-      status  = "written",
-      file    = args.file,
-      source_path = file_path,
-      message = "File written: " .. args.file,
-    })
-    return
+  local _, path_error = mag.resolve_file(ws, args.file)
+  if path_error then
+    emit_tool_result_err(firing_id, tool_name .. ": " .. path_error)
+    return nil
   end
+  return ws, provenance
+end
 
-  if action ~= "compile" and action ~= "apply" then
-    emit_tool_result_err(firing_id,
-      "mag: unknown action '" .. tostring(action) ..
-      "' (valid: write, compile, apply)")
-    return
+local function mag_write_file(firing_id, args, metadata)
+  local ws = mag_workspace(firing_id, args, metadata, "mag-write-file")
+  if not ws then return end
+  local receipt, error = mag.write_file(ws, args.file, args.new_string, args.old_string)
+  if not receipt then
+    emit_tool_result_err(firing_id, "mag-write-file: " .. tostring(error))
+  else
+    emit_tool_result_ok(firing_id, receipt)
   end
+end
 
-  if action == "apply" and args.run_id ~= nil then
+local function mag_preview(firing_id, args, metadata)
+  local ws, provenance = mag_workspace(firing_id, args, metadata, "mag-preview")
+  if not ws then return end
+  local _, error = mag.require_file(ws, args.file)
+  if error then emit_tool_result_err(firing_id, "mag-preview: " .. error); return end
+  begin_mag_load(firing_id, "preview", args, ws, provenance)
+end
+
+local function mag_apply(firing_id, args, metadata)
+  local ws, provenance = mag_workspace(firing_id, args, metadata, "mag-apply")
+  if not ws then return end
+  if args.run_id ~= nil then
     if type(args.run_id) ~= "string" or args.run_id == "" then
-      emit_tool_result_err(firing_id, "mag apply: run_id must be a non-empty graph run id")
+      emit_tool_result_err(firing_id, "mag-apply: run_id must be a non-empty graph run id")
       return
     end
     local context = {
@@ -2310,26 +2263,29 @@ local function mag_handler(firing_id, args, metadata)
     if not target or target.phase == "terminal" then
       local error_code = target_error and target_error.error_code or "not_active"
       local message = target_error and target_error.error or "graph run is already terminal"
-      emit_tool_result_err(firing_id, "mag apply[" .. error_code .. "]: " .. message)
+      emit_tool_result_err(firing_id, "mag-apply[" .. error_code .. "]: " .. message)
       return
     end
   end
-
-  -- Compile and apply both go through the mag plugin's load handshake;
-  -- the mag.loaded reply resolves them (resume_pending_load).
-  -- File-based MAG execution is detached for every caller. Non-root authority
-  -- is recorded against the kernel-stamped actor that made this invocation.
-  begin_mag_load(firing_id, action, args, ws, provenance)
+  local _, source_error
+  if args.content ~= nil then
+    _, source_error = mag.create_file(ws, args.file, args.content)
+  else
+    _, source_error = mag.require_file(ws, args.file)
+  end
+  if source_error then emit_tool_result_err(firing_id, "mag-apply: " .. source_error); return end
+  begin_mag_load(firing_id, "apply", args, ws, provenance)
 end
 
 local TOOL_HANDLERS = {
-  ["graph-status"]    = graph_status,
-  ["await-run"]       = await_run,
-  ["terminate-graph"] = terminate_graph,
-  ["write-review"]    = submit_plan,
-  ["submit-plan"]     = submit_plan,
-  ["mag"]             = mag_handler,
-  ["mag-eval"]        = mag_eval.handle,
+  ["mag-status"]     = graph_status,
+  ["mag-await"]      = await_run,
+  ["mag-terminate"]  = terminate_graph,
+  ["write-review"]   = submit_plan,
+  ["submit-plan"]    = submit_plan,
+  ["mag-write-file"] = mag_write_file,
+  ["mag-preview"]    = mag_preview,
+  ["mag-apply"]      = mag_apply,
 }
 
 local function handle_tool_invoke(body)
@@ -2397,9 +2353,7 @@ local function receive_msg(entry)
     return
   end
 
-  -- Gate-forwarded cancel addresses the source's inner firing id. For evals it
-  -- either removes a pending compile or matches a submitted standard run's
-  -- dispatch_firing_id.
+  -- Gate-forwarded cancel addresses the source's inner firing id.
   if kind == "lead-workflow.tool.cancel" then
     if replay_window.active() then return end
     local plan = state.active_plan
@@ -2419,7 +2373,6 @@ local function receive_msg(entry)
       end
     end
     cancel_completion_grace_by_firing(body.id)
-    mag_eval.cancel(body.id)
     invalidate_pending_mag_loads(body.id)
     invalidate_pending_mag_applies(body.id)
     interrupt_run_by_dispatch_firing(body.id)
@@ -2477,13 +2430,8 @@ local function receive_msg(entry)
     return
   end
 
-  -- Refresh the registry before either eval or file-load validation consumes a
-  -- loaded artifact.
+  -- Refresh the registry before file-load validation consumes a loaded artifact.
   if kind == "mag.loaded" then capture_kernel_factories(body) end
-
-  -- mag-eval owns pending compile correlation. Submitted evals join the
-  -- standard active-run path from its load hook.
-  if mag_eval.on_bus(kind, body) then return end
 
   -- MAG kernel path.
   -- mag.hello advertises the factory registry at plugin startup — the startup
@@ -2540,7 +2488,7 @@ local function receive_msg(entry)
     return
   end
   -- Kernel actor lifecycle: keep the tracked run's node statuses at the same
-  -- truth the chat surface's live panel tracks, so graph-status and the
+  -- truth the chat surface's live panel tracks, so mag-status and the
   -- run-result block report done/killed rather than dispatch-time pending.
   if kind == "mag.run_started" then
     mark_mag_run_started(body)
@@ -2551,7 +2499,7 @@ local function receive_msg(entry)
     return
   end
   if kind == "mag.actor_ready" then
-    mark_mag_actor(body, "running")
+    mark_mag_actor(body, "ready")
     return
   end
   if kind == "mag.actor_busy" then
@@ -2564,7 +2512,7 @@ local function receive_msg(entry)
   end
   if kind == "mag.actor_killed" then
     -- Teardown after a successful completion (reason "run_complete") is
-    -- bookkeeping, not death: graph-status/result blocks report done. All
+    -- bookkeeping, not death: mag-status/result blocks report done. All
     -- other reasons (mid-run kill, run_failed, kill_run, session reap)
     -- report killed as before.
     mark_mag_actor(body, body.reason == "run_complete" and "done" or "killed")
@@ -2612,7 +2560,6 @@ local function cancel_request(request_id, _err)
       end
     end
   end
-  mag_eval.cancel_request(request_id)
   for run_id, run in pairs(state.active_runs) do
     for _, owned_request_id in ipairs(run.request_ids or {}) do
       if owned_request_id == request_id then
@@ -2710,7 +2657,6 @@ local M = {
       agent_system = nil
       ambient_context = nil
       resolve_model_snapshot = nil
-      mag_eval._internals.reset()
       advertised = false
     end,
   },
@@ -2749,25 +2695,6 @@ function M.configure(opts)
     end
     resolve_model_snapshot = opts.resolve_model_snapshot
   end
-  mag_eval.configure({
-    dependency_module_roots = copy_roots(roots),
-    project_build = project_build,
-    resolve_invocation = resolve_invocation,
-    mint_run_id = function() return run_registry:mint_run_id() end,
-    submit_run = function(pending, body)
-      return submit_loaded_run(pending, body, "mag-eval")
-    end,
-  })
 end
-
--- Install the standard lead-run submitter even when the composition uses the
--- module defaults and never calls configure explicitly.
-mag_eval.configure({
-  resolve_invocation = resolve_invocation,
-  mint_run_id = function() return run_registry:mint_run_id() end,
-  submit_run = function(pending, body)
-    return submit_loaded_run(pending, body, "mag-eval")
-  end,
-})
 
 return M

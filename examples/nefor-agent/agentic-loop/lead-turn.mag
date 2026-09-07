@@ -15,13 +15,13 @@
          ["read_file"
                  "read_image"
                  "instructions"
-                 "edit_file"
-                 "graph-status"
-                 "await-run"
-                 "terminate-graph"
+                 "mag-status"
+                 "mag-await"
+                 "mag-terminate"
                  "write-review"
-                 "mag"
-                 "mag-eval"]
+                 "mag-write-file"
+                 "mag-preview"
+                 "mag-apply"]
         (type-tag nefor.contracts.Task)
         (type-tag nefor.contracts.TextAnswer)
         2))

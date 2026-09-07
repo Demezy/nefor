@@ -61,6 +61,179 @@ local function mkdir_p(path)
   return ok == true or ok == 0
 end
 
+local function exists(path)
+  if nefor and nefor.fs and type(nefor.fs.exists) == "function" then
+    return nefor.fs.exists(path)
+  end
+  local handle = io.open(path, "r")
+  if handle then handle:close(); return true end
+  return false
+end
+
+local function is_symlink(path)
+  local result = os.execute("test -L " .. sh_quote(path) .. " >/dev/null 2>&1")
+  return result == true or result == 0
+end
+
+-- Resolve a model-authored source name inside one session workspace. Rejecting
+-- symlink components is what makes lexical containment meaningful even when a
+-- prior process has written into the workspace.
+function M.resolve_file(workspace, file)
+  if type(workspace) ~= "string" or workspace:sub(1, 1) ~= "/" then
+    return nil, "workspace must be an absolute path"
+  end
+  if type(file) ~= "string" or file == "" then return nil, "file must be non-empty" end
+  if file:sub(1, 1) == "/" then return nil, "absolute paths are not allowed: " .. file end
+  local parts = {}
+  for part in file:gmatch("[^/]+") do
+    if part == "." or part == ".." then
+      return nil, "path traversal is not allowed: " .. file
+    end
+    if part:find("%z") then return nil, "file contains a NUL byte" end
+    parts[#parts + 1] = part
+  end
+  if #parts == 0 or table.concat(parts, "/") ~= file then
+    return nil, "file must be a normalized relative path: " .. file
+  end
+  local current = workspace
+  if is_symlink(current) then return nil, "workspace is a symlink" end
+  for _, part in ipairs(parts) do
+    current = current .. "/" .. part
+    if is_symlink(current) then return nil, "symlink paths are not allowed: " .. file end
+  end
+  return current
+end
+
+local function ensure_parent(path)
+  local parent = path:match("(.+)/[^/]+$")
+  if parent and not mkdir_p(parent) then return nil, "cannot create parent directory" end
+  return true
+end
+
+local function read_text(path)
+  local handle, err = io.open(path, "rb")
+  if not handle then return nil, err end
+  local value = handle:read("*a")
+  handle:close()
+  if value:find("%z") then return nil, "file contains binary data" end
+  return value
+end
+
+local function write_text(path, content, exclusive)
+  local ok, err = ensure_parent(path)
+  if not ok then return nil, err end
+  local write_path = path
+  local temp_dir
+  if exclusive then
+    for _ = 1, 16 do
+      local candidate = path .. ".create-" .. tostring(os.time()) .. "-"
+        .. tostring(math.random(100000, 999999))
+      local made = os.execute("mkdir -m 700 " .. sh_quote(candidate) .. " >/dev/null 2>&1")
+      if made == true or made == 0 then temp_dir = candidate; break end
+    end
+    if not temp_dir then return nil, "cannot create a private temporary directory" end
+    write_path = temp_dir .. "/source"
+  end
+  local handle, open_error = io.open(write_path, "w")
+  if not handle then
+    if temp_dir then os.execute("rmdir " .. sh_quote(temp_dir) .. " >/dev/null 2>&1") end
+    return nil, open_error
+  end
+  local wrote, write_error = handle:write(content)
+  local closed, close_error = handle:close()
+  if not wrote or not closed then
+    os.remove(write_path)
+    if temp_dir then os.execute("rmdir " .. sh_quote(temp_dir) .. " >/dev/null 2>&1") end
+    return nil, write_error or close_error
+  end
+  if exclusive then
+    -- POSIX hard-link creation is atomic and refuses an existing destination;
+    -- unlike rename it cannot clobber a concurrently created source file.
+    local linked = os.execute("ln " .. sh_quote(write_path) .. " " .. sh_quote(path) .. " >/dev/null 2>&1")
+    os.remove(write_path)
+    os.execute("rmdir " .. sh_quote(temp_dir) .. " >/dev/null 2>&1")
+    if linked ~= true and linked ~= 0 then return nil, "file already exists or could not be created" end
+  end
+  return true
+end
+
+function M.write_file(workspace, file, new_string, old_string)
+  local path, path_error = M.resolve_file(workspace, file)
+  if not path then return nil, path_error end
+  if type(new_string) ~= "string" then return nil, "new_string must be a string" end
+  if old_string == nil then
+    local existed = exists(path)
+    local ok, error = write_text(path, new_string, false)
+    if not ok then return nil, error end
+    return { operation = existed and "overwritten" or "created", source_path = path }
+  end
+  if type(old_string) ~= "string" or old_string == "" then
+    return nil, "old_string must be a non-empty string when present"
+  end
+  if old_string == new_string then return nil, "old_string and new_string must differ" end
+  local content, read_error = read_text(path)
+  if not content then return nil, read_error end
+  local count, search_at = 0, 1
+  while true do
+    local start_at, end_at = content:find(old_string, search_at, true)
+    if not start_at then break end
+    count = count + 1
+    search_at = end_at + 1
+  end
+  if count == 0 then return nil, "old_string was not found in the file" end
+  if count > 1 then return nil, "old_string matched multiple locations; provide more context" end
+  local start_at, end_at = content:find(old_string, 1, true)
+  local replacement = content:sub(1, start_at - 1) .. new_string .. content:sub(end_at + 1)
+  local ok, error = write_text(path, replacement, false)
+  if not ok then return nil, error end
+  return { operation = "edited", source_path = path }
+end
+
+function M.create_file(workspace, file, content)
+  local path, path_error = M.resolve_file(workspace, file)
+  if not path then return nil, path_error end
+  if exists(path) then
+    return nil, "file already exists: " .. file ..
+      "; omit content to use it, or modify it with mag-write-file before applying"
+  end
+  if type(content) ~= "string" then return nil, "content must be a string" end
+  local ok, error = write_text(path, content, true)
+  if not ok then return nil, error end
+  return { operation = "created", source_path = path }
+end
+
+function M.require_file(workspace, file)
+  local path, path_error = M.resolve_file(workspace, file)
+  if not path then return nil, path_error end
+  if not exists(path) then return nil, "file does not exist: " .. file end
+  return path
+end
+
+-- Render the authored logical node hierarchy. The compiler owns these paths;
+-- actor ids and lowered routes are intentionally absent from the model view.
+function M.workflow_tree(descriptors)
+  if type(descriptors) ~= "table" or #descriptors == 0 then return "(empty workflow)" end
+  local lines, seen = {}, {}
+  local function key(path, length)
+    local parts = {}
+    for index = 1, length or #path do parts[#parts + 1] = tostring(path[index]) end
+    return table.concat(parts, "\0")
+  end
+  for _, descriptor in ipairs(descriptors) do
+    local path = type(descriptor) == "table" and descriptor.path or nil
+    if type(path) == "table" and #path > 0 then
+      for length = 1, #path do
+        local path_key = key(path, length)
+        if not seen[path_key] then
+          seen[path_key] = true
+          lines[#lines + 1] = string.rep("  ", length - 1) .. "- " .. tostring(path[length])
+        end
+      end
+    end
+  end
+  return #lines > 0 and table.concat(lines, "\n") or "(empty workflow)"
+end
+
 -- Get the MAG workspace directory for a session.
 function M.workspace_dir(session_id)
   local root = sessions_root()

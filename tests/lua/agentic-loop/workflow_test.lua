@@ -1589,7 +1589,7 @@ end
 
 -- (lead-scoped firing ids) the public caller-routing seam: the active turn's
 -- scope-prefixed gate correlation ids are the lead's own; a sub-run's are
--- not (mag-eval detaches by this test).
+-- not (detached MAG execution exercises this boundary).
 do
   fresh_loop()
   begin_bound_turn("scoped", "r13")

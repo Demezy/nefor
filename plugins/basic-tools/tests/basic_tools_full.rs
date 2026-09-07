@@ -3,12 +3,6 @@ mod error {
 }
 
 mod tools {
-    pub mod edit_file {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/tools/edit_file.rs"
-        ));
-    }
 
     pub mod process {
         include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tools/process.rs"));

@@ -54,20 +54,20 @@ claim from a narrow check.
 
 1. Understand the request. Read partially inlined `@path` references before
    planning from them.
-2. Use `mag-eval` for quick world lookups. Use a `.mag` program for agents,
-   parallel work, review, or a durable workflow.
-3. Write the program with `mag`, compile it, and inspect the preview. Compilation
+2. Use direct context and process tools for quick world lookups. Use a `.mag`
+   program for agents, parallel work, review, or a durable workflow.
+3. Write the program with `mag-write-file`, then inspect it with `mag-preview`. Compilation
    validates the program; it is not approval for writes.
 4. Call `write-review` before applying a write-capable program.
-5. Apply with `mag`, omitting `run_id` to create a fresh graph. Application
+5. Apply with `mag-apply`, omitting `run_id` to create a fresh graph. Application
    briefly waits for that exact run. A quick terminal result is final—use it
    directly and do not narrate waiting. Otherwise dispatch returns a stable
    `run_id` acknowledgment; if your next decision depends on completion, call
-   `await-run` once with that handle. Otherwise continue independent work and
+   `mag-await` once with that handle. Otherwise continue independent work and
    let the normal completion notification arrive. Keep terminal findings from
    synchronous siblings, but do not claim the requested outcome complete until
    every asynchronous run required for it reaches canonical terminal state.
-   Never poll `graph-status`.
+   Never poll `mag-status`.
 6. Report the result. On failure, name the failed actor or validation and change
    the source before retrying.
 
@@ -76,19 +76,19 @@ claim from a narrow check.
 Use each advertised tool according to its schema. Keep cross-tool selection and
 lifecycle policy here rather than restating individual signatures:
 
-- Use direct context tools for known inputs and narrow, already-understood
-  edits. Use `mag-eval` for one-node world lookups; use a `.mag` program when
+- Use direct context and process tools for known inputs, world lookups, and
+  narrow, already-understood edits. Use a `.mag` program when
   the work needs agents, parallelism, review, or a durable multi-node workflow.
 - Prefer structured process execution for a single command. Use a shell script
   only when an explicit POSIX shell program is required. Run commands in the
   foreground with an explicit timeout policy; do not background work or poll
   for its completion.
-- A detached run acknowledgment is not completion. Use `await-run` once only
+- A detached run acknowledgment is not completion. Use `mag-await` once only
   when the next decision depends on that run's terminal result. Terminal
   findings from a mixed synchronous/asynchronous dispatch remain usable; track
   every asynchronous run required for the user's outcome and withhold the final
   completion claim until each has delivered its canonical terminal result. Use
-  `graph-status` only for a one-shot state snapshot, and use `terminate-graph`
+  `mag-status` only for a one-shot state snapshot, and use `mag-terminate`
   separately when a run must stop.
 - Compile and inspect a write-capable graph before requesting approval. Apply it
   only after `write-review` approves the concrete plan in the same turn.

@@ -656,7 +656,7 @@ end
 
 -- Deferred relay queue. Carries any text that needs to land as the next
 -- turn's user-role task: dispatched kernel-run completion bodies relayed
--- by lead-workflow and mag-eval (relay_run_completion).
+-- by lead-workflow (relay_run_completion).
 local function flush_deferred()
   if state.current_run_id ~= nil then return end
   if conversation_commit_pending() or not conversation_ready() then return end
@@ -1649,7 +1649,7 @@ end
 -- completion is formatted into a user-role task (format_deferred) and
 -- submitted as a new turn-program once the lead is idle (deferred_queue +
 -- flush_deferred). lead-workflow drives this for kernel runs the lead
--- dispatched via its `mag` tool.
+-- dispatched via its `mag-apply` tool.
 -- `completion` shape: { run_id, status = "success"|"failed", output|error }.
 function M.relay_run_completion(completion)
   if type(completion) ~= "table" then return false end

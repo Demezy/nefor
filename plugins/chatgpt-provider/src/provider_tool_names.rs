@@ -189,7 +189,6 @@ mod tests {
             "read_file",
             "read_image",
             "write_file",
-            "edit_file",
             "search_text",
             "list_dir",
             "instructions",

@@ -1313,12 +1313,13 @@ mod tests {
         }
 
         for name in [
-            "graph-status",
-            "await-run",
-            "terminate-graph",
+            "mag-status",
+            "mag-await",
+            "mag-terminate",
             "write-review",
-            "mag",
-            "mag-eval",
+            "mag-write-file",
+            "mag-preview",
+            "mag-apply",
             "list_dir",
             "skill",
         ] {
@@ -1946,7 +1947,7 @@ mod tests {
         let mut state = make_state();
         let body = advertise_body(
             "basic-tools",
-            json!([{"name": "edit_file", "description": "", "parameters": {}}]),
+            json!([{"name": "patch_file", "description": "", "parameters": {}}]),
         );
         handle_tools_advertise(&tx, &body, &mut state)
             .await
@@ -1956,7 +1957,7 @@ mod tests {
         let invoke = json!({
             "kind": "tool-gate.tool.invoke",
             "id": "prov-8",
-            "name": "edit_file",
+            "name": "patch_file",
             "args": {"path": "/x", "old_string": "a", "new_string": "b"}
         })
         .as_object()
@@ -1972,8 +1973,7 @@ mod tests {
             "args": {
                 "path": "/x",
                 "old_string": "a",
-                "new_string": "b",
-                "policy": {"require_unique_match": false}
+                "new_string": "B"
             }
         })
         .as_object()
@@ -1989,7 +1989,7 @@ mod tests {
             .get("body")
             .and_then(|b| b.get("args"))
             .expect("forwarded args");
-        assert_eq!(args["policy"]["require_unique_match"], json!(false));
+        assert_eq!(args["new_string"], json!("B"));
     }
 
     #[tokio::test]
@@ -2181,7 +2181,7 @@ mod tests {
         let source_result = json!({
             "kind": "tool.result",
             "id": "gate-1",
-            "output": {"status": "executing", "run_id": "mag-eval-1"},
+            "output": {"status": "executing", "run_id": "mag-run-1"},
             "completion_delivery": "async"
         })
         .as_object()
@@ -2193,7 +2193,7 @@ mod tests {
         let returned: Value = serde_json::from_str(&rx.recv().await.unwrap().to_line()).unwrap();
         assert_eq!(returned["body"]["id"], "r7/cap-3");
         assert_eq!(returned["body"]["name"], "write_file");
-        assert_eq!(returned["body"]["output"]["run_id"], "mag-eval-1");
+        assert_eq!(returned["body"]["output"]["run_id"], "mag-run-1");
         assert_eq!(returned["body"]["completion_delivery"], "async");
     }
 

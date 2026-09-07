@@ -1,35 +1,19 @@
 # Orchestrating MAG
 
-MAG is Nefor's typed workflow language. Use it when a task needs several agents or commands, parallel work, an approval boundary, review, or a result-dependent stage. For one bounded shell operation, use `mag-eval` instead.
+MAG is Nefor's typed workflow language. Use it when a task needs several agents or commands, parallel work, an approval boundary, review, or a result-dependent stage. Use direct process tools for one bounded command.
 
 This guide describes the lead-facing workflow. See [Authoring reference](language.md) for the language and libraries, [Patterns](../../../plugins/mag/docs/patterns.md) for graph shapes, and [Errors](errors.md) for diagnosis.
 
 ## Choose the smallest surface
 
-### `mag-eval`: one node expression
-
-`mag-eval` compiles and launches one node expression without creating a `.mag` file:
-
-```lisp
-(nefor.process.exec "find-todos"
-  (as nefor.process.ProcessExecParams
-    {:argv ["rg" "-n" "TODO" "src/"]
-     :cwd nefor.process.cwd
-     :timeout (nefor.contracts.no-timeout)}))
-```
-
-The tool call also requires a short, 1–5-word `intent`. It returns immediately with a stable `run_id`; use `await-run` when the next decision needs its terminal result. It is appropriate for finite, one-off commands. Use a program when work needs multiple nodes, agents, routing, review, or a durable source file.
-
-A process runs until it exits. `process.exec` is structured and does not invoke a shell; use `shell.script` only for an explicit `/bin/sh -c` program, or put `/bin/bash` in structured `argv` when Bash is required. Both surfaces require explicit cwd and timeout records, and `no-timeout` is unbounded. Do not launch a foreground server or watcher and then await it: the run cannot become terminal. Prefer a retained/background facility, or one bounded command that starts the service, checks it, and tears it down.
-
-### `mag`: author and launch a program
+### Author and launch a program
 
 The lead tool operates on a session MAG workspace:
 
-1. **Write** — `action="write"` creates or replaces a workspace-relative `.mag` file.
-2. **Compile and preview** — `action="compile"` (the default) checks the program and renders the proposed actors and routes. Compilation does not execute the graph and is not approval for writes.
-3. **Review** — inspect the preview. Before a write-capable graph, submit its concrete plan through `write-review`.
-4. **Apply** — after approval, `action="apply"` without `run_id` compiles and validates the current file again, applies it to a fresh graph, and returns its `run_id`. Supplying the `run_id` of a directly dispatched live graph instead applies a Delta to that graph.
+1. **Write** — `mag-write-file {file,new_string,old_string?}` creates or overwrites a workspace-relative source, or performs one exact unique replacement.
+2. **Compile and preview** — `mag-preview {file}` checks an existing program and returns its complete authored node tree. It neither writes nor executes.
+3. **Review** — inspect the tree. Before a write-capable graph, submit its concrete plan through `write-review`.
+4. **Apply** — after approval, `mag-apply {file}` compiles and applies an existing complete program to a fresh graph. Add `run_id` to apply a Delta to that directly dispatched live graph. Add `content` only to atomically create a new source file as part of the call; an existing file is an error, so modify it first and then apply without `content`.
 
 Editing a graph function describes a different future run. It does not retrieve or mutate a running graph.
 
@@ -43,7 +27,7 @@ configuration-owned libraries remain in their materialized package roots; the
 composition supplies those roots explicitly to every compilation. Nothing is
 copied into the session.
 
-Paths passed to the lead `mag` tool are relative to that workspace. Literal
+Paths passed to MAG source tools are normalized paths relative to that workspace. Absolute paths, traversal, and symlink escapes are rejected. Literal
 module imports such as `(require "nefor.graph")` resolve through the configured
 module roots. Files loaded with `(read ...)` are snapshotted on first access by
 one compilation; compile again after changing them. The ambient context
@@ -51,11 +35,11 @@ names the canonical MAG Book and available module inventory.
 
 ## Run lifecycle and control
 
-Both a targetless `mag action="apply"` and lead-dispatched `mag-eval` acknowledge dispatch with an opaque, stable `run_id`.
+A fresh `mag-apply` acknowledges asynchronous dispatch with an opaque, stable `run_id` and the complete authored node tree.
 
-- **`await-run(run_id)`** attaches to that run and blocks until its canonical terminal outcome. Call it once when subsequent work depends on completion. Canceling the waiter does not stop the run.
-- **`graph-status()`** is a one-shot snapshot of active runs and recent completed summaries. With a `run_id`, it describes that run. Do not poll it; completion is delivered normally, or use `await-run`.
-- **`terminate-graph(run_id)`** requests termination of exactly one active run. The state remains `terminating` until the runtime confirms the terminal outcome.
+- **`mag-await(run_id)`** attaches to that run and blocks until its canonical terminal outcome. Call it once when subsequent work depends on completion. Canceling the waiter does not stop the run.
+- **`mag-status()`** is a one-shot snapshot of active runs and recent completed summaries. With a `run_id`, it describes that run. Do not poll it; completion is delivered normally, or use `mag-await`.
+- **`mag-terminate(run_id)`** requests termination of exactly one active run. The state remains `terminating` until the runtime confirms the terminal outcome.
 
 Run handles are session-scoped. The root lead can address same-session runs; a delegated agent can await or control only runs it directly dispatched. Recent terminal outcomes are retained only for a bounded window, so an old handle can expire.
 
@@ -80,7 +64,7 @@ Standalone compilation emits an artifact but has no execute subcommand. Runtime 
 
 1. Put every predictable stage—implementation, review, verification, and correction routing—before the single graph output.
 2. Use sibling nodes for independent work and typed dependencies for real ordering.
-3. Compile and inspect the preview.
+3. Compile and inspect the node tree with `mag-preview`.
 4. Obtain `write-review` approval before a write-capable application.
 5. Apply, retain the returned `run_id`, and await only when needed.
 6. Report completion only to the extent established by the terminal result and checks.

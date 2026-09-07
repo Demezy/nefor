@@ -14,6 +14,7 @@ end
 
 local preview_state = require("libs.chat.preview_state")
 local run_panel = require("libs.chat.run_panel")
+local run_projection = require("libs.mag-run-projection")
 
 local function eq(actual, expected, message)
   if actual ~= expected then
@@ -484,5 +485,33 @@ batches = observe(batches, { kind = "tool.result", id = "old-1", output = "late-
 latest = preview_state.latest_tool_batch(batches, "run", "worker.run-tool")
 eq(#latest, 4, "late prior result cannot change the selected latest batch")
 eq(latest[1].item.value.value.id, "new-1", "prior batch remains hidden after late result")
+
+-- Model receipts use the same projection as the sidebar. Successful receipts
+-- show top-level active time only; failed receipts retain the branch that was
+-- active when termination landed.
+local terminal = {
+  status = "completed",
+  logical_nodes = {
+    { path = { "build" }, members = {} },
+    { path = { "build", "worker" }, members = { "worker.llm" } },
+  },
+  nodes = { ["worker.llm"] = { status = "done", started_at_ms = 100, completed_at = 600 } },
+  group_activity = {
+    [run_projection.path_key({ "build" })] = { active_ms = 500 },
+    [run_projection.path_key({ "build", "worker" })] = { active_ms = 500 },
+  },
+}
+local success_tree = run_projection.format_tree(terminal, 600, true)
+eq(success_tree:find("build", 1, true) ~= nil, true, "success receipt includes top-level node")
+eq(success_tree:find("worker", 1, true), nil, "success receipt omits nested timings")
+terminal.status = "killed"
+terminal.nodes["worker.llm"].status = "killed"
+terminal.active_at_terminal = {
+  [run_projection.path_key({ "build" })] = true,
+  [run_projection.path_key({ "build", "worker" })] = true,
+}
+local killed_tree = run_projection.format_tree(terminal, 600, true)
+eq(killed_tree:find("worker", 1, true) ~= nil, true,
+  "terminated receipt includes the branch active at termination")
 
 print("mag_runtime_projection_test: all assertions passed")

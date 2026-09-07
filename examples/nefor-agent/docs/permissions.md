@@ -45,8 +45,7 @@ read-only inventory.
 - composition-configured auto tools, including read/context tools and MAG
   control-plane dispatch tools, pass without a popup;
 - read-only-capability tools pass;
-- `edit_file` passes for write-capable agents and is denied to read-only agents;
-- `write_file` passes only when a current approved write-review plan exists,
+- both whole-file and exact-replacement forms of `write_file` pass only when a current approved write-review plan exists,
   except for the earlier `yolo` gate bypass;
 - write-capable `shell.script` is checked by `da` plus configured fast paths;
 - missing or unusable `da` is an installation error, not permission fallback;

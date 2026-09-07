@@ -663,10 +663,10 @@ local function test_openai_followup_history_json_encodes_canonical_tool_argument
       { role = "user", content = "inspect config" },
       {
         role = "assistant", content = "",
-        tool_calls = { { id = "call-1", name = "mag-eval", arguments = raw_arguments } },
+        tool_calls = { { id = "call-1", name = "mag-apply", arguments = raw_arguments } },
       },
       { role = "tool", tool_call_id = "call-1",
-        content = "mag-eval: 'intent' must contain 1-5 words" },
+        content = "mag-apply: file must be non-empty" },
     },
   })
 
@@ -675,7 +675,7 @@ local function test_openai_followup_history_json_encodes_canonical_tool_argument
   assert_true(ok, "provider-bound assistant tool_call.arguments must always be valid JSON")
   assert_eq(decoded.intent, "inspect config",
     "canonical JSON-object arguments survive provider lowering")
-  assert_eq(request.messages[3].content, "mag-eval: 'intent' must contain 1-5 words",
+  assert_eq(request.messages[3].content, "mag-apply: file must be non-empty",
     "the follow-up request preserves tool validation feedback")
 end
 

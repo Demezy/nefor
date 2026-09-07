@@ -22,14 +22,10 @@
 --   --git read,add,commit,restore-staged,tag,fetch,pull,push
 --   --cargo local
 --
--- `edit_file`: auto-approved for non-read-only agents. The lead prompt
--- still requires reading the target file before editing, but the tool
--- is not size-limited here; the lead sometimes needs to make broad
--- existing-file edits without paying graph overhead.
---
--- `write_file`: auto-approved only while lead-workflow has an approved
--- plan. Without approval it is denied instead of popped up, so direct
--- file creation/overwrite cannot bypass the plan gate.
+-- `write_file`: whole-file writes and exact replacements share one policy.
+-- The tool is approved only while lead-workflow has an approved plan and is
+-- denied to read-only agents. Without approval it is denied instead of popped
+-- up, so neither form can bypass the plan gate.
 --
 -- Other tools: defer to the user (popup) unless the agent is read-only.
 --
@@ -310,15 +306,6 @@ local function build(opts)
 
     local args = body.args
     local is_ro = allowlist_is_read_only(body.allowlist)
-
-    if tool == "edit_file" then
-      if is_ro then
-        emit_response(id, "deny", "edit_file is not available to read-only agents")
-        return
-      end
-      emit_response(id, "approve")
-      return
-    end
 
     if tool == "write_file" then
       if is_ro then

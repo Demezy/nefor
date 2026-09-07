@@ -102,23 +102,6 @@ do
   assert_eq(calls[1].decision, "approve", "yolo decision is approve")
 end
 
--- yolo still bypasses approval policy after capability membership succeeds.
-do
-  fresh("yolo")
-  feed({
-    kind = "chat.tool.permission_request",
-    id = "perm-yolo-edit-capable",
-    tool = "edit_file",
-    allowlist = { "read_file", "edit_file" },
-    args = { path = "some/file.lua", old_string = "a", new_string = "b" },
-  })
-  local calls = decode_calls()
-  assert_eq(#calls, 1, "yolo capable edit_file emits one envelope")
-  assert_eq(calls[1].kind, "tool.permission_response", "yolo capable edit_file approves")
-  assert_eq(calls[1].decision, "approve", "yolo capable edit_file decision is approve")
-  assert_eq(calls[1].reason, nil, "yolo edit_file approval has no denial reason")
-end
-
 -- yolo: write_file also bypasses the approved-plan denial path.
 do
   fresh("yolo")
@@ -126,28 +109,12 @@ do
     kind = "chat.tool.permission_request",
     id = "perm-yolo-write-no-plan",
     tool = "write_file",
-    args = { path = "some/file.lua", content = "return true\n" },
+    args = { path = "some/file.lua", new_string = "return true\n" },
   })
   local calls = decode_calls()
   assert_eq(#calls, 1, "yolo write_file no-plan emits one envelope")
   assert_eq(calls[1].kind, "tool.permission_response", "yolo write_file no-plan approves")
   assert_eq(calls[1].decision, "approve", "yolo write_file no-plan decision is approve")
-end
-
--- auto: direct edit/write is autonomous.
-do
-  fresh("auto")
-  feed({
-    kind = "chat.tool.permission_request",
-    id = "perm-auto-edit",
-    tool = "edit_file",
-    args = { path = "some/file.lua", old_string = "a", new_string = "b" },
-  })
-  local calls = decode_calls()
-  assert_eq(#calls, 1, "auto edit_file emits one envelope")
-  assert_eq(calls[1].kind, "tool.permission_response", "auto edit_file approves")
-  assert_eq(calls[1].decision, "approve", "auto edit_file decision is approve")
-  assert_eq(calls[1].args, nil, "auto edit_file approval has no policy args")
 end
 
 -- Read-only status is derived from the complete allowlist, not a wire flag.

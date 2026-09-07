@@ -4,7 +4,7 @@ Focus area: {focus}
 
 Instructions:
 
-- Pull known files into context directly and use `mag-eval` for other world
+- Pull known files into context directly and use direct process tools for other world
   queries. Prefer structured process execution for a single command; use a
   shell script only when an explicit POSIX shell program is required.
 - Do NOT modify any files.

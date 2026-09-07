@@ -1,15 +1,8 @@
-// `write_file` — write a UTF-8 string to a file.
 //
-// Behavior:
-//
-// - `path` is required; `content` is required (may be empty — that's a
-//   legitimate "truncate to 0" call).
-// - Parent directory is created if it doesn't exist (`mkdir -p` semantics).
-//   This makes `write_file new/dir/file.txt` work without a separate
-//   `mkdir` tool — the LLM's most common shape.
-// - If `path` already resolves to a directory the call is rejected
-//   ([`ToolError::IsDirectory`]) — overwriting a directory with file content
-//   is never the intent.
+// With no `old_string`, the complete file is written from `new_string`,
+// creating parents as needed. With `old_string`, one exact unique match in an
+// existing UTF-8 file is replaced. An empty `new_string` is valid in both
+// forms (truncate the file, or delete the matched text).
 //
 // Trust model matches `read_file` v1: basic-tools is trusted on the bus.
 // Path-traversal / sandboxing decisions live in the gate, not here.
@@ -21,7 +14,7 @@ use crate::error::ToolError;
 
 pub const NAME: &str = "write_file";
 pub const DESCRIPTION: &str =
-    "Write text content to a file, creating parent directories as needed. Overwrites existing files.";
+    "Write a complete text file, or edit an existing text file by replacing one exact unique string. Without old_string, new_string becomes the complete file contents and existing content is overwritten. With old_string, exactly one match is replaced. Empty new_string is allowed.";
 
 pub fn schema() -> Value {
     json!({
@@ -31,16 +24,17 @@ pub fn schema() -> Value {
                 "type": "string",
                 "description": "Absolute or relative path to the destination file."
             },
-            "content": {
+            "new_string": {
                 "type": "string",
-                "description": "UTF-8 text to write. Existing file is overwritten."
+                "description": "New UTF-8 text. Without old_string this is the complete file content; with old_string this is the replacement text. May be empty."
             },
-            "cwd": {
+            "old_string": {
                 "type": "string",
-                "description": "Working directory. Relative paths are resolved against this."
+                "description": "Optional exact text to replace in an existing UTF-8 file. When present it must be non-empty and occur exactly once."
             }
         },
-        "required": ["path", "content"]
+        "required": ["path", "new_string"],
+        "additionalProperties": false
     })
 }
 
@@ -55,12 +49,16 @@ pub fn display() -> Value {
 
 pub async fn run(args: &Value) -> Result<String, ToolError> {
     let parsed = parse_args(args)?;
-    write_text_file(&parsed.path, &parsed.content).await
+    match parsed.old_string {
+        Some(old_string) => edit_text_file(&parsed.path, &old_string, &parsed.new_string).await,
+        None => write_text_file(&parsed.path, &parsed.new_string).await,
+    }
 }
 
 struct ParsedArgs {
     path: String,
-    content: String,
+    new_string: String,
+    old_string: Option<String>,
 }
 
 fn parse_args(args: &Value) -> Result<ParsedArgs, ToolError> {
@@ -81,35 +79,35 @@ fn parse_args(args: &Value) -> Result<ParsedArgs, ToolError> {
             message: "`path` must be non-empty".into(),
         });
     }
-    let content = obj
-        .get("content")
+    let new_string = obj
+        .get("new_string")
         .and_then(Value::as_str)
         .ok_or_else(|| ToolError::BadArgs {
             tool: NAME.into(),
-            message: "missing required string field `content`".into(),
+            message: "missing required string field `new_string`".into(),
         })?;
-    let cwd = obj
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty());
-    let path = resolve_path(raw_path, cwd);
+    let old_string = match obj.get("old_string") {
+        None => None,
+        Some(Value::String(value)) if value.is_empty() => {
+            return Err(bad_args("`old_string` must be non-empty when present"));
+        }
+        Some(Value::String(value)) => Some(value.to_owned()),
+        Some(_) => return Err(bad_args("`old_string` must be a string when present")),
+    };
+    if old_string.as_deref() == Some(new_string) {
+        return Err(bad_args("`old_string` and `new_string` must differ"));
+    }
     Ok(ParsedArgs {
-        path,
-        content: content.to_owned(),
+        path: raw_path.to_owned(),
+        new_string: new_string.to_owned(),
+        old_string,
     })
 }
 
-fn resolve_path(path: &str, cwd: Option<&str>) -> String {
-    let p = std::path::Path::new(path);
-    if p.is_absolute() {
-        return path.to_owned();
-    }
-    match cwd {
-        Some(dir) => std::path::Path::new(dir)
-            .join(p)
-            .to_string_lossy()
-            .into_owned(),
-        None => path.to_owned(),
+fn bad_args(message: &str) -> ToolError {
+    ToolError::BadArgs {
+        tool: NAME.into(),
+        message: message.into(),
     }
 }
 
@@ -152,4 +150,83 @@ async fn write_text_file(path: &str, content: &str) -> Result<String, ToolError>
     })?;
 
     Ok(format!("wrote {} bytes to {}", content.len(), path))
+}
+
+async fn edit_text_file(
+    path: &str,
+    old_string: &str,
+    new_string: &str,
+) -> Result<String, ToolError> {
+    let meta = tokio::fs::metadata(path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ToolError::NotFound { path: path.into() }
+        } else {
+            ToolError::Io {
+                path: path.into(),
+                message: e.to_string(),
+            }
+        }
+    })?;
+    if meta.is_dir() {
+        return Err(ToolError::IsDirectory { path: path.into() });
+    }
+    let bytes = tokio::fs::read(path).await.map_err(|e| ToolError::Io {
+        path: path.into(),
+        message: e.to_string(),
+    })?;
+    if bytes.iter().take(8192).any(|byte| *byte == 0) {
+        return Err(ToolError::BinaryContent { path: path.into() });
+    }
+    let old_content =
+        String::from_utf8(bytes).map_err(|_| ToolError::NotUtf8 { path: path.into() })?;
+    match old_content.matches(old_string).count() {
+        0 => return Err(bad_args("`old_string` was not found in the file")),
+        1 => {}
+        _ => {
+            return Err(bad_args(
+                "`old_string` matched multiple locations; provide more surrounding context",
+            ))
+        }
+    }
+    let new_content = old_content.replacen(old_string, new_string, 1);
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| ToolError::Io {
+            path: path.into(),
+            message: e.to_string(),
+        })?;
+    file.write_all(new_content.as_bytes())
+        .await
+        .map_err(|e| ToolError::Io {
+            path: path.into(),
+            message: e.to_string(),
+        })?;
+    file.flush().await.map_err(|e| ToolError::Io {
+        path: path.into(),
+        message: e.to_string(),
+    })?;
+    Ok(format!(
+        "edited {}; changed {} line(s), byte delta {}",
+        path,
+        changed_lines(&old_content, &new_content),
+        byte_delta(old_content.len(), new_content.len())
+    ))
+}
+
+fn changed_lines(old_content: &str, new_content: &str) -> usize {
+    let old_lines: Vec<&str> = old_content.lines().collect();
+    let new_lines: Vec<&str> = new_content.lines().collect();
+    let shared = old_lines.len().min(new_lines.len());
+    old_lines
+        .iter()
+        .zip(new_lines.iter())
+        .take(shared)
+        .filter(|(old, new)| old != new)
+        .count()
+        + old_lines.len().max(new_lines.len())
+        - shared
+}
+
+fn byte_delta(old_len: usize, new_len: usize) -> isize {
+    new_len as isize - old_len as isize
 }

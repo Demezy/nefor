@@ -25,7 +25,7 @@ end
 local function typed_error(code, message, run_id, status)
   return {
     error_code = code,
-    error = "await-run[" .. code .. "]: " .. message,
+    error = "mag-await[" .. code .. "]: " .. message,
     run_id = run_id,
     status = status,
   }

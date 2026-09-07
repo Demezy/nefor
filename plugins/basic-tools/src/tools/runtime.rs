@@ -46,6 +46,14 @@ fn file_path_context() -> Value {
     })
 }
 
+fn direct_file_path_context() -> Value {
+    json!({
+        "folders": [
+            { "from": "file_path", "arg": "path" }
+        ]
+    })
+}
+
 fn path_or_file_context() -> Value {
     json!({
         "folders": [
@@ -84,15 +92,8 @@ pub const TOOLS: &[ToolDescriptor] = &[
         name: write_file::NAME,
         description: write_file::DESCRIPTION,
         schema: write_file::schema,
-        context: file_path_context,
+        context: direct_file_path_context,
         display: write_file::display,
-    },
-    ToolDescriptor {
-        name: edit_file::NAME,
-        description: edit_file::DESCRIPTION,
-        schema: edit_file::schema,
-        context: file_path_context,
-        display: edit_file::display,
     },
     ToolDescriptor {
         name: process_exec::NAME,
@@ -131,7 +132,6 @@ pub async fn run_tool(name: &str, args: &Value) -> Result<Value, ToolError> {
             .map(Value::String),
         read_image::NAME => read_image::run(args).await,
         write_file::NAME => write_file::run(args).await.map(Value::String),
-        edit_file::NAME => edit_file::run(args).await.map(Value::String),
         process_exec::NAME => process_exec::run(args).await,
         shell_script::NAME => shell_script::run(args).await,
         search_text::NAME => search_text::run(args).await.map(Value::String),

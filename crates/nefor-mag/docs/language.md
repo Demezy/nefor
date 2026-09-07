@@ -211,7 +211,7 @@ indefinitely. The current API has no `bash`, `BashOptions`,
 
 ## Human approvals
 
-`nefor.actors.approval-gate` branches a `TextAnswer` into nominal `Approved` and `Rejected` results. Use it when human judgment is part of the graph's meaning. It is distinct from lead `write-review`, which authorizes execution of a write-capable orchestration plan before launch. See [Orchestrating MAG](orchestrating.md#mag-author-and-launch-a-program).
+`nefor.actors.approval-gate` branches a `TextAnswer` into nominal `Approved` and `Rejected` results. Use it when human judgment is part of the graph's meaning. It is distinct from lead `write-review`, which authorizes execution of a write-capable orchestration plan before launch. See [Orchestrating MAG](orchestrating.md#author-and-launch-a-program).
 
 ## Runtime expansion
 

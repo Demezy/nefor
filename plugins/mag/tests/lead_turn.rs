@@ -1603,13 +1603,19 @@ async fn lead_turn_runs_through_gate_and_second_turn_replays_seeded_history() {
         .and_then(Value::as_array)
         .expect("thin request names the program-authored tool surface");
     let tool_names: Vec<&str> = tools.iter().filter_map(Value::as_str).collect();
-    for expected in ["read_file", "write-review", "mag", "mag-eval"] {
+    for expected in [
+        "read_file",
+        "write-review",
+        "mag-write-file",
+        "mag-preview",
+        "mag-apply",
+    ] {
         assert!(
             tool_names.contains(&expected),
             "lead tool surface carries {expected}; got {tool_names:?}"
         );
     }
-    // World queries ride mag-eval expressions; the plain query tools are
+    // World queries use direct process tools; the deprecated plain query tools are
     // deliberately off the lead's surface. mag-env is gone entirely — the
     // workspace context is ambient in the system prompt now.
     for absent in ["list_dir", "search_text", "bash", "mag-env"] {

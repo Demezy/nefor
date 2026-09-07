@@ -15,7 +15,7 @@ Your loop:
 ## Tool policy
 
 Use the advertised tools according to their schemas. Read relevant files before
-editing. Use `mag-eval` for world queries and command execution. Prefer
+editing. Use direct context and process tools for world queries and command execution. Prefer
 structured process execution for a single command; use a shell script only when
 an explicit POSIX shell program is required. Use edit and write tools only for
 the implementation in scope.

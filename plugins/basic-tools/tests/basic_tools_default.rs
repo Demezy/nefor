@@ -3,82 +3,6 @@ mod error {
 }
 
 mod tools {
-    pub mod edit_file {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/tools/edit_file.rs"
-        ));
-
-        #[cfg(test)]
-        mod tests {
-            use super::*;
-            use tempfile::tempdir;
-
-            #[tokio::test]
-            async fn replaces_unique_exact_match() {
-                let dir = tempdir().unwrap();
-                let path = dir.path().join("file.txt");
-                std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
-                let out = run(&json!({
-                    "path": path.to_str().unwrap(),
-                    "old_string": "beta",
-                    "new_string": "BETA"
-                }))
-                .await
-                .unwrap();
-                assert!(out.contains("edited"));
-                assert_eq!(
-                    std::fs::read_to_string(&path).unwrap(),
-                    "alpha\nBETA\ngamma\n"
-                );
-            }
-
-            #[tokio::test]
-            async fn rejects_missing_match() {
-                let dir = tempdir().unwrap();
-                let path = dir.path().join("file.txt");
-                std::fs::write(&path, "alpha\n").unwrap();
-                let err = run(&json!({
-                    "path": path.to_str().unwrap(),
-                    "old_string": "beta",
-                    "new_string": "BETA"
-                }))
-                .await
-                .unwrap_err();
-                assert!(matches!(err, ToolError::BadArgs { .. }));
-            }
-
-            #[tokio::test]
-            async fn rejects_ambiguous_match_by_default() {
-                let dir = tempdir().unwrap();
-                let path = dir.path().join("file.txt");
-                std::fs::write(&path, "x\nx\n").unwrap();
-                let err = run(&json!({
-                    "path": path.to_str().unwrap(),
-                    "old_string": "x",
-                    "new_string": "y"
-                }))
-                .await
-                .unwrap_err();
-                assert!(matches!(err, ToolError::BadArgs { .. }));
-            }
-
-            #[tokio::test]
-            async fn permits_large_exact_replacements() {
-                let dir = tempdir().unwrap();
-                let path = dir.path().join("file.txt");
-                std::fs::write(&path, "a\nb\nc\n").unwrap();
-                run(&json!({
-                    "path": path.to_str().unwrap(),
-                    "old_string": "a\nb\nc",
-                    "new_string": "A\nB\nC"
-                }))
-                .await
-                .unwrap();
-                assert_eq!(std::fs::read_to_string(&path).unwrap(), "A\nB\nC\n");
-            }
-        }
-    }
 
     pub mod process {
         include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tools/process.rs"));
@@ -844,7 +768,7 @@ mod tools {
                 let dir = tempdir().unwrap();
                 let path = dir.path().join("out.txt");
                 let path_str = path.to_str().unwrap();
-                let out = run(&json!({"path": path_str, "content": "hello"}))
+                let out = run(&json!({"path": path_str, "new_string": "hello"}))
                     .await
                     .unwrap();
                 assert!(out.starts_with("wrote 5 bytes to"));
@@ -858,7 +782,7 @@ mod tools {
                 let path = dir.path().join("empty.txt");
                 std::fs::write(&path, "preexisting").unwrap();
                 let path_str = path.to_str().unwrap();
-                run(&json!({"path": path_str, "content": ""}))
+                run(&json!({"path": path_str, "new_string": ""}))
                     .await
                     .unwrap();
                 let read_back = std::fs::read_to_string(&path).unwrap();
@@ -870,7 +794,7 @@ mod tools {
                 let dir = tempdir().unwrap();
                 let path = dir.path().join("a/b/c/file.txt");
                 let path_str = path.to_str().unwrap();
-                run(&json!({"path": path_str, "content": "hi"}))
+                run(&json!({"path": path_str, "new_string": "hi"}))
                     .await
                     .unwrap();
                 let read_back = std::fs::read_to_string(&path).unwrap();
@@ -881,7 +805,7 @@ mod tools {
             async fn rejects_existing_directory_path() {
                 let dir = tempdir().unwrap();
                 let path_str = dir.path().to_str().unwrap();
-                let err = run(&json!({"path": path_str, "content": "x"}))
+                let err = run(&json!({"path": path_str, "new_string": "x"}))
                     .await
                     .unwrap_err();
                 assert!(matches!(err, ToolError::IsDirectory { .. }));
@@ -889,29 +813,82 @@ mod tools {
 
             #[tokio::test]
             async fn rejects_missing_path_field() {
-                let err = run(&json!({"content": "x"})).await.unwrap_err();
+                let err = run(&json!({"new_string": "x"})).await.unwrap_err();
                 assert!(matches!(err, ToolError::BadArgs { .. }));
             }
 
             #[tokio::test]
-            async fn rejects_missing_content_field() {
+            async fn rejects_missing_new_string_field() {
                 let err = run(&json!({"path": "/tmp/out"})).await.unwrap_err();
                 assert!(matches!(err, ToolError::BadArgs { .. }));
             }
 
             #[tokio::test]
             async fn rejects_empty_path() {
-                let err = run(&json!({"path": "", "content": "x"})).await.unwrap_err();
+                let err = run(&json!({"path": "", "new_string": "x"}))
+                    .await
+                    .unwrap_err();
                 assert!(matches!(err, ToolError::BadArgs { .. }));
             }
 
             #[test]
-            fn schema_requires_path_and_content() {
+            fn schema_requires_path_and_new_string() {
                 let s = schema();
                 let req = s.get("required").and_then(Value::as_array).unwrap();
                 let names: Vec<&str> = req.iter().filter_map(Value::as_str).collect();
                 assert!(names.contains(&"path"));
-                assert!(names.contains(&"content"));
+                assert!(names.contains(&"new_string"));
+            }
+
+            #[tokio::test]
+            async fn replaces_one_exact_match() {
+                let dir = tempdir().unwrap();
+                let path = dir.path().join("file.txt");
+                std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+                let out = run(&json!({
+                    "path": path.to_str().unwrap(),
+                    "old_string": "beta",
+                    "new_string": "BETA"
+                }))
+                .await
+                .unwrap();
+                assert!(out.contains("edited"));
+                assert_eq!(
+                    std::fs::read_to_string(path).unwrap(),
+                    "alpha\nBETA\ngamma\n"
+                );
+            }
+
+            #[tokio::test]
+            async fn exact_edit_allows_empty_replacement() {
+                let dir = tempdir().unwrap();
+                let path = dir.path().join("file.txt");
+                std::fs::write(&path, "keep remove keep").unwrap();
+                run(&json!({
+                    "path": path.to_str().unwrap(),
+                    "old_string": " remove",
+                    "new_string": ""
+                }))
+                .await
+                .unwrap();
+                assert_eq!(std::fs::read_to_string(path).unwrap(), "keep keep");
+            }
+
+            #[tokio::test]
+            async fn exact_edit_rejects_missing_or_ambiguous_match() {
+                let dir = tempdir().unwrap();
+                let path = dir.path().join("file.txt");
+                std::fs::write(&path, "x x").unwrap();
+                for old_string in ["missing", "x"] {
+                    let err = run(&json!({
+                        "path": path.to_str().unwrap(),
+                        "old_string": old_string,
+                        "new_string": "y"
+                    }))
+                    .await
+                    .unwrap_err();
+                    assert!(matches!(err, ToolError::BadArgs { .. }));
+                }
             }
         }
     }
@@ -944,7 +921,6 @@ mod tools {
                 read_file::NAME,
                 read_image::NAME,
                 write_file::NAME,
-                edit_file::NAME,
                 process_exec::NAME,
                 shell_script::NAME,
                 search_text::NAME,
@@ -966,11 +942,10 @@ mod tools {
 
         #[test]
         fn module_owned_display_functions_compile() {
-            let displays: [fn() -> Value; 7] = [
+            let displays: [fn() -> Value; 6] = [
                 read_file::display,
                 read_image::display,
                 write_file::display,
-                edit_file::display,
                 process_exec::display,
                 shell_script::display,
                 search_text::display,

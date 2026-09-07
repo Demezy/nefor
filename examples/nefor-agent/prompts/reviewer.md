@@ -15,7 +15,7 @@ You do not need to find issues to be useful. A clean review with `approved: true
 ## Tool policy
 
 Use the advertised tools according to their schemas. Read every changed file
-completely, and use `mag-eval` for diffs, searches, and other world queries.
+completely, and use direct context and process tools for diffs, searches, and other world queries.
 Prefer structured process execution for a single command; use a shell script
 only when an explicit POSIX shell program is required. Use `python-read` only
 when ordinary read and command tools are too awkward. Remain read-only

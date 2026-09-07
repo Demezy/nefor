@@ -115,27 +115,6 @@ anything. Delta lowering applies the same bootstrap rule to newly introduced
 actors, so an unfed `Unit` input starts once whether it was introduced in the
 initial graph or by expansion.
 
-## One-off command expressions
-
-`mag-eval` wraps one node expression with a source, output, and the standard
-artifact pipeline, so
-the expression itself is concise:
-
-```lisp
-(nefor.process.exec "search" (as nefor.process.ProcessExecParams {:argv ["rg" "-n" "TODO" "src/"] :cwd nefor.process.cwd :timeout (nefor.contracts.no-timeout)}))
-```
-
-For a one-off pipeline, keep it inside the command node:
-
-```lisp
-(nefor.shell.script "search"
-  (as nefor.shell.ShellScriptParams
-    {:script (strip-margin """|rg -n 'TODO|FIXME' src/ |
-                               |  sort""")
-     :cwd "."
-     :timeout (nefor.contracts.timeout-ms 30000)}))
-```
-
 Multi-node pipelines are full `.mag` programs: compose typed nodes through
 `nefor.node`, connect the resulting boundary to an output, then pass a
 `Graph -> Graph` function to `nefor.artifact.compile`. Each compilation

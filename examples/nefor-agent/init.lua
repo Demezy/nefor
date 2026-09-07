@@ -306,7 +306,7 @@ tool_gate_argv[#tool_gate_argv + 1] = cfg.tool_gate.default_action
 
 -- lead-workflow lives alongside agentic-loop, not inside it: separate
 -- bus subscriptions, separate state. Owns plan/approval state and the
--- active graph run id; advertises mag / write-review / graph-status to
+-- active graph run id; advertises mag / write-review / mag-status to
 -- tool-gate. Registered BEFORE tool-gate's spawn so
 -- its bus subscription is live when tool-gate.hello arrives —
 -- otherwise the advertise is missed and the lead model gets "no such
@@ -357,16 +357,16 @@ local composition_readiness = {
     },
     required_provider = function() return agentic_loop.model_snapshot().provider end,
     required_tools = {
-      "read_file", "read_image", "write_file", "edit_file", "search_text", "process.exec", "shell.script",
+      "read_file", "read_image", "write_file", "search_text", "process.exec", "shell.script",
       "git_worktree_create", "git_worktree_open", "list_dir", "python-read",
-      "instructions", "discover_instruction_files", "graph-status", "await-run",
-      "terminate-graph", "write-review", "mag", "mag-eval",
+      "instructions", "discover_instruction_files", "mag-status", "mag-await",
+      "mag-terminate", "write-review", "mag-write-file", "mag-preview", "mag-apply",
     },
     tool_sources = {
-      ["basic-tools"] = { "read_file", "read_image", "write_file", "edit_file", "search_text", "process.exec", "shell.script" },
+      ["basic-tools"] = { "read_file", "read_image", "write_file", "search_text", "process.exec", "shell.script" },
       ["git-worktree"] = { "git_worktree_create", "git_worktree_open" },
       ["read-only-tools"] = { "list_dir", "python-read", "instructions", "discover_instruction_files" },
-      ["lead-workflow"] = { "graph-status", "await-run", "terminate-graph", "write-review", "mag", "mag-eval" },
+      ["lead-workflow"] = { "mag-status", "mag-await", "mag-terminate", "write-review", "mag-write-file", "mag-preview", "mag-apply" },
     },
     timeout_ms = tonumber(os.getenv("NEFOR_STARTUP_TIMEOUT_MS")) or 10000,
 }
