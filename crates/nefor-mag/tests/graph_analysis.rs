@@ -799,3 +799,33 @@ fn input_diagnostics_keep_raw_occurrences_and_actual_message_evidence() {
     let order = artifact["assignment-order"].as_array().unwrap();
     assert_eq!(&order[..3], &[json!("a"), json!("b"), json!("z")]);
 }
+
+#[test]
+fn generic_list_inference_supports_nested_sequence_with_error_union() {
+    for (name, nodes) in [
+        ("inline", "[runtime configs]"),
+        ("bound", "workers"),
+        ("annotated", "(as (List (nefor.graph.Node nefor.contracts.Task (| nefor.contracts.TextAnswer nefor.contracts.AgentError))) [runtime configs])"),
+    ] {
+        let source = format!(r#"
+          (require "nefor.contracts")
+          (require "nefor.graph")
+          (require "nefor.node")
+          (let agent-shaped
+            (fn [[id String]] -> (nefor.graph.Node nefor.contracts.Task
+                                   (| nefor.contracts.TextAnswer nefor.contracts.AgentError))
+              (nefor.graph.node id "test" [] [] []
+                (nefor.graph.port id (type-tag nefor.contracts.Task) "nefor.graph.Value")
+                (nefor.graph.port id (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError)) "nefor.graph.Value"))))
+          (let runtime (agent-shaped "runtime"))
+          (let configs (agent-shaped "configs"))
+          (let workers [runtime configs])
+          (let task (nefor.graph.source "task" (type-tag nefor.contracts.Task) (as nefor.contracts.Task {{:prompt "Investigate"}})))
+          (let work (nefor.node.>>> task (nefor.node.sequence "traces" {nodes})))
+          (artifact (= (get (get work "output") "type")
+                       (type-tag (List (| nefor.contracts.TextAnswer nefor.contracts.AgentError)))))
+        "#);
+        let artifact = run(&format!("generic-list-{name}"), &source, json!({}));
+        assert_eq!(artifact, json!(true), "{name}");
+    }
+}

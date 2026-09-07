@@ -2022,3 +2022,68 @@ fn type_schema_rejects_non_data_and_non_string_map_keys() {
         assert!(error.contains(expected), "{ty}: {error}");
     }
 }
+
+#[test]
+fn generic_list_inference_preserves_element_evidence() {
+    let root = workspace("generic-list-inference");
+    for values in ["[1 2]", "values", "(as (List Int) [1 2])"] {
+        let source = format!(
+            r#"
+          (let values [1 2])
+          (let element-tag (fn [T] [[values (List T)]] -> (TypeTag T) (type-tag T)))
+          (artifact (= (type-evidence (element-tag {values})) (type-evidence (type-tag Int))))
+        "#
+        );
+        assert_eq!(compile(&source, &root).unwrap(), json!(true), "{values}");
+    }
+}
+
+#[test]
+fn generic_list_inference_keeps_constraints_and_empty_list_behavior() {
+    let root = workspace("generic-list-constraints");
+    for source in [
+        r#"(let tag (fn [T] [[xs (List T)]] -> (TypeTag T) (type-tag T)))
+           (artifact (tag [1 "wrong"]))"#,
+        r#"(let tag (fn [T] [[xs (List T)]] -> (TypeTag T) (type-tag T)))
+           (artifact (tag []))"#,
+        r#"(let tag (fn [T] [[xs (List (List T))]] -> (TypeTag T) (type-tag T)))
+           (artifact (tag [[1] ["wrong"]]))"#,
+    ] {
+        assert!(compile(source, &root).is_err(), "{source}");
+    }
+    for (name, source) in [
+        (
+            "nested",
+            r#"(let tag (fn [T] [[xs (List (List T))]] -> (TypeTag T) (type-tag T)))
+          (artifact (= (tag [[1] [2]]) (type-tag Int)))"#,
+        ),
+        (
+            "empty-without-evidence",
+            r#"(let size (fn [T] [[xs (List T)]] -> Int (count xs)))
+          (artifact (= (size []) 0))"#,
+        ),
+        (
+            "empty-annotated",
+            r#"(let tag (fn [T] [[xs (List T)]] -> (TypeTag T) (type-tag T)))
+          (artifact (= (tag (as (List Int) [])) (type-tag Int)))"#,
+        ),
+        (
+            "sum",
+            r#"(type A {:value Int}) (type B {:value String})
+          (let tag (fn [T] [[xs (List T)]] -> (TypeTag T) (type-tag T)))
+          (artifact (= (tag [(as (| A B) (as A {:value 1}))
+                              (as (| A B) (as B {:value "two"}))]) (type-tag (| A B))))"#,
+        ),
+        (
+            "overload",
+            r#"(let tag (fn [T] [[xs (List T)]] -> (TypeTag T) (type-tag T)))
+          (let tag (fn [[value String]] -> (TypeTag String) (type-tag String)))
+          (artifact (= (tag [1 2]) (type-tag Int)))"#,
+        ),
+    ] {
+        assert_eq!(
+            compile(source, &root).unwrap_or_else(|error| panic!("{name}: {error}")),
+            json!(true)
+        );
+    }
+}

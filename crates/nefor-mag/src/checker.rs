@@ -1800,10 +1800,15 @@ fn compile_vector(
     };
     let mut checked_items = Vec::with_capacity(items.len());
     let mut item_type = expected_item.cloned();
+    let mut substitution = HashMap::new();
     for item in items {
-        let value = compile_expr(env, scopes, item, expected_item)?;
-        if let Some(ty) = expected_item {
-            compatible_static(env, &value.ty, ty, &mut HashMap::new()).map_err(MagError::Type)?;
+        let item_expected = expected_item.map(|ty| substitute(ty, &substitution));
+        let value = compile_expr(env, scopes, item, item_expected.as_ref())?;
+        if let Some(ty) = &item_expected {
+            // Element constraints must survive the contextual list type: callers
+            // infer their generic arguments from the vector's resulting type.
+            compatible_static(env, &value.ty, ty, &mut substitution).map_err(MagError::Type)?;
+            item_type = expected_item.map(|ty| substitute(ty, &substitution));
         } else if let Some(current) = &item_type {
             if compatible_static(env, &value.ty, current, &mut HashMap::new()).is_err() {
                 let mut alternatives = match current {
