@@ -1182,6 +1182,7 @@ fn replayed_reset_preserves_results_but_new_session_selects_a_fresh_conversation
             "run_id": "replayed",
             "run_name": "replayed-result",
             "status": "cancelled",
+            "duration_ms": 432_000,
         }),
     );
     dispatch_event(&mut engine, json!({ "kind": "chat.reset" }));
@@ -1189,8 +1190,8 @@ fn replayed_reset_preserves_results_but_new_session_selects_a_fresh_conversation
 
     let replayed = render_str(&mut engine);
     assert!(
-        replayed.contains("replayed-result"),
-        "replaying a reset must deterministically retain the preceding result:\n{replayed}"
+        replayed.contains("mag result [async] · replayed-result · 07m 12s"),
+        "replaying a reset must deterministically retain the preceding result header:\n{replayed}"
     );
 
     fixture_assistant_delta(&mut engine, "old session lead");
