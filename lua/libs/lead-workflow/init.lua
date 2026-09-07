@@ -132,9 +132,6 @@ local run_registry = RunRegistry.new({
     end
     return os.date("!%Y-%m-%dT%H:%M:%SZ")
   end,
-  monotonic_ms = function()
-    return monotonic_now_ms()
-  end,
 })
 
 local dependency_module_roots = {}

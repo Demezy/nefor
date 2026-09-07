@@ -335,6 +335,15 @@ compiler special case.
   prefix of the fold; replay is deterministic even though arrival order was
   not. Debugging is diffing prefixes.
 
+## Terminal run results
+
+Every canonical `mag.run_result` carries `duration_ms`, a nonnegative integer
+measured by the MAG runtime's per-execution monotonic clock. Measurement starts
+immediately before the accepted run enters `begin_run`, spans its initial
+program and every later apply or capability wait, and freezes once when the run
+settles completed, failed, or killed. Preflight `mag.error` responses do not
+carry a duration because run execution never began.
+
 ## Modification rejection events
 
 Initial execution and mid-run apply use the same validator but have different

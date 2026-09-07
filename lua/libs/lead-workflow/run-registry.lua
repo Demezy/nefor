@@ -68,7 +68,6 @@ function M.new(opts)
     tombstone_limit = opts.tombstone_limit or 256,
     mint_id = assert(opts.mint_id, "run-registry: mint_id is required"),
     now = opts.now or function() return nil end,
-    monotonic_ms = opts.monotonic_ms or function() return nil end,
     runs = {},
     active_runs = {},
     completed_runs = {},
@@ -146,7 +145,6 @@ function M:register(spec)
     phase = "queued",
     status = "queued",
     dispatched_at = self.now(),
-    duration_started_ms = self.monotonic_ms(),
     updated_at = self.now(),
     terminal = spec.terminal,
     dispatch_firing_id = spec.dispatch_firing_id,
@@ -281,10 +279,7 @@ function M:settle(run_id, body)
   run.result = nil
   run.output_path = nil
   run.error = nil
-  local finished_ms = self.monotonic_ms()
-  if type(run.duration_started_ms) == "number" and type(finished_ms) == "number" then
-    run.duration_ms = math.max(0, finished_ms - run.duration_started_ms)
-  end
+  run.duration_ms = body.duration_ms
   local waiters = {}
   for firing_id in pairs(run.waiters) do waiters[#waiters + 1] = firing_id end
   table.sort(waiters)

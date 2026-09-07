@@ -1464,8 +1464,6 @@ end
 
 do
   fresh()
-  local clock = 10000
-  lw._internals.set_monotonic_now_ms(function() return clock end)
   local timers = controlled_grace()
   local run_id = start_file_run("grace-timeout-file", "grace-timeout-file.mag")
   _test.calls_clear()
@@ -1475,10 +1473,9 @@ do
     "mag-apply identifies the async grace outcome")
   assert_eq(file_ack.body.completion_delivery, "async",
     "mag-apply grace acknowledgment marks async delivery")
-  clock = clock + 432000
   _test.calls_clear()
   feed("mag", { kind = "mag.run_result", run_id = run_id, status = "completed",
-    result = { text = "late file result" } })
+    duration_ms = 432000, result = { text = "late file result" } })
   local block = find_call(decode_calls(), function(c)
     return c.body.kind == "chat.graph_result.append" and c.body.run_id == run_id
   end)
@@ -1488,7 +1485,7 @@ do
   assert_eq(block.body.invocation_label, "grace-timeout-file.mag",
     "terminal result keeps the canonical source-file label")
   assert_eq(block.body.duration_ms, 432000,
-    "terminal result reuses the run registry's elapsed duration")
+    "terminal result forwards the runtime-owned duration unchanged")
 end
 
 do
@@ -2923,20 +2920,22 @@ end
 -- Failed and killed terminals preserve typed status/error semantics.
 do
   for _, case in ipairs({
-    { name = "failed", code = "await_run_failed", error = "worker failed" },
-    { name = "killed", code = "await_run_killed", error = "stopped" },
+    { name = "failed", code = "await_run_failed", error = "worker failed", duration_ms = 3210 },
+    { name = "killed", code = "await_run_killed", error = "stopped", duration_ms = 6543 },
   }) do
     local run_id = dispatch_awaitable("await-" .. case.name)
     invoke_tool("wait-" .. case.name, "mag-await", { run_id = run_id })
     _test.calls_clear()
     feed("mag", { kind = "mag.run_result", run_id = run_id, status = case.name,
-      error = case.error, metadata = { passthrough = true } })
+      error = case.error, duration_ms = case.duration_ms, metadata = { passthrough = true } })
     local reply = find_call(decode_calls(), function(c)
       return c.body.kind == "tool.result" and c.body.id == "wait-" .. case.name
     end)
     assert_true(reply ~= nil and reply.body.error_code == case.code,
       case.name .. " waiter receives stable typed error")
     assert_eq(reply.body.status, case.name, case.name .. " status is preserved")
+    assert_eq(reply.body.terminal.duration_ms, case.duration_ms,
+      case.name .. " runtime-owned duration is preserved")
     assert_eq(reply.body.terminal.metadata.passthrough, true,
       case.name .. " canonical metadata is preserved")
   end

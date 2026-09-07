@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use nefor_plugin_sdk::{await_ready_ok, spawn_stdin_reader, spawn_stdout_writer, TransportError};
 use nefor_protocol::{Body, Envelope, PluginOutgoing, SystemBody};
 use serde_json::{Map, Value};
@@ -35,6 +36,8 @@ use crate::kernel::{ExecutionModelSnapshot, LuaHost, RunCompletion, TeardownReas
 struct ActiveExecute {
     /// The `mag.execute` request id to correlate the terminal reply to.
     in_reply_to: Option<String>,
+    /// Monotonic start of accepted run execution, retained across every apply.
+    started_at: Instant,
 }
 
 /// The in-flight async runs, keyed by run_id.
@@ -343,14 +346,18 @@ async fn settle_run(
     // The teardown reason rides the reap's `mag.actor_killed` events so
     // consumers can tell a completed run's bookkeeping sweep from a real
     // termination.
+    let Some(active_run) = active.get(run_id) else {
+        return Ok(());
+    };
+    let duration_ms = elapsed_ms(active_run.started_at);
     let (mut reply, reason) = if let Some(rc) = host.take_run_complete(run_id)? {
         (
-            run_result_ok(None, run_id, &rc),
+            run_result_ok(None, run_id, &rc, duration_ms),
             TeardownReason::RunComplete,
         )
     } else if let Some(error) = host.take_run_failed(run_id)? {
         (
-            run_result_failed(None, run_id, &error),
+            run_result_failed(None, run_id, &error, duration_ms),
             TeardownReason::RunFailed,
         )
     } else {
@@ -389,6 +396,7 @@ async fn settle_reaped(
                     a.in_reply_to.as_deref(),
                     run_id,
                     "run reaped at session boundary (a later session began a new run)",
+                    elapsed_ms(a.started_at),
                 ),
             )
             .await?;
@@ -885,6 +893,7 @@ async fn handle_execute(
         _ => format!("{session_id}/{run_id}"),
     };
 
+    let started_at = Instant::now();
     let begun = host.begin_run_with_principal(
         &run_id,
         run_name,
@@ -898,7 +907,11 @@ async fn handle_execute(
     settle_reaped(out_tx, host, active, bridge, &begun.reaped).await?;
     if !begun.ok {
         let msg = begun.error.unwrap_or_else(|| "begin_run failed".into());
-        return send_event(out_tx, run_result_failed(in_reply_to, &run_id, &msg)).await;
+        return send_event(
+            out_tx,
+            run_result_failed(in_reply_to, &run_id, &msg, elapsed_ms(started_at)),
+        )
+        .await;
     }
     let outcome = host.start_program(&run_id, &execution.initial, &execution.operations)?;
     flush_emits(out_tx, host, bridge).await?;
@@ -907,7 +920,11 @@ async fn handle_execute(
     // drop the context.
     if !outcome.ok {
         let msg = outcome.error.unwrap_or_else(|| "start failed".into());
-        send_event(out_tx, run_result_failed(in_reply_to, &run_id, &msg)).await?;
+        send_event(
+            out_tx,
+            run_result_failed(in_reply_to, &run_id, &msg, elapsed_ms(started_at)),
+        )
+        .await?;
         host.end_run(&run_id, TeardownReason::RunFailed)?;
         return flush_emits(out_tx, host, bridge).await;
     }
@@ -917,13 +934,13 @@ async fn handle_execute(
     // through the fold).
     let terminal = if let Some(rc) = host.take_run_complete(&run_id)? {
         Some((
-            run_result_ok(in_reply_to, &run_id, &rc),
+            run_result_ok(in_reply_to, &run_id, &rc, elapsed_ms(started_at)),
             TeardownReason::RunComplete,
         ))
     } else {
         host.take_run_failed(&run_id)?.map(|error| {
             (
-                run_result_failed(in_reply_to, &run_id, &error),
+                run_result_failed(in_reply_to, &run_id, &error, elapsed_ms(started_at)),
                 TeardownReason::RunFailed,
             )
         })
@@ -940,6 +957,7 @@ async fn handle_execute(
         run_id,
         ActiveExecute {
             in_reply_to: in_reply_to.map(str::to_owned),
+            started_at,
         },
     );
     Ok(())
@@ -1272,7 +1290,15 @@ async fn handle_kill_run(
     };
     host.end_run(run_id, TeardownReason::Killed)?;
     flush_emits(out_tx, host, bridge).await?;
-    send_event(out_tx, run_result_killed(a.in_reply_to.as_deref(), run_id)).await
+    send_event(
+        out_tx,
+        run_result_killed(
+            a.in_reply_to.as_deref(),
+            run_id,
+            elapsed_ms(a.started_at),
+        ),
+    )
+    .await
 }
 
 async fn handle_kill_all_runs(
@@ -1289,7 +1315,15 @@ async fn handle_kill_all_runs(
         };
         host.end_run(&run_id, TeardownReason::Killed)?;
         flush_emits(out_tx, host, bridge).await?;
-        send_event(out_tx, run_result_killed(a.in_reply_to.as_deref(), &run_id)).await?;
+        send_event(
+            out_tx,
+            run_result_killed(
+                a.in_reply_to.as_deref(),
+                &run_id,
+                elapsed_ms(a.started_at),
+            ),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -1394,7 +1428,12 @@ async fn handle_interrupt_run(
         flush_emits(out_tx, host, bridge).await?;
         return send_event(
             out_tx,
-            run_result_failed(a.in_reply_to.as_deref(), &run_id, INTERRUPT_FAILURE),
+            run_result_failed(
+                a.in_reply_to.as_deref(),
+                &run_id,
+                INTERRUPT_FAILURE,
+                elapsed_ms(a.started_at),
+            ),
         )
         .await;
     }
@@ -1772,6 +1811,7 @@ fn run_result_ok(
     in_reply_to: Option<&str>,
     run_id: &str,
     rc: &RunCompletion,
+    duration_ms: u64,
 ) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("kind".into(), Value::String(RUN_RESULT_KIND.into()));
@@ -1780,6 +1820,7 @@ fn run_result_ok(
     }
     m.insert("run_id".into(), Value::String(run_id.to_owned()));
     m.insert("status".into(), Value::String("completed".into()));
+    m.insert("duration_ms".into(), Value::from(duration_ms));
     m.insert("persisted".into(), Value::Bool(rc.persisted));
     if let Some(path) = &rc.output_path {
         m.insert("output_path".into(), Value::String(path.clone()));
@@ -1792,7 +1833,12 @@ fn run_result_ok(
 
 /// Terminal run reply on failure: status + the error naming what went wrong
 /// (rejected modification, unhandled actor failure).
-fn run_result_failed(in_reply_to: Option<&str>, run_id: &str, error: &str) -> Map<String, Value> {
+fn run_result_failed(
+    in_reply_to: Option<&str>,
+    run_id: &str,
+    error: &str,
+    duration_ms: u64,
+) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("kind".into(), Value::String(RUN_RESULT_KIND.into()));
     if let Some(id) = in_reply_to {
@@ -1800,6 +1846,7 @@ fn run_result_failed(in_reply_to: Option<&str>, run_id: &str, error: &str) -> Ma
     }
     m.insert("run_id".into(), Value::String(run_id.to_owned()));
     m.insert("status".into(), Value::String("failed".into()));
+    m.insert("duration_ms".into(), Value::from(duration_ms));
     m.insert("error".into(), Value::String(error.to_owned()));
     m
 }
@@ -1808,7 +1855,11 @@ fn run_result_failed(in_reply_to: Option<&str>, run_id: &str, error: &str) -> Ma
 /// execute settles as status "killed". Distinct from "failed" so consumers
 /// treat it as "turn aborted" (no history append, no error surface), not as
 /// an error.
-fn run_result_killed(in_reply_to: Option<&str>, run_id: &str) -> Map<String, Value> {
+fn run_result_killed(
+    in_reply_to: Option<&str>,
+    run_id: &str,
+    duration_ms: u64,
+) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("kind".into(), Value::String(RUN_RESULT_KIND.into()));
     if let Some(id) = in_reply_to {
@@ -1816,7 +1867,12 @@ fn run_result_killed(in_reply_to: Option<&str>, run_id: &str) -> Map<String, Val
     }
     m.insert("run_id".into(), Value::String(run_id.to_owned()));
     m.insert("status".into(), Value::String("killed".into()));
+    m.insert("duration_ms".into(), Value::from(duration_ms));
     m
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Acknowledge a `mag.apply`: whether the fold accepted the modification, plus

@@ -1879,6 +1879,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn synchronous_execute_publishes_runtime_owned_duration() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let host = LuaHost::load_kernel(
+            &manifest.join("lua/mag-kernel/init.lua"),
+            Some(&manifest.join("../../lua")),
+        )
+        .expect("kernel");
+        let body = serde_json::json!({
+            "run_id": "synchronous-duration",
+            "session_id": "session-1",
+            "artifact": {"format":"nefor.mag","version":1,"kind":"program","program":{
+                "initial": {
+                    "actors": [{
+                        "id": "sync",
+                        "factory": "nefor.factory.stub",
+                        "type_arguments": [],
+                        "params": {"$mag": "packed-value", "value": {"greeting": "done"}},
+                        "routes": {}
+                    }],
+                    "messages": [{"to": "sync", "content": {"$mag": "packed-value", "value": {"kind": "stub.In"}}}],
+                    "nodes": [{"path": ["sync"], "members": ["sync"]}],
+                    "kills": [],
+                    "result": {"from": {"actor": "sync", "type": "example.Result", "type_id": "sha256:test-result", "wire": "stub.Out"}}
+                },
+                "operations": []
+            }}
+        });
+        let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
+        let mut active = ActiveExecutes::new();
+        let mut bridge = CapabilityBridge::new("tool-gate");
+        handle_execute(
+            &out_tx,
+            "direct",
+            body.as_object().expect("execute body"),
+            Some("execute-sync"),
+            (&host, &mut active, &mut bridge),
+        )
+        .await
+        .expect("synchronous execution");
+
+        let mut events = Vec::new();
+        while let Ok(outgoing) = out_rx.try_recv() {
+            let Body::Event(body) = outgoing.body else {
+                continue;
+            };
+            events.push(body);
+        }
+        let result = events
+            .iter()
+            .find(|body| body.get("kind").and_then(Value::as_str) == Some(RUN_RESULT_KIND))
+            .unwrap_or_else(|| panic!("terminal run result missing from {events:?}"));
+        assert_eq!(
+            result.get("status").and_then(Value::as_str),
+            Some("completed"),
+            "{result:?}"
+        );
+        assert!(result.get("duration_ms").and_then(Value::as_u64).is_some());
+        assert!(active.is_empty(), "synchronous execution is never retained");
+    }
+
+    #[tokio::test]
     async fn malformed_agent_error_output_rejects_during_load_before_run_registration() {
         let root =
             std::env::temp_dir().join(format!("mag-malformed-agent-output-{}", std::process::id()));
@@ -2048,7 +2109,10 @@ mod tests {
         let (out_tx, mut out_rx) = mpsc::channel(CHANNEL_CAP);
         let mut active = HashMap::from([(
             "provider-events".to_owned(),
-            ActiveExecute { in_reply_to: None },
+            ActiveExecute {
+                in_reply_to: None,
+                started_at: Instant::now(),
+            },
         )]);
 
         for body in [

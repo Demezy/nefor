@@ -368,6 +368,13 @@ fn execute_body(
     }))
 }
 
+fn assert_duration_ms(result: &Map<String, Value>) -> u64 {
+    result
+        .get("duration_ms")
+        .and_then(Value::as_u64)
+        .expect("terminal run result carries a nonnegative integer duration_ms")
+}
+
 fn completed(provider: &str, request_id: &str, fields: Value) -> Map<String, Value> {
     let mut body = fields.as_object().expect("completion fields").clone();
     body.insert(
@@ -1731,6 +1738,7 @@ async fn lead_turn_runs_through_gate_and_second_turn_replays_seeded_history() {
         create2.get("output_schema").is_none(),
         "TextAnswer requests direct terminal text without a provider schema"
     );
+    tokio::time::sleep(Duration::from_millis(30)).await;
     send_event(
         &mut stdin,
         completed(
@@ -1745,6 +1753,10 @@ async fn lead_turn_runs_through_gate_and_second_turn_replays_seeded_history() {
     assert_eq!(
         result.get("status").and_then(Value::as_str),
         Some("completed")
+    );
+    assert!(
+        assert_duration_ms(&result) >= 20,
+        "the producer-owned duration includes time spent awaiting the provider"
     );
     assert_eq!(
         result.get("in_reply_to").and_then(Value::as_str),
@@ -1875,6 +1887,7 @@ async fn kill_run_cancels_the_provider_round_and_settles_killed() {
         "provider cancel observed before the terminal reply"
     );
     assert_eq!(result.get("status").and_then(Value::as_str), Some("killed"));
+    assert_duration_ms(&result);
     assert_eq!(
         result.get("run_id").and_then(Value::as_str),
         Some("lead-run-killed")
@@ -2179,6 +2192,7 @@ async fn terminating_interrupt_cancels_inflight_tool_and_settles_failed_without_
         Some("failed"),
         "the terminated dispatched run settles FAILED, not completed"
     );
+    assert_duration_ms(&result);
     assert_eq!(
         result.get("error").and_then(Value::as_str),
         Some("interrupted by user"),
