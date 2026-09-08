@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn realistic_catalog_pins_process_exec_as_the_offending_tenth_tool() {
+    fn realistic_catalog_maps_every_tool_to_a_provider_valid_name() {
         let catalog = specs(&[
             "read_file",
             "read_image",
@@ -197,14 +197,14 @@ mod tests {
             "process.exec",
             "shell.script",
         ]);
-        assert_eq!(catalog[9].name, "process.exec");
-        assert!(!is_valid_provider_name(&catalog[9].name));
         let names = ProviderToolNames::from_specs(&catalog).expect("mapping");
-        assert!(is_valid_provider_name(
-            names
-                .to_provider(&catalog[9].name)
-                .expect("mapped tenth tool")
-        ));
+
+        for tool in &catalog {
+            let provider = names.to_provider(&tool.name).expect("mapped tool");
+            assert!(is_valid_provider_name(provider), "{provider}");
+            assert_eq!(names.to_internal(provider), Ok(tool.name.as_str()));
+        }
+        assert_ne!(names.to_provider("process.exec"), Ok("process.exec"));
     }
 
     #[test]
