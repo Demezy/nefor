@@ -20,7 +20,7 @@ use std::time::Duration;
 use chatgpt_provider::auth::AuthStore;
 use chatgpt_provider::broker::ToolBroker;
 use chatgpt_provider::catalog::ToolCatalog;
-use chatgpt_provider::config::ServeArgs;
+use chatgpt_provider::config::{ServeArgs, WebSearchMode};
 use chatgpt_provider::dispatcher::{run_dispatch_loop, DispatcherContext};
 use chatgpt_provider::responses::ResponsesClient;
 use chatgpt_provider::state::Chats;
@@ -232,6 +232,7 @@ async fn cancel_aborts_inflight_completion_and_provider_serves_next() {
     let args = Arc::new(ServeArgs {
         provider_name: PROVIDER.into(),
         base_url: format!("http://{addr}"),
+        web_search: WebSearchMode::Cached,
     });
     let chats = Arc::new(Chats::with_default_model(None));
     let dir = tempfile::tempdir().expect("tempdir");
@@ -288,6 +289,8 @@ async fn cancel_aborts_inflight_completion_and_provider_serves_next() {
         1,
         "inline system prompt must occur exactly once: {request}"
     );
+    assert_eq!(request.matches(r#""type":"web_search""#).count(), 1);
+    assert!(request.contains(r#""external_web_access":false"#));
 
     // A persistent chat may use the same id without replacing or owning
     // the request-local completion state.
@@ -396,6 +399,12 @@ async fn cancel_aborts_inflight_completion_and_provider_serves_next() {
         .and_then(Value::as_str)
         .unwrap_or_default();
     assert_eq!(text, "hello", "second completion streamed its output");
+    let chat_request = request_rx.recv().await.expect("captured chat request");
+    assert_eq!(
+        chat_request.matches(r#""type":"web_search""#).count(),
+        1,
+        "persistent chat request receives one hosted tool: {chat_request}"
+    );
 
     // Clean shutdown: drop the sender so the loop returns.
     drop(in_tx);
@@ -420,6 +429,7 @@ async fn invalid_direct_completion_options_fail_once_before_http() {
     let args = Arc::new(ServeArgs {
         provider_name: PROVIDER.into(),
         base_url: format!("http://{addr}"),
+        web_search: Default::default(),
     });
     let chats = Arc::new(Chats::with_default_model(None));
     let dir = tempfile::tempdir().expect("tempdir");
@@ -536,7 +546,7 @@ async fn invalid_direct_completion_options_fail_once_before_http() {
 }
 
 #[tokio::test]
-async fn concurrent_direct_completions_keep_request_local_tool_allowlists() {
+async fn direct_completions_keep_local_allowlists_and_add_hosted_search() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let (request_tx, mut request_rx) = mpsc::channel::<Value>(2);
@@ -564,6 +574,7 @@ async fn concurrent_direct_completions_keep_request_local_tool_allowlists() {
     let args = Arc::new(ServeArgs {
         provider_name: PROVIDER.into(),
         base_url: format!("http://{addr}"),
+        web_search: WebSearchMode::Cached,
     });
     let chats = Arc::new(Chats::with_default_model(None));
     let dir = tempfile::tempdir().expect("tempdir");
@@ -632,9 +643,11 @@ async fn concurrent_direct_completions_keep_request_local_tool_allowlists() {
                 .expect("prompt")
                 .to_owned();
             let tools = request["tools"].as_array().expect("tools");
-            assert_eq!(tools.len(), 1, "each request keeps exactly its allowlist");
+            assert_eq!(tools.len(), 2, "hosted search is additive to the allowlist");
             let tool = tools[0]["name"].as_str().expect("tool name").to_owned();
             assert_eq!(tools[0]["parameters"]["type"], "object");
+            assert_eq!(tools[1]["type"], "web_search");
+            assert_eq!(tools[1]["external_web_access"], false);
             let service_tier = request
                 .get("service_tier")
                 .and_then(Value::as_str)
@@ -697,9 +710,11 @@ async fn chat_compaction_preserves_fast_service_tier() {
             .expect("response");
     });
 
-    let (in_tx, mut out_rx, loop_handle) = start_direct_harness(
+    let (in_tx, mut out_rx, loop_handle) = start_direct_harness_with_budget(
         format!("http://{addr}"),
         test_responses_client(format!("http://{addr}")),
+        None,
+        WebSearchMode::Cached,
     )
     .await;
     in_tx
@@ -746,6 +761,9 @@ async fn chat_compaction_preserves_fast_service_tier() {
     let request = request_rx.recv().await.expect("compaction request");
     assert_eq!(request["service_tier"], "priority");
     assert_eq!(request["input"][1]["type"], "compaction_trigger");
+    assert_eq!(request["tools"].as_array().map(Vec::len), Some(1));
+    assert_eq!(request["tools"][0]["type"], "web_search");
+    assert_eq!(request["tools"][0]["external_web_access"], false);
     wait_for_kind(
         &mut out_rx,
         &kind("chat.compaction.commit"),
@@ -753,6 +771,126 @@ async fn chat_compaction_preserves_fast_service_tier() {
     )
     .await
     .expect("compaction committed");
+
+    finish_harness(in_tx, loop_handle).await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn native_web_search_context_replays_in_output_order_without_item_id() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_server = hits.clone();
+    let (request_tx, mut request_rx) = mpsc::channel::<Value>(2);
+    let server = tokio::spawn(async move {
+        let replies = [
+            concat!(
+                "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"in_progress\"}}\n\n",
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"found\"}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"found\"}]}}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"current rust\"}}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\n",
+                "data: [DONE]\n\n"
+            ),
+            concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"continued\"}\n\n",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"continued\"}]}}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r2\"}}\n\n",
+                "data: [DONE]\n\n"
+            ),
+        ];
+        for body in replies {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            request_tx
+                .send(read_request_json(&mut stream).await)
+                .await
+                .expect("capture request");
+            hits_server.fetch_add(1, Ordering::SeqCst);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("response");
+        }
+    });
+
+    let base_url = format!("http://{addr}");
+    let (in_tx, mut out_rx, loop_handle) =
+        start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
+    submit_direct_completion(&in_tx, "native-search-1").await;
+    let completed = wait_for_completion_event(
+        &mut out_rx,
+        "native-search-1",
+        "completed",
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("first completion");
+    assert_eq!(completed["text"], "found");
+    assert!(completed.get("tool_calls").is_none());
+    let provider_context = completed["provider_context"].clone();
+    let items = provider_context["artifact"]["items"]
+        .as_array()
+        .expect("native items");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["type"], "web_search_call");
+    assert_eq!(items[0]["id"], "ws_1");
+    assert_eq!(items[1]["type"], "message");
+
+    in_tx
+        .send(Ok(event_env(
+            &kind("completion.request"),
+            &[
+                ("request_id", Value::String("native-search-2".into())),
+                ("model", Value::String("test-model".into())),
+                (
+                    "messages",
+                    serde_json::json!([
+                        {"role":"user","content":"find it"},
+                        {"role":"assistant","content":"found","provider_context":provider_context},
+                        {"role":"user","content":"continue"}
+                    ]),
+                ),
+            ],
+        )))
+        .await
+        .expect("second completion request");
+    let second = wait_for_completion_event(
+        &mut out_rx,
+        "native-search-2",
+        "completed",
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("second completion");
+    assert_eq!(second["text"], "continued");
+
+    let _first_request = request_rx.recv().await.expect("first request");
+    let second_request = request_rx.recv().await.expect("second request");
+    let replay = second_request["input"].as_array().expect("request input");
+    let replay_types = replay
+        .iter()
+        .filter_map(|item| item.get("type").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        replay_types,
+        ["message", "web_search_call", "message", "message"]
+    );
+    let web_search = replay
+        .iter()
+        .find(|item| item["type"] == "web_search_call")
+        .expect("replayed web search");
+    assert!(web_search.get("id").is_none());
+    assert_eq!(web_search["action"]["query"], "current rust");
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "no local tool iteration");
+    let trailing = drain_for(&mut out_rx, Duration::from_millis(100)).await;
+    assert!(trailing
+        .iter()
+        .all(|body| body.get("event").and_then(Value::as_str) != Some("tool_call")));
 
     finish_harness(in_tx, loop_handle).await;
     server.await.expect("server");
@@ -828,13 +966,14 @@ async fn start_direct_harness(
     mpsc::Receiver<PluginOutgoing>,
     tokio::task::JoinHandle<Result<(), chatgpt_provider::error::ChatgptError>>,
 ) {
-    start_direct_harness_with_budget(base_url, client, None).await
+    start_direct_harness_with_budget(base_url, client, None, WebSearchMode::Disabled).await
 }
 
 async fn start_direct_harness_with_budget(
     base_url: String,
     client: ResponsesClient,
     retry_budget: Option<Duration>,
+    web_search: WebSearchMode,
 ) -> (
     mpsc::Sender<Result<Envelope, TransportError>>,
     mpsc::Receiver<PluginOutgoing>,
@@ -843,6 +982,7 @@ async fn start_direct_harness_with_budget(
     let args = Arc::new(ServeArgs {
         provider_name: PROVIDER.into(),
         base_url,
+        web_search,
     });
     let chats = Arc::new(Chats::with_default_model(None));
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1016,6 +1156,7 @@ async fn replay_body_read_stops_at_the_absolute_recovery_deadline() {
         base_url.clone(),
         test_responses_client(base_url),
         Some(retry_budget),
+        WebSearchMode::Disabled,
     )
     .await;
 
@@ -1406,6 +1547,7 @@ async fn direct_completion_replays_encrypted_reasoning_before_tool_output() {
     let args = Arc::new(ServeArgs {
         provider_name: PROVIDER.into(),
         base_url: format!("http://{addr}"),
+        web_search: Default::default(),
     });
     let chats = Arc::new(Chats::with_default_model(None));
     let dir = tempfile::tempdir().expect("tempdir");

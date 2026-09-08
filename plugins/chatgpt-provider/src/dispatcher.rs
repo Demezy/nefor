@@ -14,7 +14,7 @@
 //! Responses-API typed stream from Phase 3 instead of the
 //! chat-completions SSE parser.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -68,6 +68,11 @@ const LOGOUT_REFUSED_ENV_MESSAGE: &str =
 const HTTP_401_MESSAGE: &str = "auth failed (HTTP 401) — re-login via chatgpt-provider login";
 
 const USAGE_POLL_INTERVAL_SECS: u64 = 5 * 60;
+
+fn with_provider_tools(args: &ServeArgs, mut local_tools: Vec<Value>) -> Vec<Value> {
+    args.web_search.append_tool(&mut local_tools);
+    local_tools
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Auth401Action {
@@ -2427,6 +2432,7 @@ async fn compact_chat(
                 return Ok(());
             }
         };
+    let tools_json = with_provider_tools(&ctx.args, tools_json);
     let mut translated =
         translator::history_to_input(&snapshot.history, snapshot.system.as_deref());
     if let Err(error) = provider_tool_names.map_input_to_provider(&mut translated.input) {
@@ -2630,6 +2636,31 @@ async fn handle_chat_delete(
 // ---------------------------------------------------------------------
 // Per-turn task.
 // ---------------------------------------------------------------------
+
+#[derive(Default)]
+struct NativeOutputBuffer {
+    indexed: BTreeMap<u32, ResponseItem>,
+    unindexed: Vec<ResponseItem>,
+}
+
+impl NativeOutputBuffer {
+    fn push(&mut self, output_index: Option<u32>, item: ResponseItem) -> Result<(), String> {
+        if let Some(output_index) = output_index {
+            if self.indexed.insert(output_index, item).is_some() {
+                return Err(format!(
+                    "Responses stream completed more than one output item at index {output_index}"
+                ));
+            }
+        } else {
+            self.unindexed.push(item);
+        }
+        Ok(())
+    }
+
+    fn into_items(self) -> Vec<ResponseItem> {
+        self.indexed.into_values().chain(self.unindexed).collect()
+    }
+}
 
 /// Per-call argument buffer for streaming function-call args.
 #[derive(Default)]
@@ -3243,6 +3274,7 @@ fn spawn_turn(
                         break;
                     }
                 };
+            let tools_json = with_provider_tools(&ctx.args, tools_json);
             tracing::info!(
                 count = filtered_specs.len(),
                 names = ?filtered_specs.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
@@ -3532,7 +3564,7 @@ fn spawn_turn(
             let mut reasoning_formatter = ReasoningSummaryFormatter::default();
             let mut reasoning_started_at: Option<std::time::Instant> = None;
             let mut tool_buf = ToolCallBuffer::default();
-            let mut iter_native_output = Vec::new();
+            let mut iter_native_output = NativeOutputBuffer::default();
             let mut iter_finish_reason: Option<String> = None;
             let mut iter_usage: Option<(u64, u64)> = None;
             let mut iter_interrupted = false;
@@ -3705,7 +3737,10 @@ fn spawn_turn(
                                 ResponseEvent::OutputItemAdded { .. } => {
                                     native_output_state_observed = true;
                                 }
-                                ResponseEvent::OutputItemDone { item, .. } => {
+                                ResponseEvent::OutputItemDone {
+                                    item,
+                                    output_index,
+                                } => {
                                     native_output_state_observed = true;
                                     if let ResponseItem::FunctionCall {
                                         id,
@@ -3731,11 +3766,12 @@ fn spawn_turn(
                                             tool_buf.on_item_done(Some(&item_id), arguments);
                                         }
                                     }
-                                    // `output_item.done` events are emitted in response output
-                                    // order. Preserve that exact sequence: reasoning items only
-                                    // remain useful when replayed beside their sibling message and
-                                    // function-call items.
-                                    iter_native_output.push(item);
+                                    if let Err(error) =
+                                        iter_native_output.push(output_index, item)
+                                    {
+                                        iter_errored = Some(error);
+                                        break;
+                                    }
                                 }
                                 ResponseEvent::Completed { response } => {
                                     terminal_event_seen = true;
@@ -3775,6 +3811,8 @@ fn spawn_turn(
                     }
                 }
             }
+
+            let mut iter_native_output = iter_native_output.into_items();
 
             // Hard cancel arrived mid-stream: drop this turn entirely.
             // The reqwest byte stream was already aborted when the select
@@ -4227,7 +4265,65 @@ mod tests {
         ServeArgs {
             provider_name: "chatgpt".into(),
             base_url: "https://example.invalid".into(),
+            web_search: Default::default(),
         }
+    }
+
+    #[test]
+    fn native_output_uses_indices_then_stable_unindexed_fallback() {
+        let message = |role: &str| ResponseItem::Message {
+            role: role.into(),
+            content: vec![],
+        };
+        let mut output = NativeOutputBuffer::default();
+        output.push(Some(1), message("index-1")).expect("index 1");
+        output
+            .push(None, message("unindexed-a"))
+            .expect("first unindexed");
+        output.push(Some(0), message("index-0")).expect("index 0");
+        output
+            .push(None, message("unindexed-b"))
+            .expect("second unindexed");
+
+        let roles = output
+            .into_items()
+            .into_iter()
+            .map(|item| match item {
+                ResponseItem::Message { role, .. } => role,
+                _ => unreachable!("test only inserts messages"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(roles, ["index-0", "index-1", "unindexed-a", "unindexed-b"]);
+    }
+
+    #[test]
+    fn native_output_rejects_duplicate_indices() {
+        let mut output = NativeOutputBuffer::default();
+        let message = ResponseItem::Message {
+            role: "assistant".into(),
+            content: vec![],
+        };
+        output.push(Some(0), message.clone()).expect("first item");
+        assert_eq!(
+            output.push(Some(0), message).expect_err("duplicate index"),
+            "Responses stream completed more than one output item at index 0"
+        );
+    }
+
+    #[test]
+    fn hosted_search_is_added_after_local_tool_filtering() {
+        let local = serde_json::json!({"type": "function", "name": "read_file"});
+        let mut args = args();
+        args.web_search = crate::config::WebSearchMode::Cached;
+
+        let with_local = with_provider_tools(&args, vec![local.clone()]);
+        assert_eq!(with_local[0], local);
+        assert_eq!(with_local[1]["type"], "web_search");
+        assert_eq!(with_local[1]["external_web_access"], false);
+
+        let empty_allowlist_result = with_provider_tools(&args, Vec::new());
+        assert_eq!(empty_allowlist_result.len(), 1);
+        assert_eq!(empty_allowlist_result[0]["type"], "web_search");
     }
 
     #[test]
@@ -5283,6 +5379,19 @@ mod tests {
                         encrypted_content: Some("sealed-plan".into()),
                         summary: vec![],
                     },
+                    ResponseItem::WebSearchCall {
+                        id: Some("ws_1".into()),
+                        status: Some("completed".into()),
+                        action: Some(crate::responses::request::WebSearchAction {
+                            kind: Some("search".into()),
+                            query: Some("native search".into()),
+                            queries: None,
+                            url: None,
+                            pattern: None,
+                            extra: Map::new(),
+                        }),
+                        extra: Map::new(),
+                    },
                     ResponseItem::Message {
                         role: "assistant".into(),
                         content: vec![],
@@ -5299,7 +5408,12 @@ mod tests {
             ResponseItem::Reasoning { encrypted_content: Some(content), .. }
                 if content == "sealed-plan"
         ));
-        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            &items[1],
+            ResponseItem::WebSearchCall { id: Some(id), .. } if id == "ws_1"
+        ));
+        assert!(matches!(&items[2], ResponseItem::Message { .. }));
+        assert_eq!(items.len(), 3);
 
         assert!(
             message_provider_context_items(&message, "other", Some("gpt-5.6-sol"))

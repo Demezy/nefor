@@ -115,6 +115,63 @@ data: {"type":"response.output_item.done","output_index":1,"item":{"type":"funct
 }
 
 #[test]
+fn parses_partial_and_completed_web_search_actions_losslessly() {
+    let cases = [
+        (
+            r#"{"type":"web_search_call","id":"ws_search","status":"in_progress","action":{"type":"search","query":"rust","queries":["rust","rust lang"]}}"#,
+            "search",
+        ),
+        (
+            r#"{"type":"web_search_call","id":"ws_open","status":"completed","action":{"type":"open_page","url":"https://example.com"}}"#,
+            "open_page",
+        ),
+        (
+            r#"{"type":"web_search_call","id":"ws_find","status":"completed","action":{"type":"find_in_page","url":"https://example.com","pattern":"needle"}}"#,
+            "find_in_page",
+        ),
+        (
+            r#"{"type":"web_search_call","id":"ws_unknown","status":"completed","action":{"type":"future_action","cursor":7}}"#,
+            "future_action",
+        ),
+        (
+            r#"{"type":"web_search_call","id":"ws_partial","status":"in_progress"}"#,
+            "",
+        ),
+    ];
+
+    for (item, expected_kind) in cases {
+        for event_type in ["response.output_item.added", "response.output_item.done"] {
+            let raw = format!(
+                "data: {{\"type\":\"{event_type}\",\"output_index\":0,\"item\":{item}}}\n\n"
+            );
+            let event = parse_all(&raw).pop().expect("event");
+            let item = match event {
+                ResponseEvent::OutputItemAdded { item, .. }
+                | ResponseEvent::OutputItemDone { item, .. } => item,
+                other => panic!("expected web-search item event, got {other:?}"),
+            };
+            let ResponseItem::WebSearchCall {
+                id, status, action, ..
+            } = &item
+            else {
+                panic!("expected web-search call, got {item:?}");
+            };
+            assert!(id.as_deref().is_some_and(|id| id.starts_with("ws_")));
+            assert!(status.is_some());
+            assert_eq!(
+                action.as_ref().and_then(|action| action.kind.as_deref()),
+                (!expected_kind.is_empty()).then_some(expected_kind)
+            );
+            let stored = serde_json::to_value(&item).expect("serialize context item");
+            assert_eq!(stored["id"], serde_json::json!(id));
+            if expected_kind == "future_action" {
+                assert_eq!(stored["action"]["cursor"], 7);
+            }
+        }
+    }
+}
+
+#[test]
 fn parses_reasoning_summary_delta() {
     let raw = r#"
 data: {"type":"response.reasoning_summary_text.delta","delta":"Considering ","summary_index":0,"item_id":"rs_1"}

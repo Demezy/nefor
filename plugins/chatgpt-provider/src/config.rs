@@ -10,7 +10,7 @@
 //! - `login` subcommand. Interactive OAuth bootstrap; persists tokens
 //!   to `$XDG_DATA_HOME/nefor/chatgpt-auth.json` and exits.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 /// Default plugin identity / event-kind prefix.
 pub const DEFAULT_PROVIDER_NAME: &str = "chatgpt";
@@ -37,8 +37,34 @@ pub struct Cli {
     #[arg(long = "base-url", default_value = DEFAULT_BASE_URL, value_parser = trim_trailing_slash, global = true)]
     pub base_url: String,
 
+    /// Provider-hosted web search mode for every Responses request.
+    #[arg(long = "web-search", value_enum, default_value_t = WebSearchMode::Disabled, global = true)]
+    pub web_search: WebSearchMode,
+
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum WebSearchMode {
+    #[default]
+    Disabled,
+    Cached,
+    Live,
+}
+
+impl WebSearchMode {
+    pub fn append_tool(self, tools: &mut Vec<serde_json::Value>) {
+        let external_web_access = match self {
+            Self::Disabled => return,
+            Self::Cached => false,
+            Self::Live => true,
+        };
+        tools.push(serde_json::json!({
+            "type": "web_search",
+            "external_web_access": external_web_access,
+        }));
+    }
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -62,6 +88,7 @@ pub struct LoginArgs {
 pub struct ServeArgs {
     pub provider_name: String,
     pub base_url: String,
+    pub web_search: WebSearchMode,
 }
 
 impl ServeArgs {
@@ -77,6 +104,7 @@ impl From<&Cli> for ServeArgs {
         Self {
             provider_name: cli.provider_name.clone(),
             base_url: cli.base_url.clone(),
+            web_search: cli.web_search,
         }
     }
 }
@@ -95,6 +123,7 @@ mod tests {
         assert!(cli.command.is_none());
         assert_eq!(cli.provider_name, DEFAULT_PROVIDER_NAME);
         assert_eq!(cli.base_url, DEFAULT_BASE_URL);
+        assert_eq!(cli.web_search, WebSearchMode::Disabled);
     }
 
     #[test]
@@ -112,9 +141,47 @@ mod tests {
     }
 
     #[test]
+    fn web_search_accepts_only_closed_modes() {
+        for (raw, expected) in [
+            ("disabled", WebSearchMode::Disabled),
+            ("cached", WebSearchMode::Cached),
+            ("live", WebSearchMode::Live),
+        ] {
+            let cli =
+                Cli::try_parse_from(["chatgpt-provider", "--web-search", raw]).expect("parse mode");
+            assert_eq!(cli.web_search, expected);
+        }
+        assert!(Cli::try_parse_from(["chatgpt-provider", "--web-search", "maybe"]).is_err());
+    }
+
+    #[test]
     fn login_subcommand_parses() {
         let cli = Cli::try_parse_from(["chatgpt-provider", "login"]).expect("parse");
         assert!(matches!(cli.command, Some(Command::Login(_))));
+    }
+
+    #[test]
+    fn web_search_tool_is_provider_owned_and_additive() {
+        let local = serde_json::json!({"type": "function", "name": "read_file"});
+        for (mode, expected) in [
+            (WebSearchMode::Disabled, None),
+            (WebSearchMode::Cached, Some(false)),
+            (WebSearchMode::Live, Some(true)),
+        ] {
+            let mut tools = vec![local.clone()];
+            mode.append_tool(&mut tools);
+            assert_eq!(tools[0], local);
+            assert_eq!(tools.len(), if expected.is_some() { 2 } else { 1 });
+            if let Some(external) = expected {
+                assert_eq!(
+                    tools[1],
+                    serde_json::json!({
+                        "type": "web_search",
+                        "external_web_access": external,
+                    })
+                );
+            }
+        }
     }
 
     #[test]

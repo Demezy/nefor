@@ -21,6 +21,37 @@ fn repo_root() -> PathBuf {
 }
 
 #[test]
+fn starter_forwards_optional_chatgpt_web_search_mode() {
+    let lua = Lua::new();
+    set_package_path(&lua).expect("set package.path");
+    lua.load(
+        r#"
+        local command = require("config.provider_command")
+        local default = command.chatgpt("/bin/chatgpt-provider", {
+          name = "chatgpt",
+        })
+        assert(#default == 3)
+        assert(default[1] == "/bin/chatgpt-provider")
+        assert(default[2] == "--name" and default[3] == "chatgpt")
+
+        local cached = command.chatgpt("/bin/chatgpt-provider", {
+          name = "chatgpt", base_url = "http://localhost",
+          web_search = "cached", extra_args = { "--future", "value" },
+        })
+        local expected = {
+          "/bin/chatgpt-provider", "--name", "chatgpt",
+          "--base-url", "http://localhost",
+          "--web-search", "cached", "--future", "value",
+        }
+        assert(#cached == #expected)
+        for i, value in ipairs(expected) do assert(cached[i] == value) end
+        "#,
+    )
+    .exec()
+    .expect("build ChatGPT provider commands");
+}
+
+#[test]
 fn chatgpt_direct_terminals_keep_provider_output_on_canonical_completion_events() {
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");

@@ -240,19 +240,10 @@ for _, p in ipairs(cfg.providers or {}) do
       }
     ))
   elseif p.kind == "chatgpt" then
-    local provider_command = {
-      require("config").bin("chatgpt-provider"),
-      "--name", p.name,
-    }
-    if p.base_url then
-      table.insert(provider_command, "--base-url")
-      table.insert(provider_command, p.base_url)
-    end
     -- No `--model` flag: chatgpt-provider fetches its model list from
     -- the backend at runtime; the user picks via `/model` in chat.
-    for _, a in ipairs(p.extra_args or {}) do
-      table.insert(provider_command, a)
-    end
+    local provider_command = require("config.provider_command").chatgpt(
+      require("config").bin("chatgpt-provider"), p)
     actor.spawn(provider.spawn_spec(
       p.name,
       provider_command,

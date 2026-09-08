@@ -6,7 +6,7 @@
 //! same wire footprint but drop fields nefor doesn't drive yet
 //! (`client_metadata`, websocket-bridging shapes).
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 /// Canonical request body POSTed to `…/codex/responses`.
@@ -19,6 +19,7 @@ pub struct ResponsesApiRequest {
     pub model: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub instructions: String,
+    #[serde(serialize_with = "serialize_request_items")]
     pub input: Vec<ResponseItem>,
     pub tools: Vec<serde_json::Value>,
     pub tool_choice: String,
@@ -95,6 +96,7 @@ pub enum Verbosity {
 ///   - `message` — user/assistant text turns
 ///   - `function_call` — model invoking a tool
 ///   - `function_call_output` — result fed back to the model
+///   - `web_search_call` — provider-hosted search state, replayed natively
 ///   - `reasoning` — chain-of-thought (passed through verbatim across
 ///     turns to preserve state on the subscription path)
 ///   - `compaction` — native opaque compaction state returned by the
@@ -132,6 +134,16 @@ pub enum ResponseItem {
         call_id: String,
         output: String,
     },
+    WebSearchCall {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<WebSearchAction>,
+        #[serde(flatten)]
+        extra: Map<String, Value>,
+    },
     Reasoning {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
@@ -162,6 +174,56 @@ pub enum ResponseItem {
         #[serde(flatten)]
         extra: Map<String, Value>,
     },
+}
+
+/// Serialize provider-context items for an outbound ChatGPT request. Response
+/// item IDs remain in the durable context, but ChatGPT's non-stored Responses
+/// requests follow Codex's normal lowering and omit hosted-search item IDs.
+pub(crate) fn serialize_request_items<S>(
+    items: &[ResponseItem],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let lowered = items
+        .iter()
+        .cloned()
+        .map(|item| match item {
+            ResponseItem::WebSearchCall {
+                status,
+                action,
+                extra,
+                ..
+            } => ResponseItem::WebSearchCall {
+                id: None,
+                status,
+                action,
+                extra,
+            },
+            item => item,
+        })
+        .collect::<Vec<_>>();
+    lowered.serialize(serializer)
+}
+
+/// A hosted web-search action. Optional known fields tolerate the partial
+/// shapes emitted by `output_item.added`; `extra` preserves future actions and
+/// fields for native replay without interpreting them as local tool calls.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebSearchAction {
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queries: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 /// Single content part inside a `Message`. The Responses API uses

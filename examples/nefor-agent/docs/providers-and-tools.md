@@ -20,6 +20,14 @@ Configure those through [`config.active.providers`](customization.md#starter-set
 
 A provider subprocess speaks NCP, but provider request/history/stream types are a higher-level contract. `generic-provider` owns canonical type declarations and concrete providers translate to them. Do not treat those event kinds as NCP itself.
 
+A `chatgpt` descriptor may set `web_search = "cached"` or `web_search = "live"`;
+the starter forwards it as the provider's `--web-search` option. Leaving the
+field unset keeps the provider default (`disabled`). ChatGPT-hosted search is
+not a local function tool: it remains available even when an agent's local
+capability allowlist is read-only or empty, and it does not pass through
+`tool-gate`. Choose `cached` when external live access is not intended and
+`live` only when the provider may query the current web.
+
 ## Config-defined read-only tools
 
 `libs.read-only-tools` exposes a supported registration seam:

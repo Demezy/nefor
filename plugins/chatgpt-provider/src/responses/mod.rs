@@ -37,7 +37,7 @@ pub use headers::{build_headers, default_user_agent};
 pub use nefor_sse::SseBuffer;
 pub use request::{
     MessageContent, Reasoning, ReasoningEffort, ReasoningSummary, ReasoningSummaryPart,
-    ResponseItem, ResponsesApiRequest, TextControls, Verbosity,
+    ResponseItem, ResponsesApiRequest, TextControls, Verbosity, WebSearchAction,
 };
 pub use stream::{parse_sse_frame, ResponseEvent, ResponseStream};
 pub use usage::{UsageCredits, UsageRateLimit, UsageSnapshot, UsageWindow};
@@ -131,6 +131,7 @@ pub struct CompactRequest {
     pub model: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub instructions: String,
+    #[serde(serialize_with = "request::serialize_request_items")]
     pub input: Vec<ResponseItem>,
     pub tools: Vec<serde_json::Value>,
     pub parallel_tool_calls: bool,
