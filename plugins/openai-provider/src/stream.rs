@@ -113,18 +113,17 @@ fn response_signals_terminal_quota_denial(status: u16, body: &str) -> bool {
         return false;
     }
     let normalized = body.to_ascii_lowercase();
-    [
-        "insufficient_quota",
-        "budget_exhausted",
-        "billing_hard_limit_reached",
-        "credits_exhausted",
-        "insufficient balance",
-        "payment required",
-        "quota exhausted",
-        "credit exhausted",
-    ]
-    .iter()
-    .any(|signal| normalized.contains(signal))
+    let names_account_resource = ["quota", "credit", "balance", "budget"]
+        .iter()
+        .any(|resource| normalized.contains(resource));
+    let names_terminal_state = ["exhausted", "depleted", "insufficient"]
+        .iter()
+        .any(|state| normalized.contains(state));
+
+    (names_account_resource && names_terminal_state)
+        || normalized.contains("billing_hard_limit")
+        || normalized.contains("billing hard limit")
+        || normalized.contains("payment required")
 }
 
 /// Boundary signal passed to the reasoning callback. The dispatcher
@@ -1181,17 +1180,26 @@ mod tests {
 
     #[test]
     fn terminal_quota_denial_is_distinct_from_transient_retries() {
-        assert!(response_signals_terminal_quota_denial(
-            429,
-            r#"{"error":{"type":"insufficient_quota"}}"#
-        ));
+        for body in [
+            r#"{"error":{"type":"insufficient_quota"}}"#,
+            r#"{"error":"Your budget has been exhausted"}"#,
+            r#"{"error":"Credit balance depleted"}"#,
+            r#"{"error":"Insufficient balance"}"#,
+            r#"{"error":"Billing hard limit reached"}"#,
+            r#"{"error":"Payment required"}"#,
+        ] {
+            assert!(
+                response_signals_terminal_quota_denial(429, body),
+                "expected terminal denial for {body}"
+            );
+            assert!(
+                !response_signals_terminal_quota_denial(500, body),
+                "5xx must remain retriable for {body}"
+            );
+        }
         assert!(!response_signals_terminal_quota_denial(
             429,
             r#"{"error":"rate limited"}"#
-        ));
-        assert!(!response_signals_terminal_quota_denial(
-            500,
-            r#"{"error":{"type":"insufficient_quota"}}"#
         ));
     }
 
