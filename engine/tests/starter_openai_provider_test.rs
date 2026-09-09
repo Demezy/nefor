@@ -21,34 +21,45 @@ fn repo_root() -> PathBuf {
 }
 
 #[test]
-fn starter_forwards_optional_chatgpt_web_search_mode() {
+fn starter_chatgpt_command_has_no_web_search_bypass_and_compositor_advertises_native_tool() {
     let lua = Lua::new();
+    install_stub_nefor(&lua).expect("install nefor stub");
     set_package_path(&lua).expect("set package.path");
     lua.load(
         r#"
         local command = require("config.provider_command")
-        local default = command.chatgpt("/bin/chatgpt-provider", {
-          name = "chatgpt",
-        })
-        assert(#default == 3)
-        assert(default[1] == "/bin/chatgpt-provider")
-        assert(default[2] == "--name" and default[3] == "chatgpt")
-
-        local cached = command.chatgpt("/bin/chatgpt-provider", {
+        local argv = command.chatgpt("/bin/chatgpt-provider", {
           name = "chatgpt", base_url = "http://localhost",
           web_search = "cached", extra_args = { "--future", "value" },
         })
         local expected = {
           "/bin/chatgpt-provider", "--name", "chatgpt",
-          "--base-url", "http://localhost",
-          "--web-search", "cached", "--future", "value",
+          "--base-url", "http://localhost", "--future", "value",
         }
-        assert(#cached == #expected)
-        for i, value in ipairs(expected) do assert(cached[i] == value) end
+        assert(#argv == #expected)
+        for i, value in ipairs(expected) do assert(argv[i] == value) end
+
+        local spec = require("libs.compositors.provider").spawn_spec(
+          "chatgpt", { "/bin/true" }, {
+            translator_lib = "chatgpt-provider", tool_gate = "selected-gate",
+            agentic_loop = {}, conversations = { context = function() return { messages = {} } end },
+          })
+        spec.to_plugin({{ type = "event", from = "selected-gate", body = {
+          kind = "selected-gate.hello",
+        } }})
+        local sent = _test.sent()
+        assert(#sent == 1)
+        assert(sent[1].kind == "selected-gate.tools.advertise")
+        assert(sent[1].body.source == "chatgpt")
+        assert(#sent[1].body.tools == 1)
+        local web = sent[1].body.tools[1]
+        assert(web.name == "web_search")
+        assert(web.execution.kind == "provider_native")
+        assert(web.execution.provider == "chatgpt")
         "#,
     )
     .exec()
-    .expect("build ChatGPT provider commands");
+    .expect("verify ChatGPT command and provider-owned advertisement");
 }
 
 #[test]
@@ -154,7 +165,7 @@ fn provider_adapter_owns_universal_compaction_lifecycle() {
         r#"
         local op = require("libs.compositors.provider")
         local spec = op.spawn_spec("chatgpt", { "/bin/true" }, {
-          agentic_loop = {}, translator_lib = "chatgpt-provider",
+          agentic_loop = {}, translator_lib = "chatgpt-provider", tool_gate = "tool-gate",
           conversations = {
             context = function(_, conversation_id)
               assert(conversation_id == "lead")

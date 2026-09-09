@@ -81,6 +81,14 @@ local function visible_text(message)
   return ""
 end
 
+local function exchange_arguments(exchange)
+  local arguments = type(exchange) == "table" and exchange.arguments or nil
+  if type(arguments) == "table" then
+    return arguments.arguments or arguments.args or arguments
+  end
+  return arguments or {}
+end
+
 local function message_completed(state, actions, message)
   if settle_hidden(state, actions, message) then return end
   if type(message) ~= "table" then return end
@@ -164,7 +172,7 @@ local function snapshot_actions(state, projection, actions)
         action(actions, "tool_started", {
           exchange_id = exchange_id,
           name = call.name,
-          arguments = call.arguments,
+          arguments = exchange_arguments(exchange or call),
           turn_id = message.turn_id,
         })
       end
@@ -286,20 +294,15 @@ function M.reduce(previous, body)
       message = change.message,
       turn_id = change.turn_id,
     })
-  elseif kind == "tool_call_completed" then
+  elseif kind == "tool_exchange_started" or kind == "tool_call_completed" then
     local exchange = change.exchange or {}
-    if state.exchanges[exchange.id] == nil then
-      state.exchanges[exchange.id] = exchange.status
-      local arguments = type(exchange.arguments) == "table"
-          and (exchange.arguments.arguments or exchange.arguments.args)
-        or exchange.arguments
-      action(actions, "tool_started", {
-        exchange_id = exchange.id,
-        name = exchange.name,
-        arguments = arguments,
-        turn_id = change.turn_id,
-      })
-    end
+    state.exchanges[exchange.id] = exchange.status
+    action(actions, "tool_started", {
+      exchange_id = exchange.id,
+      name = exchange.name,
+      arguments = exchange_arguments(exchange),
+      turn_id = change.turn_id,
+    })
   elseif kind == "tool_result_recorded" or kind == "tool_error_recorded" then
     local exchange = change.exchange or {}
     state.exchanges[exchange.id] = exchange.status

@@ -184,7 +184,10 @@ handlers.tool_call_completed = function(c, event)
   if event.call.arguments == nil then return err("invalid_tool_arguments", { exchange_id = event.exchange_id }) end
   local existing = c.exchange_by_tool_call_id[external_id]
   if existing and existing ~= exchange then
-    return err("tool_call_id_conflict", { exchange_id = event.exchange_id, tool_call_id = external_id })
+    local existing_message = find_message(c, existing.message_id)
+    if not existing_message or existing_message.visibility ~= "discarded" then
+      return err("tool_call_id_conflict", { exchange_id = event.exchange_id, tool_call_id = external_id })
+    end
   end
   exchange.status = "call_completed"
   exchange.tool_call_id = external_id

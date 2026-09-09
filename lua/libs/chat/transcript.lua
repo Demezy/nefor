@@ -270,6 +270,19 @@ function M.discard_message(state, message_id)
   return shallow_merge(state, { entries = entries, in_flight = in_flight })
 end
 
+function M.upsert_tool_call(state, id, name, input, input_table, display, raw_input, turn_id)
+  for i = #state.entries, 1, -1 do
+    local entry = state.entries[i]
+    if entry.kind == "tool_call" and entry.id == id then
+      local updated = Entry.set_tool_call(
+        entry, name, input, input_table, display, raw_input, turn_id)
+      return shallow_merge(state, { entries = replace_entry(state.entries, i, updated) })
+    end
+  end
+  return M.push_entry(state,
+    Entry.tool_call(id, name, input, input_table, display, raw_input, turn_id))
+end
+
 function M.attach_tool_end(state, id, output, error_flag, completion_delivery)
   for i = #state.entries, 1, -1 do
     local e = state.entries[i]

@@ -924,10 +924,10 @@ local function handle_tool_start(msg, state)
   else input_str = tostring(msg.input) end
   local raw_input = msg.input
   local contract = (state.tool_displays or {})[msg.name]
-  return transcript.push_entry(state, Entry.tool_call(
-    msg.id, msg.name, input_str,
+  return transcript.upsert_tool_call(
+    state, msg.id, msg.name, input_str,
     type(msg.input) == "table" and msg.input or nil,
-    contract, raw_input, msg.turn_id)), {}
+    contract, raw_input, msg.turn_id), {}
 end
 
 local function handle_tool_register(msg, state)

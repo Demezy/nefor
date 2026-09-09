@@ -408,3 +408,144 @@ async fn chatgpt_projects_stale_allowlist_and_returns_tool_result_through_gate()
     gate.kill().await.ok();
     basic_tools.kill().await.ok();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_executed_lifecycle_records_facts_without_activating_run_tool() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut mag = spawn_mag(temp.path()).await;
+    let mut mag_in = mag.stdin.take().expect("MAG stdin");
+    let mut mag_out = BufReader::new(mag.stdout.take().expect("MAG stdout"));
+    handshake(&mut mag_out, &mut mag_in).await;
+
+    let source = r#"
+(require "nefor.actors")
+(require "nefor.artifact")
+(require "nefor.contracts")
+(require "nefor.graph")
+(let exact-model (fn [[model nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel model))
+(let resolved (as nefor.actors.ResolvedModel {:provider "provider" :model "test-model" :reasoning-effort (nefor.actors.reasoning-effort "medium")}))
+(let start (nefor.graph.source "task" (type-tag nefor.contracts.Task) (as nefor.contracts.Task {:prompt "research"})))
+(let answer (nefor.actors.resolved-agent exact-model
+               (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "answer" :model resolved
+                :system "Research, then answer."
+                :tools ["web_search"] :da-policy (nefor.contracts.no-da-policy) :max-corrections 0})
+               (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer)))
+(let output (nefor.graph.output "result" (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+                 (nefor.graph.add-edges graph [(nefor.graph.edge start answer) (nefor.graph.edge answer output)])))
+(nefor.artifact.compile topology)
+"#;
+    tokio::fs::write(temp.path().join("native.mag"), source)
+        .await
+        .expect("fixture");
+    send(
+        &mut mag_in,
+        "engine",
+        object(json!({
+            "kind": "mag.load", "id": "load-native", "source_dir": temp.path(),
+            "module_roots": [
+                repo_root().join("mag/lib"),
+                repo_root().join("examples/nefor-agent/mag/lib")
+            ], "entry": "native.mag"
+        })),
+    )
+    .await;
+    let artifact = next_kind(&mut mag_out, "mag.loaded").await["artifact"].clone();
+    send(
+        &mut mag_in,
+        "agentic-loop",
+        object(json!({
+            "kind": "mag.execute", "id": "execute-native", "run_id": "native-run",
+            "session_id": "native-session", "principal": "lead",
+            "conversation_id": "native-conversation", "artifact": artifact,
+            "params_overlay": {"actor:10:answer.llm": {"provider": PROVIDER}}
+        })),
+    )
+    .await;
+
+    let request = next_kind(&mut mag_out, "conversation.provider.invoke.request").await;
+    let request_id = request["request_id"]
+        .as_str()
+        .expect("provider request id")
+        .to_owned();
+    for body in [
+        object(json!({
+            "kind": "conversation.provider.event", "provider": PROVIDER,
+            "request_id": request_id, "event": "tool_execution_started",
+            "tool_call_id": "web-native-1", "name": "web_search",
+            "arguments": {"action": "search", "query": "rust native tools"},
+            "provider_context": {"encrypted_content": "must-not-be-public"}
+        })),
+        object(json!({
+            "kind": "conversation.provider.event", "provider": PROVIDER,
+            "request_id": request_id, "event": "tool_execution_completed",
+            "tool_call_id": "web-native-1", "name": "web_search",
+            "arguments": {"action": "search", "query": "rust provider tools"},
+            "result": {"status": "completed"},
+            "extra": {"response_body": "must-not-be-public"}
+        })),
+        object(json!({
+            "kind": "conversation.provider.event", "provider": PROVIDER,
+            "request_id": request_id, "event": "completed",
+            "text": "native answer", "finish_reason": "stop"
+        })),
+    ] {
+        send(&mut mag_in, "conversation-manager", body).await;
+    }
+
+    let mut facts = Vec::new();
+    let result = loop {
+        let Body::Event(body) = outgoing(&mut mag_out, "native lifecycle result").await.body else {
+            continue;
+        };
+        let kind = body.get("kind").and_then(Value::as_str);
+        assert!(
+            !kind.is_some_and(|value| value == "tool.invoke" || value.ends_with(".tool.invoke")),
+            "provider-executed observation reached tool execution: {body:?}"
+        );
+        if matches!(
+            kind,
+            Some("mag.actor_ready" | "mag.actor_busy" | "mag.actor_idle" | "mag.firing")
+        ) && body
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.contains("run-tool"))
+        {
+            panic!("provider-executed observation activated run-tool: {body:?}");
+        }
+        if kind == Some("conversation.fact.append") {
+            facts.push(body["fact"].clone());
+        }
+        if kind == Some("mag.run_result") {
+            break body;
+        }
+    };
+
+    let count = |kind: &str| {
+        facts
+            .iter()
+            .filter(|fact| fact.get("kind").and_then(Value::as_str) == Some(kind))
+            .count()
+    };
+    assert_eq!(count("tool_exchange_started"), 1);
+    assert_eq!(count("tool_call_fragment_appended"), 1);
+    assert_eq!(count("tool_call_completed"), 1);
+    assert_eq!(count("tool_result_recorded"), 1);
+    let tool_facts: Vec<_> = facts
+        .iter()
+        .filter(|fact| {
+            fact.get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.starts_with("tool_"))
+        })
+        .collect();
+    let tool_wire = serde_json::to_string(&tool_facts).expect("tool facts serialize");
+    assert!(tool_wire.contains("rust provider tools"));
+    assert!(!tool_wire.contains("must-not-be-public"));
+    assert!(!tool_wire.contains("provider_context"));
+    assert!(!tool_wire.contains("response_body"));
+    assert_eq!(result["status"], "completed");
+    assert_eq!(result["result"]["value"], "native answer");
+
+    mag.kill().await.ok();
+}

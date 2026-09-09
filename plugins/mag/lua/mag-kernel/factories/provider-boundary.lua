@@ -14,8 +14,11 @@ local DIAGNOSTIC_LIMIT = 160
 
 local function bounded(value)
   value = tostring(value or "")
-  if #value <= DIAGNOSTIC_LIMIT then return value end
-  return value:sub(1, DIAGNOSTIC_LIMIT) .. "…"
+  local length = utf8.len(value)
+  if length == nil then return "<invalid UTF-8 diagnostic>" end
+  if length <= DIAGNOSTIC_LIMIT then return value end
+  local boundary = utf8.offset(value, DIAGNOSTIC_LIMIT + 1)
+  return value:sub(1, boundary - 1) .. "…"
 end
 
 local function argument_diagnostic(arguments)
@@ -160,6 +163,9 @@ function M.construct(id, params, emit, options)
   local facts = nil
   local firing_sequence = 0
   local tool_call_corrections = 0
+  local native_exchanges = {}
+  local native_exchange_order = {}
+  local native_exchange_sequence = 0
   local max_tool_call_corrections = params.max_tool_call_corrections
     or params.max_corrections or DEFAULT_TOOL_CALL_CORRECTIONS
   if type(max_tool_call_corrections) ~= "number" or max_tool_call_corrections < 0
@@ -238,18 +244,130 @@ function M.construct(id, params, emit, options)
     return merged
   end
 
+  local function object_arguments(value)
+    if type(value) == "table" and not json_data.is_array(value) then
+      return json_data.copy(value)
+    end
+    return {}
+  end
+
+  local function merge_arguments(current, incoming)
+    local merged = object_arguments(current)
+    for key, value in pairs(object_arguments(incoming)) do merged[key] = value end
+    return merged
+  end
+
+  local function ensure_streamed_message()
+    if streamed_message_id == nil then
+      streamed_message_id = facts:start_message("assistant")
+      streamed_text = ""
+    end
+    return streamed_message_id
+  end
+
+  local function native_key(tool_call_id)
+    local request_id = pending and pending.request_id or "unbound"
+    return request_id .. ":" .. tostring(#tool_call_id) .. ":" .. tool_call_id
+  end
+
+  local function start_native_exchange(value)
+    local tool_call_id = value.tool_call_id
+    local tool_name = value.name
+    if type(tool_call_id) ~= "string" or tool_call_id == ""
+        or type(tool_name) ~= "string" or tool_name == "" then
+      return nil
+    end
+    local key = native_key(tool_call_id)
+    local existing = native_exchanges[key]
+    if existing then
+      if existing.status == "open" then
+        existing.arguments = merge_arguments(existing.arguments, value.arguments)
+      end
+      return existing
+    end
+    native_exchange_sequence = native_exchange_sequence + 1
+    local message_id = ensure_streamed_message()
+    local exchange = {
+      key = key,
+      exchange_id = message_id .. ":native-exchange:" .. tostring(native_exchange_sequence),
+      message_id = message_id,
+      tool_call_id = tool_call_id,
+      name = tool_name,
+      arguments = object_arguments(value.arguments),
+      status = "open",
+    }
+    native_exchanges[key] = exchange
+    native_exchange_order[#native_exchange_order + 1] = key
+    facts:start_tool_exchange(
+      exchange.message_id, exchange.exchange_id, exchange.tool_call_id, exchange.name)
+    return exchange
+  end
+
+  local function settle_native_exchange(exchange, result, error)
+    if not exchange or exchange.status ~= "open" then return false end
+    facts:append_tool_arguments(exchange.exchange_id, exchange.arguments)
+    facts:complete_tool_call(
+      exchange.exchange_id, exchange.tool_call_id, exchange.name, exchange.arguments)
+    if error ~= nil then
+      facts:record_tool_error(exchange.exchange_id, bounded(error))
+    else
+      facts:record_tool_result(exchange.exchange_id, result)
+    end
+    exchange.status = "settled"
+    return true
+  end
+
+  local function handle_native_observation(value)
+    if value.kind == "tool_execution_started" then
+      return start_native_exchange(value) ~= nil
+    end
+    if value.kind ~= "tool_execution_completed" and value.kind ~= "tool_execution_failed" then
+      return false
+    end
+    local exchange = start_native_exchange(value)
+    if not exchange or exchange.status ~= "open" then return true end
+    if type(value.arguments) == "table" and not json_data.is_array(value.arguments) then
+      exchange.arguments = object_arguments(value.arguments)
+    end
+    if value.kind == "tool_execution_failed" then
+      settle_native_exchange(exchange, nil, value.error or "provider tool execution failed")
+    elseif value.result ~= nil then
+      settle_native_exchange(exchange, value.result, nil)
+    end
+    return true
+  end
+
+  local function settle_open_native(error)
+    for _, key in ipairs(native_exchange_order) do
+      local exchange = native_exchanges[key]
+      if exchange and exchange.status == "open" then
+        settle_native_exchange(exchange, nil, error)
+      end
+    end
+  end
+
+  local function reset_native_exchanges()
+    native_exchanges = {}
+    native_exchange_order = {}
+    native_exchange_sequence = 0
+  end
+
   local function interrupt_stream(reason)
     if streamed_message_id == nil then return end
+    settle_open_native(reason)
     facts:interrupt_message(streamed_message_id, { reason = reason })
     streamed_message_id = nil
     streamed_text = ""
   end
 
   local function discard_stream(detail)
-    if streamed_message_id == nil then return end
-    facts:interrupt_message(streamed_message_id, detail or {}, "discarded")
-    streamed_message_id = nil
-    streamed_text = ""
+    settle_open_native("provider attempt discarded before native tool execution completed")
+    if streamed_message_id ~= nil then
+      facts:interrupt_message(streamed_message_id, detail or {}, "discarded")
+      streamed_message_id = nil
+      streamed_text = ""
+    end
+    reset_native_exchanges()
   end
 
   function state:append(message, completion)
@@ -303,6 +421,7 @@ function M.construct(id, params, emit, options)
     facts:complete_turn(merge_terminal(terminal_detail or {}))
   end
   function state:fail(detail)
+    settle_open_native(detail or "provider failed")
     interrupt_stream("provider_failed")
     self:emit({ kind = kinds.failed, failure = kinds.Failed, value = { error = detail } })
     turn_active = false
@@ -344,6 +463,8 @@ function M.construct(id, params, emit, options)
 
   local function invoke_provider()
     if draining then return false end
+    settle_open_native("provider request replaced before native tool execution completed")
+    reset_native_exchanges()
     seq = seq + 1
     pending = { request_id = id .. "@r" .. tostring(seq) }
     state:emit({
@@ -368,6 +489,7 @@ function M.construct(id, params, emit, options)
   end
 
   local function emit_failure(detail)
+    settle_open_native(detail or "provider failed")
     interrupt_stream("provider_failed")
     if options.on_error then
       options.on_error(state, detail)
@@ -406,6 +528,7 @@ function M.construct(id, params, emit, options)
       if pending == nil then return nil end
       pending = nil
       if activation.error ~= nil then
+        settle_open_native(activation.error)
         emit_failure(activation.error)
         return nil
       end
@@ -417,6 +540,7 @@ function M.construct(id, params, emit, options)
       end
       provider_round_completion = merge_terminal(round_detail)
       provider_round_metadata = {}
+      settle_open_native("provider completion ended before native tool execution completed")
       if type(result) == "table" and result.finish_reason == "error" then
         local detail = result.error
         if type(detail) ~= "string" or detail == "" then
@@ -497,6 +621,7 @@ function M.construct(id, params, emit, options)
   function instance.handle_observation(observation)
     local value = observation and observation.value
     if observation.binding == "conversation" and type(value) == "table" then
+      if handle_native_observation(value) then return true end
       if value.kind == "attempt_discarded" then
         discard_stream(value)
       elseif value.kind == "retry" or (value.kind == "retry_decision" and value.retry == true) then
@@ -510,9 +635,11 @@ function M.construct(id, params, emit, options)
         terminal_metadata.model = value.model or terminal_metadata.model
         terminal_metadata.duration_ms = value.duration_ms or terminal_metadata.duration_ms
       elseif value.kind == "interrupted" then
+        settle_open_native(value.error or value.message or "provider completion interrupted")
         interrupt_stream("provider_interrupted")
         facts:interrupt_turn(merge_terminal(value))
       elseif value.kind == "failed" or value.kind == "error" then
+        settle_open_native(value.error or value.message or "provider completion failed")
         interrupt_stream("provider_failed")
         facts:fail_turn(merge_terminal(value))
       end

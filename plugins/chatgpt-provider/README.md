@@ -46,15 +46,15 @@ structured output, and reasoning controls each enter through their one wire
 representation. Events carry only counts and accuracy, never request content.
 Aggregate input/output usage remains separate from current request occupancy.
 
-Provider-hosted web search is selected at process startup with
-`--web-search disabled|cached|live` (default: `disabled`). `cached` appends the
-native Responses tool `{ "type": "web_search", "external_web_access": false }`;
-`live` sets `external_web_access` to `true`; `disabled` omits it. This is a
-provider capability, not a Nefor function tool: it is added independently of
-local tool registration and per-chat allowlists, including when the local
-allowlist is empty. Native search calls remain Responses output items for
-provider-context continuation and never enter the local tool gate or invocation
-loop.
+Provider-hosted `web_search` is advertised by the ChatGPT provider through
+the composition-selected tool gate. An agent selects it by name through the
+same catalog and per-request `tools` list as routed functions. Only a selected,
+advertised descriptor whose `execution.provider` matches this provider lowers
+to `{ "type": "web_search", "external_web_access": false }`; otherwise it is
+absent. Native search calls remain Responses output items for private provider
+continuation, while sanitized start/completion/failure observations travel on
+the ordinary completion-event channel. They never enter local invocation,
+`ToolBroker`, or terminal function `tool_calls`.
 
 Direct completions and compaction chats accept an optional closed
 `provider_options` object. Its only supported field is

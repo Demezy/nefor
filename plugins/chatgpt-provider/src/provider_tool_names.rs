@@ -148,8 +148,10 @@ mod tests {
             .iter()
             .map(|name| ToolSpec {
                 name: (*name).into(),
+                owner: "basic-tools".into(),
                 description: String::new(),
                 input_schema: json!({}),
+                execution: crate::catalog::ToolExecution::Routed,
             })
             .collect()
     }

@@ -5,6 +5,47 @@ local function copy(value)
   return json_data.copy(value or {})
 end
 
+
+local function tools(provider)
+  assert(type(provider) == "string" and #provider > 0,
+    "chatgpt-provider.tools: provider required")
+  return {
+    {
+      name = "web_search",
+      description = "Search the web using the provider's hosted search capability.",
+      parameters = {
+        type = "object",
+        properties = {
+          query = { type = "string", description = "Search query." },
+        },
+      },
+      display = {
+        compact = {
+          label = "web search",
+          primary = { label = "query", select = { source = "args", path = "query" }, kind = "scalar", omit = "missing" },
+        },
+        expanded = {
+          label = "web search",
+          fields = {
+            { label = "action", select = { source = "args", path = "action" }, kind = "scalar", omit = "missing" },
+            { label = "query", select = { source = "args", path = "query" }, kind = "scalar", omit = "missing" },
+            { label = "url", select = { source = "args", path = "url" }, kind = "path", omit = "missing" },
+          },
+        },
+        result = {
+          kind = "receipt",
+          text = "search completed",
+          fields = {
+            { label = "status", select = { source = "result", path = "status" }, kind = "status", omit = "missing" },
+          },
+        },
+        lifecycle = "delayed",
+      },
+      execution = { kind = "provider_native", provider = provider },
+    },
+  }
+end
+
 local function translator(name)
   local t = oa.translator(name)
   local prefix = name .. "."
@@ -180,4 +221,5 @@ end
 
 return {
   translator = translator,
+  tools = tools,
 }

@@ -20,7 +20,7 @@ use std::time::Duration;
 use chatgpt_provider::auth::AuthStore;
 use chatgpt_provider::broker::ToolBroker;
 use chatgpt_provider::catalog::ToolCatalog;
-use chatgpt_provider::config::{ServeArgs, WebSearchMode};
+use chatgpt_provider::config::ServeArgs;
 use chatgpt_provider::dispatcher::{run_dispatch_loop, DispatcherContext};
 use chatgpt_provider::responses::ResponsesClient;
 use chatgpt_provider::state::Chats;
@@ -232,7 +232,6 @@ async fn cancel_aborts_inflight_completion_and_provider_serves_next() {
     let args = Arc::new(ServeArgs {
         provider_name: PROVIDER.into(),
         base_url: format!("http://{addr}"),
-        web_search: WebSearchMode::Cached,
         stream_retry_timeout_seconds: None,
     });
     let chats = Arc::new(Chats::with_default_model(None));
@@ -245,6 +244,9 @@ async fn cancel_aborts_inflight_completion_and_provider_serves_next() {
     // Static token → Connected without any network refresh.
     let _ = auth.apply_auth_set("test-token".into()).await;
     let catalog = Arc::new(ToolCatalog::new());
+    catalog.register_from("tool-gate", ToolCatalog::parse_tools(&serde_json::json!([
+        {"name":"web_search","owner":"chatgpt","parameters":{"type":"object"},"execution":{"kind":"provider_native","provider":"chatgpt"}}
+    ]))).await;
     let broker = Arc::new(ToolBroker::new());
     let responses_client = Arc::new(test_responses_client(format!("http://{addr}")));
 
@@ -262,6 +264,7 @@ async fn cancel_aborts_inflight_completion_and_provider_serves_next() {
                 ("request_id", Value::String("shared-id".into())),
                 ("system", Value::String("top-level system".into())),
                 ("model", Value::String("test-model".into())),
+                ("tools", serde_json::json!(["web_search"])),
                 (
                     "messages",
                     serde_json::json!([
@@ -430,7 +433,6 @@ async fn invalid_direct_completion_options_fail_once_before_http() {
     let args = Arc::new(ServeArgs {
         provider_name: PROVIDER.into(),
         base_url: format!("http://{addr}"),
-        web_search: Default::default(),
         stream_retry_timeout_seconds: None,
     });
     let chats = Arc::new(Chats::with_default_model(None));
@@ -576,7 +578,6 @@ async fn direct_completions_keep_local_allowlists_and_add_hosted_search() {
     let args = Arc::new(ServeArgs {
         provider_name: PROVIDER.into(),
         base_url: format!("http://{addr}"),
-        web_search: WebSearchMode::Cached,
         stream_retry_timeout_seconds: None,
     });
     let chats = Arc::new(Chats::with_default_model(None));
@@ -592,8 +593,9 @@ async fn direct_completions_keep_local_allowlists_and_add_hosted_search() {
         .register_from(
             "tool-gate",
             ToolCatalog::parse_tools(&serde_json::json!([
-                {"name":"alpha","description":"Alpha","input_schema":{"type":"object","properties":{"a":{"type":"string"}}}},
-                {"name":"beta","description":"Beta","input_schema":{"type":"object","properties":{"b":{"type":"integer"}}}}
+                {"name":"alpha","owner":"tool-gate","description":"Alpha","input_schema":{"type":"object","properties":{"a":{"type":"string"}}}},
+                {"name":"beta","owner":"tool-gate","description":"Beta","input_schema":{"type":"object","properties":{"b":{"type":"integer"}}}},
+                {"name":"web_search","owner":"chatgpt","parameters":{"type":"object"},"execution":{"kind":"provider_native","provider":"chatgpt"}}
             ])),
         )
         .await;
@@ -646,11 +648,9 @@ async fn direct_completions_keep_local_allowlists_and_add_hosted_search() {
                 .expect("prompt")
                 .to_owned();
             let tools = request["tools"].as_array().expect("tools");
-            assert_eq!(tools.len(), 2, "hosted search is additive to the allowlist");
+            assert_eq!(tools.len(), 1, "unselected hosted search must be absent");
             let tool = tools[0]["name"].as_str().expect("tool name").to_owned();
             assert_eq!(tools[0]["parameters"]["type"], "object");
-            assert_eq!(tools[1]["type"], "web_search");
-            assert_eq!(tools[1]["external_web_access"], false);
             let service_tier = request
                 .get("service_tier")
                 .and_then(Value::as_str)
@@ -717,7 +717,7 @@ async fn chat_compaction_preserves_fast_service_tier() {
         format!("http://{addr}"),
         test_responses_client(format!("http://{addr}")),
         None,
-        WebSearchMode::Cached,
+        true,
     )
     .await;
     in_tx
@@ -726,6 +726,7 @@ async fn chat_compaction_preserves_fast_service_tier() {
             &[
                 ("chat_id", Value::String("compact-fast".into())),
                 ("model", Value::String("test-model".into())),
+                ("tools", serde_json::json!(["web_search"])),
                 (
                     "provider_options",
                     serde_json::json!({"service_tier": "fast"}),
@@ -825,6 +826,36 @@ async fn native_web_search_context_replays_in_output_order_without_item_id() {
     let (in_tx, mut out_rx, loop_handle) =
         start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
     submit_direct_completion(&in_tx, "native-search-1").await;
+    let started = wait_for_completion_event(
+        &mut out_rx,
+        "native-search-1",
+        "tool_execution_started",
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("native search started");
+    assert_eq!(started["tool_call_id"], "ws_1");
+    assert_eq!(started["name"], "web_search");
+    assert_eq!(started["arguments"], serde_json::json!({}));
+    let native_completed = wait_for_completion_event(
+        &mut out_rx,
+        "native-search-1",
+        "tool_execution_completed",
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("native search completed");
+    assert_eq!(native_completed["tool_call_id"], "ws_1");
+    assert_eq!(
+        native_completed["arguments"],
+        serde_json::json!({
+            "action":"search", "query":"current rust"
+        })
+    );
+    assert_eq!(
+        native_completed["result"],
+        serde_json::json!({"status":"completed"})
+    );
     let completed = wait_for_completion_event(
         &mut out_rx,
         "native-search-1",
@@ -969,14 +1000,14 @@ async fn start_direct_harness(
     mpsc::Receiver<PluginOutgoing>,
     tokio::task::JoinHandle<Result<(), chatgpt_provider::error::ChatgptError>>,
 ) {
-    start_direct_harness_with_budget(base_url, client, None, WebSearchMode::Disabled).await
+    start_direct_harness_with_budget(base_url, client, None, false).await
 }
 
 async fn start_direct_harness_with_budget(
     base_url: String,
     client: ResponsesClient,
     retry_budget: Option<Duration>,
-    web_search: WebSearchMode,
+    advertise_web_search: bool,
 ) -> (
     mpsc::Sender<Result<Envelope, TransportError>>,
     mpsc::Receiver<PluginOutgoing>,
@@ -985,7 +1016,6 @@ async fn start_direct_harness_with_budget(
     let args = Arc::new(ServeArgs {
         provider_name: PROVIDER.into(),
         base_url,
-        web_search,
         stream_retry_timeout_seconds: None,
     });
     let chats = Arc::new(Chats::with_default_model(None));
@@ -1001,7 +1031,15 @@ async fn start_direct_harness_with_budget(
         args,
         chats,
         auth,
-        Arc::new(ToolCatalog::new()),
+        {
+            let catalog = Arc::new(ToolCatalog::new());
+            if advertise_web_search {
+                catalog.register_from("tool-gate", ToolCatalog::parse_tools(&serde_json::json!([
+                    {"name":"web_search","owner":"chatgpt","parameters":{"type":"object"},"execution":{"kind":"provider_native","provider":"chatgpt"}}
+                ]))).await;
+            }
+            catalog
+        },
         Arc::new(ToolBroker::new()),
         Arc::new(client),
         out_tx,
@@ -1173,7 +1211,7 @@ async fn replay_body_read_stops_at_the_absolute_recovery_deadline() {
         base_url.clone(),
         test_responses_client(base_url),
         Some(retry_budget),
-        WebSearchMode::Disabled,
+        false,
     )
     .await;
 
@@ -1341,6 +1379,96 @@ async fn interruption_after_tool_call_state_discards_and_replays() {
 }
 
 #[tokio::test]
+async fn native_tool_lifecycle_restarts_with_a_replayed_attempt() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let provisional = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"web_search_call\",\"id\":\"ws-stable\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"provisional\"}}}\n\n"
+    );
+    let replacement = concat!(
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"web_search_call\",\"id\":\"ws-stable\",\"status\":\"in_progress\",\"action\":{\"type\":\"search\",\"query\":\"replacement\"}}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"web_search_call\",\"id\":\"ws-stable\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"replacement\"}}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r2\"}}\n\n"
+    );
+    let server = tokio::spawn(serve_scripted_sse(
+        listener,
+        vec![
+            ScriptedSseReply::truncated(provisional),
+            ScriptedSseReply::complete(replacement),
+        ],
+        hits.clone(),
+    ));
+    let base_url = format!("http://{addr}");
+    let (in_tx, mut out_rx, loop_handle) = start_direct_harness_with_budget(
+        base_url.clone(),
+        test_responses_client(base_url),
+        None,
+        true,
+    )
+    .await;
+
+    in_tx
+        .send(Ok(event_env(
+            &kind("completion.request"),
+            &[
+                ("request_id", Value::String("native-replay".into())),
+                ("model", Value::String("test-model".into())),
+                ("tools", serde_json::json!(["web_search"])),
+                (
+                    "messages",
+                    serde_json::json!([{"role":"user","content":"search"}]),
+                ),
+            ],
+        )))
+        .await
+        .expect("completion request");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut starts = 0;
+    let mut completed = 0;
+    let mut discarded = 0;
+    loop {
+        let message = tokio::time::timeout_at(deadline, out_rx.recv())
+            .await
+            .expect("provider completion deadline")
+            .expect("provider output");
+        let Some(body) = event_body(&message) else {
+            continue;
+        };
+        if body.get("kind").and_then(Value::as_str) != Some(&kind("completion.event"))
+            || body.get("request_id").and_then(Value::as_str) != Some("native-replay")
+        {
+            continue;
+        }
+        match body.get("event").and_then(Value::as_str) {
+            Some("tool_execution_started") => starts += 1,
+            Some("tool_execution_completed") => completed += 1,
+            Some("attempt_discarded") => discarded += 1,
+            Some("completed") => break,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        starts, 2,
+        "the replacement attempt re-emits the stable native start"
+    );
+    assert_eq!(
+        completed, 1,
+        "only the replacement attempt completes the native call"
+    );
+    assert_eq!(
+        discarded, 1,
+        "the provisional native attempt is explicitly discarded"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+
+    finish_harness(in_tx, loop_handle).await;
+    server.await.expect("server");
+}
+
+#[tokio::test]
 async fn clean_eof_before_completion_is_not_semantic_success() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -1460,7 +1588,6 @@ async fn direct_completion_replays_encrypted_reasoning_before_tool_output() {
     let args = Arc::new(ServeArgs {
         provider_name: PROVIDER.into(),
         base_url: format!("http://{addr}"),
-        web_search: Default::default(),
         stream_retry_timeout_seconds: None,
     });
     let chats = Arc::new(Chats::with_default_model(None));

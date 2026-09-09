@@ -99,6 +99,11 @@ function M.spawn_spec(name, command, opts)
   end
 
   local provider_lib = require(opts.translator_lib or "openai-provider")
+  local provider_tools = type(provider_lib.tools) == "function" and provider_lib.tools(name) or nil
+  local tool_gate = opts.tool_gate
+  if provider_tools ~= nil and (type(tool_gate) ~= "string" or tool_gate == "") then
+    error("provider.spawn_spec: opts.tool_gate is required for provider-owned tools")
+  end
   local translator = provider_lib.translator(name)
   local kinds = translator.kinds
   local pending_compactions = {}
@@ -764,6 +769,14 @@ function M.spawn_spec(name, command, opts)
           if contribution_totals[rule.usage_id] ~= nil then notify_usage(rule.usage_id) end
         end
       else
+        if provider_tools ~= nil and type(env.body) == "table"
+            and env.body.kind == tool_gate .. ".hello" then
+          emit_synthetic(name, {
+            kind = tool_gate .. ".tools.advertise",
+            source = name,
+            tools = clone_table(provider_tools),
+          })
+        end
         if type(env.body) == "table" and env.body.kind == "sessions.session_start" then
           session_generation = session_generation + 1
           pending_requests = {}

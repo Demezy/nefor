@@ -869,8 +869,10 @@
                 "basic-tools",
                 vec![openai_provider::catalog::ToolSpec {
                     name: "read_file".into(),
+                    owner: "basic-tools".into(),
                     description: "Read a file.".into(),
                     parameters: serde_json::json!({"type": "object"}),
+                    execution: openai_provider::catalog::ToolExecution::Routed,
                 }],
             )
             .await;

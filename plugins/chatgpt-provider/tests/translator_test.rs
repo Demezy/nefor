@@ -155,10 +155,12 @@ fn tools_to_responses_format_round_trip_through_request() {
 
     let specs = vec![ToolSpec {
         name: "read_file".into(),
+        owner: "basic-tools".into(),
         description: "Read a file".into(),
         input_schema: json!({"type": "object"}),
+        execution: chatgpt_provider::catalog::ToolExecution::Routed,
     }];
-    let (_, tools) = tools_to_responses_format(&specs).expect("mapping");
+    let (_, tools) = tools_to_responses_format(&specs, "chatgpt").expect("mapping");
     let req = ResponsesApiRequest {
         model: "test-model".into(),
         instructions: String::new(),

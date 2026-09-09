@@ -171,6 +171,69 @@ async fn run(policy: Policy) -> Result<(), TransportError> {
     Ok(())
 }
 
+/// Execution authority carried by an advertised capability.
+///
+/// Omitted wire metadata normalizes to `Routed`, preserving the existing tool
+/// contract. Provider-native capabilities remain catalog entries, but the
+/// named provider executes them without crossing the gate's invocation path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolExecution {
+    Routed,
+    ProviderNative { provider: String },
+}
+
+impl ToolExecution {
+    fn parse(value: Option<&Value>, source: &str) -> Result<Self, String> {
+        let Some(value) = value else {
+            return Ok(Self::Routed);
+        };
+        let object = value
+            .as_object()
+            .ok_or_else(|| "execution must be an object".to_owned())?;
+        if !object
+            .keys()
+            .all(|key| matches!(key.as_str(), "kind" | "provider"))
+        {
+            return Err("execution has unknown field".into());
+        }
+        match object.get("kind").and_then(Value::as_str) {
+            Some("routed") => {
+                if object.contains_key("provider") {
+                    return Err("routed execution must not declare provider".into());
+                }
+                Ok(Self::Routed)
+            }
+            Some("provider_native") => {
+                let provider = object
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .filter(|provider| !provider.trim().is_empty())
+                    .ok_or_else(|| {
+                        "provider_native execution requires a non-empty provider".to_owned()
+                    })?;
+                if provider != source {
+                    return Err(format!(
+                        "provider_native execution provider `{provider}` must match advertising source `{source}`"
+                    ));
+                }
+                Ok(Self::ProviderNative {
+                    provider: provider.to_owned(),
+                })
+            }
+            _ => Err("execution.kind must be routed or provider_native".into()),
+        }
+    }
+
+    fn wire_value(&self) -> Value {
+        match self {
+            Self::Routed => serde_json::json!({ "kind": "routed" }),
+            Self::ProviderNative { provider } => {
+                serde_json::json!({ "kind": "provider_native", "provider": provider })
+            }
+        }
+    }
+}
+
 /// One advertised tool. Mirrors the wire shape — name + description +
 /// JSON Schema parameters — without depending on a provider catalog crate.
 #[derive(Debug, Clone)]
@@ -179,6 +242,7 @@ struct ToolSpec {
     description: String,
     parameters: Value,
     display: Value,
+    execution: ToolExecution,
 }
 
 /// Pending forwarded invocation: maps the gate-minted inner id (used to
@@ -214,6 +278,9 @@ struct GateState {
     /// Reverse lookup: tool name → source plugin name. Rebuilt from
     /// `advertised` whenever it changes.
     tool_owner: HashMap<String, String>,
+    /// Execution authority by tool name. Kept beside owner lookup so direct
+    /// gate invocation can fail closed before permission policy is consulted.
+    tool_execution: HashMap<String, ToolExecution>,
     /// Active forwards keyed by gate-minted inner id.
     pending: HashMap<String, PendingForward>,
     /// Active permission requests keyed by provider's outer id.
@@ -231,6 +298,7 @@ impl GateState {
         Self {
             advertised: HashMap::new(),
             tool_owner: HashMap::new(),
+            tool_execution: HashMap::new(),
             pending: HashMap::new(),
             awaiting_approval: HashMap::new(),
             inner_id_counter: 0,
@@ -241,9 +309,12 @@ impl GateState {
 
     fn rebuild_owner_map(&mut self) {
         self.tool_owner.clear();
+        self.tool_execution.clear();
         for (source, tools) in &self.advertised {
-            for t in tools {
-                self.tool_owner.insert(t.name.clone(), source.clone());
+            for tool in tools {
+                self.tool_owner.insert(tool.name.clone(), source.clone());
+                self.tool_execution
+                    .insert(tool.name.clone(), tool.execution.clone());
             }
         }
     }
@@ -619,11 +690,14 @@ async fn handle_tools_advertise(
                 .clone();
             validate_display_contract(&display)
                 .map_err(|e| "invalid display for ".to_owned() + &name + ": " + &e)?;
+            let execution = ToolExecution::parse(t.get("execution"), &source)
+                .map_err(|e| "invalid execution for ".to_owned() + &name + ": " + &e)?;
             Ok(ToolSpec {
                 name,
                 description,
                 parameters,
                 display,
+                execution,
             })
         })
         .collect::<Result<_, _>>();
@@ -730,6 +804,19 @@ async fn handle_tool_invoke(
             return Ok(());
         }
     };
+    if let Some(ToolExecution::ProviderNative { provider }) = state.tool_execution.get(&name) {
+        send_event(
+            out_tx,
+            tool_result_error_body(
+                &outer_id,
+                &format!(
+                    "tool `{name}` is provider-native to `{provider}` and cannot be invoked through tool-gate"
+                ),
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
 
     let decision = if state.mode == GateMode::Yolo {
         Decision::Auto
@@ -975,6 +1062,7 @@ fn tool_register_body(state: &GateState) -> Map<String, Value> {
         m.insert("description".into(), Value::String(ts.description.clone()));
         m.insert("parameters".into(), ts.parameters.clone());
         m.insert("display".into(), ts.display.clone());
+        m.insert("execution".into(), ts.execution.wire_value());
         tools.push(Value::Object(m));
     }
     let mut m = Map::new();
@@ -1486,6 +1574,163 @@ mod tests {
         let arr = body.get("tools").and_then(Value::as_array).unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["owner"], "basic-tools");
+    }
+
+    #[tokio::test]
+    async fn execution_metadata_is_closed_and_normalized_in_public_registry() {
+        let cases = [
+            (
+                "basic-tools",
+                json!({"name": "read_file"}),
+                ToolExecution::Routed,
+                json!({"kind": "routed"}),
+            ),
+            (
+                "chatgpt",
+                json!({
+                    "name": "web_search",
+                    "execution": {"kind": "provider_native", "provider": "chatgpt"}
+                }),
+                ToolExecution::ProviderNative {
+                    provider: "chatgpt".into(),
+                },
+                json!({"kind": "provider_native", "provider": "chatgpt"}),
+            ),
+        ];
+
+        for (source, tool, expected_execution, expected_wire) in cases {
+            let (tx, mut rx) = mpsc::channel::<PluginOutgoing>(8);
+            let mut state = make_state();
+            let body = advertise_body(source, Value::Array(vec![tool]));
+            handle_tools_advertise(&tx, &body, &mut state)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                state.tool_execution.values().next(),
+                Some(&expected_execution)
+            );
+            let event: Value = serde_json::from_str(&rx.recv().await.unwrap().to_line()).unwrap();
+            assert_eq!(event["body"]["tools"][0]["execution"], expected_wire);
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_execution_metadata_is_rejected_atomically() {
+        let cases = [
+            (json!("provider_native"), "execution must be an object"),
+            (
+                json!({"kind": "future"}),
+                "execution.kind must be routed or provider_native",
+            ),
+            (
+                json!({"kind": "routed", "provider": "chatgpt"}),
+                "routed execution must not declare provider",
+            ),
+            (
+                json!({"kind": "provider_native"}),
+                "provider_native execution requires a non-empty provider",
+            ),
+            (
+                json!({"kind": "provider_native", "provider": "other"}),
+                "provider_native execution provider `other` must match advertising source `chatgpt`",
+            ),
+            (
+                json!({"kind": "provider_native", "provider": "chatgpt", "extra": true}),
+                "execution has unknown field",
+            ),
+        ];
+
+        for (execution, expected) in cases {
+            let (tx, mut rx) = mpsc::channel::<PluginOutgoing>(8);
+            let mut state = make_state();
+            let valid = advertise_body("basic-tools", json!([{"name": "read_file"}]));
+            handle_tools_advertise(&tx, &valid, &mut state)
+                .await
+                .unwrap();
+            let _register = rx.recv().await.unwrap();
+
+            let invalid = advertise_body(
+                "chatgpt",
+                json!([{"name": "web_search", "execution": execution}]),
+            );
+            handle_tools_advertise(&tx, &invalid, &mut state)
+                .await
+                .unwrap();
+
+            let event: Value = serde_json::from_str(&rx.recv().await.unwrap().to_line()).unwrap();
+            assert_eq!(event["body"]["kind"], "tool-gate.advertise_error");
+            assert!(
+                event["body"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.ends_with(expected)),
+                "{event}"
+            );
+            assert_eq!(
+                state.tool_owner.get("read_file").map(String::as_str),
+                Some("basic-tools")
+            );
+            assert!(!state.tool_owner.contains_key("web_search"));
+            assert!(!state.tool_execution.contains_key("web_search"));
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_native_tools_share_collisions_but_never_enter_gate_execution() {
+        for mode in [GateMode::Safe, GateMode::Yolo] {
+            let (tx, mut rx) = mpsc::channel::<PluginOutgoing>(8);
+            let mut state = make_state();
+            state.mode = mode;
+            let native = advertise_body(
+                "chatgpt",
+                json!([{
+                    "name": "web_search",
+                    "execution": {"kind": "provider_native", "provider": "chatgpt"}
+                }]),
+            );
+            handle_tools_advertise(&tx, &native, &mut state)
+                .await
+                .unwrap();
+            let register: Value =
+                serde_json::from_str(&rx.recv().await.unwrap().to_line()).unwrap();
+            assert_eq!(register["body"]["tools"][0]["owner"], "chatgpt");
+
+            let duplicate = advertise_body("basic-tools", json!([{"name": "web_search"}]));
+            handle_tools_advertise(&tx, &duplicate, &mut state)
+                .await
+                .unwrap();
+            let collision: Value =
+                serde_json::from_str(&rx.recv().await.unwrap().to_line()).unwrap();
+            assert_eq!(collision["body"]["kind"], "tool-gate.advertise_error");
+            assert_eq!(
+                state.tool_owner.get("web_search").map(String::as_str),
+                Some("chatgpt")
+            );
+
+            let invoke = json!({
+                "kind": "tool-gate.tool.invoke",
+                "id": format!("native-{mode:?}"),
+                "name": "web_search",
+                "args": {"query": "nefor"},
+                "allowlist": ["web_search"]
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            handle_tool_invoke(&tx, &invoke, &mut state).await.unwrap();
+            let result: Value = serde_json::from_str(&rx.recv().await.unwrap().to_line()).unwrap();
+            assert_eq!(result["body"]["kind"], "tool.result");
+            assert_eq!(
+                result["body"]["error"],
+                "tool `web_search` is provider-native to `chatgpt` and cannot be invoked through tool-gate"
+            );
+            assert!(state.awaiting_approval.is_empty());
+            assert!(state.pending.is_empty());
+            assert!(
+                rx.try_recv().is_err(),
+                "provider-native tool must not forward"
+            );
+        }
     }
 
     #[tokio::test]

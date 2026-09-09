@@ -219,6 +219,49 @@ function M.new(options)
     return message_id
   end
 
+  function recorder:start_tool_exchange(message_id, exchange_id, tool_call_id, tool_name)
+    exchanges[tool_call_id] = exchange_id
+    return emit("tool_exchange_started", {
+      exchange_id = exchange_id,
+      message_id = message_id,
+      tool_call_id = tool_call_id,
+      tool_name = tool_name,
+    })
+  end
+
+  function recorder:append_tool_arguments(exchange_id, arguments)
+    return emit("tool_call_fragment_appended", {
+      exchange_id = exchange_id,
+      fragment = { arguments = copy(arguments) },
+    })
+  end
+
+  function recorder:complete_tool_call(exchange_id, tool_call_id, tool_name, arguments)
+    exchanges[tool_call_id] = exchange_id
+    return emit("tool_call_completed", {
+      exchange_id = exchange_id,
+      call = {
+        tool_call_id = tool_call_id,
+        name = tool_name,
+        arguments = copy(arguments),
+      },
+    })
+  end
+
+  function recorder:record_tool_result(exchange_id, result)
+    return emit("tool_result_recorded", {
+      exchange_id = exchange_id,
+      result = copy(result),
+    })
+  end
+
+  function recorder:record_tool_error(exchange_id, error)
+    return emit("tool_error_recorded", {
+      exchange_id = exchange_id,
+      error = copy(error),
+    })
+  end
+
   function recorder:retry(reason, provenance)
     retry_sequence = retry_sequence + 1
     emit("retry_started", {

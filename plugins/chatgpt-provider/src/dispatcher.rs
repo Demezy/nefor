@@ -69,11 +69,6 @@ const HTTP_401_MESSAGE: &str = "auth failed (HTTP 401) — re-login via chatgpt-
 
 const USAGE_POLL_INTERVAL_SECS: u64 = 5 * 60;
 
-fn with_provider_tools(args: &ServeArgs, mut local_tools: Vec<Value>) -> Vec<Value> {
-    args.web_search.append_tool(&mut local_tools);
-    local_tools
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Auth401Action {
     RetryReloaded,
@@ -1691,6 +1686,41 @@ fn parse_direct_completion_tools(value: Option<&Value>) -> Result<DirectCompleti
     }
 }
 
+async fn project_direct_tool_specs(
+    catalog: &ToolCatalog,
+    names: &[String],
+    direct_specs: Option<Vec<crate::catalog::ToolSpec>>,
+) -> Vec<crate::catalog::ToolSpec> {
+    let advertised = catalog.project_names(names).await;
+    let direct_by_name = direct_specs
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|spec| names.iter().any(|name| name == &spec.name))
+        .map(|spec| (spec.name.clone(), spec))
+        .collect::<HashMap<_, _>>();
+    let advertised_by_name = advertised
+        .into_iter()
+        .map(|spec| (spec.name.clone(), spec))
+        .collect::<HashMap<_, _>>();
+
+    names
+        .iter()
+        .filter_map(|name| {
+            let advertised = advertised_by_name.get(name);
+            if advertised.is_some_and(|spec| !spec.execution.is_routed()) {
+                return advertised.cloned();
+            }
+            if let Some(spec) = direct_by_name
+                .get(name)
+                .filter(|spec| spec.execution.is_routed())
+            {
+                return Some(spec.clone());
+            }
+            advertised.cloned()
+        })
+        .collect()
+}
+
 fn completion_checkpoint(
     context: Option<&Value>,
     provider: &str,
@@ -1879,11 +1909,8 @@ async fn handle_completion_request(
     let (tool_overrides, tool_allowlist) = match parse_direct_completion_tools(body.get("tools")) {
         Ok(DirectCompletionTools::Disabled) => (Some(Vec::new()), Some(Vec::new())),
         Ok(DirectCompletionTools::Allowlist(names)) => {
-            let specs = match body.get("tool_specs") {
-                Some(value @ Value::Array(_)) => ToolCatalog::parse_tools(value)
-                    .into_iter()
-                    .filter(|spec| names.iter().any(|name| name == &spec.name))
-                    .collect(),
+            let direct_specs = match body.get("tool_specs") {
+                Some(value @ Value::Array(_)) => Some(ToolCatalog::parse_tools(value)),
                 Some(_) => {
                     send_completion_event(ctx, Some(&request_id), "failed", |event| {
                         event.insert(
@@ -1896,8 +1923,9 @@ async fn handle_completion_request(
                     .await?;
                     return Ok(());
                 }
-                None => ctx.catalog.project_names(&names).await,
+                None => None,
             };
+            let specs = project_direct_tool_specs(&ctx.catalog, &names, direct_specs).await;
             let projected_names = specs
                 .iter()
                 .map(|spec| spec.name.clone())
@@ -2457,7 +2485,7 @@ async fn compact_chat(
         None => tools_specs,
     };
     let (provider_tool_names, tools_json) =
-        match translator::tools_to_responses_format(&filtered_specs) {
+        match translator::tools_to_responses_format(&filtered_specs, &ctx.args.provider_name) {
             Ok(mapped) => mapped,
             Err(error) => {
                 send_event(
@@ -2468,7 +2496,6 @@ async fn compact_chat(
                 return Ok(());
             }
         };
-    let tools_json = with_provider_tools(&ctx.args, tools_json);
     let mut translated =
         translator::history_to_input(&snapshot.history, snapshot.system.as_deref());
     if let Err(error) = provider_tool_names.map_input_to_provider(&mut translated.input) {
@@ -2672,6 +2699,297 @@ async fn handle_chat_delete(
 // ---------------------------------------------------------------------
 // Per-turn task.
 // ---------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct NativeToolCallObservation {
+    arguments: Value,
+    settled: bool,
+    anonymous: bool,
+}
+
+struct NativeToolLifecycle {
+    request_id: String,
+    calls: HashMap<String, NativeToolCallObservation>,
+    upstream_ids: HashMap<String, String>,
+    output_ids: HashMap<u32, String>,
+    next_sequence: u32,
+}
+
+impl NativeToolLifecycle {
+    fn new(request_id: String) -> Self {
+        Self {
+            request_id,
+            calls: HashMap::new(),
+            upstream_ids: HashMap::new(),
+            output_ids: HashMap::new(),
+            next_sequence: 0,
+        }
+    }
+
+    fn known_id(&self, upstream_id: Option<&str>, output_index: Option<u32>) -> Option<String> {
+        let upstream = upstream_id
+            .filter(|id| !id.is_empty())
+            .and_then(|id| self.upstream_ids.get(id));
+        let indexed = output_index.and_then(|index| self.output_ids.get(&index));
+        match (upstream, indexed) {
+            (Some(upstream), Some(indexed)) if upstream != indexed => Some(upstream.clone()),
+            (Some(id), _) | (_, Some(id)) => Some(id.clone()),
+            (None, None) => None,
+        }
+    }
+
+    fn new_id(&mut self, upstream_id: Option<&str>, output_index: Option<u32>) -> String {
+        if let Some(id) = upstream_id.filter(|id| !id.is_empty()) {
+            return id.to_owned();
+        }
+        if let Some(index) = output_index {
+            return format!("{}:web_search:{index}", self.request_id);
+        }
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        format!("{}:web_search:anonymous:{sequence}", self.request_id)
+    }
+
+    fn bind_aliases(&mut self, id: &str, upstream_id: Option<&str>, output_index: Option<u32>) {
+        if let Some(upstream_id) = upstream_id.filter(|value| !value.is_empty()) {
+            self.upstream_ids
+                .entry(upstream_id.to_owned())
+                .or_insert_with(|| id.to_owned());
+        }
+        if let Some(output_index) = output_index {
+            self.output_ids
+                .entry(output_index)
+                .or_insert_with(|| id.to_owned());
+        }
+    }
+
+    fn id_for_start(&mut self, upstream_id: Option<&str>, output_index: Option<u32>) -> String {
+        let id = self
+            .known_id(upstream_id, output_index)
+            .unwrap_or_else(|| self.new_id(upstream_id, output_index));
+        self.bind_aliases(&id, upstream_id, output_index);
+        id
+    }
+
+    fn id_for_terminal(&mut self, upstream_id: Option<&str>, output_index: Option<u32>) -> String {
+        let known = self.known_id(upstream_id, output_index).or_else(|| {
+            // With no protocol key, a terminal can soundly settle an anonymous
+            // start only when exactly one remains open. Multiple candidates are
+            // inherently ambiguous, so the terminal becomes a distinct done-only call.
+            if upstream_id.filter(|id| !id.is_empty()).is_none() && output_index.is_none() {
+                let mut anonymous = self
+                    .calls
+                    .iter()
+                    .filter(|(_, call)| call.anonymous && !call.settled);
+                let only = anonymous.next().map(|(id, _)| id.clone());
+                if anonymous.next().is_none() {
+                    return only;
+                }
+            }
+            None
+        });
+        let id = known.unwrap_or_else(|| self.new_id(upstream_id, output_index));
+        self.bind_aliases(&id, upstream_id, output_index);
+        id
+    }
+
+    fn started(
+        &mut self,
+        upstream_id: Option<&str>,
+        output_index: Option<u32>,
+        action: Option<&crate::responses::request::WebSearchAction>,
+    ) -> Option<Map<String, Value>> {
+        let id = self.id_for_start(upstream_id, output_index);
+        let arguments = sanitize_web_search_action(action);
+        if let Some(call) = self.calls.get_mut(&id) {
+            if arguments
+                .as_object()
+                .is_some_and(|object| !object.is_empty())
+            {
+                call.arguments = arguments;
+            }
+            return None;
+        }
+        self.calls.insert(
+            id.clone(),
+            NativeToolCallObservation {
+                arguments: arguments.clone(),
+                settled: false,
+                anonymous: upstream_id.filter(|id| !id.is_empty()).is_none()
+                    && output_index.is_none(),
+            },
+        );
+        Some(native_tool_event(
+            &self.request_id,
+            "tool_execution_started",
+            &id,
+            arguments,
+            None,
+        ))
+    }
+
+    fn completed(
+        &mut self,
+        upstream_id: Option<&str>,
+        output_index: Option<u32>,
+        status: Option<&str>,
+        action: Option<&crate::responses::request::WebSearchAction>,
+    ) -> Vec<Map<String, Value>> {
+        let id = self.id_for_terminal(upstream_id, output_index);
+        let final_arguments = sanitize_web_search_action(action);
+        let mut events = Vec::new();
+        if !self.calls.contains_key(&id) {
+            self.calls.insert(
+                id.clone(),
+                NativeToolCallObservation {
+                    arguments: final_arguments.clone(),
+                    settled: false,
+                    anonymous: upstream_id.filter(|id| !id.is_empty()).is_none()
+                        && output_index.is_none(),
+                },
+            );
+            events.push(native_tool_event(
+                &self.request_id,
+                "tool_execution_started",
+                &id,
+                final_arguments.clone(),
+                None,
+            ));
+        }
+        let Some(call) = self.calls.get_mut(&id) else {
+            return events;
+        };
+        if call.settled {
+            return events;
+        }
+        if final_arguments
+            .as_object()
+            .is_some_and(|object| !object.is_empty())
+        {
+            call.arguments = final_arguments;
+        }
+        call.settled = true;
+        let arguments = call.arguments.clone();
+        let failed = matches!(status, Some("failed" | "incomplete" | "cancelled"));
+        events.push(if failed {
+            native_tool_event(
+                &self.request_id,
+                "tool_execution_failed",
+                &id,
+                arguments,
+                Some((
+                    "error",
+                    Value::String(bounded_diagnostic(status.unwrap_or("failed"))),
+                )),
+            )
+        } else {
+            native_tool_event(
+                &self.request_id,
+                "tool_execution_completed",
+                &id,
+                arguments,
+                Some(("result", serde_json::json!({"status":"completed"}))),
+            )
+        });
+        events
+    }
+
+    fn fail_open(&mut self, diagnostic: &str) -> Vec<Map<String, Value>> {
+        let mut ids = self
+            .calls
+            .iter()
+            .filter(|(_, call)| !call.settled)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.into_iter()
+            .filter_map(|id| {
+                let call = self.calls.get_mut(&id)?;
+                call.settled = true;
+                Some(native_tool_event(
+                    &self.request_id,
+                    "tool_execution_failed",
+                    &id,
+                    call.arguments.clone(),
+                    Some(("error", Value::String(bounded_diagnostic(diagnostic)))),
+                ))
+            })
+            .collect()
+    }
+}
+
+fn sanitize_web_search_action(
+    action: Option<&crate::responses::request::WebSearchAction>,
+) -> Value {
+    let mut arguments = Map::new();
+    let Some(action) = action else {
+        return Value::Object(arguments);
+    };
+    if let Some(kind) = action.kind.as_deref().filter(|kind| !kind.is_empty()) {
+        arguments.insert("action".into(), Value::String(kind.to_owned()));
+        match kind {
+            "search" => {
+                if let Some(query) = action.query.as_deref().filter(|query| !query.is_empty()) {
+                    arguments.insert("query".into(), Value::String(query.to_owned()));
+                }
+                if let Some(queries) = &action.queries {
+                    arguments.insert(
+                        "queries".into(),
+                        Value::Array(
+                            queries
+                                .iter()
+                                .filter(|query| !query.is_empty())
+                                .cloned()
+                                .map(Value::String)
+                                .collect(),
+                        ),
+                    );
+                }
+            }
+            "open_page" => {
+                if let Some(url) = action.url.as_deref().filter(|url| !url.is_empty()) {
+                    arguments.insert("url".into(), Value::String(url.to_owned()));
+                }
+            }
+            "find_in_page" => {
+                if let Some(url) = action.url.as_deref().filter(|url| !url.is_empty()) {
+                    arguments.insert("url".into(), Value::String(url.to_owned()));
+                }
+                if let Some(pattern) = action.pattern.as_deref().filter(|value| !value.is_empty()) {
+                    arguments.insert("pattern".into(), Value::String(pattern.to_owned()));
+                }
+            }
+            _ => {}
+        }
+    }
+    Value::Object(arguments)
+}
+
+fn bounded_diagnostic(message: &str) -> String {
+    message.chars().take(500).collect()
+}
+
+fn native_tool_event(
+    request_id: &str,
+    event: &str,
+    tool_call_id: &str,
+    arguments: Value,
+    terminal: Option<(&str, Value)>,
+) -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert("request_id".into(), Value::String(request_id.to_owned()));
+    fields.insert("event".into(), Value::String(event.to_owned()));
+    fields.insert(
+        "tool_call_id".into(),
+        Value::String(tool_call_id.to_owned()),
+    );
+    fields.insert("name".into(), Value::String("web_search".into()));
+    fields.insert("arguments".into(), arguments);
+    if let Some((name, value)) = terminal {
+        fields.insert(name.into(), value);
+    }
+    fields
+}
 
 #[derive(Default)]
 struct NativeOutputBuffer {
@@ -3281,6 +3599,9 @@ fn spawn_turn(
         let mut final_stream_attempts: u32 = 0;
         let mut final_terminal_event_seen = false;
         let mut auth_401_recovery_stage: u8 = 0;
+        let mut native_tool_lifecycle = direct_request
+            .as_ref()
+            .map(|(request_id, _)| NativeToolLifecycle::new(request_id.clone()));
         let conversation_id = logical_routing_id(
             ctx.chats
                 .conversation_id(&chat_id)
@@ -3350,25 +3671,26 @@ fn spawn_turn(
                     .collect(),
                 None => tools_specs,
             };
-            let (provider_tool_names, tools_json) =
-                match translator::tools_to_responses_format(&filtered_specs) {
-                    Ok(mapped) => mapped,
-                    Err(error) => {
-                        errored = true;
-                        final_finish_reason = Some("error".into());
-                        final_error = Some(error.to_string());
-                        let _ = ctx
-                            .out_tx
-                            .send(PluginOutgoing::event(turn_error_body(
-                                &ctx.args,
-                                Some(&chat_id),
-                                &error.to_string(),
-                            )))
-                            .await;
-                        break;
-                    }
-                };
-            let tools_json = with_provider_tools(&ctx.args, tools_json);
+            let (provider_tool_names, tools_json) = match translator::tools_to_responses_format(
+                &filtered_specs,
+                &ctx.args.provider_name,
+            ) {
+                Ok(mapped) => mapped,
+                Err(error) => {
+                    errored = true;
+                    final_finish_reason = Some("error".into());
+                    final_error = Some(error.to_string());
+                    let _ = ctx
+                        .out_tx
+                        .send(PluginOutgoing::event(turn_error_body(
+                            &ctx.args,
+                            Some(&chat_id),
+                            &error.to_string(),
+                        )))
+                        .await;
+                    break;
+                }
+            };
             tracing::info!(
                 count = filtered_specs.len(),
                 names = ?filtered_specs.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
@@ -3837,6 +4159,23 @@ fn spawn_turn(
                                     tool_buf.on_item_done(item_id.as_deref(), &arguments);
                                 }
                                 ResponseEvent::OutputItemAdded {
+                                    item: ResponseItem::WebSearchCall { id, action, .. },
+                                    output_index,
+                                } => {
+                                    native_output_state_observed = true;
+                                    if let Some(lifecycle) = &mut native_tool_lifecycle {
+                                        if let Some(body) = lifecycle.started(
+                                            id.as_deref(), output_index, action.as_ref())
+                                        {
+                                            let body = make_event(
+                                                format!("{}completion.event", ctx.args.event_prefix()),
+                                                body,
+                                            );
+                                            let _ = ctx.out_tx.try_send(PluginOutgoing::event(body));
+                                        }
+                                    }
+                                }
+                                ResponseEvent::OutputItemAdded {
                                     item:
                                         ResponseItem::FunctionCall {
                                             id,
@@ -3864,6 +4203,21 @@ fn spawn_turn(
                                     output_index,
                                 } => {
                                     native_output_state_observed = true;
+                                    let mut retain_native_item = true;
+                                    if let ResponseItem::WebSearchCall { id, status, action, .. } = &item {
+                                        if let Some(lifecycle) = &mut native_tool_lifecycle {
+                                            let events = lifecycle.completed(
+                                                id.as_deref(), output_index, status.as_deref(), action.as_ref());
+                                            retain_native_item = !events.is_empty();
+                                            for body in events {
+                                                let body = make_event(
+                                                    format!("{}completion.event", ctx.args.event_prefix()),
+                                                    body,
+                                                );
+                                                let _ = ctx.out_tx.try_send(PluginOutgoing::event(body));
+                                            }
+                                        }
+                                    }
                                     if let ResponseItem::FunctionCall {
                                         id,
                                         call_id,
@@ -3888,11 +4242,11 @@ fn spawn_turn(
                                             tool_buf.on_item_done(Some(&item_id), arguments);
                                         }
                                     }
-                                    if let Err(error) =
-                                        iter_native_output.push(output_index, item)
-                                    {
-                                        iter_errored = Some(error);
-                                        break;
+                                    if retain_native_item {
+                                        if let Err(error) = iter_native_output.push(output_index, item) {
+                                            iter_errored = Some(error);
+                                            break;
+                                        }
                                     }
                                 }
                                 ResponseEvent::Completed { response } => {
@@ -4003,6 +4357,9 @@ fn spawn_turn(
                     let _ = ctx.out_tx.send(PluginOutgoing::event(body)).await;
                 }
                 if decision.retry {
+                    if let Some((request_id, _)) = &direct_request {
+                        native_tool_lifecycle = Some(NativeToolLifecycle::new(request_id.clone()));
+                    }
                     pre_output_stream_retries += 1;
                     iterations = iterations.saturating_sub(1);
                     if direct_request.is_none() {
@@ -4173,6 +4530,22 @@ fn spawn_turn(
             final_finish_reason = iter_finish_reason.or(Some("stop".into()));
             final_native_output = iter_native_output;
             break;
+        }
+
+        if let Some(lifecycle) = &mut native_tool_lifecycle {
+            let diagnostic = if cancel.is_suppressed() {
+                "provider request cancelled"
+            } else if interrupted {
+                "provider request interrupted"
+            } else if errored {
+                final_error.as_deref().unwrap_or("provider request failed")
+            } else {
+                "provider request completed before web search settled"
+            };
+            for body in lifecycle.fail_open(diagnostic) {
+                let body = make_event(format!("{}completion.event", ctx.args.event_prefix()), body);
+                let _ = ctx.out_tx.send(PluginOutgoing::event(body)).await;
+            }
         }
 
         // Suppressed hard-cancel: release the slot and return without
@@ -4388,7 +4761,6 @@ mod tests {
         ServeArgs {
             provider_name: "chatgpt".into(),
             base_url: "https://example.invalid".into(),
-            web_search: Default::default(),
             stream_retry_timeout_seconds: None,
         }
     }
@@ -4434,20 +4806,171 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn direct_specs_cannot_introduce_unadvertised_native_tools() {
+        let catalog = ToolCatalog::new();
+        let names = vec!["web_search".into(), "read_file".into()];
+        let specs = vec![
+            crate::catalog::ToolSpec {
+                name: "web_search".into(),
+                owner: "chatgpt".into(),
+                description: "forged native search".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                execution: crate::catalog::ToolExecution::ProviderNative {
+                    provider: "chatgpt".into(),
+                },
+            },
+            crate::catalog::ToolSpec {
+                name: "read_file".into(),
+                owner: "basic-tools".into(),
+                description: "explicit routed schema".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+                execution: crate::catalog::ToolExecution::Routed,
+            },
+        ];
+
+        let projected = project_direct_tool_specs(&catalog, &names, Some(specs)).await;
+        assert_eq!(
+            projected
+                .iter()
+                .map(|spec| spec.name.as_str())
+                .collect::<Vec<_>>(),
+            ["read_file"]
+        );
+        let (_, tools) =
+            translator::tools_to_responses_format(&projected, "chatgpt").expect("mapping");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+    }
+
     #[test]
-    fn hosted_search_is_added_after_local_tool_filtering() {
-        let local = serde_json::json!({"type": "function", "name": "read_file"});
-        let mut args = args();
-        args.web_search = crate::config::WebSearchMode::Cached;
+    fn hosted_search_requires_selected_matching_descriptor() {
+        let specs = vec![
+            crate::catalog::ToolSpec {
+                name: "read_file".into(),
+                owner: "basic-tools".into(),
+                description: "read".into(),
+                input_schema: serde_json::json!({}),
+                execution: crate::catalog::ToolExecution::Routed,
+            },
+            crate::catalog::ToolSpec {
+                name: "web_search".into(),
+                owner: "chatgpt".into(),
+                description: "search".into(),
+                input_schema: serde_json::json!({}),
+                execution: crate::catalog::ToolExecution::ProviderNative {
+                    provider: "chatgpt".into(),
+                },
+            },
+        ];
+        let (_, tools) = translator::tools_to_responses_format(&specs, "chatgpt").expect("mapping");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(
+            tools[1],
+            serde_json::json!({"type":"web_search","external_web_access":false})
+        );
+        let (_, wrong_provider) =
+            translator::tools_to_responses_format(&specs, "openai").expect("mapping");
+        assert_eq!(wrong_provider.len(), 1);
+    }
 
-        let with_local = with_provider_tools(&args, vec![local.clone()]);
-        assert_eq!(with_local[0], local);
-        assert_eq!(with_local[1]["type"], "web_search");
-        assert_eq!(with_local[1]["external_web_access"], false);
+    #[test]
+    fn native_web_search_lifecycle_is_sanitized_stable_and_deduplicated() {
+        let mut lifecycle = NativeToolLifecycle::new("request-1".into());
+        let action = crate::responses::request::WebSearchAction {
+            kind: Some("search".into()),
+            query: Some("rust ownership".into()),
+            queries: Some(vec!["rust ownership".into(), String::new()]),
+            url: Some("must-not-leak".into()),
+            pattern: None,
+            extra: serde_json::Map::from_iter([(
+                "secret".into(),
+                Value::String("must-not-leak".into()),
+            )]),
+        };
+        let started = lifecycle
+            .started(None, Some(3), Some(&action))
+            .expect("first start");
+        assert_eq!(started["tool_call_id"], "request-1:web_search:3");
+        assert_eq!(
+            started["arguments"],
+            serde_json::json!({
+                "action":"search", "query":"rust ownership", "queries":["rust ownership"]
+            })
+        );
+        assert!(lifecycle.started(None, Some(3), Some(&action)).is_none());
+        let terminal = lifecycle.completed(None, Some(3), Some("completed"), Some(&action));
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(terminal[0]["event"], "tool_execution_completed");
+        assert_eq!(
+            terminal[0]["result"],
+            serde_json::json!({"status":"completed"})
+        );
+        assert!(lifecycle
+            .completed(None, Some(3), Some("completed"), Some(&action))
+            .is_empty());
+    }
 
-        let empty_allowlist_result = with_provider_tools(&args, Vec::new());
-        assert_eq!(empty_allowlist_result.len(), 1);
-        assert_eq!(empty_allowlist_result[0]["type"], "web_search");
+    #[test]
+    fn native_web_search_keeps_index_fallback_when_id_appears_on_done() {
+        let mut lifecycle = NativeToolLifecycle::new("request-index".into());
+        let started = lifecycle
+            .started(None, Some(4), None)
+            .expect("fallback start");
+        assert_eq!(started["tool_call_id"], "request-index:web_search:4");
+
+        let terminal = lifecycle.completed(Some("ws_late"), Some(4), Some("completed"), None);
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(terminal[0]["event"], "tool_execution_completed");
+        assert_eq!(terminal[0]["tool_call_id"], started["tool_call_id"]);
+        assert!(lifecycle.fail_open("must not split").is_empty());
+        assert!(lifecycle
+            .completed(Some("ws_late"), Some(4), Some("completed"), None)
+            .is_empty());
+    }
+
+    #[test]
+    fn native_web_search_distinguishes_fully_unkeyed_starts() {
+        let mut lifecycle = NativeToolLifecycle::new("request-anonymous".into());
+        let first = lifecycle.started(None, None, None).expect("first start");
+        let second = lifecycle.started(None, None, None).expect("second start");
+        assert_ne!(first["tool_call_id"], second["tool_call_id"]);
+        assert_eq!(
+            first["tool_call_id"],
+            "request-anonymous:web_search:anonymous:0"
+        );
+        assert_eq!(
+            second["tool_call_id"],
+            "request-anonymous:web_search:anonymous:1"
+        );
+
+        let ambiguous_terminal = lifecycle.completed(None, None, Some("completed"), None);
+        assert_eq!(ambiguous_terminal.len(), 2);
+        assert_eq!(
+            ambiguous_terminal[0]["tool_call_id"],
+            "request-anonymous:web_search:anonymous:2"
+        );
+        assert_eq!(
+            ambiguous_terminal[1]["tool_call_id"],
+            ambiguous_terminal[0]["tool_call_id"]
+        );
+        assert_eq!(lifecycle.fail_open("ambiguous terminal").len(), 2);
+    }
+
+    #[test]
+    fn native_web_search_done_only_synthesizes_start_and_open_calls_fail_once() {
+        let mut lifecycle = NativeToolLifecycle::new("request-2".into());
+        let done = lifecycle.completed(Some("ws_1"), None, Some("failed"), None);
+        assert_eq!(done.len(), 2);
+        assert_eq!(done[0]["event"], "tool_execution_started");
+        assert_eq!(done[1]["event"], "tool_execution_failed");
+        assert!(lifecycle.fail_open("late failure").is_empty());
+
+        let _ = lifecycle.started(Some("ws_2"), Some(1), None);
+        let failed = lifecycle.fail_open(&"x".repeat(600));
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0]["error"].as_str().map(str::len), Some(500));
+        assert!(lifecycle.fail_open("duplicate").is_empty());
     }
 
     #[test]
@@ -5158,8 +5681,10 @@ mod tests {
     fn tool_call_buffer_reverse_maps_streamed_provider_name() {
         let specs = vec![crate::catalog::ToolSpec {
             name: "process.exec".into(),
+            owner: "basic-tools".into(),
             description: String::new(),
             input_schema: serde_json::json!({}),
+            execution: crate::catalog::ToolExecution::Routed,
         }];
         let names =
             crate::provider_tool_names::ProviderToolNames::from_specs(&specs).expect("mapping");
@@ -5189,8 +5714,10 @@ mod tests {
         b.on_item_done(Some("call_1"), r#"{"a":1}"#);
         let specs = vec![crate::catalog::ToolSpec {
             name: "x".into(),
+            owner: "basic-tools".into(),
             description: String::new(),
             input_schema: serde_json::json!({}),
+            execution: crate::catalog::ToolExecution::Routed,
         }];
         let names =
             crate::provider_tool_names::ProviderToolNames::from_specs(&specs).expect("mapping");

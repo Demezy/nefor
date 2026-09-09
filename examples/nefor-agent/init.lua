@@ -249,6 +249,7 @@ for _, p in ipairs(cfg.providers or {}) do
       provider_command,
       {
         translator_lib = "chatgpt-provider",
+        tool_gate = "tool-gate",
         agentic_loop = agentic_loop,
         conversations = conversation_reader,
         usage = p.usage,

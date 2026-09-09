@@ -21,7 +21,7 @@ use std::collections::HashSet;
 
 use serde_json::{Map, Value};
 
-use crate::catalog::ToolSpec;
+use crate::catalog::{ToolExecution, ToolSpec};
 use crate::provider_tool_names::{ProviderToolNameError, ProviderToolNames};
 use crate::responses::request::{MessageContent, ResponseItem};
 use crate::state::{HistoryEntry, Message};
@@ -223,23 +223,41 @@ fn parse_image_tool_output(content: &str) -> Option<ImageToolOutput> {
 /// job — apply before calling this function.
 pub fn tools_to_responses_format(
     tools: &[ToolSpec],
+    provider: &str,
 ) -> Result<(ProviderToolNames, Vec<Value>), ProviderToolNameError> {
-    let names = ProviderToolNames::from_specs(tools)?;
-    let values = tools
+    let routed = tools
         .iter()
-        .map(|t| {
-            let mut obj = Map::new();
-            obj.insert("type".into(), Value::String("function".into()));
-            obj.insert(
+        .filter(|tool| tool.execution.is_routed())
+        .cloned()
+        .collect::<Vec<_>>();
+    let names = ProviderToolNames::from_specs(&routed)?;
+    let mut values = routed
+        .iter()
+        .map(|tool| {
+            let mut object = Map::new();
+            object.insert("type".into(), Value::String("function".into()));
+            object.insert(
                 "name".into(),
-                Value::String(names.to_provider(&t.name)?.to_owned()),
+                Value::String(names.to_provider(&tool.name)?.to_owned()),
             );
-            obj.insert("description".into(), Value::String(t.description.clone()));
-            obj.insert("parameters".into(), t.input_schema.clone());
-            obj.insert("strict".into(), Value::Bool(false));
-            Ok(Value::Object(obj))
+            object.insert(
+                "description".into(),
+                Value::String(tool.description.clone()),
+            );
+            object.insert("parameters".into(), tool.input_schema.clone());
+            object.insert("strict".into(), Value::Bool(false));
+            Ok(Value::Object(object))
         })
         .collect::<Result<Vec<_>, ProviderToolNameError>>()?;
+    if tools.iter().any(|tool| {
+        tool.name == "web_search"
+            && matches!(&tool.execution, ToolExecution::ProviderNative { provider: owner } if owner == provider)
+    }) {
+        values.push(serde_json::json!({
+            "type": "web_search",
+            "external_web_access": false,
+        }));
+    }
     Ok((names, values))
 }
 
@@ -576,14 +594,16 @@ mod tests {
     fn tools_to_responses_format_emits_expected_shape() {
         let specs = vec![ToolSpec {
             name: "read_file".into(),
+            owner: "basic-tools".into(),
             description: "Read a file".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
                 "required": ["path"],
             }),
+            execution: ToolExecution::Routed,
         }];
-        let (_, out) = tools_to_responses_format(&specs).expect("mapping");
+        let (_, out) = tools_to_responses_format(&specs, "chatgpt").expect("mapping");
         assert_eq!(out.len(), 1);
         let t = &out[0];
         assert_eq!(t.get("type").and_then(Value::as_str), Some("function"));

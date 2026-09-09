@@ -62,6 +62,19 @@ eq(actions[1].text, "answer", "text streams from the universal chunk")
 actions = reduce({
   kind = "conversation.projection.delta", conversation_id = "root",
   change = {
+    kind = "tool_exchange_started", turn_id = "turn-1",
+    exchange = {
+      id = "exchange-1", name = "read_file", status = "call_open",
+    },
+  },
+})
+eq(#actions, 1, "an open canonical exchange creates one ordinary tool entry")
+eq(actions[1].exchange_id, "exchange-1", "tool UI keys by canonical exchange id")
+eq(next(actions[1].arguments), nil, "an open tool entry starts with neutral arguments")
+
+actions = reduce({
+  kind = "conversation.projection.delta", conversation_id = "root",
+  change = {
     kind = "tool_call_completed", turn_id = "turn-1",
     exchange = {
       id = "exchange-1", name = "read_file", status = "call_completed",
@@ -69,7 +82,8 @@ actions = reduce({
     },
   },
 })
-eq(actions[1].exchange_id, "exchange-1", "tool UI keys by canonical exchange id")
+eq(#actions, 1, "call completion enriches the existing ordinary tool entry")
+eq(actions[1].exchange_id, "exchange-1", "completion preserves canonical exchange identity")
 eq(actions[1].arguments.path, "README.md", "tool arguments survive projection")
 
 actions = reduce({

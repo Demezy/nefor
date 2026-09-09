@@ -2133,6 +2133,34 @@ mod tests {
             ),
             event(
                 &request_id,
+                "tool_execution_started",
+                serde_json::json!({
+                    "tool_call_id":"web-1", "name":"web_search",
+                    "arguments":{"action":"search","query":"rust"},
+                    "provider_context":{"encrypted":"must-not-leak"}
+                }),
+            ),
+            event(
+                &request_id,
+                "tool_execution_completed",
+                serde_json::json!({
+                    "tool_call_id":"web-1", "name":"web_search",
+                    "arguments":{"action":"search","query":"rust language"},
+                    "result":{"status":"completed"},
+                    "extra":{"response_body":"must-not-leak"}
+                }),
+            ),
+            event(
+                &request_id,
+                "tool_execution_completed",
+                serde_json::json!({
+                    "tool_call_id":"web-1", "name":"web_search",
+                    "arguments":{"action":"search","query":"duplicate"},
+                    "result":{"status":"completed"}
+                }),
+            ),
+            event(
+                &request_id,
                 "completed",
                 serde_json::json!({
                     "text":"terminal-aggregate-must-not-append",
@@ -2157,17 +2185,44 @@ mod tests {
         drop(out_tx);
 
         let mut terminal_result = None;
+        let mut facts = Vec::new();
         while let Some(outgoing) = out_rx.recv().await {
             let Body::Event(body) = outgoing.body else {
                 continue;
             };
-            if body.get("kind").and_then(Value::as_str) == Some(RUN_RESULT_KIND) {
+            let kind = body.get("kind").and_then(Value::as_str);
+            assert!(
+                !kind
+                    .is_some_and(|value| value == "tool.invoke" || value.ends_with(".tool.invoke")),
+                "provider-executed lifecycle reached tool execution: {body:?}"
+            );
+            if kind == Some("conversation.fact.append") {
+                facts.push(body["fact"].clone());
+            }
+            if kind == Some(RUN_RESULT_KIND) {
                 terminal_result = body.get("result").cloned();
             }
         }
 
+        let fact_count = |kind: &str| {
+            facts
+                .iter()
+                .filter(|fact| fact.get("kind").and_then(Value::as_str) == Some(kind))
+                .count()
+        };
+        assert_eq!(fact_count("tool_exchange_started"), 1);
+        assert_eq!(fact_count("tool_call_fragment_appended"), 1);
+        assert_eq!(fact_count("tool_call_completed"), 1);
+        assert_eq!(fact_count("tool_result_recorded"), 1);
+        let wire = serde_json::to_string(&facts).expect("serialize canonical facts");
+        assert!(!wire.contains("must-not-leak"));
+        assert!(!wire.contains("provider_context"));
+        assert!(!wire.contains("response_body"));
+        assert!(wire.contains("rust language"));
+
         let result = terminal_result.expect("durable terminal result");
         assert_eq!(result["value"], "semantic-only");
         assert_eq!(result["result"]["text_answer"], "semantic-only");
+        assert!(result["result"].get("tool_calls").is_none());
     }
 }

@@ -37,12 +37,14 @@ async fn chats_and_catalog_and_broker_compose_for_a_tool_turn_shape() {
             "basic-tools",
             vec![ToolSpec {
                 name: "read_file".into(),
+                owner: "basic-tools".into(),
                 description: "Read a file".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
                     "required": ["path"]
                 }),
+                execution: chatgpt_provider::catalog::ToolExecution::Routed,
             }],
         )
         .await;
@@ -239,13 +241,17 @@ async fn catalog_filters_by_allowlist_at_translator_step() {
         vec![
             ToolSpec {
                 name: "read_file".into(),
+                owner: "basic-tools".into(),
                 description: String::new(),
                 input_schema: serde_json::json!({}),
+                execution: chatgpt_provider::catalog::ToolExecution::Routed,
             },
             ToolSpec {
                 name: "delete_file".into(),
+                owner: "basic-tools".into(),
                 description: String::new(),
                 input_schema: serde_json::json!({}),
+                execution: chatgpt_provider::catalog::ToolExecution::Routed,
             },
         ],
     )
@@ -260,7 +266,7 @@ async fn catalog_filters_by_allowlist_at_translator_step() {
         .into_iter()
         .filter(|t| allowed.iter().any(|a| a == &t.name))
         .collect();
-    let (_, wire) = tools_to_responses_format(&filtered).expect("mapping");
+    let (_, wire) = tools_to_responses_format(&filtered, "chatgpt").expect("mapping");
     assert_eq!(wire.len(), 1);
     assert_eq!(
         wire[0].get("name").and_then(|v| v.as_str()),

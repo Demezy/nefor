@@ -32,10 +32,21 @@ local function assert_true(cond, msg)
   if not cond then error("assertion failed: " .. (msg or "(no message)"), 2) end
 end
 
--- Capturing emit sink standing in for the kernel's outbound.
-local function capture()
+local function assert_json_safe(value, label)
+  local ok, encoded = pcall(nefor.json.encode, value)
+  if not ok then error((label or "value") .. " is not JSON-safe: " .. tostring(encoded), 2) end
+  assert_true(type(encoded) == "string", "JSON conversion returns text")
+end
+
+-- Capturing emit sink standing in for the kernel's outbound. Some cases also
+-- round-trip each emission through the host's JSON conversion seam so a Lua
+-- string cannot hide an invalid UTF-8 diagnostic from the regression.
+local function capture(json_safe)
   local out = {}
-  return out, function(message) out[#out + 1] = message end
+  return out, function(message)
+    if json_safe then assert_json_safe(message, "emitted message") end
+    out[#out + 1] = message
+  end
 end
 
 local function find_kind(msgs, kind)
@@ -52,13 +63,24 @@ local function find_last_kind(msgs, kind)
   return nil
 end
 
-local function conversation(id, facts)
+local function count_kind(msgs, kind)
+  local count = 0
+  for _, message in ipairs(msgs) do
+    if message.kind == kind then count = count + 1 end
+  end
+  return count
+end
+
+local function conversation(id, facts, json_safe)
   facts = facts or {}
   return {
     id = id .. ":conversation",
     turn_id = id .. ":turn",
     provenance = { actor_id = id, run_id = id .. ":run" },
-    emit = function(fact) facts[#facts + 1] = fact end,
+    emit = function(fact)
+      if json_safe then assert_json_safe(fact, "conversation fact") end
+      facts[#facts + 1] = fact
+    end,
   }, facts
 end
 
@@ -135,9 +157,9 @@ local function with_contracts(params)
 end
 
 -- Construct an llm instance with a fresh capture. Consumes the ready confirm.
-local function make(id, params)
-  local msgs, emit = capture()
-  local dependency, facts = conversation(id)
+local function make(id, params, json_safe)
+  local msgs, emit = capture(json_safe)
+  local dependency, facts = conversation(id, nil, json_safe)
   local instance = llm.construct(id, with_contracts(params), emit, { conversation = dependency })
   return instance, msgs, facts
 end
@@ -712,6 +734,205 @@ do
 end
 
 do
+  local instance, msgs, facts = make("retry-native-tools.llm", { provider = "p" })
+  instance.deliver(turn({ messages = { { role = "user", content = "research" } } }))
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "tool_execution_started", tool_call_id = "web-stable", name = "web_search",
+    arguments = { action = "search", query = "provisional" },
+  } })
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "attempt_discarded", attempt = 1, failure_kind = "body_read",
+  } })
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "retry_decision", retry = true, message = "connection reset",
+  } })
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "tool_execution_started", tool_call_id = "web-stable", name = "web_search",
+    arguments = { action = "search", query = "replacement" },
+  } })
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "tool_execution_completed", tool_call_id = "web-stable", name = "web_search",
+    arguments = { action = "search", query = "replacement" },
+    result = { status = "completed" },
+  } })
+  instance.deliver({
+    kind = "reply", ref = find_kind(msgs, "capability.invoke").ref,
+    result = { text = "answer" },
+  })
+
+  local discarded_messages, errors, results = 0, 0, 0
+  for _, fact in ipairs(facts) do
+    if fact.kind == "message_interrupted" and fact.visibility == "discarded" then
+      discarded_messages = discarded_messages + 1
+    elseif fact.kind == "tool_error_recorded" then
+      errors = errors + 1
+    elseif fact.kind == "tool_result_recorded" then
+      results = results + 1
+    end
+  end
+  assert_eq(count_kind(facts, "tool_exchange_started"), 2,
+    "replacement attempt starts a fresh exchange even when the provider reuses its stable id")
+  assert_eq(discarded_messages, 1, "the provisional native exchange is audit-only")
+  assert_eq(errors, 1, "the provisional open exchange settles before discard")
+  assert_eq(results, 1, "the replacement exchange settles normally")
+  assert_true(find_kind(msgs, "tool.invoke") == nil,
+    "neither attempt creates a duplicate local invocation")
+end
+
+do
+  local instance, msgs, facts = make("native-tools.llm", { provider = "p" })
+  instance.deliver(turn({ messages = { { role = "user", content = "research" } } }))
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "tool_execution_started", tool_call_id = "web-1", name = "web_search",
+    arguments = { action = "search" },
+  } })
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "tool_execution_started", tool_call_id = "web-1", name = "web_search",
+    arguments = { query = "partial" },
+  } })
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "tool_execution_completed", tool_call_id = "web-1", name = "web_search",
+    arguments = { action = "search", query = "final query" },
+    result = { status = "completed" },
+  } })
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "tool_execution_completed", tool_call_id = "web-1", name = "web_search",
+    arguments = { action = "search", query = "duplicate" },
+    result = { status = "completed" },
+  } })
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "tool_execution_completed", tool_call_id = "web-2", name = "web_search",
+    arguments = { action = "open_page", url = "https://example.invalid" },
+    result = { status = "completed" },
+  } })
+  local provider_context = {
+    provider = "chatgpt", format = "chatgpt.responses.output_items.v1",
+    artifact = { items = { { type = "web_search_call", opaque = "sealed" } } },
+  }
+  instance.deliver({
+    kind = "reply", ref = find_kind(msgs, "capability.invoke").ref,
+    result = { text = "answer", provider_context = provider_context },
+  })
+
+  assert_eq(count_kind(facts, "tool_exchange_started"), 2,
+    "start and done-only native calls each create one canonical exchange")
+  assert_eq(count_kind(facts, "tool_call_fragment_appended"), 2,
+    "each native call records final arguments once")
+  assert_eq(count_kind(facts, "tool_call_completed"), 2,
+    "duplicate native terminal observations do not duplicate call completion")
+  assert_eq(count_kind(facts, "tool_result_recorded"), 2,
+    "duplicate native terminal observations do not duplicate results")
+  assert_eq(count_kind(facts, "tool_error_recorded"), 0,
+    "successful native calls record no tool error")
+  local first_call
+  local completion_context
+  for _, fact in ipairs(facts) do
+    if fact.kind == "tool_call_completed" and fact.call.tool_call_id == "web-1" then
+      first_call = fact.call
+    elseif fact.kind == "message_completed" and fact.provider_context ~= nil then
+      completion_context = fact.provider_context
+    end
+  end
+  assert_eq(first_call.arguments.query, "final query",
+    "terminal sanitized arguments replace partial start arguments")
+  assert_eq(completion_context.artifact.items[1].opaque, "sealed",
+    "opaque provider context remains unchanged on the private message completion")
+  assert_true(find_kind(msgs, "generic-tool.ToolCalls") == nil,
+    "provider-executed observations never become executable ToolCalls")
+  assert_true(find_kind(msgs, "tool.invoke") == nil,
+    "provider-executed observations never invoke a graph tool")
+end
+
+do
+  local instance, msgs, facts = make("native-failed.llm", { provider = "p" }, true)
+  instance.deliver(turn({ messages = { { role = "user", content = "research" } } }))
+  local diagnostic = string.rep("a", 159) .. "é" .. " beyond the bound"
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "tool_execution_failed", tool_call_id = "web-failed", name = "web_search",
+    arguments = { action = "find_in_page", pattern = "needle" },
+    error = diagnostic,
+  } })
+  instance.deliver({
+    kind = "reply", ref = find_kind(msgs, "capability.invoke").ref,
+    result = { text = "fallback answer" },
+  })
+  assert_eq(count_kind(facts, "tool_exchange_started"), 1,
+    "failed done-only observation synthesizes one canonical start")
+  assert_eq(count_kind(facts, "tool_call_completed"), 1,
+    "failed native execution still completes the canonical call")
+  assert_eq(count_kind(facts, "tool_error_recorded"), 1,
+    "failed native execution settles once as a canonical tool error")
+  local recorded_error
+  for _, fact in ipairs(facts) do
+    if fact.kind == "tool_error_recorded" then recorded_error = fact.error end
+  end
+  assert_eq(recorded_error, string.rep("a", 159) .. "é…",
+    "multibyte diagnostics truncate on a character boundary")
+  assert_eq(facts[#facts].kind, "turn_completed",
+    "a multibyte provider error still reaches terminal canonical settlement")
+  assert_true(find_kind(msgs, "generic-tool.ToolCalls") == nil,
+    "failed provider execution also bypasses the executable tool graph")
+end
+
+do
+  local instance, _, facts = make("native-killed.llm", { provider = "p" })
+  instance.deliver(turn({ messages = { { role = "user", content = "research" } } }))
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "tool_execution_started", tool_call_id = "web-open", name = "web_search",
+    arguments = { action = "search", query = "unfinished" },
+  } })
+  instance.handle_kill()
+
+  assert_eq(count_kind(facts, "tool_exchange_started"), 1,
+    "kill preserves the single started exchange")
+  assert_eq(count_kind(facts, "tool_call_completed"), 1,
+    "kill completes an open native call before message interruption")
+  assert_eq(count_kind(facts, "tool_error_recorded"), 1,
+    "kill settles an open native call exactly once")
+  local error_index, message_index, turn_index
+  for index, fact in ipairs(facts) do
+    if fact.kind == "tool_error_recorded" then error_index = index end
+    if fact.kind == "message_interrupted" then message_index = index end
+    if fact.kind == "turn_interrupted" then turn_index = index end
+  end
+  assert_true(error_index < message_index and message_index < turn_index,
+    "kill records the tool interruption before message and turn terminal facts")
+end
+
+do
+  local instance, msgs, facts = make("native-open-completion.llm", { provider = "p" })
+  instance.deliver(turn({ messages = { { role = "user", content = "research" } } }))
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "tool_execution_started", tool_call_id = "web-open", name = "web_search",
+    arguments = { action = "search", query = "unfinished" },
+  } })
+  instance.deliver({
+    kind = "reply", ref = find_kind(msgs, "capability.invoke").ref,
+    result = { text = "answer after incomplete native call" },
+  })
+  assert_eq(count_kind(facts, "tool_call_completed"), 1,
+    "provider completion completes an otherwise open native call")
+  assert_eq(count_kind(facts, "tool_error_recorded"), 1,
+    "provider completion settles an otherwise open native call as interrupted")
+end
+
+do
+  local instance, _, facts = make("native-interrupted.llm", { provider = "p" })
+  instance.deliver(turn({ messages = { { role = "user", content = "research" } } }))
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "tool_execution_started", tool_call_id = "web-open", name = "web_search",
+    arguments = { action = "search", query = "unfinished" },
+  } })
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "interrupted", message = "provider request cancelled",
+  } })
+  assert_eq(count_kind(facts, "tool_error_recorded"), 1,
+    "provider interruption settles each open native call once")
+  assert_eq(facts[#facts].kind, "turn_interrupted",
+    "provider interruption records the turn terminal only after tool settlement")
+end
+
+do
   local instance, msgs, facts = make("reasoning-only.llm", { provider = "p" })
   instance.deliver(turn({ messages = { { role = "user", content = "go" } } }))
   instance.handle_observation({ binding = "transcript", value = {
@@ -754,12 +975,18 @@ do
   instance.handle_observation({ binding = "transcript", value = {
     kind = "reasoning", text = "partial reasoning",
   } })
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "tool_execution_started", tool_call_id = "web-failure", name = "web_search",
+    arguments = { action = "search", query = "unfinished" },
+  } })
   instance.deliver({
     kind = "reply",
     ref = find_kind(msgs, "capability.invoke").ref,
     error = "provider disconnected",
   })
 
+  assert_eq(count_kind(facts, "tool_error_recorded"), 1,
+    "provider request failure settles an open native exchange exactly once")
   local interrupted = false
   for _, fact in ipairs(facts) do
     if fact.kind == "message_interrupted" then interrupted = true end

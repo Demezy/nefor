@@ -191,6 +191,18 @@ function M.set_output(entry, output, err_flag, completion_delivery)
   return new
 end
 
+function M.set_tool_call(entry, name, input, input_table, display, raw_input, turn_id)
+  local new = copy(entry)
+  new.name = name
+  new.input = input
+  new.input_table = input_table
+  new.display = display
+  new.raw_input = raw_input
+  if turn_id ~= nil then new.turn_id = turn_id end
+  log.log("entry", "mutate fn=set_tool_call old_v=%d new_v=%d", entry.v, new.v)
+  return new
+end
+
 function M.set_status(entry, status)
   local new = copy(entry)
   new.status = status

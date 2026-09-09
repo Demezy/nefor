@@ -97,6 +97,37 @@ do
   rejects(store, fact("xr", "error-chat", "tool_result_recorded", { exchange_id = "x", result = {} }), "tool_exchange_terminal")
 end
 
+-- A discarded provisional provider attempt may reuse the provider's stable
+-- tool-call id in its replacement attempt; ordinary transcript conflicts remain rejected.
+do
+  local store = manager.new(); create(store, "replayed-native", "agent")
+  append(store, fact("m1", "replayed-native", "message_started", { message_id = "m1", role = "assistant" }))
+  append(store, fact("x1", "replayed-native", "tool_exchange_started", {
+    exchange_id = "x1", message_id = "m1", tool_name = "web_search",
+  }))
+  append(store, fact("x1c", "replayed-native", "tool_call_completed", {
+    exchange_id = "x1", call = { id = "ws-stable", name = "web_search", arguments = { query = "old" } },
+  }))
+  append(store, fact("x1e", "replayed-native", "tool_error_recorded", {
+    exchange_id = "x1", error = "attempt discarded",
+  }))
+  append(store, fact("m1i", "replayed-native", "message_interrupted", {
+    message_id = "m1", visibility = "discarded",
+  }))
+  append(store, fact("m2", "replayed-native", "message_started", { message_id = "m2", role = "assistant" }))
+  append(store, fact("x2", "replayed-native", "tool_exchange_started", {
+    exchange_id = "x2", message_id = "m2", tool_name = "web_search",
+  }))
+  append(store, fact("x2c", "replayed-native", "tool_call_completed", {
+    exchange_id = "x2", call = { id = "ws-stable", name = "web_search", arguments = { query = "new" } },
+  }))
+  local current = append(store, fact("x2r", "replayed-native", "tool_result_recorded", {
+    exchange_id = "x2", result = { status = "completed" },
+  }))
+  eq(current.exchange_by_tool_call_id["ws-stable"].id, "x2",
+    "stable id resolves to the surviving replacement exchange")
+end
+
 -- Completion delivery is a closed optional value: old records may omit it,
 -- while new delayed-tool settlements must use one of the canonical variants.
 do
@@ -342,6 +373,24 @@ do
   append(store, fact("start", "native-context", "message_started", {
     message_id = "assistant", role = "assistant",
   }))
+  append(store, fact("tool-start", "native-context", "tool_exchange_started", {
+    exchange_id = "native-exchange", message_id = "assistant",
+    tool_call_id = "web-1", tool_name = "web_search",
+  }))
+  append(store, fact("tool-args", "native-context", "tool_call_fragment_appended", {
+    exchange_id = "native-exchange",
+    fragment = { arguments = { action = "search", query = "sanitized query" } },
+  }))
+  append(store, fact("tool-call", "native-context", "tool_call_completed", {
+    exchange_id = "native-exchange",
+    call = {
+      tool_call_id = "web-1", name = "web_search",
+      arguments = { action = "search", query = "sanitized query" },
+    },
+  }))
+  append(store, fact("tool-result", "native-context", "tool_result_recorded", {
+    exchange_id = "native-exchange", result = { status = "completed" },
+  }))
   local provider_context = {
     provider = "chatgpt",
     format = "chatgpt.responses.output_items.v1",
@@ -358,6 +407,14 @@ do
   local public = projection.conversation(store:peek("native-context"))
   eq(public.messages[1].provider_context, nil,
     "public conversation projection does not expose provider context")
+  eq(public.exchanges[1].tool_call_id, "web-1",
+    "public conversation retains the sanitized native exchange identity")
+  eq(public.exchanges[1].arguments.query, "sanitized query",
+    "public conversation retains only the canonical tool arguments")
+  eq(public.exchanges[1].result.status, "completed",
+    "public conversation retains the sanitized native receipt")
+  eq(nefor.json.encode(public):find("sealed", 1, true), nil,
+    "public conversation contains no opaque provider artifact bytes")
 
   local invalid = manager.new(); create(invalid, "invalid-native-context", "lead")
   append(invalid, fact("start-invalid", "invalid-native-context", "message_started", {

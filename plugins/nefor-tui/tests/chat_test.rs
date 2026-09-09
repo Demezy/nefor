@@ -10394,6 +10394,7 @@ fn live_semantic_tools_render_without_a_display_catalog() {
     let _ = render_str(&mut engine);
     let conversation_id = "generic-live-tools";
     activate_conversation(&mut engine, conversation_id);
+    let _ = engine.take_emit_queue();
 
     for (id, name, arguments) in [
         (
@@ -10411,10 +10412,42 @@ fn live_semantic_tools_render_without_a_display_catalog() {
             &mut engine,
             json!({
                 "kind": "conversation.projection.delta", "conversation_id": conversation_id,
+                "change": { "kind": "tool_exchange_started", "turn_id": "fresh-turn",
+                    "exchange": { "id": id, "name": name, "status": "call_open" } }
+            }),
+        );
+        let open = render_snapshot(&mut engine);
+        assert!(
+            open.contains(name),
+            "an open canonical exchange must render through the ordinary tool row:\n{open}"
+        );
+        dispatch_event(
+            &mut engine,
+            json!({
+                "kind": "conversation.projection.delta", "conversation_id": conversation_id,
                 "change": { "kind": "tool_call_completed", "turn_id": "fresh-turn",
                     "exchange": { "id": id, "name": name, "status": "call_completed",
                         "arguments": arguments } }
             }),
+        );
+        let entries: mlua::Table = engine
+            .state_table()
+            .expect("state")
+            .get("entries")
+            .expect("entries");
+        let matching = (1..=entries.raw_len())
+            .filter(|index| {
+                entries
+                    .get::<mlua::Table>(*index)
+                    .ok()
+                    .and_then(|entry| entry.get::<String>("id").ok())
+                    .as_deref()
+                    == Some(id)
+            })
+            .count();
+        assert_eq!(
+            matching, 1,
+            "call completion must enrich rather than duplicate the open tool row"
         );
     }
     for (id, kind, exchange) in [
@@ -10454,6 +10487,16 @@ fn live_semantic_tools_render_without_a_display_catalog() {
             "semantic exchange {id} must retain its own transcript row"
         );
     }
+    let effects = engine.take_emit_queue();
+    assert!(
+        effects.iter().all(|(_, body)| {
+            !body
+                .get("kind")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|kind| kind == "tool.invoke" || kind.ends_with(".tool.invoke"))
+        }),
+        "rendering canonical provider-executed lifecycle must not execute a tool: {effects:?}"
+    );
 
     engine
         .handle_key(key("ctrl_o"))
@@ -10480,6 +10523,7 @@ fn replayed_semantic_tools_render_without_a_display_catalog() {
     load_chat_scenario(&mut engine);
     let _ = render_str(&mut engine);
     activate_conversation(&mut engine, "generic-replay-tools");
+    let _ = engine.take_emit_queue();
     dispatch_event(
         &mut engine,
         json!({
@@ -10488,6 +10532,10 @@ fn replayed_semantic_tools_render_without_a_display_catalog() {
             "projection": {
                 "messages": [{
                     "id": "replay-assistant", "role": "assistant", "status": "completed",
+                    "provider_context": {
+                        "provider": "chatgpt", "format": "opaque.v1",
+                        "artifact": { "encrypted_content": "sealed-private-context" }
+                    },
                     "tool_calls": [
                         { "id": "provider-one", "name": "archive.search",
                             "arguments": { "needle": "replay marker" }, "status": "result" },
@@ -10508,6 +10556,16 @@ fn replayed_semantic_tools_render_without_a_display_catalog() {
             }
         }),
     );
+    let replay_effects = engine.take_emit_queue();
+    assert!(
+        replay_effects.iter().all(|(_, body)| {
+            !body
+                .get("kind")
+                .and_then(JsonValue::as_str)
+                .is_some_and(|kind| kind == "tool.invoke" || kind.ends_with(".tool.invoke"))
+        }),
+        "snapshot/replay of canonical tool facts must not execute a tool: {replay_effects:?}"
+    );
 
     engine
         .handle_key(key("ctrl_o"))
@@ -10524,6 +10582,16 @@ fn replayed_semantic_tools_render_without_a_display_catalog() {
         assert!(
             rendered.contains(expected),
             "generic replay projection lost {expected:?}:\n{rendered}"
+        );
+    }
+    for private in [
+        "provider_context",
+        "encrypted_content",
+        "sealed-private-context",
+    ] {
+        assert!(
+            !rendered.contains(private),
+            "opaque provider continuation state leaked into replay rendering: {rendered}"
         );
     }
     let state = engine.state_table().expect("state");

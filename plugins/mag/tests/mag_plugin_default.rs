@@ -151,6 +151,50 @@ pub mod bridge {
         }
 
         #[test]
+        fn provider_native_lifecycle_never_enters_terminal_tool_calls() {
+            let mut bridge = CapabilityBridge::new("tool-gate");
+            bridge.translate_emit(provider_invoke("req-native", "chatgpt", json!([])));
+            for (name, fields) in [
+                (
+                    "tool_execution_started",
+                    json!({
+                        "tool_call_id": "web-1", "name": "web_search",
+                        "arguments": {"action": "search", "query": "rust"}
+                    }),
+                ),
+                (
+                    "tool_execution_completed",
+                    json!({
+                        "tool_call_id": "web-1", "name": "web_search",
+                        "arguments": {"action": "search", "query": "rust"},
+                        "result": {"status": "completed"}
+                    }),
+                ),
+            ] {
+                let lifecycle = event("req-native", "chatgpt", name, fields);
+                let kind = lifecycle["kind"].as_str().unwrap();
+                assert_eq!(
+                    bridge.provider_request_id(CONVERSATION_MANAGER, kind, &lifecycle),
+                    Some("req-native")
+                );
+                assert!(bridge.take_reply(kind, &lifecycle).is_none());
+            }
+            let done = event(
+                "req-native",
+                "chatgpt",
+                "completed",
+                json!({"text": "answer", "finish_reason": "stop"}),
+            );
+            let result = bridge
+                .take_reply(done["kind"].as_str().unwrap(), &done)
+                .unwrap()
+                .result
+                .unwrap();
+            assert_eq!(result["text"], "answer");
+            assert!(result.get("tool_calls").is_none());
+        }
+
+        #[test]
         fn provider_context_reaches_the_kernel_reply_unchanged() {
             let mut bridge = CapabilityBridge::new("tool-gate");
             bridge.translate_emit(provider_invoke("req-1", "chatgpt", json!([])));
@@ -564,6 +608,60 @@ mod tests {
                 parse_model_snapshot(body.as_object().unwrap(), RunPrincipal::Lead).is_err(),
                 "malformed snapshot must fail: {body}"
             );
+        }
+    }
+
+    #[test]
+    fn provider_tool_lifecycle_observation_is_closed_and_sanitized() {
+        let completed = serde_json::json!({
+            "event": "tool_execution_completed",
+            "request_id": "request-1",
+            "tool_call_id": "web-1",
+            "name": "web_search",
+            "arguments": {"action": "search", "query": "rust"},
+            "result": {"status": "completed"},
+            "provider_context": {"artifact": {"encrypted": "sealed"}},
+            "extra": {"response_body": "private"}
+        });
+        assert_eq!(
+            provider_tool_lifecycle_observation(completed.as_object().unwrap()).unwrap(),
+            serde_json::json!({
+                "kind": "tool_execution_completed",
+                "tool_call_id": "web-1",
+                "name": "web_search",
+                "arguments": {"action": "search", "query": "rust"},
+                "result": {"status": "completed"}
+            })
+        );
+
+        let long_error = "x".repeat(PROVIDER_TOOL_ERROR_LIMIT + 20);
+        let failed = serde_json::json!({
+            "event": "tool_execution_failed",
+            "tool_call_id": "web-2",
+            "name": "web_search",
+            "arguments": {},
+            "error": long_error
+        });
+        let observed = provider_tool_lifecycle_observation(failed.as_object().unwrap()).unwrap();
+        let error = observed["error"].as_str().unwrap();
+        assert_eq!(error.chars().count(), PROVIDER_TOOL_ERROR_LIMIT + 1);
+        assert!(error.ends_with('…'));
+
+        for invalid in [
+            serde_json::json!({
+                "event": "tool_execution_started", "tool_call_id": "", "name": "web_search",
+                "arguments": {}
+            }),
+            serde_json::json!({
+                "event": "tool_execution_started", "tool_call_id": "web", "name": "web_search",
+                "arguments": []
+            }),
+            serde_json::json!({
+                "event": "tool_execution_completed", "tool_call_id": "web", "name": "web_search",
+                "arguments": {}
+            }),
+        ] {
+            assert!(provider_tool_lifecycle_observation(invalid.as_object().unwrap()).is_none());
         }
     }
 

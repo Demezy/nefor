@@ -421,6 +421,53 @@ fn is_provider_diagnostic_event(event: &str) -> bool {
     )
 }
 
+const PROVIDER_TOOL_ERROR_LIMIT: usize = 160;
+
+fn provider_tool_lifecycle_observation(body: &Map<String, Value>) -> Option<Value> {
+    let event = body.get("event").and_then(Value::as_str)?;
+    if !matches!(
+        event,
+        "tool_execution_started" | "tool_execution_completed" | "tool_execution_failed"
+    ) {
+        return None;
+    }
+    let tool_call_id = body
+        .get("tool_call_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())?;
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())?;
+    let arguments = body.get("arguments").and_then(Value::as_object)?;
+    let mut observation = Map::new();
+    observation.insert("kind".into(), Value::String(event.to_owned()));
+    observation.insert(
+        "tool_call_id".into(),
+        Value::String(tool_call_id.to_owned()),
+    );
+    observation.insert("name".into(), Value::String(name.to_owned()));
+    observation.insert("arguments".into(), Value::Object(arguments.clone()));
+    match event {
+        "tool_execution_completed" => {
+            observation.insert("result".into(), body.get("result")?.clone());
+        }
+        "tool_execution_failed" => {
+            let error = body
+                .get("error")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())?;
+            let mut bounded = error.chars().take(PROVIDER_TOOL_ERROR_LIMIT).collect::<String>();
+            if error.chars().count() > PROVIDER_TOOL_ERROR_LIMIT {
+                bounded.push('…');
+            }
+            observation.insert("error".into(), Value::String(bounded));
+        }
+        _ => {}
+    }
+    Some(Value::Object(observation))
+}
+
 async fn handle_event(
     out_tx: &mpsc::Sender<PluginOutgoing>,
     source: &str,
@@ -455,6 +502,15 @@ async fn handle_event(
                     flush_emits(out_tx, host, bridge).await?;
                 }
             }
+        }
+        if let Some(observation) = provider_tool_lifecycle_observation(body) {
+            let _ = host.bus_observation(
+                &request_id,
+                "append",
+                "conversation",
+                &observation,
+            )?;
+            flush_emits(out_tx, host, bridge).await?;
         }
         if let Some(event) = body
             .get("event")

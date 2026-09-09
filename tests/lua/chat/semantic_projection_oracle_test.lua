@@ -83,8 +83,12 @@ local function apply_actions(state, actions)
       state = transcript.finalize_assistant(
         state, item.text, nil, nil, item.message_id, item.turn_id)
     elseif item.kind == "tool_started" then
-      state.entries[#state.entries + 1] = Entry.tool_call(
-        item.exchange_id, item.name, "", nil, nil, item.arguments, item.turn_id)
+      local input = item.arguments
+      local input_text = type(input) == "string" and input
+        or (type(input) == "table" and "(object)" or tostring(input))
+      state = transcript.upsert_tool_call(
+        state, item.exchange_id, item.name, input_text,
+        type(input) == "table" and input or nil, nil, input, item.turn_id)
     elseif item.kind == "tool_completed" then
       state = transcript.attach_tool_end(state, item.exchange_id, item.output, item.error)
     end

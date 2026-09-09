@@ -207,10 +207,12 @@ async fn structured_request_reaches_local_responses_server_with_explicit_object_
     let mut request = minimal_request();
     let specs = vec![chatgpt_provider::catalog::ToolSpec {
         name: "shell.script".into(),
+        owner: "basic-tools".into(),
         description: "Run a shell script".into(),
         input_schema: json!({"type": "object"}),
+        execution: chatgpt_provider::catalog::ToolExecution::Routed,
     }];
-    let (_, tools) = chatgpt_provider::translator::tools_to_responses_format(&specs)
+    let (_, tools) = chatgpt_provider::translator::tools_to_responses_format(&specs, "chatgpt")
         .expect("provider tool mapping");
     request.tools = tools;
     request.text = Some(TextControls {
@@ -486,10 +488,12 @@ async fn native_compaction_v2_posts_responses_trigger_and_accepts_streamed_item(
     request.model = "gpt-5.6-sol".into();
     let specs = vec![chatgpt_provider::catalog::ToolSpec {
         name: "process.exec".into(),
+        owner: "basic-tools".into(),
         description: "Execute a process".into(),
         input_schema: json!({"type": "object"}),
+        execution: chatgpt_provider::catalog::ToolExecution::Routed,
     }];
-    let (_, tools) = chatgpt_provider::translator::tools_to_responses_format(&specs)
+    let (_, tools) = chatgpt_provider::translator::tools_to_responses_format(&specs, "chatgpt")
         .expect("provider tool mapping");
     request.tools = tools;
     request.input.push(ResponseItem::CompactionTrigger {});
