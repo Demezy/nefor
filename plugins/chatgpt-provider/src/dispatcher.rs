@@ -24,7 +24,7 @@ use nefor_protocol::{Body, Envelope, PluginName, PluginOutgoing, SystemBody};
 use rand::Rng;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, Notify};
 
 use crate::auth::{
     AuthSnapshot, AuthState, AuthStore, LoginLease, LoginStartOutcome, LogoutOutcome,
@@ -37,7 +37,10 @@ use crate::responses::request::{
     Reasoning, ReasoningEffort, ReasoningSummary, ResponseItem, ResponsesApiRequest, TextControls,
 };
 use crate::responses::stream::{ResponseEvent, ResponseStream};
-use crate::responses::{ModelEntry, ResponsesClient, ResponsesTurnContext, UsageSnapshot};
+use crate::responses::{
+    is_transient_status, response_signals_terminal_quota_denial, ModelEntry, ResponsesClient,
+    ResponsesTurnContext, UsageSnapshot,
+};
 use crate::state::{
     ChatConfiguration, ChatId, ChatStats, Chats, ChatsError, HistoryEntry, Message, MessageRestore,
     ServiceTier, ToolCall, ToolCallFunction, TurnToken,
@@ -52,15 +55,12 @@ pub const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// asking for tools; this prevents runaways.
 pub const TOOL_LOOP_MAX_ITERATIONS: u32 = 20;
 
-/// Transient SSE failures may replay only before text, reasoning, native
-/// output items, or tool-call state exist. The attempt cap is authoritative;
-/// the elapsed budget is a second bound so delayed attempts cannot stretch
-/// recovery indefinitely.
-const PRE_OUTPUT_MAX_ATTEMPTS: u32 = 3;
-const PRE_OUTPUT_RETRY_BUDGET: Duration = Duration::from_secs(30);
+/// Provider attempts remain provisional until a semantic terminal event. A
+/// transient failure may therefore discard the whole attempt and replay it,
+/// including after text, reasoning, native output, or tool-call fragments.
+/// Production recovery is unbounded; tests may install explicit bounds.
 const PRE_OUTPUT_RETRY_BASE_DELAY_MS: u64 = 200;
-const PRE_OUTPUT_RETRY_MAX_DELAY_MS: u64 = 1_500;
-const PRE_OUTPUT_RETRY_JITTER_MS: i64 = 100;
+const PRE_OUTPUT_RETRY_MAX_DELAY_MS: u64 = 30_000;
 
 const LOGOUT_REFUSED_ENV_MESSAGE: &str =
     "no login to revoke — credentials come from the environment; restart the plugin without it";
@@ -299,15 +299,11 @@ fn stream_retry_body(
     let mut m = Map::new();
     m.insert("chat_id".into(), Value::String(chat_id.to_string()));
     m.insert("attempt".into(), Value::Number(attempt.into()));
-    m.insert(
-        "max_attempts".into(),
-        Value::Number(PRE_OUTPUT_MAX_ATTEMPTS.into()),
-    );
     m.insert("retry".into(), Value::Bool(true));
     m.insert(
         "retry_reason".into(),
         Value::String(
-            RetryDecisionReason::RetryablePreOutputFailure
+            RetryDecisionReason::RetryableProvisionalFailure
                 .as_str()
                 .into(),
         ),
@@ -339,10 +335,6 @@ fn retry_decision_body(
         "retry_decision",
         [
             ("attempt", Value::Number(attempt.into())),
-            (
-                "max_attempts",
-                Value::Number(PRE_OUTPUT_MAX_ATTEMPTS.into()),
-            ),
             ("retry", Value::Bool(decision.retry)),
             (
                 "retry_reason",
@@ -355,15 +347,49 @@ fn retry_decision_body(
                 Value::Bool(state.terminal_event_seen),
             ),
             (
-                "visible_state_blocked",
-                Value::Bool(state.visible_state_blocked),
+                "visible_state_observed",
+                Value::Bool(state.visible_state_observed),
             ),
             (
-                "native_output_state_blocked",
-                Value::Bool(state.native_output_state_blocked),
+                "native_output_state_observed",
+                Value::Bool(state.native_output_state_observed),
             ),
-            ("tool_state_blocked", Value::Bool(state.tool_state_blocked)),
+            (
+                "tool_state_observed",
+                Value::Bool(state.tool_state_observed),
+            ),
             ("error", Value::String(failure.message.clone())),
+        ],
+    )
+}
+
+fn attempt_discarded_body(
+    args: &ServeArgs,
+    request_id: &str,
+    attempt: u32,
+    failure: &StreamFailure,
+    state: StreamAttemptState,
+) -> Map<String, Value> {
+    completion_event_body(
+        args,
+        request_id,
+        "attempt_discarded",
+        [
+            ("attempt", Value::Number(attempt.into())),
+            ("failure_kind", Value::String(failure.kind.as_str().into())),
+            ("message", Value::String(failure.message.clone())),
+            (
+                "visible_state_observed",
+                Value::Bool(state.visible_state_observed),
+            ),
+            (
+                "native_output_state_observed",
+                Value::Bool(state.native_output_state_observed),
+            ),
+            (
+                "tool_state_observed",
+                Value::Bool(state.tool_state_observed),
+            ),
         ],
     )
 }
@@ -1000,7 +1026,8 @@ pub struct DispatcherContext {
     pub broker: Arc<ToolBroker>,
     pub responses_client: Arc<ResponsesClient>,
     pub out_tx: mpsc::Sender<PluginOutgoing>,
-    pre_output_retry_budget: Duration,
+    stream_retry_policy: StreamRetryPolicy,
+    recovery_gate: Arc<ProviderRecoveryGate>,
     direct_completions: Arc<DirectCompletions>,
 }
 
@@ -1014,6 +1041,7 @@ impl DispatcherContext {
         responses_client: Arc<ResponsesClient>,
         out_tx: mpsc::Sender<PluginOutgoing>,
     ) -> Self {
+        let stream_retry_budget = args.stream_retry_timeout_seconds.map(Duration::from_secs);
         Self {
             args,
             chats,
@@ -1022,16 +1050,24 @@ impl DispatcherContext {
             broker,
             responses_client,
             out_tx,
-            pre_output_retry_budget: PRE_OUTPUT_RETRY_BUDGET,
+            stream_retry_policy: StreamRetryPolicy {
+                budget: stream_retry_budget,
+                ..StreamRetryPolicy::default()
+            },
+            recovery_gate: Arc::new(ProviderRecoveryGate::default()),
             direct_completions: Arc::new(DirectCompletions::default()),
         }
     }
 
-    /// Override the automatic replay window. Production construction keeps the
-    /// default; transport-boundary tests use a short window to prove that the
-    /// same absolute deadline governs replay request setup and body reads.
+    /// Install an elapsed recovery bound for transport-boundary tests.
     pub fn with_pre_output_retry_budget(mut self, budget: Duration) -> Self {
-        self.pre_output_retry_budget = budget;
+        self.stream_retry_policy.budget = Some(budget);
+        self
+    }
+
+    /// Install an attempt bound for transport-boundary tests.
+    pub fn with_pre_output_retry_max_attempts(mut self, max_attempts: u32) -> Self {
+        self.stream_retry_policy.max_attempts = Some(max_attempts);
         self
     }
 }
@@ -2935,6 +2971,16 @@ struct StreamFailure {
 
 impl StreamFailure {
     fn from_error(error: ChatgptError) -> Self {
+        let request_retryable = match &error {
+            ChatgptError::ResponsesEndpoint { status, body } => {
+                is_transient_status(*status)
+                    && !response_signals_terminal_quota_denial(*status, body)
+            }
+            ChatgptError::Http(error) => {
+                error.is_connect() || error.is_timeout() || error.is_request()
+            }
+            _ => false,
+        };
         let kind = match error {
             ChatgptError::ResponsesStreamRead(_) => StreamFailureKind::BodyRead,
             ChatgptError::ResponsesStreamIdleTimeout { .. } => StreamFailureKind::IdleTimeout,
@@ -2949,7 +2995,7 @@ impl StreamFailure {
         Self {
             kind,
             message: format!("stream error: {error}"),
-            retryable: kind.transport_retryable(),
+            retryable: kind.transport_retryable() || request_retryable,
         }
     }
 
@@ -3003,19 +3049,94 @@ async fn next_response_event(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StreamAttemptState {
-    visible_state_blocked: bool,
-    native_output_state_blocked: bool,
-    tool_state_blocked: bool,
+    visible_state_observed: bool,
+    native_output_state_observed: bool,
+    tool_state_observed: bool,
     terminal_event_seen: bool,
+}
+
+impl StreamAttemptState {
+    fn has_provisional_state(self) -> bool {
+        self.visible_state_observed || self.native_output_state_observed || self.tool_state_observed
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct StreamRetryPolicy {
+    max_attempts: Option<u32>,
+    budget: Option<Duration>,
+}
+
+#[derive(Debug, Default)]
+struct RecoveryGateState {
+    open_until: Option<tokio::time::Instant>,
+    probe_in_flight: bool,
+}
+
+/// Coordinates recovery across every turn owned by one provider process. Once
+/// any turn observes a transient stream failure, new requests wait behind one
+/// half-open probe instead of stampeding the same unhealthy upstream path.
+#[derive(Debug, Default)]
+struct ProviderRecoveryGate {
+    state: Mutex<RecoveryGateState>,
+    changed: Notify,
+}
+
+impl ProviderRecoveryGate {
+    async fn record_failure(&self, delay: Duration) -> Duration {
+        let now = tokio::time::Instant::now();
+        let candidate = now + delay;
+        let mut state = self.state.lock().await;
+        state.open_until = Some(
+            state
+                .open_until
+                .map_or(candidate, |existing| existing.max(candidate)),
+        );
+        state.probe_in_flight = false;
+        let remaining = state
+            .open_until
+            .expect("recovery deadline was just set")
+            .saturating_duration_since(now);
+        drop(state);
+        self.changed.notify_waiters();
+        remaining
+    }
+
+    async fn admit(&self, cancel: &TurnToken) -> bool {
+        loop {
+            let wait_until = {
+                let mut state = self.state.lock().await;
+                let Some(open_until) = state.open_until else {
+                    return true;
+                };
+                if tokio::time::Instant::now() >= open_until && !state.probe_in_flight {
+                    state.probe_in_flight = true;
+                    return true;
+                }
+                open_until
+            };
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return false,
+                _ = self.changed.notified() => {},
+                _ = tokio::time::sleep_until(wait_until) => {},
+            }
+        }
+    }
+
+    async fn record_success(&self) {
+        let mut state = self.state.lock().await;
+        state.open_until = None;
+        state.probe_in_flight = false;
+        drop(state);
+        self.changed.notify_waiters();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RetryDecisionReason {
-    RetryablePreOutputFailure,
+    RetryableProvisionalFailure,
     FailureNotRetryable,
-    VisibleStateExists,
-    NativeOutputStateExists,
-    ToolStateExists,
     AttemptLimitReached,
     ElapsedBudgetExhausted,
 }
@@ -3023,11 +3144,8 @@ enum RetryDecisionReason {
 impl RetryDecisionReason {
     fn as_str(self) -> &'static str {
         match self {
-            Self::RetryablePreOutputFailure => "retryable_pre_output_failure",
+            Self::RetryableProvisionalFailure => "retryable_provisional_failure",
             Self::FailureNotRetryable => "failure_not_retryable",
-            Self::VisibleStateExists => "visible_or_reasoning_state_exists",
-            Self::NativeOutputStateExists => "native_output_state_exists",
-            Self::ToolStateExists => "tool_call_state_exists",
             Self::AttemptLimitReached => "attempt_limit_reached",
             Self::ElapsedBudgetExhausted => "elapsed_budget_exhausted",
         }
@@ -3042,28 +3160,24 @@ struct RetryDecision {
 
 fn decide_pre_output_retry(
     failure: &StreamFailure,
-    state: StreamAttemptState,
     attempt: u32,
     elapsed: Duration,
     next_delay: Duration,
-    budget: Duration,
+    policy: StreamRetryPolicy,
 ) -> RetryDecision {
-    let reason = if state.tool_state_blocked {
-        RetryDecisionReason::ToolStateExists
-    } else if state.visible_state_blocked {
-        RetryDecisionReason::VisibleStateExists
-    } else if state.native_output_state_blocked {
-        RetryDecisionReason::NativeOutputStateExists
-    } else if !failure.retryable {
+    let reason = if !failure.retryable {
         RetryDecisionReason::FailureNotRetryable
-    } else if attempt >= PRE_OUTPUT_MAX_ATTEMPTS {
+    } else if policy.max_attempts.is_some_and(|limit| attempt >= limit) {
         RetryDecisionReason::AttemptLimitReached
-    } else if elapsed.saturating_add(next_delay) >= budget {
+    } else if policy
+        .budget
+        .is_some_and(|budget| elapsed.saturating_add(next_delay) >= budget)
+    {
         RetryDecisionReason::ElapsedBudgetExhausted
     } else {
         return RetryDecision {
             retry: true,
-            reason: RetryDecisionReason::RetryablePreOutputFailure,
+            reason: RetryDecisionReason::RetryableProvisionalFailure,
         };
     };
     RetryDecision {
@@ -3073,18 +3187,17 @@ fn decide_pre_output_retry(
 }
 
 fn pre_output_retry_delay(retry_number: u32) -> Duration {
-    let jitter =
-        rand::thread_rng().gen_range(-PRE_OUTPUT_RETRY_JITTER_MS..=PRE_OUTPUT_RETRY_JITTER_MS);
-    pre_output_retry_delay_with_jitter(retry_number, jitter)
+    let ceiling = pre_output_retry_delay_ceiling(retry_number);
+    Duration::from_millis(rand::thread_rng().gen_range(0..=ceiling.as_millis() as u64))
 }
 
-fn pre_output_retry_delay_with_jitter(retry_number: u32, jitter_ms: i64) -> Duration {
+fn pre_output_retry_delay_ceiling(retry_number: u32) -> Duration {
     let shift = retry_number.saturating_sub(1).min(32);
     let factor = 1_u64.checked_shl(shift).unwrap_or(u64::MAX);
     let delay = PRE_OUTPUT_RETRY_BASE_DELAY_MS
         .saturating_mul(factor)
         .min(PRE_OUTPUT_RETRY_MAX_DELAY_MS);
-    Duration::from_millis((delay as i64 + jitter_ms).max(0) as u64)
+    Duration::from_millis(delay)
 }
 
 fn response_failure_message(response: &Value) -> String {
@@ -3119,27 +3232,8 @@ fn response_failure_is_transient(response: &Value) -> bool {
 fn terminal_stream_failure_message(
     failure: &StreamFailure,
     decision: RetryDecision,
-    state: StreamAttemptState,
     attempt: u32,
 ) -> String {
-    if state.tool_state_blocked {
-        return format!(
-            "ChatGPT stream interrupted after tool-call state began. Nefor did not replay the request because tool state or side effects may already exist. Cause: {}",
-            failure.message
-        );
-    }
-    if state.visible_state_blocked {
-        return format!(
-            "ChatGPT stream interrupted after partial text or reasoning state. Nefor did not replay the request because doing so could duplicate visible output. Cause: {}",
-            failure.message
-        );
-    }
-    if state.native_output_state_blocked {
-        return format!(
-            "ChatGPT stream interrupted after provider response state began. Nefor did not replay the request because text, reasoning, or tool-call state may already exist. Cause: {}",
-            failure.message
-        );
-    }
     if failure.kind.transport_retryable()
         && matches!(
             decision.reason,
@@ -3147,7 +3241,7 @@ fn terminal_stream_failure_message(
         )
     {
         return format!(
-            "ChatGPT stream transport failed before any text, reasoning, or tool-call state after {attempt} attempts. Automatic recovery is exhausted; retrying the turn is safe. Cause: {}",
+            "ChatGPT stream transport failed after {attempt} provisional attempts. Configured automatic recovery is exhausted; retrying the turn is safe. Cause: {}",
             failure.message
         );
     }
@@ -3183,7 +3277,7 @@ fn spawn_turn(
         let mut operation_usage: Option<OperationUsage> = None;
         let mut active_model = String::new();
         let mut pre_output_stream_retries: u32 = 0;
-        let mut pre_output_retry_deadline: Option<tokio::time::Instant> = None;
+        let mut stream_recovery_started_at: Option<tokio::time::Instant> = None;
         let mut final_stream_attempts: u32 = 0;
         let mut final_terminal_event_seen = false;
         let mut auth_401_recovery_stage: u8 = 0;
@@ -3411,25 +3505,32 @@ fn spawn_turn(
             }
             let auth_snap = ctx.auth.snapshot().await;
 
-            // Start the recovery window before the original stream attempt so
-            // time spent there reduces the replay window. The original keeps
-            // the provider's normal request/idle bounds; every replayed request
-            // and body read is constrained by the remaining absolute deadline.
-            let recovery_deadline = *pre_output_retry_deadline
-                .get_or_insert_with(|| tokio::time::Instant::now() + ctx.pre_output_retry_budget);
-            let attempt_deadline = (pre_output_stream_retries > 0).then_some(recovery_deadline);
+            // Production recovery has no elapsed deadline. Tests and explicit
+            // embeddings may install one; it begins at the first transient
+            // failure rather than charging healthy request time to recovery.
+            let attempt_deadline = if pre_output_stream_retries > 0 {
+                ctx.stream_retry_policy
+                    .budget
+                    .and_then(|budget| stream_recovery_started_at.map(|started| started + budget))
+            } else {
+                None
+            };
+            if !ctx.recovery_gate.admit(&cancel).await {
+                break;
+            }
             let mut stream = match open_response_stream(
                 &ctx.responses_client,
                 &req,
                 &auth_snap,
                 &mut response_turn,
                 attempt_deadline,
-                ctx.pre_output_retry_budget,
+                ctx.stream_retry_policy.budget.unwrap_or_default(),
             )
             .await
             {
                 Ok(s) => {
                     auth_401_recovery_stage = 0;
+                    ctx.recovery_gate.record_success().await;
                     s
                 }
                 Err(error @ ChatgptError::ResponsesStreamRecoveryTimeout { .. }) => {
@@ -3439,103 +3540,124 @@ fn spawn_turn(
                     )
                 }
                 Err(ChatgptError::ResponsesEndpoint { status, body }) => {
-                    if status == 401 {
-                        let failed_token = auth_snap
-                            .tokens
-                            .as_ref()
-                            .map(|tokens| tokens.access_token.clone());
-                        let disk_credentials_adopted = if auth_401_recovery_stage == 0 {
-                            match ctx.auth.adopt_disk_credentials().await {
-                                Ok(adopted) => adopted,
-                                Err(error) => {
-                                    tracing::warn!(%error, "could not reload auth file after 401");
-                                    false
-                                }
-                            }
-                        } else {
-                            false
-                        };
-                        let recovery_action =
-                            auth_401_action(auth_401_recovery_stage, disk_credentials_adopted);
-                        match recovery_action {
-                            Auth401Action::RetryReloaded => {
-                                auth_401_recovery_stage = 1;
-                                iterations = iterations.saturating_sub(1);
-                                continue;
-                            }
-                            Auth401Action::ForceRefresh => {}
-                            Auth401Action::Fail => {
-                                let snap = ctx.auth.apply_error(HTTP_401_MESSAGE.to_owned()).await;
-                                let _ = ctx
-                                    .out_tx
-                                    .send(PluginOutgoing::event(auth_status_body(&ctx.args, &snap)))
-                                    .await;
-                            }
-                        }
-                        if recovery_action == Auth401Action::ForceRefresh {
-                            if let Some(failed_token) = failed_token {
-                                match ctx.auth.force_refresh_after(&failed_token).await {
-                                    Ok(_) => {
-                                        auth_401_recovery_stage = 2;
-                                        iterations = iterations.saturating_sub(1);
-                                        continue;
-                                    }
+                    if is_transient_status(status)
+                        && !response_signals_terminal_quota_denial(status, &body)
+                    {
+                        let error = ChatgptError::ResponsesEndpoint { status, body };
+                        ResponseStream::new(
+                            Box::pin(futures::stream::once(async move { Err(error) })),
+                            None,
+                        )
+                    } else {
+                        if status == 401 {
+                            let failed_token = auth_snap
+                                .tokens
+                                .as_ref()
+                                .map(|tokens| tokens.access_token.clone());
+                            let disk_credentials_adopted = if auth_401_recovery_stage == 0 {
+                                match ctx.auth.adopt_disk_credentials().await {
+                                    Ok(adopted) => adopted,
                                     Err(error) => {
-                                        final_error =
-                                            Some(format!("token refresh failed: {error}"));
-                                        let _ =
-                                            handle_refresh_error(&ctx, Some(&chat_id), error).await;
-                                        errored = true;
-                                        final_finish_reason = Some("error".into());
-                                        break;
+                                        tracing::warn!(%error, "could not reload auth file after 401");
+                                        false
                                     }
                                 }
                             } else {
-                                let snap = ctx.auth.apply_error(HTTP_401_MESSAGE.to_owned()).await;
-                                let _ = ctx
-                                    .out_tx
-                                    .send(PluginOutgoing::event(auth_status_body(&ctx.args, &snap)))
-                                    .await;
+                                false
+                            };
+                            let recovery_action =
+                                auth_401_action(auth_401_recovery_stage, disk_credentials_adopted);
+                            match recovery_action {
+                                Auth401Action::RetryReloaded => {
+                                    auth_401_recovery_stage = 1;
+                                    iterations = iterations.saturating_sub(1);
+                                    continue;
+                                }
+                                Auth401Action::ForceRefresh => {}
+                                Auth401Action::Fail => {
+                                    let snap =
+                                        ctx.auth.apply_error(HTTP_401_MESSAGE.to_owned()).await;
+                                    let _ = ctx
+                                        .out_tx
+                                        .send(PluginOutgoing::event(auth_status_body(
+                                            &ctx.args, &snap,
+                                        )))
+                                        .await;
+                                }
+                            }
+                            if recovery_action == Auth401Action::ForceRefresh {
+                                if let Some(failed_token) = failed_token {
+                                    match ctx.auth.force_refresh_after(&failed_token).await {
+                                        Ok(_) => {
+                                            auth_401_recovery_stage = 2;
+                                            iterations = iterations.saturating_sub(1);
+                                            continue;
+                                        }
+                                        Err(error) => {
+                                            final_error =
+                                                Some(format!("token refresh failed: {error}"));
+                                            let _ =
+                                                handle_refresh_error(&ctx, Some(&chat_id), error)
+                                                    .await;
+                                            errored = true;
+                                            final_finish_reason = Some("error".into());
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    let snap =
+                                        ctx.auth.apply_error(HTTP_401_MESSAGE.to_owned()).await;
+                                    let _ = ctx
+                                        .out_tx
+                                        .send(PluginOutgoing::event(auth_status_body(
+                                            &ctx.args, &snap,
+                                        )))
+                                        .await;
+                                }
                             }
                         }
-                    }
-                    // Reactive fallback: some gpt-5-family slugs
-                    // (`gpt-5.3-codex-spark`, etc.) match
-                    // `model_supports_reasoning`'s `gpt-5` prefix but
-                    // reject the `reasoning.summary` parameter the
-                    // request carries. Mark the model and retry the
-                    // same iteration with reasoning disabled; the
-                    // next pass builds the request without it because
-                    // `chats.model_reasoning_unsupported` is now true.
-                    if status == 400
-                        && supports_reasoning
-                        && body_signals_reasoning_unsupported(&body)
-                    {
-                        tracing::info!(
-                            model = %snapshot.model,
-                            body = %snippet(&body),
-                            "model rejected reasoning — falling back to no-reasoning mode for this model",
-                        );
-                        ctx.chats
-                            .mark_model_reasoning_unsupported(&snapshot.model)
+                        // Reactive fallback: some gpt-5-family slugs
+                        // (`gpt-5.3-codex-spark`, etc.) match
+                        // `model_supports_reasoning`'s `gpt-5` prefix but
+                        // reject the `reasoning.summary` parameter the
+                        // request carries. Mark the model and retry the
+                        // same iteration with reasoning disabled; the
+                        // next pass builds the request without it because
+                        // `chats.model_reasoning_unsupported` is now true.
+                        if status == 400
+                            && supports_reasoning
+                            && body_signals_reasoning_unsupported(&body)
+                        {
+                            tracing::info!(
+                                model = %snapshot.model,
+                                body = %snippet(&body),
+                                "model rejected reasoning — falling back to no-reasoning mode for this model",
+                            );
+                            ctx.chats
+                                .mark_model_reasoning_unsupported(&snapshot.model)
+                                .await;
+                            iterations = iterations.saturating_sub(1);
+                            continue;
+                        }
+                        let msg = format!("HTTP {status}: {}", snippet(&body));
+                        final_error = Some(msg.clone());
+                        let _ = ctx
+                            .out_tx
+                            .send(PluginOutgoing::event(turn_error_body(
+                                &ctx.args,
+                                Some(&chat_id),
+                                &msg,
+                            )))
                             .await;
-                        iterations = iterations.saturating_sub(1);
-                        continue;
+                        errored = true;
+                        final_finish_reason = Some("error".into());
+                        break;
                     }
-                    let msg = format!("HTTP {status}: {}", snippet(&body));
-                    final_error = Some(msg.clone());
-                    let _ = ctx
-                        .out_tx
-                        .send(PluginOutgoing::event(turn_error_body(
-                            &ctx.args,
-                            Some(&chat_id),
-                            &msg,
-                        )))
-                        .await;
-                    errored = true;
-                    final_finish_reason = Some("error".into());
-                    break;
                 }
+                Err(error @ ChatgptError::Http(_)) => ResponseStream::new(
+                    Box::pin(futures::stream::once(async move { Err(error) })),
+                    None,
+                ),
                 Err(e) => {
                     let msg = format!("request failed: {e}");
                     final_error = Some(msg.clone());
@@ -3585,7 +3707,7 @@ fn spawn_turn(
                     next = next_response_event(
                         &mut stream,
                         attempt_deadline,
-                        ctx.pre_output_retry_budget,
+                        ctx.stream_retry_policy.budget.unwrap_or_default(),
                     ) => {
                         match next {
                             Some(Ok(event)) => match event {
@@ -3832,45 +3954,49 @@ fn spawn_turn(
                 let attempt = pre_output_stream_retries + 1;
                 let candidate_delay = pre_output_retry_delay(attempt);
                 let state = StreamAttemptState {
-                    visible_state_blocked: visible_state_observed,
-                    native_output_state_blocked: native_output_state_observed,
-                    tool_state_blocked: tool_state_observed,
+                    visible_state_observed,
+                    native_output_state_observed,
+                    tool_state_observed,
                     terminal_event_seen,
                 };
-                let retry_elapsed = ctx.pre_output_retry_budget.saturating_sub(
-                    recovery_deadline.saturating_duration_since(tokio::time::Instant::now()),
-                );
+                let recovery_started_at =
+                    *stream_recovery_started_at.get_or_insert_with(tokio::time::Instant::now);
+                let retry_elapsed = recovery_started_at.elapsed();
                 let decision = decide_pre_output_retry(
                     &failure,
-                    state,
                     attempt,
                     retry_elapsed,
                     candidate_delay,
-                    ctx.pre_output_retry_budget,
+                    ctx.stream_retry_policy,
                 );
                 let delay = if decision.retry {
-                    candidate_delay
+                    ctx.recovery_gate.record_failure(candidate_delay).await
                 } else {
                     Duration::ZERO
                 };
                 tracing::warn!(
                     chat_id = %chat_id,
                     attempt,
-                    max_attempts = PRE_OUTPUT_MAX_ATTEMPTS,
+                    max_attempts = ctx.stream_retry_policy.max_attempts,
                     retry = decision.retry,
                     retry_reason = decision.reason.as_str(),
                     failure_kind = failure.kind.as_str(),
                     terminal_event_seen,
-                    visible_state_blocked = state.visible_state_blocked,
-                    native_output_state_blocked = state.native_output_state_blocked,
-                    tool_state_blocked = state.tool_state_blocked,
+                    visible_state_observed = state.visible_state_observed,
+                    native_output_state_observed = state.native_output_state_observed,
+                    tool_state_observed = state.tool_state_observed,
                     elapsed_ms = retry_elapsed.as_millis() as u64,
-                    budget_ms = ctx.pre_output_retry_budget.as_millis() as u64,
+                    budget_ms = ctx.stream_retry_policy.budget.map(|budget| budget.as_millis() as u64),
                     delay_ms = delay.as_millis() as u64,
                     error = %failure.message,
                     "Responses stream retry decision",
                 );
                 if let Some((request_id, _)) = &direct_request {
+                    if decision.retry && state.has_provisional_state() {
+                        let body =
+                            attempt_discarded_body(&ctx.args, request_id, attempt, &failure, state);
+                        let _ = ctx.out_tx.send(PluginOutgoing::event(body)).await;
+                    }
                     let body = retry_decision_body(
                         &ctx.args, request_id, attempt, delay, &failure, decision, state,
                     );
@@ -3883,12 +4009,9 @@ fn spawn_turn(
                         let body = stream_retry_body(&ctx.args, &chat_id, attempt, delay, &failure);
                         let _ = ctx.out_tx.send(PluginOutgoing::event(body)).await;
                     }
-                    tokio::time::sleep(delay).await;
                     continue;
                 }
-                iter_errored = Some(terminal_stream_failure_message(
-                    &failure, decision, state, attempt,
-                ));
+                iter_errored = Some(terminal_stream_failure_message(&failure, decision, attempt));
             }
 
             for formatted in reasoning_formatter.finish() {
@@ -4266,6 +4389,7 @@ mod tests {
             provider_name: "chatgpt".into(),
             base_url: "https://example.invalid".into(),
             web_search: Default::default(),
+            stream_retry_timeout_seconds: None,
         }
     }
 
@@ -5184,36 +5308,31 @@ mod tests {
     }
 
     #[test]
-    fn stream_retry_policy_is_bounded_and_preserves_output_safety() {
+    fn stream_retry_policy_replays_provisional_state_until_an_explicit_bound() {
         let failure = StreamFailure::from_error(ChatgptError::ResponsesStreamRead("reset".into()));
-        let clear = StreamAttemptState {
-            visible_state_blocked: false,
-            native_output_state_blocked: false,
-            tool_state_blocked: false,
-            terminal_event_seen: false,
-        };
         assert_eq!(
             decide_pre_output_retry(
                 &failure,
-                clear,
                 1,
                 Duration::ZERO,
                 Duration::from_millis(200),
-                PRE_OUTPUT_RETRY_BUDGET,
+                StreamRetryPolicy::default(),
             ),
             RetryDecision {
                 retry: true,
-                reason: RetryDecisionReason::RetryablePreOutputFailure,
+                reason: RetryDecisionReason::RetryableProvisionalFailure,
             }
         );
         assert_eq!(
             decide_pre_output_retry(
                 &failure,
-                clear,
-                PRE_OUTPUT_MAX_ATTEMPTS,
+                3,
                 Duration::ZERO,
                 Duration::from_millis(200),
-                PRE_OUTPUT_RETRY_BUDGET,
+                StreamRetryPolicy {
+                    max_attempts: Some(3),
+                    budget: None,
+                },
             )
             .reason,
             RetryDecisionReason::AttemptLimitReached,
@@ -5221,74 +5340,26 @@ mod tests {
         assert_eq!(
             decide_pre_output_retry(
                 &failure,
-                clear,
                 1,
-                PRE_OUTPUT_RETRY_BUDGET,
+                Duration::from_secs(30),
                 Duration::ZERO,
-                PRE_OUTPUT_RETRY_BUDGET,
+                StreamRetryPolicy {
+                    max_attempts: None,
+                    budget: Some(Duration::from_secs(30)),
+                },
             )
             .reason,
             RetryDecisionReason::ElapsedBudgetExhausted,
-        );
-
-        let visible = StreamAttemptState {
-            visible_state_blocked: true,
-            ..clear
-        };
-        assert_eq!(
-            decide_pre_output_retry(
-                &failure,
-                visible,
-                1,
-                Duration::ZERO,
-                Duration::ZERO,
-                PRE_OUTPUT_RETRY_BUDGET,
-            )
-            .reason,
-            RetryDecisionReason::VisibleStateExists,
-        );
-        let native = StreamAttemptState {
-            native_output_state_blocked: true,
-            ..clear
-        };
-        assert_eq!(
-            decide_pre_output_retry(
-                &failure,
-                native,
-                1,
-                Duration::ZERO,
-                Duration::ZERO,
-                PRE_OUTPUT_RETRY_BUDGET,
-            )
-            .reason,
-            RetryDecisionReason::NativeOutputStateExists,
-        );
-        let tool = StreamAttemptState {
-            tool_state_blocked: true,
-            ..clear
-        };
-        assert_eq!(
-            decide_pre_output_retry(
-                &failure,
-                tool,
-                1,
-                Duration::ZERO,
-                Duration::ZERO,
-                PRE_OUTPUT_RETRY_BUDGET,
-            )
-            .reason,
-            RetryDecisionReason::ToolStateExists,
         );
 
         let parse = StreamFailure::from_error(ChatgptError::ResponsesStreamParse("bad".into()));
         assert_eq!(
             decide_pre_output_retry(
                 &parse,
-                clear,
                 1,
                 Duration::ZERO,
                 Duration::ZERO,
-                PRE_OUTPUT_RETRY_BUDGET,
+                StreamRetryPolicy::default(),
             )
             .reason,
             RetryDecisionReason::FailureNotRetryable,
@@ -5322,16 +5393,40 @@ mod tests {
         assert!(!StreamFailure::semantic(&invalid).retryable);
 
         assert_eq!(
-            pre_output_retry_delay_with_jitter(1, 0),
+            pre_output_retry_delay_ceiling(1),
             Duration::from_millis(PRE_OUTPUT_RETRY_BASE_DELAY_MS),
         );
         assert_eq!(
-            pre_output_retry_delay_with_jitter(2, 0),
+            pre_output_retry_delay_ceiling(2),
             Duration::from_millis(PRE_OUTPUT_RETRY_BASE_DELAY_MS * 2),
         );
         assert_eq!(
-            pre_output_retry_delay_with_jitter(99, 0),
+            pre_output_retry_delay_ceiling(99),
             Duration::from_millis(PRE_OUTPUT_RETRY_MAX_DELAY_MS),
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_recovery_gate_admits_one_half_open_probe() {
+        let gate = Arc::new(ProviderRecoveryGate::default());
+        let cancel = TurnToken::new();
+        gate.record_failure(Duration::from_millis(10)).await;
+
+        assert!(gate.admit(&cancel).await, "first request becomes the probe");
+        let waiting_gate = gate.clone();
+        let waiting_cancel = TurnToken::new();
+        let waiter = tokio::spawn(async move { waiting_gate.admit(&waiting_cancel).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), waiter)
+                .await
+                .is_err(),
+            "a second request remains gated while the probe is in flight"
+        );
+
+        gate.record_success().await;
+        assert!(
+            gate.admit(&cancel).await,
+            "success reopens normal admission"
         );
     }
 

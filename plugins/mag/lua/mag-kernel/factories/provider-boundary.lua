@@ -245,6 +245,13 @@ function M.construct(id, params, emit, options)
     streamed_text = ""
   end
 
+  local function discard_stream(detail)
+    if streamed_message_id == nil then return end
+    facts:interrupt_message(streamed_message_id, detail or {}, "discarded")
+    streamed_message_id = nil
+    streamed_text = ""
+  end
+
   function state:append(message, completion)
     if message.role == "assistant" and completion == nil then
       completion = provider_round_completion
@@ -490,7 +497,9 @@ function M.construct(id, params, emit, options)
   function instance.handle_observation(observation)
     local value = observation and observation.value
     if observation.binding == "conversation" and type(value) == "table" then
-      if value.kind == "retry" or (value.kind == "retry_decision" and value.retry == true) then
+      if value.kind == "attempt_discarded" then
+        discard_stream(value)
+      elseif value.kind == "retry" or (value.kind == "retry_decision" and value.retry == true) then
         facts:retry(value.error or value.message or value.retry_reason or "provider_retry", value)
       elseif value.kind == "usage" then
         provider_round_metadata = value

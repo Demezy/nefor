@@ -164,6 +164,17 @@ Runtime `conversation.usage.*` traffic is live control-plane state and sessions 
 
 The generic OpenAI-compatible Rust plugin owns transport recovery as part of its HTTP/SSE boundary. Connection failures, HTTP 429, and every HTTP 5xx response share one bounded retry budget. An SSE transport failure after successful headers can replay within that budget only before text, reasoning, or tool-call state exists; once any such state has escaped, replay is rejected to prevent duplicate output or effects. Retry progress remains observable to the composition. The plugin otherwise only parses transport facts: standard token fields remain optional; unknown upstream usage members are preserved under `usage.extensions`, and the upstream completion ID is carried when present. Lua instance configuration supplies additional request-body members and the semantics that interpret extensions. Missing usage or completion identity is not turned into authoritative zero accounting.
 
+The ChatGPT Responses provider uses a stronger provider-round boundary. Streamed
+deltas and native output items are provisional until a semantic terminal event;
+a transient stream failure emits an explicit discarded-attempt observation and
+replays the provider round. Conversation-manager retains the interrupted attempt
+as audit-only `discarded` history while excluding it from provider context, and
+the chat projection retracts it from the surface. Local tool calls are not
+delivered until the successful round commits, so provisional function-call state
+does not imply an external side effect. Recovery is unbounded until cancellation
+by default, with an optional elapsed limit owned by provider configuration and a
+shared half-open gate that coordinates concurrent turns after an outage.
+
 ## Provider HTTPS trust
 
 Network-owning Rust providers construct HTTPS clients through the

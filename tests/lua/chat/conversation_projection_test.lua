@@ -313,6 +313,26 @@ eq(actions[1].message_id, "attempt-1", "the discard names the retracted message"
 diagnostic_reduce({
   kind = "conversation.projection.delta", conversation_id = "typed",
   change = { kind = "message_started", turn_id = "typed-turn", message = {
+    id = "transport-attempt", turn_id = "typed-turn", role = "assistant",
+  } },
+})
+diagnostic_reduce({
+  kind = "conversation.projection.delta", conversation_id = "typed",
+  change = { kind = "content_chunk_appended", message_id = "transport-attempt",
+    chunk = { kind = "text", data = "provisional" } },
+})
+actions = diagnostic_reduce({
+  kind = "conversation.projection.delta", conversation_id = "typed",
+  change = { kind = "message_interrupted", turn_id = "typed-turn", message = {
+    id = "transport-attempt", turn_id = "typed-turn", role = "assistant",
+    visibility = "discarded", text = "provisional",
+  } },
+})
+eq(actions[1].kind, "message_discarded", "an abandoned transport attempt is retracted")
+
+diagnostic_reduce({
+  kind = "conversation.projection.delta", conversation_id = "typed",
+  change = { kind = "message_started", turn_id = "typed-turn", message = {
     id = "correction", turn_id = "typed-turn", role = "user", visibility = "diagnostic",
   } },
 })

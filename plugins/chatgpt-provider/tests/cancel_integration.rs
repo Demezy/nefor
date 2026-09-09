@@ -233,6 +233,7 @@ async fn cancel_aborts_inflight_completion_and_provider_serves_next() {
         provider_name: PROVIDER.into(),
         base_url: format!("http://{addr}"),
         web_search: WebSearchMode::Cached,
+        stream_retry_timeout_seconds: None,
     });
     let chats = Arc::new(Chats::with_default_model(None));
     let dir = tempfile::tempdir().expect("tempdir");
@@ -430,6 +431,7 @@ async fn invalid_direct_completion_options_fail_once_before_http() {
         provider_name: PROVIDER.into(),
         base_url: format!("http://{addr}"),
         web_search: Default::default(),
+        stream_retry_timeout_seconds: None,
     });
     let chats = Arc::new(Chats::with_default_model(None));
     let dir = tempfile::tempdir().expect("tempdir");
@@ -575,6 +577,7 @@ async fn direct_completions_keep_local_allowlists_and_add_hosted_search() {
         provider_name: PROVIDER.into(),
         base_url: format!("http://{addr}"),
         web_search: WebSearchMode::Cached,
+        stream_retry_timeout_seconds: None,
     });
     let chats = Arc::new(Chats::with_default_model(None));
     let dir = tempfile::tempdir().expect("tempdir");
@@ -983,6 +986,7 @@ async fn start_direct_harness_with_budget(
         provider_name: PROVIDER.into(),
         base_url,
         web_search,
+        stream_retry_timeout_seconds: None,
     });
     let chats = Arc::new(Chats::with_default_model(None));
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1001,7 +1005,8 @@ async fn start_direct_harness_with_budget(
         Arc::new(ToolBroker::new()),
         Arc::new(client),
         out_tx,
-    );
+    )
+    .with_pre_output_retry_max_attempts(3);
     if let Some(retry_budget) = retry_budget {
         ctx = ctx.with_pre_output_retry_budget(retry_budget);
     }
@@ -1041,17 +1046,22 @@ async fn finish_harness(
     let _ = tokio::time::timeout(Duration::from_secs(2), loop_handle).await;
 }
 
-async fn assert_truncated_observation_blocks_replay(
+async fn assert_truncated_observation_is_discarded_and_replayed(
     request_id: &str,
     event_body: &str,
-    expected_reason: &str,
 ) -> Value {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let hits = Arc::new(AtomicUsize::new(0));
     let server = tokio::spawn(serve_scripted_sse(
         listener,
-        vec![ScriptedSseReply::truncated(event_body)],
+        vec![
+            ScriptedSseReply::truncated(event_body),
+            ScriptedSseReply::complete(concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"replacement\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r2\"}}\n\n"
+            )),
+        ],
         hits.clone(),
     ));
     let base_url = format!("http://{addr}");
@@ -1059,6 +1069,14 @@ async fn assert_truncated_observation_blocks_replay(
         start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
 
     submit_direct_completion(&in_tx, request_id).await;
+    let discarded = wait_for_completion_event(
+        &mut out_rx,
+        request_id,
+        "attempt_discarded",
+        Duration::from_secs(3),
+    )
+    .await
+    .expect("discarded attempt");
     let decision = wait_for_completion_event(
         &mut out_rx,
         request_id,
@@ -1067,16 +1085,16 @@ async fn assert_truncated_observation_blocks_replay(
     )
     .await
     .expect("retry decision");
-    assert_eq!(decision["retry"], false);
-    assert_eq!(decision["retry_reason"], expected_reason);
-    assert_eq!(hits.load(Ordering::SeqCst), 1, "request was not replayed");
-    wait_for_completion_event(&mut out_rx, request_id, "error", Duration::from_secs(3))
+    assert_eq!(decision["retry"], true);
+    assert_eq!(decision["retry_reason"], "retryable_provisional_failure");
+    wait_for_completion_event(&mut out_rx, request_id, "completed", Duration::from_secs(3))
         .await
-        .expect("terminal error");
+        .expect("replacement completion");
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "request was replayed once");
 
     finish_harness(in_tx, loop_handle).await;
     server.await.expect("server");
-    Value::Object(decision)
+    Value::Object(discarded)
 }
 
 #[tokio::test]
@@ -1110,12 +1128,11 @@ async fn truncated_body_before_output_replays_once_then_succeeds() {
     .await
     .expect("retry decision");
     assert_eq!(decision["attempt"], 1);
-    assert_eq!(decision["max_attempts"], 3);
     assert_eq!(decision["retry"], true);
     assert_eq!(decision["failure_kind"], "body_read");
     assert_eq!(decision["terminal_event_seen"], false);
-    assert_eq!(decision["visible_state_blocked"], false);
-    assert_eq!(decision["tool_state_blocked"], false);
+    assert_eq!(decision["visible_state_observed"], false);
+    assert_eq!(decision["tool_state_observed"], false);
     assert!(decision["error"]
         .as_str()
         .is_some_and(|error| error.contains("source:")));
@@ -1247,7 +1264,7 @@ async fn pre_output_transport_retries_stop_at_attempt_limit() {
 }
 
 #[tokio::test]
-async fn out_of_order_function_argument_events_never_replay() {
+async fn out_of_order_function_argument_events_are_provisional() {
     let cases = [
         (
             "function-args-delta",
@@ -1259,30 +1276,25 @@ async fn out_of_order_function_argument_events_never_replay() {
         ),
     ];
     for (request_id, event_body) in cases {
-        let decision = assert_truncated_observation_blocks_replay(
-            request_id,
-            event_body,
-            "tool_call_state_exists",
-        )
-        .await;
-        assert_eq!(decision["tool_state_blocked"], true);
+        let discarded =
+            assert_truncated_observation_is_discarded_and_replayed(request_id, event_body).await;
+        assert_eq!(discarded["tool_state_observed"], true);
     }
 }
 
 #[tokio::test]
-async fn reasoning_output_item_observation_never_replays() {
-    let decision = assert_truncated_observation_blocks_replay(
+async fn reasoning_output_item_observation_is_provisional() {
+    let discarded = assert_truncated_observation_is_discarded_and_replayed(
         "reasoning-item-added",
         "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}}\n\n",
-        "native_output_state_exists",
     )
     .await;
-    assert_eq!(decision["native_output_state_blocked"], true);
-    assert_eq!(decision["visible_state_blocked"], false);
+    assert_eq!(discarded["native_output_state_observed"], true);
+    assert_eq!(discarded["visible_state_observed"], false);
 }
 
 #[tokio::test]
-async fn empty_text_and_reasoning_observations_never_replay() {
+async fn empty_text_and_reasoning_observations_are_provisional() {
     let cases = [
         (
             "empty-text-delta",
@@ -1298,133 +1310,34 @@ async fn empty_text_and_reasoning_observations_never_replay() {
         ),
     ];
     for (request_id, event_body) in cases {
-        let decision = assert_truncated_observation_blocks_replay(
-            request_id,
-            event_body,
-            "visible_or_reasoning_state_exists",
-        )
-        .await;
-        assert_eq!(decision["visible_state_blocked"], true);
+        let discarded =
+            assert_truncated_observation_is_discarded_and_replayed(request_id, event_body).await;
+        assert_eq!(discarded["visible_state_observed"], true);
     }
 }
 
 #[tokio::test]
-async fn interruption_after_text_never_replays() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    let hits = Arc::new(AtomicUsize::new(0));
+async fn interruption_after_text_discards_and_replays() {
     let body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n";
-    let server = tokio::spawn(serve_scripted_sse(
-        listener,
-        vec![ScriptedSseReply::truncated(body)],
-        hits.clone(),
-    ));
-    let base_url = format!("http://{addr}");
-    let (in_tx, mut out_rx, loop_handle) =
-        start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
-
-    submit_direct_completion(&in_tx, "partial-text").await;
-    let decision = wait_for_completion_event(
-        &mut out_rx,
-        "partial-text",
-        "retry_decision",
-        Duration::from_secs(3),
-    )
-    .await
-    .expect("retry decision");
-    assert_eq!(decision["retry"], false);
-    assert_eq!(
-        decision["retry_reason"],
-        "visible_or_reasoning_state_exists"
-    );
-    assert_eq!(decision["visible_state_blocked"], true);
-    let failed =
-        wait_for_completion_event(&mut out_rx, "partial-text", "error", Duration::from_secs(3))
-            .await
-            .expect("terminal error");
-    assert!(failed["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("did not replay")));
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
-
-    finish_harness(in_tx, loop_handle).await;
-    server.await.expect("server");
+    let discarded =
+        assert_truncated_observation_is_discarded_and_replayed("partial-text", body).await;
+    assert_eq!(discarded["visible_state_observed"], true);
 }
 
 #[tokio::test]
-async fn interruption_after_buffered_reasoning_never_replays() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    let hits = Arc::new(AtomicUsize::new(0));
+async fn interruption_after_buffered_reasoning_discards_and_replays() {
     let body = "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"**Considering recovery\",\"item_id\":\"rs_1\"}\n\n";
-    let server = tokio::spawn(serve_scripted_sse(
-        listener,
-        vec![ScriptedSseReply::truncated(body)],
-        hits.clone(),
-    ));
-    let base_url = format!("http://{addr}");
-    let (in_tx, mut out_rx, loop_handle) =
-        start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
-
-    submit_direct_completion(&in_tx, "partial-reasoning").await;
-    let decision = wait_for_completion_event(
-        &mut out_rx,
-        "partial-reasoning",
-        "retry_decision",
-        Duration::from_secs(3),
-    )
-    .await
-    .expect("retry decision");
-    assert_eq!(decision["retry"], false);
-    assert_eq!(
-        decision["retry_reason"],
-        "visible_or_reasoning_state_exists"
-    );
-    assert_eq!(decision["visible_state_blocked"], true);
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
-
-    finish_harness(in_tx, loop_handle).await;
-    server.await.expect("server");
+    let discarded =
+        assert_truncated_observation_is_discarded_and_replayed("partial-reasoning", body).await;
+    assert_eq!(discarded["visible_state_observed"], true);
 }
 
 #[tokio::test]
-async fn interruption_after_tool_call_state_never_replays() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    let hits = Arc::new(AtomicUsize::new(0));
+async fn interruption_after_tool_call_state_discards_and_replays() {
     let body = "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"inspect\",\"arguments\":\"\"}}\n\n";
-    let server = tokio::spawn(serve_scripted_sse(
-        listener,
-        vec![ScriptedSseReply::truncated(body)],
-        hits.clone(),
-    ));
-    let base_url = format!("http://{addr}");
-    let (in_tx, mut out_rx, loop_handle) =
-        start_direct_harness(base_url.clone(), test_responses_client(base_url)).await;
-
-    submit_direct_completion(&in_tx, "partial-tool").await;
-    let decision = wait_for_completion_event(
-        &mut out_rx,
-        "partial-tool",
-        "retry_decision",
-        Duration::from_secs(3),
-    )
-    .await
-    .expect("retry decision");
-    assert_eq!(decision["retry"], false);
-    assert_eq!(decision["retry_reason"], "tool_call_state_exists");
-    assert_eq!(decision["tool_state_blocked"], true);
-    let failed =
-        wait_for_completion_event(&mut out_rx, "partial-tool", "error", Duration::from_secs(3))
-            .await
-            .expect("terminal error");
-    assert!(failed["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("tool state or side effects may already exist")));
-    assert_eq!(hits.load(Ordering::SeqCst), 1);
-
-    finish_harness(in_tx, loop_handle).await;
-    server.await.expect("server");
+    let discarded =
+        assert_truncated_observation_is_discarded_and_replayed("partial-tool", body).await;
+    assert_eq!(discarded["tool_state_observed"], true);
 }
 
 #[tokio::test]
@@ -1548,6 +1461,7 @@ async fn direct_completion_replays_encrypted_reasoning_before_tool_output() {
         provider_name: PROVIDER.into(),
         base_url: format!("http://{addr}"),
         web_search: Default::default(),
+        stream_retry_timeout_seconds: None,
     });
     let chats = Arc::new(Chats::with_default_model(None));
     let dir = tempfile::tempdir().expect("tempdir");

@@ -41,6 +41,11 @@ pub struct Cli {
     #[arg(long = "web-search", value_enum, default_value_t = WebSearchMode::Disabled, global = true)]
     pub web_search: WebSearchMode,
 
+    /// Optional elapsed limit for recovering a transient Responses stream.
+    /// Omit it for autonomous recovery that continues until success or cancel.
+    #[arg(long = "stream-retry-timeout-seconds", global = true)]
+    pub stream_retry_timeout_seconds: Option<u64>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -89,6 +94,7 @@ pub struct ServeArgs {
     pub provider_name: String,
     pub base_url: String,
     pub web_search: WebSearchMode,
+    pub stream_retry_timeout_seconds: Option<u64>,
 }
 
 impl ServeArgs {
@@ -105,6 +111,7 @@ impl From<&Cli> for ServeArgs {
             provider_name: cli.provider_name.clone(),
             base_url: cli.base_url.clone(),
             web_search: cli.web_search,
+            stream_retry_timeout_seconds: cli.stream_retry_timeout_seconds,
         }
     }
 }
@@ -124,6 +131,7 @@ mod tests {
         assert_eq!(cli.provider_name, DEFAULT_PROVIDER_NAME);
         assert_eq!(cli.base_url, DEFAULT_BASE_URL);
         assert_eq!(cli.web_search, WebSearchMode::Disabled);
+        assert_eq!(cli.stream_retry_timeout_seconds, None);
     }
 
     #[test]
@@ -152,6 +160,14 @@ mod tests {
             assert_eq!(cli.web_search, expected);
         }
         assert!(Cli::try_parse_from(["chatgpt-provider", "--web-search", "maybe"]).is_err());
+    }
+
+    #[test]
+    fn stream_retry_timeout_is_optional() {
+        let cli =
+            Cli::try_parse_from(["chatgpt-provider", "--stream-retry-timeout-seconds", "120"])
+                .expect("parse timeout");
+        assert_eq!(cli.stream_retry_timeout_seconds, Some(120));
     }
 
     #[test]

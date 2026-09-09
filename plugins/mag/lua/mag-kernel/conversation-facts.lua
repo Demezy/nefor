@@ -153,7 +153,9 @@ function M.new(options)
   -- after its content has already streamed.
   local function visibility_of(message)
     local declared = type(message) == "table" and message.visibility or nil
-    if declared == "diagnostic" or declared == "transcript" then return declared end
+    if declared == "diagnostic" or declared == "discarded" or declared == "transcript" then
+      return declared
+    end
     return nil
   end
 

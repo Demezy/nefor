@@ -675,6 +675,43 @@ do
 end
 
 do
+  local instance, msgs, facts = make("retry-stream.llm", { provider = "p" })
+  instance.deliver(turn({ messages = { { role = "user", content = "go" } } }))
+  instance.handle_observation({ binding = "transcript", value = {
+    kind = "assistant", text = "provisional",
+  } })
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "attempt_discarded", attempt = 1, failure_kind = "body_read",
+  } })
+  instance.handle_observation({ binding = "conversation", value = {
+    kind = "retry_decision", retry = true, message = "connection reset",
+  } })
+  instance.handle_observation({ binding = "transcript", value = {
+    kind = "assistant", text = "replacement",
+  } })
+  instance.deliver({
+    kind = "reply",
+    ref = find_kind(msgs, "capability.invoke").ref,
+    result = { text = "replacement", finish_reason = "stop" },
+  })
+
+  local starts, discarded, retries = 0, 0, 0
+  for _, fact in ipairs(facts) do
+    if fact.kind == "message_started" and fact.role == "assistant" then
+      starts = starts + 1
+    elseif fact.kind == "message_interrupted" and fact.visibility == "discarded" then
+      discarded = discarded + 1
+    elseif fact.kind == "retry_started" then
+      retries = retries + 1
+    end
+  end
+  assert_eq(starts, 2, "replacement output starts a fresh assistant message")
+  assert_eq(discarded, 1, "the failed provider attempt becomes audit-only")
+  assert_eq(retries, 1, "the retry decision remains a canonical fact")
+  assert_eq(facts[#facts].kind, "turn_completed", "the replacement attempt completes the turn")
+end
+
+do
   local instance, msgs, facts = make("reasoning-only.llm", { provider = "p" })
   instance.deliver(turn({ messages = { { role = "user", content = "go" } } }))
   instance.handle_observation({ binding = "transcript", value = {

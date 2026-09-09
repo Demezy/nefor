@@ -73,7 +73,7 @@ end
 local function context_messages(conversation, include_provider_context)
   local messages = {}
   for _, message in ipairs(conversation.messages) do
-    if message.status ~= "open" then
+    if message.status ~= "open" and message.visibility ~= "discarded" then
       local projected = projected_message(conversation, message, include_provider_context)
       messages[#messages + 1] = projected
     end

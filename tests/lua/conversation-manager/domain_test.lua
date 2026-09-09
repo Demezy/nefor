@@ -275,8 +275,8 @@ end
 
 -- Transcript disposition is an explicit, validated distinction. A message may
 -- declare it up front, or narrow to diagnostic at its terminal fact; it can
--- never be promoted back into the transcript, and every disposition stays in
--- the model context projection.
+-- never be promoted back into the transcript. Diagnostic messages remain model
+-- context; discarded transport attempts remain audit-only.
 do
   local projection = require("libs.conversation-manager.projection")
   local store = manager.new(); create(store, "visible", "lead")
@@ -314,10 +314,23 @@ do
   }), "invalid_visibility")
   append(store, fact("d4", "visible", "message_completed", { message_id = "promoted" }))
 
+  append(store, fact("m5", "visible", "message_started", {
+    message_id = "abandoned", role = "assistant", turn_id = "turn",
+  }))
+  append(store, fact("c5", "visible", "content_chunk_appended", {
+    message_id = "abandoned", chunk = { kind = "text", data = "partial" },
+  }))
+  append(store, fact("d5", "visible", "message_interrupted", {
+    message_id = "abandoned", visibility = "discarded",
+  }))
+
   local context = projection.context(store:peek("visible"))
-  eq(#context.messages, 3, "every disposition remains available as model context")
+  eq(#context.messages, 3, "discarded attempts stay out of model context")
   eq(context.messages[1].visibility, "diagnostic",
     "the context projection reports each message's disposition")
+  local public = projection.conversation(store:peek("visible"))
+  eq(#public.messages, 4, "discarded attempts remain available for audit")
+  eq(public.messages[4].visibility, "discarded", "audit projection names the disposition")
 end
 
 -- Provider-native continuation state is durable model context, not public

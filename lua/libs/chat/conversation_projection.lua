@@ -35,12 +35,12 @@ local function terminal_text(terminal)
   return nil
 end
 
--- Diagnostic messages are model context that never becomes conversation: a
--- rejected structured-output attempt and the correction prompt that answers it.
--- The manager still keeps them in the context projection; the surface must not
--- render them, and must retract anything already streamed for one.
-local function diagnostic(message)
-  return type(message) == "table" and message.visibility == "diagnostic"
+-- Hidden messages never become conversation on a surface. Diagnostic messages
+-- remain model context; discarded transport attempts are audit-only. Either may
+-- be classified only after content streamed, so the surface must retract it.
+local function hidden(message)
+  return type(message) == "table"
+    and (message.visibility == "diagnostic" or message.visibility == "discarded")
 end
 
 local function record_message(state, message)
@@ -55,13 +55,13 @@ local function record_message(state, message)
   }
 end
 
--- Returns true when this terminal fact narrows an already-streamed message into
--- diagnostic: the surface has to remove what it showed.
+-- Returns true when a terminal fact hides a message from the surface, retracting
+-- anything already streamed for it.
 local function settle_hidden(state, actions, message)
   local recorded = state.messages[type(message) == "table" and message.id or ""]
   local was_streamed = type(recorded) == "table" and recorded.streamed == true
   record_message(state, message)
-  if not diagnostic(message) then return false end
+  if not hidden(message) then return false end
   if was_streamed then
     action(actions, "message_discarded", {
       message_id = message.id,
@@ -143,8 +143,8 @@ local function snapshot_actions(state, projection, actions)
 
   for _, message in ipairs(projection.messages or {}) do
     record_message(state, message)
-    if diagnostic(message) then
-      -- Rejected attempts and their corrections replay as model context only.
+    if hidden(message) then
+      -- Hidden messages never replay into the transcript.
     elseif message.role == "assistant" then
       if type(message.reasoning) == "string" and message.reasoning ~= "" then
         action(actions, "reasoning_delta", {
@@ -257,7 +257,7 @@ function M.reduce(previous, body)
   elseif kind == "content_chunk_appended" then
     local message = state.messages[change.message_id]
     local chunk = change.chunk
-    if message and message.visibility == "diagnostic" then
+    if hidden(message) then
       -- Model context only; no delta reaches the transcript.
     elseif message and message.role == "user" and type(chunk) == "table"
         and chunk.kind == "structured" then

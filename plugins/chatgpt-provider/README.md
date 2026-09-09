@@ -63,6 +63,23 @@ matching Codex's ChatGPT subscription transport;
 omission (or an empty object) keeps the standard service tier. ChatGPT owns
 this validation and rejects unknown fields or tier values before HTTP.
 
+## Stream recovery
+
+A Responses attempt is provisional until the provider emits a semantic terminal
+event. Transient connection resets, premature EOFs, idle timeouts, and transient
+provider failures therefore discard the entire attempt and replay the same
+provider round even when text, reasoning, native output, or tool-call fragments
+have already streamed. Discarded content remains available in the canonical
+conversation audit, but is retracted from the TUI and excluded from future model
+context. Tool calls are delivered only after a successful terminal event, so an
+abandoned attempt cannot have executed a local tool.
+
+Recovery continues until success or explicit cancellation by default. Backoff
+uses full jitter with a 30-second ceiling, and one provider-process recovery gate
+admits a single half-open probe after a shared outage so concurrent agents do not
+retry in lockstep. Set `--stream-retry-timeout-seconds <seconds>` only when an
+embedding needs a finite elapsed recovery window.
+
 Image media returned by tools such as `read_image` is converted to Responses
 API `InputImage` items for vision-capable models. If the active model cannot
 accept images, the provider returns an explicit model-capability error instead

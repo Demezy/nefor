@@ -10,9 +10,10 @@ local roles = { system = true, user = true, assistant = true, tool = true }
 local completion_deliveries = { sync = true, async = true }
 -- A message's transcript disposition. "transcript" is ordinary conversation;
 -- "diagnostic" is model context that no surface renders as conversation (a
--- rejected structured-output attempt and its correction prompt). Both remain in
--- the model context projection; only the display projection distinguishes them.
-local visibilities = { transcript = true, diagnostic = true }
+-- rejected structured-output attempt and its correction prompt). "discarded"
+-- is an abandoned provider attempt retained only for audit: it appears in the
+-- conversation projection but never in model context or a surface.
+local visibilities = { transcript = true, diagnostic = true, discarded = true }
 
 local copy = json_data.copy
 M.copy = copy
@@ -226,7 +227,7 @@ local function settle_visibility(message, event)
   if not visibilities[event.visibility] then
     return err("invalid_visibility", { message_id = message.id, visibility = event.visibility })
   end
-  if message.visibility == "diagnostic" and event.visibility == "transcript" then
+  if message.visibility ~= "transcript" and event.visibility == "transcript" then
     return err("invalid_visibility_promotion", { message_id = message.id })
   end
   message.visibility = event.visibility

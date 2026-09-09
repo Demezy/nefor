@@ -172,7 +172,7 @@ pub const CODEX_COMPAT_CLIENT_VERSION: &str = "0.154.0";
 /// Only the *initial* HTTP exchange is retried. Once the SSE stream
 /// has yielded bytes, mid-stream failures route through a different
 /// code path (`ResponsesStreamRead`) and are only recoverable by the
-/// dispatcher before any visible output has been emitted.
+/// dispatcher by discarding and replaying the provisional provider attempt.
 ///
 /// Budget-driven (not attempt-count-driven): keep retrying as long as
 /// the next backoff would still fit inside the 5-minute window. Backoff
@@ -369,10 +369,17 @@ impl ResponsesClient {
                 Ok(Ok(resp)) if resp.status().is_success() => return Ok(resp),
                 Ok(Ok(resp)) => {
                     let status = resp.status().as_u16();
-                    if !is_transient_status(status) {
-                        return Err(http_error_from_response(resp, status).await);
-                    }
                     let retry_after = retry_after_seconds(resp.headers());
+                    let endpoint_error = http_error_from_response(resp, status).await;
+                    let terminal_quota = match &endpoint_error {
+                        ChatgptError::ResponsesEndpoint { body, .. } => {
+                            response_signals_terminal_quota_denial(status, body)
+                        }
+                        _ => false,
+                    };
+                    if !is_transient_status(status) || terminal_quota {
+                        return Err(endpoint_error);
+                    }
                     let next_delay = retry_delay(attempt, retry_after);
                     if !budget_allows(started, next_delay) {
                         tracing::warn!(
@@ -383,9 +390,8 @@ impl ResponsesClient {
                             budget_ms = RETRY_BUDGET_MS,
                             "retry budget exhausted; surfacing error",
                         );
-                        return Err(http_error_from_response(resp, status).await);
+                        return Err(endpoint_error);
                     }
-                    drop(resp);
                     tracing::warn!(
                         op,
                         attempt = attempt + 1,
@@ -480,10 +486,17 @@ impl ResponsesClient {
                 Ok(resp) if resp.status().is_success() => break resp,
                 Ok(resp) => {
                     let status = resp.status().as_u16();
-                    if !is_transient_status(status) {
-                        return Err(http_error_from_response(resp, status).await);
-                    }
                     let retry_after = retry_after_seconds(resp.headers());
+                    let endpoint_error = http_error_from_response(resp, status).await;
+                    let terminal_quota = match &endpoint_error {
+                        ChatgptError::ResponsesEndpoint { body, .. } => {
+                            response_signals_terminal_quota_denial(status, body)
+                        }
+                        _ => false,
+                    };
+                    if !is_transient_status(status) || terminal_quota {
+                        return Err(endpoint_error);
+                    }
                     let next_delay = retry_delay(attempt, retry_after);
                     if !budget_allows(started, next_delay) {
                         tracing::warn!(
@@ -494,9 +507,8 @@ impl ResponsesClient {
                             budget_ms = RETRY_BUDGET_MS,
                             "retry budget exhausted; surfacing error",
                         );
-                        return Err(http_error_from_response(resp, status).await);
+                        return Err(endpoint_error);
                     }
-                    drop(resp);
                     tracing::warn!(
                         op = "list_models",
                         attempt = attempt + 1,
@@ -636,11 +648,29 @@ fn compact_items_from_value(value: serde_json::Value) -> Result<Vec<ResponseItem
     })
 }
 
-/// 5xx range that's worth retrying. 500 is excluded because it usually
-/// means the request itself was bad (model rejected our shape) and a
-/// retry won't help.
-fn is_transient_status(status: u16) -> bool {
-    matches!(status, 502..=504)
+/// Retry rate limiting and server-side failures. Request/schema failures use
+/// 4xx responses and remain terminal; quota-shaped 429 bodies are separated
+/// below because they require an external account change.
+pub(crate) fn is_transient_status(status: u16) -> bool {
+    status == 429 || (500..600).contains(&status)
+}
+
+pub(crate) fn response_signals_terminal_quota_denial(status: u16, body: &str) -> bool {
+    if status != 429 {
+        return false;
+    }
+    let normalized = body.to_ascii_lowercase();
+    let names_resource = ["quota", "credit", "balance", "budget"]
+        .iter()
+        .any(|resource| normalized.contains(resource));
+    let names_terminal_state = ["exhausted", "depleted", "insufficient"]
+        .iter()
+        .any(|state| normalized.contains(state));
+
+    (names_resource && names_terminal_state)
+        || normalized.contains("billing_hard_limit")
+        || normalized.contains("billing hard limit")
+        || normalized.contains("payment required")
 }
 
 /// Whether a `reqwest::Error` reflects a transient transport-level
@@ -806,14 +836,33 @@ mod retry_tests {
     use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
 
     #[test]
-    fn is_transient_status_only_5xx_recoverable() {
+    fn transient_statuses_cover_rate_limits_and_server_failures() {
+        assert!(is_transient_status(429));
+        assert!(is_transient_status(500));
         assert!(is_transient_status(502));
         assert!(is_transient_status(503));
         assert!(is_transient_status(504));
-        assert!(!is_transient_status(500));
         assert!(!is_transient_status(400));
-        assert!(!is_transient_status(429));
         assert!(!is_transient_status(200));
+    }
+
+    #[test]
+    fn terminal_quota_denials_are_not_transient_rate_limits() {
+        for body in [
+            r#"{"error":{"type":"insufficient_quota"}}"#,
+            r#"{"message":"Credit balance depleted"}"#,
+            r#"{"code":"billing_hard_limit"}"#,
+        ] {
+            assert!(response_signals_terminal_quota_denial(429, body));
+        }
+        assert!(!response_signals_terminal_quota_denial(
+            429,
+            r#"{"message":"rate limit exceeded; try again"}"#,
+        ));
+        assert!(!response_signals_terminal_quota_denial(
+            500,
+            r#"{"error":{"type":"insufficient_quota"}}"#,
+        ));
     }
 
     #[test]

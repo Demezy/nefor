@@ -72,8 +72,7 @@ pub enum ChatgptError {
     ResponsesEndpoint { status: u16, body: String },
 
     /// Mid-stream transport read failure (TCP reset or chunked decoder
-    /// error). Safe to retry only before an attempt has emitted any
-    /// user-visible output or tool-call state.
+    /// error). The dispatcher discards the provisional attempt before replay.
     #[error("responses SSE stream read error: {0}")]
     ResponsesStreamRead(String),
 

@@ -411,7 +411,13 @@ async fn settle_reaped(
 fn is_provider_diagnostic_event(event: &str) -> bool {
     matches!(
         event,
-        "retry" | "retry_decision" | "usage" | "failed" | "error" | "interrupted"
+        "attempt_discarded"
+            | "retry"
+            | "retry_decision"
+            | "usage"
+            | "failed"
+            | "error"
+            | "interrupted"
     )
 }
 
