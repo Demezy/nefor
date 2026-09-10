@@ -1389,7 +1389,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn callback_without_send_does_not_spin_and_shutdown_discards_late_callbacks() {
+    async fn callback_without_send_allows_shutdown_and_discards_late_callbacks() {
         let shared = shared_state();
         let host = build_host(
             &shared,
@@ -1401,11 +1401,13 @@ mod tests {
                 args = { "-c", "sleep 0.02" },
                 on_exit = function() callback_count = callback_count + 1 end,
             })
-            late = nefor.process.spawn({
-                cmd = "sh",
-                args = { "-c", "sleep 1" },
-                on_exit = function() callback_count = callback_count + 100 end,
-            })
+            function start_late_callback()
+                late = nefor.process.spawn({
+                    cmd = "sh",
+                    args = { "-c", "sleep 1" },
+                    on_exit = function() callback_count = callback_count + 100 end,
+                })
+            end
             "#,
         );
         let lua = host.lua().clone();
@@ -1413,15 +1415,43 @@ mod tests {
         let (_recipient, transport) = make_transport();
         broker.attach_transport(transport, pn("recipient"));
         let shutdown = broker.shutdown_handle();
-        let run = tokio::spawn(broker.run());
-        tokio::time::sleep(Duration::from_millis(75)).await;
-        assert_eq!(lua.globals().get::<i64>("callback_count").unwrap(), 1);
+        let mut run = tokio::spawn(broker.run());
+        let callback_observation = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let callback_count = lua.globals().get::<i64>("callback_count").unwrap();
+                match callback_count {
+                    0 => tokio::time::sleep(Duration::from_millis(1)).await,
+                    1 => return Ok::<(), i64>(()),
+                    unexpected => return Err(unexpected),
+                }
+            }
+        })
+        .await;
+        match callback_observation {
+            Ok(Ok(())) => {}
+            failure => {
+                shutdown.shutdown(0).await;
+                let cleanup = tokio::time::timeout(Duration::from_secs(1), &mut run).await;
+                match failure {
+                    Ok(Err(callback_count)) => panic!(
+                        "callback must run exactly once; observed {callback_count}; cleanup: {cleanup:?}"
+                    ),
+                    Err(_) => panic!(
+                        "callback must enter Lua before the failure deadline; cleanup: {cleanup:?}"
+                    ),
+                    Ok(Ok(())) => unreachable!(),
+                }
+            }
+        }
 
+        let start_late_callback: mlua::Function = lua.globals().get("start_late_callback").unwrap();
+        start_late_callback.call::<()>(()).unwrap();
         shutdown.shutdown(0).await;
-        tokio::time::timeout(Duration::from_secs(1), run)
+        let outcome = tokio::time::timeout(Duration::from_secs(1), run)
             .await
-            .expect("callback with no send must not keep the broker busy")
+            .expect("callback with no send must allow broker shutdown")
             .unwrap();
+        assert_eq!(outcome, BrokerStopReason::Shutdown);
         tokio::time::sleep(Duration::from_millis(1100)).await;
         assert_eq!(
             lua.globals().get::<i64>("callback_count").unwrap(),
