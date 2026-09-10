@@ -115,7 +115,7 @@ async fn routed_requests_settle_out_of_order_cancel_once_and_preserve_exact_payl
     let (captured_tx, captured_rx) = std_mpsc::channel::<Value>();
     let server_thread = thread::spawn(move || {
         let mut responders = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..4 {
             let mut request = server.recv().expect("receive request");
             let mut text = String::new();
             request
@@ -147,14 +147,23 @@ async fn routed_requests_settle_out_of_order_cancel_once_and_preserve_exact_payl
                             }]
                         }),
                     )
+                } else if body.pointer("/commands/screenshot/0/ref_id")
+                    == Some(&Value::String("turn10view0".into()))
+                {
+                    (
+                        Duration::from_millis(5),
+                        serde_json::from_str(include_str!(
+                            "fixtures/web/screenshot-reference-success.json"
+                        ))
+                        .expect("successful screenshot fixture"),
+                    )
                 } else {
                     (
                         Duration::from_millis(5),
-                        json!({
-                            "encrypted_output":null,
-                            "output":"exact screenshot output",
-                            "results":[{"type":"future_screenshot","page":0,"unknown":true}]
-                        }),
+                        serde_json::from_str(include_str!(
+                            "fixtures/web/screenshot-direct-url-failure.json"
+                        ))
+                        .expect("semantic screenshot failure fixture"),
                     )
                 };
                 thread::sleep(delay);
@@ -267,20 +276,57 @@ async fn routed_requests_settle_out_of_order_cancel_once_and_preserve_exact_payl
         .send(Ok(web_request(
             "gate-shot",
             "web_screenshot",
-            json!({"screenshot":[{"ref_id":"turn0view0","pageno":0}]}),
+            json!({"screenshot":[{"ref_id":"turn10view0","pageno":0}]}),
         )))
         .await
         .expect("screenshot request");
     let screenshot = wait_for_web_result(&mut out_rx, "gate-shot").await;
-    assert_eq!(screenshot["output"]["text"], "exact screenshot output");
-    assert_eq!(screenshot["output"]["results"][0]["page"], 0);
-    assert!(screenshot["output"]["results"][0]["unknown"].as_bool() == Some(true));
+    assert_eq!(
+        screenshot["output"]["text"],
+        " (https://www.iana.org/about/informational-booklet.pdf)\nciteturn12view0 "
+    );
+    assert_eq!(screenshot["output"]["results"], json!([]));
+    assert_eq!(
+        screenshot["provider_state"]["encrypted_output"],
+        "opaque-screenshot-state"
+    );
+    assert!(screenshot.get("error").is_none());
     assert!(screenshot["output"].get("type").is_none());
+
+    in_tx
+        .send(Ok(web_request(
+            "gate-shot-failed",
+            "web_screenshot",
+            json!({"screenshot":[{"ref_id":"https://www.iana.org/about/informational-booklet.pdf","pageno":0}]}),
+        )))
+        .await
+        .expect("direct URL screenshot request");
+    let failed_screenshot = wait_for_web_result(&mut out_rx, "gate-shot-failed").await;
+    assert_eq!(
+        failed_screenshot["error"],
+        "web screenshot failed: provider could not resolve the screenshot call"
+    );
+    assert!(failed_screenshot["output"]["text"]
+        .as_str()
+        .is_some_and(|text| text.contains("turn11view0")));
+    assert_eq!(
+        failed_screenshot["output"]["results"][0]["ref_id"],
+        "turn11view0"
+    );
+    assert!(failed_screenshot["output"]["results"][0]["snippet"]
+        .as_str()
+        .is_some_and(|snippet| snippet.starts_with("Unable to resolve screenshot call:")));
+    assert_eq!(
+        failed_screenshot["provider_state"]["encrypted_output"],
+        "opaque-screenshot-state"
+    );
+    assert!(failed_screenshot["output"].get("type").is_none());
 
     let requests = [
         captured_rx.recv().expect("first request"),
         captured_rx.recv().expect("second request"),
         captured_rx.recv().expect("third request"),
+        captured_rx.recv().expect("fourth request"),
     ];
     let stable_ids = requests
         .iter()

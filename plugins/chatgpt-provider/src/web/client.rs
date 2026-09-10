@@ -7,7 +7,7 @@ use crate::auth::AuthSnapshot;
 use crate::error::ChatgptError;
 use crate::responses::headers;
 
-use super::request::{SearchRequest, SearchResponse};
+use super::request::{SearchEndpointResponse, SearchRequest, SearchResponse};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
@@ -29,6 +29,8 @@ pub enum WebError {
     Transport(#[source] reqwest::Error),
     #[error("web endpoint returned {status}: {body}")]
     Endpoint { status: u16, body: String },
+    #[error("web endpoint provider error: {diagnostic}")]
+    Provider { diagnostic: String },
     #[error("failed to decode web response: {0}")]
     Decode(#[source] serde_json::Error),
     #[error("web request cancelled")]
@@ -111,8 +113,6 @@ impl WebClient {
         let mut request_headers =
             headers::build_headers(auth, &self.installation_id, &self.originator)
                 .map_err(WebError::Headers)?;
-        headers::add_turn_headers(&mut request_headers, &request.id, &request.id, None)
-            .map_err(WebError::Headers)?;
         request_headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         request_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
@@ -143,8 +143,21 @@ impl WebClient {
             });
         }
 
-        serde_json::from_slice(&bytes).map_err(WebError::Decode)
+        match serde_json::from_slice(&bytes).map_err(WebError::Decode)? {
+            SearchEndpointResponse::Success(response) => Ok(response),
+            SearchEndpointResponse::ProviderError(envelope) => Err(WebError::Provider {
+                diagnostic: bounded_json_diagnostic(&envelope.error),
+            }),
+        }
     }
+}
+
+fn bounded_json_diagnostic(value: &serde_json::Value) -> String {
+    value
+        .to_string()
+        .chars()
+        .take(MAX_ERROR_BODY_CHARS)
+        .collect()
 }
 
 fn bounded_diagnostic(bytes: &[u8]) -> String {
@@ -305,8 +318,9 @@ mod tests {
             Some("installation-fixture")
         );
         assert_eq!(header(&captured, "originator"), Some("originator-fixture"));
-        assert_eq!(header(&captured, "session-id"), Some("stable-conversation"));
-        assert_eq!(header(&captured, "thread-id"), Some("stable-conversation"));
+        assert_eq!(header(&captured, "session-id"), None);
+        assert_eq!(header(&captured, "thread-id"), None);
+        assert_eq!(header(&captured, "x-codex-turn-state"), None);
         assert_eq!(header(&captured, "accept"), Some("application/json"));
         assert_eq!(
             captured.body,
@@ -354,6 +368,37 @@ mod tests {
                 assert_eq!(status, 403);
                 assert_eq!(body.chars().count(), MAX_ERROR_BODY_CHARS);
                 assert!(body.starts_with("denied "));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+        server.join().expect("server thread");
+    }
+
+    #[tokio::test]
+    async fn explicit_provider_error_envelope_is_not_reported_as_a_decode_failure() {
+        let (base_url, _captured_rx, server) = spawn_server(
+            200,
+            include_str!("../../tests/fixtures/web/provider-error-envelope.json").into(),
+        );
+        let client = test_client(base_url);
+        let request = SearchRequest::new(
+            "stable-conversation",
+            "gpt-test",
+            WebCommand::Search(SearchQuery {
+                q: "query".into(),
+                recency: None,
+                domains: None,
+            }),
+        );
+
+        let error = client
+            .execute(&request, &auth(), &CancellationToken::new())
+            .await
+            .expect_err("provider envelope should fail");
+        match error {
+            WebError::Provider { diagnostic } => {
+                assert!(diagnostic.contains("invalid_reference"));
+                assert!(diagnostic.contains("invalid web reference"));
             }
             other => panic!("unexpected error: {other}"),
         }

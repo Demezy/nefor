@@ -61,11 +61,14 @@ late completion.
 
 Successful results preserve the endpoint's exact plaintext output, optional
 opaque result JSON, and opaque encrypted provider state. Empty text remains
-empty. Errors remain specific and are returned as ordinary tool errors; invalid
-Lua arguments are rejected before HTTP. `web_image_search` remains
-`image_query`, and `web_screenshot` preserves the zero-indexed screenshot
-request plus plaintext/opaque response data. Screenshot media decoding is not
-claimed because no verified response media DTO exists yet.
+empty. Errors remain specific and are returned as ordinary tool errors; an
+observed screenshot-resolution diagnostic can carry both the error marker and
+the unchanged provider output as evidence. Invalid Lua arguments are rejected
+before HTTP. `web_image_search` remains `image_query`. For `web_screenshot`,
+open the PDF first and pass the provider-issued PDF reference from that output;
+direct PDF URLs may fail semantically even with HTTP 200. A resolved screenshot
+currently returns plaintext plus an opaque reference, not image bytes, so media
+decoding is not implemented or claimed.
 
 The private web request kinds are not public bus capabilities. The provider
 compositor accepts routed invoke/cancel traffic only from its selected tool gate

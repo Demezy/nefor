@@ -24,6 +24,7 @@ serde_json = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 libc = "0.2"
+tiny_http = "0.12"
 
 [features]
 full-tests = []
@@ -31,6 +32,11 @@ full-tests = []
 [[test]]
 name = "agentic_cli_mock_e2e"
 path = "tests/agentic_cli_mock_e2e.rs"
+required-features = ["full-tests"]
+
+[[test]]
+name = "routed_web_e2e"
+path = "tests/routed_web_e2e.rs"
 required-features = ["full-tests"]
 
 [[test]]

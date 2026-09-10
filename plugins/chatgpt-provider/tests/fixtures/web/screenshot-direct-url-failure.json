@@ -1,0 +1,12 @@
+{
+  "encrypted_output": "opaque-screenshot-state",
+  "output": "Internal Error ()\nciteturn11view0 [wordlim: 200] Unable to resolve screenshot call: screenshot({\"ref_id\":\"https://www.iana.org/about/informational-booklet.pdf\",\"pageno\":0,\"height\":null,\"offset\":null}) because content type is not application/pdf and web screenshot is not enabled\nL0: Unable to resolve screenshot call: screenshot({\"ref_id\":\"https://www.iana.org/about/informational-booklet.pdf\",\"pageno\":0,\"height\":null,\"offset\":null}) because content type is not application/pdf and web screenshot is not enabled\n",
+  "results": [
+    {
+      "type": "text_result",
+      "ref_id": "turn11view0",
+      "snippet": "Unable to resolve screenshot call: screenshot({\"ref_id\":\"https://www.iana.org/about/informational-booklet.pdf\",\"pageno\":0,\"height\":null,\"offset\":null}) because content type is not application/pdf and ",
+      "title": "Internal Error"
+    }
+  ]
+}

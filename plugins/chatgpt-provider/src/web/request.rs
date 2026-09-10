@@ -232,6 +232,38 @@ pub struct SearchResponse {
     pub results: Option<Vec<Value>>,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum SearchEndpointResponse {
+    ProviderError(ProviderErrorEnvelope),
+    Success(SearchResponse),
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ProviderErrorEnvelope {
+    pub error: Value,
+}
+
+impl SearchResponse {
+    pub fn semantic_error_for(&self, command: &WebCommand) -> Option<&'static str> {
+        if !matches!(command, WebCommand::Screenshot(_)) {
+            return None;
+        }
+        let diagnostic = self.results.as_ref()?.iter().any(|result| {
+            result.get("type").and_then(Value::as_str) == Some("text_result")
+                && result.get("title").and_then(Value::as_str) == Some("Internal Error")
+                && result
+                    .get("snippet")
+                    .and_then(Value::as_str)
+                    .is_some_and(|snippet| {
+                        snippet.starts_with("Unable to resolve screenshot call:")
+                    })
+        });
+        diagnostic
+            .then_some("web screenshot failed: provider could not resolve the screenshot call")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,5 +375,75 @@ mod tests {
         ] {
             assert!(WebCommand::from_commands(&invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn screenshot_resolution_failure_uses_only_the_evidenced_structured_signature() {
+        let response: SearchResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/web/screenshot-direct-url-failure.json"
+        ))
+        .expect("sanitized live response fixture");
+        let screenshot = WebCommand::Screenshot(ScreenshotOperation {
+            ref_id: "https://www.iana.org/about/informational-booklet.pdf".into(),
+            pageno: 0,
+        });
+        assert_eq!(
+            response.semantic_error_for(&screenshot),
+            Some("web screenshot failed: provider could not resolve the screenshot call")
+        );
+
+        let ordinary_search = WebCommand::Search(SearchQuery {
+            q: "pages discussing Internal Error".into(),
+            recency: None,
+            domains: None,
+        });
+        assert_eq!(response.semantic_error_for(&ordinary_search), None);
+        let ordinary_open = WebCommand::Open(OpenOperation {
+            ref_id: "turn0search0".into(),
+            lineno: None,
+        });
+        assert_eq!(response.semantic_error_for(&ordinary_open), None);
+
+        let prose_only = SearchResponse {
+            encrypted_output: None,
+            output: "Internal Error: Unable to resolve screenshot call: quoted page prose".into(),
+            results: Some(vec![json!({
+                "type": "text_result",
+                "title": "Internal Error",
+                "snippet": "A page discussing Unable to resolve screenshot call without the diagnostic prefix"
+            })]),
+        };
+        assert_eq!(prose_only.semantic_error_for(&screenshot), None);
+    }
+
+    #[test]
+    fn successful_reference_screenshot_remains_plaintext_with_empty_results() {
+        let response: SearchResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/web/screenshot-reference-success.json"
+        ))
+        .expect("sanitized live response fixture");
+        let screenshot = WebCommand::Screenshot(ScreenshotOperation {
+            ref_id: "turn10view0".into(),
+            pageno: 0,
+        });
+        assert_eq!(response.semantic_error_for(&screenshot), None);
+        assert_eq!(
+            response.output,
+            " (https://www.iana.org/about/informational-booklet.pdf)\nciteturn12view0 "
+        );
+        assert_eq!(response.results, Some(Vec::new()));
+    }
+
+    #[test]
+    fn explicit_provider_error_envelope_is_a_distinct_response_variant() {
+        let response: SearchEndpointResponse = serde_json::from_str(include_str!(
+            "../../tests/fixtures/web/provider-error-envelope.json"
+        ))
+        .expect("provider error envelope fixture");
+        let SearchEndpointResponse::ProviderError(envelope) = response else {
+            panic!("expected provider error envelope");
+        };
+        assert_eq!(envelope.error["code"], "invalid_reference");
+        assert_eq!(envelope.error["message"], "invalid web reference");
     }
 }

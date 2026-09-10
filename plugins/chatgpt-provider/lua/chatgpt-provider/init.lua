@@ -161,9 +161,9 @@ local function tools(provider)
     },
     {
       name = "web_screenshot",
-      description = "Request a PDF page screenshot by URL or web result reference. Page numbers are zero-indexed. Screenshot media decoding is not yet proven; exact endpoint text and opaque results are preserved.",
+      description = "Request a zero-indexed PDF page screenshot. Open the PDF with web_open first, then pass the provider-issued PDF reference returned in its output; direct PDF URLs may not resolve. The endpoint currently returns plaintext and opaque references, not proven image media.",
       parameters = object_schema({
-        url = { type = "string", minLength = 1, description = "URL or web result reference." },
+        url = { type = "string", minLength = 1, description = "Provider-issued PDF reference returned by web_open." },
         page = { type = "integer", minimum = 0, description = "Zero-indexed PDF page number." },
       }, { "url", "page" }),
       display = content_display("web screenshot", composed_primary({
@@ -442,12 +442,11 @@ local function translator(name, options)
       if not nonempty(body.id) then return nil end
       pending_web[body.id] = nil
       local result = { kind = "tool.result", id = body.id }
-      if body.error ~= nil then
-        result.error = body.error
-      elseif type(body.output) ~= "table" then
-        result.error = "web result missing output"
-      else
+      if body.error ~= nil then result.error = body.error end
+      if type(body.output) == "table" then
         result.output = copy(body.output)
+      elseif body.error == nil then
+        result.error = "web result missing output"
       end
       if body.provider_state ~= nil then result.provider_state = copy(body.provider_state) end
       return result

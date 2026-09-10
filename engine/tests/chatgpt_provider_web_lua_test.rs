@@ -86,6 +86,8 @@ fn advertises_six_routed_read_tools_with_closed_schemas_and_content_results() {
         assert(projected.web_image_search.label == "web image search" and projected.web_image_search.primary == "moon")
         assert(projected.web_screenshot.label == "web screenshot" and projected.web_screenshot.primary == "turn0pdf0 page 0")
         assert(tools[6].parameters.properties.page.description:find("Zero%-indexed"))
+        assert(tools[6].description:find("web_open", 1, true))
+        assert(tools[6].description:find("provider-issued PDF reference", 1, true))
         assert(tools[6].display.expanded.fields[2].label == "page (zero-indexed)")
         "#,
     )
@@ -240,11 +242,27 @@ fn cancel_and_result_translation_preserve_correlation_content_and_opaque_state()
         assert(success.output.results[1].future.x == 1)
         assert(success.provider_state.encrypted_output == "opaque")
 
-        local failure = assert(t.outbound({ type = "event", from = "chatgpt", body = {
-          kind = "chatgpt.web.result", id = "gate-10", error = "HTTP 403",
+        local semantic_failure = assert(t.outbound({ type = "event", from = "chatgpt", body = {
+          kind = "chatgpt.web.result", id = "gate-10",
+          error = "web screenshot failed: provider could not resolve the screenshot call",
+          output = {
+            text = "Internal Error ()\nciteturn11view0 Unable to resolve screenshot call: exact provider evidence",
+            results = nefor.json.decode('[{"type":"text_result","ref_id":"turn11view0","title":"Internal Error","snippet":"Unable to resolve screenshot call: exact provider evidence","unknown":{"x":1}}]'),
+          },
+          provider_state = { encrypted_output = "opaque-screenshot-state" },
         }}))
-        assert(failure.kind == "tool.result" and failure.id == "gate-10")
-        assert(failure.error == "HTTP 403" and failure.output == nil)
+        assert(semantic_failure.kind == "tool.result" and semantic_failure.id == "gate-10")
+        assert(semantic_failure.error == "web screenshot failed: provider could not resolve the screenshot call")
+        assert(semantic_failure.output.text:find("turn11view0", 1, true))
+        assert(semantic_failure.output.results[1].ref_id == "turn11view0")
+        assert(semantic_failure.output.results[1].unknown.x == 1)
+        assert(semantic_failure.provider_state.encrypted_output == "opaque-screenshot-state")
+
+        local transport_failure = assert(t.outbound({ type = "event", from = "chatgpt", body = {
+          kind = "chatgpt.web.result", id = "gate-11", error = "HTTP 403",
+        }}))
+        assert(transport_failure.kind == "tool.result" and transport_failure.id == "gate-11")
+        assert(transport_failure.error == "HTTP 403" and transport_failure.output == nil)
         "#,
     )
     .exec()

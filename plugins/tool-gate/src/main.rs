@@ -516,6 +516,38 @@ fn validate_display_contract(display: &Value) -> Result<(), String> {
         }
         Ok(())
     }
+    fn validate_primary(value: &Value, location: &str) -> Result<(), String> {
+        let Some(object) = value.as_object() else {
+            return Err(format!("{location} must be an object"));
+        };
+        let Some(parts) = object.get("parts") else {
+            return field(value, location);
+        };
+        if object.keys().any(|key| key != "parts") {
+            return Err(format!("{location} has unknown field"));
+        }
+        let parts = parts
+            .as_array()
+            .filter(|parts| !parts.is_empty())
+            .ok_or_else(|| format!("{location}.parts must be a non-empty array"))?;
+        for (index, part) in parts.iter().enumerate() {
+            let part_location = format!("{location}.parts[{index}]");
+            let Some(part_object) = part.as_object() else {
+                return Err(format!("{part_location} must be an object"));
+            };
+            if let Some(text) = part_object.get("text") {
+                if part_object.keys().any(|key| key != "text") {
+                    return Err(format!("{part_location} has unknown field"));
+                }
+                if !text.is_string() {
+                    return Err(format!("{part_location}.text must be a string"));
+                }
+            } else {
+                field(part, &part_location)?;
+            }
+        }
+        Ok(())
+    }
     fn fields(value: Option<&Value>, location: &str) -> Result<(), String> {
         let values = value
             .and_then(Value::as_array)
@@ -551,7 +583,7 @@ fn validate_display_contract(display: &Value) -> Result<(), String> {
                 return Err(format!("{location}.{name}.label must be non-empty"));
             }
             if let Some(primary) = view.get("primary") {
-                field(primary, &format!("{location}.{name}.primary"))?;
+                validate_primary(primary, &format!("{location}.{name}.primary"))?;
             }
             if expanded {
                 fields(view.get("fields"), &format!("{location}.{name}.fields"))?;
@@ -1468,6 +1500,27 @@ mod tests {
         rejected["expanded"]["fields"][0]["unknown"] = json!(true);
         assert!(validate_display_contract(&rejected).is_err());
     }
+    #[test]
+    fn display_contract_accepts_composed_primary_parts() {
+        let accepted = json!({
+            "compact": { "label": "Click", "primary": { "parts": [
+                { "label": "target", "select": { "source": "args", "path": "url" }, "kind": "path" },
+                { "text": " link " },
+                { "label": "link", "select": { "source": "args", "path": "link" }, "kind": "scalar" }
+            ] } },
+            "expanded": { "label": "Click", "fields": [] },
+            "result": { "kind": "content", "fields": [] }
+        });
+        assert!(validate_display_contract(&accepted).is_ok());
+
+        let mut rejected = accepted;
+        rejected["compact"]["primary"]["parts"][1]["unknown"] = json!(true);
+        assert_eq!(
+            validate_display_contract(&rejected).unwrap_err(),
+            "display.compact.primary.parts[1] has unknown field"
+        );
+    }
+
     #[tokio::test]
     async fn rejects_empty_and_whitespace_only_sources_with_advertise_error() {
         for source in ["", " 	"] {

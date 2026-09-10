@@ -99,6 +99,11 @@ test-provider:
     cargo test -p nefor --test openai_provider_lib_test
     cargo test -p nefor --test starter_openai_provider_test
 
+# Real engine + tool-gate + ChatGPT provider against a deterministic local web endpoint.
+test-routed-web-e2e:
+    cargo build -p nefor -p tool-gate-plugin -p chatgpt-provider
+    cargo test -p nefor --features full-tests --test routed_web_e2e -- --test-threads=1
+
 # Build, sign, and verify the runtime helpers used by the MAG process E2E tests.
 prepare-mag-e2e:
     cargo run --quiet -p nefor-cargo-test-harness -- --prepare-mag-e2e

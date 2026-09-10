@@ -1885,15 +1885,21 @@ fn response_output_context(provider: &str, model: &str, items: &[ResponseItem]) 
     })
 }
 
+struct WebExecutionResult {
+    response: crate::web::SearchResponse,
+    semantic_error: Option<String>,
+}
+
 fn web_result_body(
     args: &ServeArgs,
     id: &str,
-    result: Result<crate::web::SearchResponse, String>,
+    result: Result<WebExecutionResult, String>,
 ) -> Map<String, Value> {
     let mut fields = Map::new();
     fields.insert("id".into(), Value::String(id.to_owned()));
     match result {
-        Ok(response) => {
+        Ok(result) => {
+            let response = result.response;
             let mut output = Map::new();
             output.insert("text".into(), Value::String(response.output));
             if let Some(results) = response.results {
@@ -1905,6 +1911,9 @@ fn web_result_body(
                     "provider_state".into(),
                     serde_json::json!({"encrypted_output": encrypted_output}),
                 );
+            }
+            if let Some(error) = result.semantic_error {
+                fields.insert("error".into(), Value::String(error));
             }
         }
         Err(error) => {
@@ -2083,11 +2092,18 @@ async fn handle_web_request(
                 .await
                 .map_err(|error| format!("web auth refresh failed: {error}"))?;
             let auth = owned.auth.snapshot().await;
-            owned
+            let response = owned
                 .web_client
                 .execute(&request, &auth, &execution.cancellation)
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+            let semantic_error = response
+                .semantic_error_for(&request.commands)
+                .map(str::to_owned);
+            Ok(WebExecutionResult {
+                response,
+                semantic_error,
+            })
         }
         .await;
         if owned.web_executions.finish(&id, execution.owner).await {
