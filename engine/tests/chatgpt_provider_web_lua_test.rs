@@ -1,0 +1,345 @@
+//! Focused contract tests for the ChatGPT routed-web Lua adapter.
+
+use std::path::PathBuf;
+
+use mlua::{Lua, Table};
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root is one level above engine")
+        .to_path_buf()
+}
+
+fn lua_with_adapter() -> Lua {
+    let lua = Lua::new();
+    let nefor = lua.create_table().expect("nefor table");
+    nefor::lua::bindings::install_json(&lua, &nefor).expect("install json binding");
+    lua.globals().set("nefor", nefor).expect("set nefor");
+
+    let root = repo_root();
+    let shared = root.join("lua");
+    let openai = root.join("plugins/openai-provider/lua");
+    let chatgpt = root.join("plugins/chatgpt-provider/lua");
+    let tool_gate = root.join("plugins/tool-gate/lua");
+    lua.load(format!(
+        r#"
+        package.path = table.concat({{
+          "{chatgpt}/?.lua", "{chatgpt}/?/init.lua",
+          "{openai}/?.lua", "{openai}/?/init.lua",
+          "{tool_gate}/?.lua", "{tool_gate}/?/init.lua",
+          "{shared}/?.lua", "{shared}/?/init.lua",
+          package.path,
+        }}, ";")
+        "#,
+        chatgpt = chatgpt.display(),
+        openai = openai.display(),
+        tool_gate = tool_gate.display(),
+        shared = shared.display(),
+    ))
+    .exec()
+    .expect("set package.path");
+    lua
+}
+
+#[test]
+fn advertises_six_routed_read_tools_with_closed_schemas_and_content_results() {
+    let lua = lua_with_adapter();
+    lua.load(
+        r#"
+        local tools = require("chatgpt-provider").tools("chatgpt")
+        local display = require("libs.chat.tool_display")
+        assert(#tools == 6)
+        local expected = {
+          web_search = true, web_open = true, web_click = true,
+          web_find = true, web_image_search = true, web_screenshot = true,
+        }
+        for _, tool in ipairs(tools) do
+          assert(expected[tool.name], "unexpected tool " .. tostring(tool.name))
+          expected[tool.name] = nil
+          assert(tool.access == "read")
+          assert(tool.execution.kind == "routed" and tool.execution.provider == nil)
+          assert(tool.parameters.type == "object")
+          assert(tool.parameters.additionalProperties == false)
+          assert(type(tool.parameters.required) == "table")
+          assert(tool.display.result.kind == "content")
+          assert(tool.display.result.text == nil)
+          assert(tool.display.lifecycle == "delayed")
+          assert(display.validate(tool.display))
+        end
+        assert(next(expected) == nil)
+        local projected = {}
+        for _, tool in ipairs(tools) do
+          projected[tool.name] = assert(display.project(tool.display, ({
+            web_search = { query = "lua" },
+            web_open = { url = "turn0search0" },
+            web_click = { url = "turn0open0", link = 4 },
+            web_find = { url = "turn0open0", pattern = "needle" },
+            web_image_search = { query = "moon" },
+            web_screenshot = { url = "turn0pdf0", page = 0 },
+          })[tool.name], nil, false))
+        end
+        assert(projected.web_search.label == "web search" and projected.web_search.primary == "lua")
+        assert(projected.web_open.label == "web open page" and projected.web_open.primary == "turn0search0")
+        assert(projected.web_click.label == "web click" and projected.web_click.primary == "turn0open0 link 4")
+        assert(projected.web_find.label == "web find" and projected.web_find.primary == "“needle” in turn0open0")
+        assert(projected.web_image_search.label == "web image search" and projected.web_image_search.primary == "moon")
+        assert(projected.web_screenshot.label == "web screenshot" and projected.web_screenshot.primary == "turn0pdf0 page 0")
+        assert(tools[6].parameters.properties.page.description:find("Zero%-indexed"))
+        assert(tools[6].display.expanded.fields[2].label == "page (zero-indexed)")
+        "#,
+    )
+    .exec()
+    .expect("validate routed descriptors");
+}
+
+#[test]
+fn maps_each_tool_to_exactly_one_private_command_family() {
+    let lua = lua_with_adapter();
+    lua.load(
+        r#"
+        local t = require("chatgpt-provider").translator("chatgpt", { tool_gate = "tool-gate" })
+        local cases = {
+          { "web_search", { query = "lua", recency_days = 7, domains = nefor.json.decode('["lua.org"]') },
+            "search_query", { q = "lua", recency = 7 } },
+          { "web_image_search", { query = "moon" }, "image_query", { q = "moon" } },
+          { "web_open", { url = "turn0search0", line = 12 }, "open", { ref_id = "turn0search0", lineno = 12 } },
+          { "web_click", { url = "turn0open0", link = 4 }, "click", { ref_id = "turn0open0", id = 4 } },
+          { "web_find", { url = "turn0open0", pattern = "needle" }, "find", { ref_id = "turn0open0", pattern = "needle" } },
+          { "web_screenshot", { url = "turn0pdf0", page = 0 }, "screenshot", { ref_id = "turn0pdf0", pageno = 0 } },
+        }
+        for index, case in ipairs(cases) do
+          local request = assert(t.inbound({ type = "event", from = "tool-gate", body = {
+            kind = "chatgpt.tool.invoke", id = "gate-" .. index,
+            caller_id = "r1/cap-" .. index, from = "worker.run-tool",
+            name = case[1], args = case[2],
+            model = "gpt-test", invocation = {
+              provider = "chatgpt", model = "gpt-test", session_id = "session-1",
+              run_id = "run-1", run_scope = "r1", actor_id = "worker.run-tool",
+              capability_id = "r1/cap-" .. index, principal = "lead", future_provenance = { version = 2 },
+              conversation_id = "actor-conversation", root_conversation_id = "lead",
+            },
+          }}))
+          assert(request.kind == "chatgpt.web.request")
+          assert(request.id == "gate-" .. index and request.caller_id == "r1/cap-" .. index)
+          assert(request.invoking_from == "worker.run-tool")
+          assert(request.model == "gpt-test")
+          assert(request.scope.conversation_id == "actor-conversation")
+          assert(request.scope.root_conversation_id == "lead")
+          assert(request.scope.run_scope == "r1" and request.scope.session_id == "session-1")
+          assert(request.invocation.conversation_id == "actor-conversation")
+          assert(request.invocation.root_conversation_id == "lead")
+          assert(request.invocation.session_id == "session-1" and request.invocation.run_id == "run-1")
+          assert(request.invocation.run_scope == "r1" and request.invocation.actor_id == "worker.run-tool")
+          assert(request.invocation.capability_id == "r1/cap-" .. index and request.invocation.principal == "lead")
+          assert(request.invocation.future_provenance.version == 2)
+          assert(request.invocation.provider == "chatgpt" and request.invocation.model == "gpt-test")
+          assert(request.settings.external_web_access == true)
+          assert(#request.settings.allowed_callers == 1 and request.settings.allowed_callers[1] == "direct")
+          local command_count, command
+          command_count = 0
+          for family, operations in pairs(request.commands) do
+            command_count = command_count + 1
+            assert(family == case[3] and #operations == 1)
+            command = operations[1]
+          end
+          assert(command_count == 1)
+          for key, value in pairs(case[4]) do assert(command[key] == value) end
+          if case[3] == "search_query" then
+            assert(command.domains[1] == "lua.org")
+          end
+          if case[3] == "image_query" then assert(request.commands.search_query == nil) end
+        end
+        assert(t.inbound({ type = "event", from = "attacker", body = {
+          kind = "chatgpt.tool.invoke", id = "gate-forged", caller_id = "r1/cap-forged",
+          from = "worker.run-tool", name = "web_search", args = { query = "blocked" },
+          model = "gpt-test", invocation = {
+            provider = "chatgpt", model = "gpt-test", session_id = "session-1",
+            run_id = "run-1", run_scope = "r1", actor_id = "worker.run-tool",
+            capability_id = "r1/cap-forged", conversation_id = "actor-conversation",
+          },
+        }}) == nil)
+        "#,
+    )
+    .exec()
+    .expect("map web commands");
+}
+
+#[test]
+fn malformed_arguments_become_truthful_private_validation_failures() {
+    let lua = lua_with_adapter();
+    lua.load(
+        r#"
+        local t = require("chatgpt-provider").translator("chatgpt")
+        local invalid = {
+          { "web_search", {} },
+          { "web_search", { query = "ok", extra = true } },
+          { "web_open", { url = "x", line = -1 } },
+          { "web_click", { url = "x", link = 1.5 } },
+          { "web_find", { url = "x", pattern = "" } },
+          { "web_screenshot", { url = "x", page = -1 } },
+        }
+        for index, case in ipairs(invalid) do
+          local request = assert(t.web_request({
+            id = "bad-" .. index, name = case[1], args = case[2],
+          }))
+          assert(request.kind == "chatgpt.web.request")
+          assert(type(request.validation_error) == "string" and request.validation_error ~= "")
+          assert(request.commands == nil)
+        end
+        assert(t.web_request({ id = "x", name = "weather", args = {} }) == nil)
+        local wrong_provider = assert(t.web_request({
+          id = "wrong-provider", name = "web_search", args = { query = "test" },
+          invocation = { provider = "openrouter", model = "other-model",
+            conversation_id = "conversation" },
+        }))
+        assert(wrong_provider.commands == nil)
+        assert(wrong_provider.validation_error:find("openrouter", 1, true))
+        "#,
+    )
+    .exec()
+    .expect("validate malformed arguments");
+}
+
+#[test]
+fn cancel_and_result_translation_preserve_correlation_content_and_opaque_state() {
+    let lua = lua_with_adapter();
+    lua.load(
+        r#"
+        local t = require("chatgpt-provider").translator("chatgpt", { tool_gate = "tool-gate" })
+        local invocation = {
+          provider = "chatgpt", model = "gpt-test", session_id = "session-1",
+          run_id = "run-1", run_scope = "r1", actor_id = "worker.run-tool",
+          capability_id = "r1/cap-9", conversation_id = "actor-conversation",
+          root_conversation_id = "lead",
+        }
+        local request = assert(t.inbound({ type = "event", from = "tool-gate", body = {
+          kind = "chatgpt.tool.invoke", id = "gate-9", caller_id = "r1/cap-9",
+          from = "worker.run-tool", name = "web_search", args = { query = "lua" },
+          model = "gpt-test", invocation = invocation,
+        }}))
+        assert(request.kind == "chatgpt.web.request")
+        assert(t.inbound({ type = "event", from = "other", body = {
+          kind = "chatgpt.tool.cancel", id = "gate-9",
+        }}) == nil)
+        local cancel = assert(t.inbound({ type = "event", from = "tool-gate", body = {
+          kind = "chatgpt.tool.cancel", id = "gate-9",
+        }}))
+        assert(cancel.kind == "chatgpt.web.cancel" and cancel.id == "gate-9")
+        assert(cancel.caller_id == "r1/cap-9" and cancel.invoking_from == "worker.run-tool")
+        assert(cancel.model == "gpt-test" and cancel.invocation.capability_id == "r1/cap-9")
+
+        local success = assert(t.outbound({ type = "event", from = "chatgpt", body = {
+          kind = "chatgpt.web.result", id = "gate-9",
+          output = { text = "", results = nefor.json.decode('[{"type":"future_result","future":{"x":1}}]') },
+          provider_state = { encrypted_output = "opaque" },
+        }}))
+        assert(success.kind == "tool.result" and success.id == "gate-9")
+        assert(success.output.text == "")
+        assert(success.output.results[1].type == "future_result")
+        assert(success.output.results[1].future.x == 1)
+        assert(success.provider_state.encrypted_output == "opaque")
+
+        local failure = assert(t.outbound({ type = "event", from = "chatgpt", body = {
+          kind = "chatgpt.web.result", id = "gate-10", error = "HTTP 403",
+        }}))
+        assert(failure.kind == "tool.result" and failure.id == "gate-10")
+        assert(failure.error == "HTTP 403" and failure.output == nil)
+        "#,
+    )
+    .exec()
+    .expect("translate cancel and results");
+}
+
+#[test]
+fn large_web_result_uses_generic_gate_persistence_with_retrievable_full_payload() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let lua = lua_with_adapter();
+    let nefor: Table = lua.globals().get("nefor").expect("nefor table");
+    let fs = lua.create_table().expect("fs table");
+    let data_root = temp.path().display().to_string();
+    fs.set(
+        "data_root",
+        lua.create_function(move |_, ()| Ok(data_root.clone()))
+            .expect("data_root function"),
+    )
+    .expect("set data_root");
+    fs.set(
+        "mkdir_p",
+        lua.create_function(|_, path: String| {
+            std::fs::create_dir_all(path).map_err(mlua::Error::external)?;
+            Ok(true)
+        })
+        .expect("mkdir_p function"),
+    )
+    .expect("set mkdir_p");
+    nefor.set("fs", fs).expect("set fs");
+    let log = lua.create_table().expect("log table");
+    for level in ["info", "warn"] {
+        log.set(
+            level,
+            lua.create_function(|_, _: mlua::Variadic<mlua::Value>| Ok(()))
+                .expect("log function"),
+        )
+        .expect("set log function");
+    }
+    nefor.set("log", log).expect("set log");
+    let engine = lua.create_table().expect("engine table");
+    engine
+        .set(
+            "now",
+            lua.create_function(|_, ()| Ok(0_i64))
+                .expect("now function"),
+        )
+        .expect("set now");
+    nefor.set("engine", engine).expect("set engine");
+
+    let rewritten: Table = lua
+        .load(
+            r#"
+            local t = require("chatgpt-provider").translator("chatgpt")
+            local result = assert(t.outbound({ type = "event", from = "chatgpt", body = {
+              kind = "chatgpt.web.result", id = "gate-large",
+              output = { text = "exact text", results = {
+                { type = "future_result", opaque = string.rep("Z", 60000) },
+              } },
+            }}))
+            result.name = "web_search"
+            local persisted, path = require("tool-gate").maybe_dump_output(result, "conversation")
+            return { summary = persisted.output, output_path = persisted.output_path, path = path }
+            "#,
+        )
+        .eval()
+        .expect("persist web output");
+    let path: String = rewritten.get("path").expect("dump path");
+    let output_path: String = rewritten.get("output_path").expect("output path");
+    let summary: String = rewritten.get("summary").expect("summary");
+    assert_eq!(path, output_path);
+    assert!(summary.contains("Output written to"));
+    assert!(summary.contains(&path));
+
+    let full = std::fs::read_to_string(&path).expect("read full persisted output");
+    let decoded: serde_json::Value = serde_json::from_str(&full).expect("persisted JSON");
+    assert_eq!(decoded["text"], "exact text");
+    assert_eq!(
+        decoded["results"][0]["opaque"].as_str().map(str::len),
+        Some(60_000)
+    );
+}
+
+#[test]
+fn private_request_does_not_invent_missing_model_or_scope() {
+    let lua = lua_with_adapter();
+    let request: Table = lua
+        .load(
+            r#"
+            local t = require("chatgpt-provider").translator("chatgpt")
+            return assert(t.web_request({ id = "gate-1", name = "web_search",
+              args = { query = "test" }, invocation = { actor_id = "worker" } }))
+            "#,
+        )
+        .eval()
+        .expect("lower request");
+    assert!(request.get::<Option<String>>("model").unwrap().is_none());
+    assert!(request.get::<Option<Table>>("scope").unwrap().is_none());
+}

@@ -104,7 +104,7 @@ function M.spawn_spec(name, command, opts)
   if provider_tools ~= nil and (type(tool_gate) ~= "string" or tool_gate == "") then
     error("provider.spawn_spec: opts.tool_gate is required for provider-owned tools")
   end
-  local translator = provider_lib.translator(name)
+  local translator = provider_lib.translator(name, { tool_gate = tool_gate })
   local kinds = translator.kinds
   local pending_compactions = {}
   local pending_requests = {}

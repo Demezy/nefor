@@ -120,6 +120,31 @@ local function validate_fields(fields, where)
   return true
 end
 
+local function validate_primary(primary, where)
+  if type(primary) ~= "table" then return nil, where .. " must be a table" end
+  if primary.parts == nil then return validate_field(primary, where) end
+  for key, _ in pairs(primary) do
+    if key ~= "parts" then return nil, where .. " has unknown field `" .. tostring(key) .. "`" end
+  end
+  if not dense_list(primary.parts) or #primary.parts == 0 then
+    return nil, where .. ".parts must be a non-empty JSON array"
+  end
+  for index, part in ipairs(primary.parts) do
+    local part_where = where .. ".parts[" .. index .. "]"
+    if type(part) ~= "table" then return nil, part_where .. " must be a table" end
+    if part.text ~= nil then
+      for key, _ in pairs(part) do
+        if key ~= "text" then return nil, part_where .. " has unknown field `" .. tostring(key) .. "`" end
+      end
+      if type(part.text) ~= "string" then return nil, part_where .. ".text must be a string" end
+    else
+      local ok, err = validate_field(part, part_where)
+      if not ok then return nil, err end
+    end
+  end
+  return true
+end
+
 local function validate_view(view, where, expanded)
   if type(view) ~= "table" then return nil, where .. " must be a table" end
   for key, _ in pairs(view) do
@@ -129,7 +154,7 @@ local function validate_view(view, where, expanded)
   end
   if not nonempty(view.label) then return nil, where .. ".label must be non-empty" end
   if view.primary ~= nil then
-    local ok, err = validate_field(view.primary, where .. ".primary")
+    local ok, err = validate_primary(view.primary, where .. ".primary")
     if not ok then return nil, err end
   end
   if expanded then return validate_fields(view.fields, where .. ".fields") end
@@ -312,6 +337,21 @@ local function project_field(field, args, result)
   return { label = field.label, value = rendered, kind = field.kind }
 end
 
+local function project_primary(primary, args, result)
+  if primary.parts == nil then return project_field(primary, args, result) end
+  local values = {}
+  for _, part in ipairs(primary.parts) do
+    if part.text ~= nil then
+      values[#values + 1] = part.text
+    else
+      local projected = project_field(part, args, result)
+      if not projected then return nil end
+      values[#values + 1] = projected.value
+    end
+  end
+  return { value = table.concat(values), kind = "composed" }
+end
+
 local function active_policy(contract, args, result)
   local variant = contract.variant
   if variant == nil then return contract end
@@ -331,7 +371,7 @@ function M.project(contract, args, result, is_error)
     arguments = {}, result_fields = {},
   }
   if compact.primary then
-    local primary = project_field(compact.primary, args, result)
+    local primary = project_primary(compact.primary, args, result)
     if primary then
       projection.primary = primary.value
       projection.primary_is_path = primary.kind == "path"

@@ -146,9 +146,10 @@ local function persist_modlog_entry(entry)
     tonumber(entry.seq) or -1, tostring(entry.outcome)))
 end
 
-local function is_llm_factory(factory)
+local function has_model_context(factory)
   return factory == "nefor.factory.llm" or factory == "llm"
       or factory == "nefor.factory.structured-output" or factory == "structured-output"
+      or factory == "nefor.factory.run-tool" or factory == "run-tool"
 end
 
 local function lower_reasoning_effort(value)
@@ -397,8 +398,8 @@ local function new_run_context(meta)
     registry = registry,
     log = log,
     bus_emit = bus_emit,
-    invocation_provenance = function(actor_id, capability_id)
-      return {
+    invocation_provenance = function(actor_id, capability_id, request)
+      local provenance = {
         session_id = ctx.session_id,
         run_id = ctx.run_id,
         run_scope = ctx.scope,
@@ -408,6 +409,15 @@ local function new_run_context(meta)
         conversation_id = ctx.actor_conversations[actor_id],
         root_conversation_id = ctx.conversation_id,
       }
+      if type(request) == "table" then
+        if type(request.provider) == "string" and request.provider ~= "" then
+          provenance.provider = request.provider
+        end
+        if type(request.model) == "string" and request.model ~= "" then
+          provenance.model = request.model
+        end
+      end
+      return provenance
     end,
     events = emit_event,
     persist_output = persist_output,
@@ -480,7 +490,7 @@ local function new_run_context(meta)
   router:set_construct(function(record)
     local emit = router:emitter(record.id)
     local actor_params = record.params or {}
-    if is_llm_factory(record.factory) then
+    if has_model_context(record.factory) then
       local effective = {}
       for key, value in pairs(actor_params) do effective[key] = value end
       actor_params = effective
@@ -512,7 +522,16 @@ local function new_run_context(meta)
     end
     local explicit_conversation_id = type(actor_params.conversation_id) == "string"
         and actor_params.conversation_id ~= "" and actor_params.conversation_id or nil
-    local actor_conversation_id = explicit_conversation_id
+    local conversation_peer = type(actor_params.conversation_peer) == "string"
+        and actor_params.conversation_peer ~= "" and actor_params.conversation_peer or nil
+    actor_params.conversation_peer = nil
+    local peer_conversation_id = conversation_peer
+      and ctx.actor_conversations[conversation_peer] or nil
+    if conversation_peer and peer_conversation_id == nil then
+      return nil, "conversation peer " .. string.format("%q", conversation_peer)
+        .. " must be constructed before " .. string.format("%q", record.id)
+    end
+    local actor_conversation_id = explicit_conversation_id or peer_conversation_id
       or tostring(ctx.conversation_id) .. "/turns/" .. tostring(ctx.run_id)
         .. "/actors/" .. tostring(record.id)
     ctx.actor_conversations[record.id] = actor_conversation_id

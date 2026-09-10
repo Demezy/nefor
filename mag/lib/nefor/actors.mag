@@ -71,7 +71,11 @@
                                      :max_corrections Int
                                      :dynamic_item_type SemanticTypeId
                                      :dynamic_item_descriptor TypeDescriptor})
-(type RunToolParams {:tools (List String)
+(type RunToolParams {:model String
+                     :provider String
+                     :model_profile OptionalModelProfile
+                     :conversation_peer String
+                     :tools (List String)
                      :da-policy nefor.contracts.DaPolicy})
 (type ToolResultParams {})
 (type RetryGateParams {:max_retries Int})
@@ -219,9 +223,15 @@
            (nefor.graph.store-port llm-in)
            [(nefor.graph.store-port tool-calls)
             (nefor.graph.store-port result)]))
+       ;; The tool runner names its LLM peer instead of copying a conversation
+       ;; string, so the kernel can reuse the exact runtime-derived identity.
        (nefor.graph.actor run-tool-id run-tool-factory []
          (as RunToolParams
-           {:tools (or (get config "tools") (as (List String) []))
+           {:model (get resolved-model "model")
+            :provider (get resolved-model "provider")
+            :model_profile selected-profile
+            :conversation_peer llm-id
+            :tools (or (get config "tools") (as (List String) []))
             :da-policy (get config "da-policy")})
          (nefor.graph.store-port run-in) [(nefor.graph.store-port run-out)])
        (nefor.graph.actor tool-result-id tool-result-factory []

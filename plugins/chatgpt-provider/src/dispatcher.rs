@@ -25,6 +25,7 @@ use rand::Rng;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Mutex, Notify};
+use tokio_util::sync::CancellationToken;
 
 use crate::auth::{
     AuthSnapshot, AuthState, AuthStore, LoginLease, LoginStartOutcome, LogoutOutcome,
@@ -46,6 +47,7 @@ use crate::state::{
     ServiceTier, ToolCall, ToolCallFunction, TurnToken,
 };
 use crate::translator;
+use crate::web::{SearchRequest, WebClient, WebCommand};
 use nefor_plugin_sdk::TransportError;
 
 pub const PROTOCOL_VERSION: &str = "0.1";
@@ -1009,6 +1011,83 @@ impl DirectCompletions {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebInvocationProvenance {
+    provider: String,
+    model: String,
+    actor_id: String,
+    capability_id: String,
+    logical_scope: String,
+}
+
+#[derive(Clone)]
+struct WebExecution {
+    owner: u64,
+    cancellation: CancellationToken,
+    provenance: WebInvocationProvenance,
+}
+
+#[derive(Default)]
+struct WebExecutions {
+    runs: Mutex<HashMap<String, WebExecution>>,
+    next_owner: AtomicU64,
+}
+
+impl WebExecutions {
+    async fn begin(
+        &self,
+        id: String,
+        provenance: WebInvocationProvenance,
+    ) -> Result<WebExecution, String> {
+        let mut runs = self.runs.lock().await;
+        if runs.contains_key(&id) {
+            return Err(format!("web request `{id}` is already in flight"));
+        }
+        let execution = WebExecution {
+            owner: self.next_owner.fetch_add(1, Ordering::Relaxed),
+            cancellation: CancellationToken::new(),
+            provenance,
+        };
+        runs.insert(id, execution.clone());
+        Ok(execution)
+    }
+
+    async fn cancel(&self, id: &str, provenance: &WebInvocationProvenance) -> bool {
+        let mut runs = self.runs.lock().await;
+        if !runs
+            .get(id)
+            .is_some_and(|execution| &execution.provenance == provenance)
+        {
+            return false;
+        }
+        let Some(execution) = runs.remove(id) else {
+            return false;
+        };
+        execution.cancellation.cancel();
+        true
+    }
+
+    async fn finish(&self, id: &str, owner: u64) -> bool {
+        let mut runs = self.runs.lock().await;
+        if runs
+            .get(id)
+            .is_some_and(|execution| execution.owner == owner)
+        {
+            runs.remove(id);
+            true
+        } else {
+            false
+        }
+    }
+
+    async fn cancel_all(&self) {
+        let runs = std::mem::take(&mut *self.runs.lock().await);
+        for execution in runs.into_values() {
+            execution.cancellation.cancel();
+        }
+    }
+}
+
 /// Shared state threaded through every dispatch handler. Bundles the
 /// shared dependencies that every event path needs so function signatures
 /// stay short.
@@ -1020,10 +1099,12 @@ pub struct DispatcherContext {
     pub catalog: Arc<ToolCatalog>,
     pub broker: Arc<ToolBroker>,
     pub responses_client: Arc<ResponsesClient>,
+    pub web_client: Arc<WebClient>,
     pub out_tx: mpsc::Sender<PluginOutgoing>,
     stream_retry_policy: StreamRetryPolicy,
     recovery_gate: Arc<ProviderRecoveryGate>,
     direct_completions: Arc<DirectCompletions>,
+    web_executions: Arc<WebExecutions>,
 }
 
 impl DispatcherContext {
@@ -1037,6 +1118,12 @@ impl DispatcherContext {
         out_tx: mpsc::Sender<PluginOutgoing>,
     ) -> Self {
         let stream_retry_budget = args.stream_retry_timeout_seconds.map(Duration::from_secs);
+        let web_client = Arc::new(WebClient::with_http(
+            responses_client.http_client(),
+            responses_client.base_url().to_owned(),
+            responses_client.installation_id().to_owned(),
+            responses_client.originator().to_owned(),
+        ));
         Self {
             args,
             chats,
@@ -1044,6 +1131,7 @@ impl DispatcherContext {
             catalog,
             broker,
             responses_client,
+            web_client,
             out_tx,
             stream_retry_policy: StreamRetryPolicy {
                 budget: stream_retry_budget,
@@ -1051,6 +1139,7 @@ impl DispatcherContext {
             },
             recovery_gate: Arc::new(ProviderRecoveryGate::default()),
             direct_completions: Arc::new(DirectCompletions::default()),
+            web_executions: Arc::new(WebExecutions::default()),
         }
     }
 
@@ -1088,6 +1177,7 @@ pub async fn run_dispatch_loop(
                         Body::System(SystemBody::Shutdown { .. }) => {
                             tracing::info!("shutdown received");
                             ctx.chats.interrupt_all().await;
+                            ctx.web_executions.cancel_all().await;
                             return Ok(());
                         }
                         Body::System(_) => {
@@ -1104,6 +1194,7 @@ pub async fn run_dispatch_loop(
                     }
                     None => {
                         tracing::info!("stdin closed; exiting");
+                        ctx.web_executions.cancel_all().await;
                         return Ok(());
                     }
                 }
@@ -1111,6 +1202,7 @@ pub async fn run_dispatch_loop(
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("ctrl-c; exiting");
                 ctx.chats.interrupt_all().await;
+                ctx.web_executions.cancel_all().await;
                 return Ok(());
             }
             _ = usage_interval.tick() => {
@@ -1188,6 +1280,8 @@ async fn dispatch_event(
     };
 
     match suffix {
+        "web.request" => handle_web_request(ctx, from, body).await,
+        "web.cancel" => handle_web_cancel(ctx, from, body).await,
         "completion.request" => handle_completion_request(ctx, body).await,
         "completion.cancel" => {
             if let Some(request_id) = read_request_id(body) {
@@ -1789,6 +1883,257 @@ fn response_output_context(provider: &str, model: &str, items: &[ResponseItem]) 
             "items": items,
         },
     })
+}
+
+fn web_result_body(
+    args: &ServeArgs,
+    id: &str,
+    result: Result<crate::web::SearchResponse, String>,
+) -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert("id".into(), Value::String(id.to_owned()));
+    match result {
+        Ok(response) => {
+            let mut output = Map::new();
+            output.insert("text".into(), Value::String(response.output));
+            if let Some(results) = response.results {
+                output.insert("results".into(), Value::Array(results));
+            }
+            fields.insert("output".into(), Value::Object(output));
+            if let Some(encrypted_output) = response.encrypted_output {
+                fields.insert(
+                    "provider_state".into(),
+                    serde_json::json!({"encrypted_output": encrypted_output}),
+                );
+            }
+        }
+        Err(error) => {
+            fields.insert("error".into(), Value::String(error));
+        }
+    }
+    make_event(format!("{}web.result", args.event_prefix()), fields)
+}
+
+fn nonempty_web_field<'a>(object: &'a Map<String, Value>, field: &str) -> Result<&'a str, String> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("web invocation provenance requires non-empty `{field}`"))
+}
+
+fn web_invocation_provenance(
+    args: &ServeArgs,
+    body: &Map<String, Value>,
+) -> Result<WebInvocationProvenance, String> {
+    let invocation = body
+        .get("invocation")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "web request requires invocation provenance".to_owned())?;
+    let provider = nonempty_web_field(invocation, "provider")?;
+    if provider != args.provider_name {
+        return Err(format!(
+            "web invocation provider `{provider}` does not match `{}`",
+            args.provider_name
+        ));
+    }
+    let model = nonempty_web_field(invocation, "model")?;
+    let body_model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "web request is missing an acknowledged model".to_owned())?;
+    if body_model != model {
+        return Err("web request model does not match invocation provenance".into());
+    }
+    let actor_id = nonempty_web_field(invocation, "actor_id")?;
+    let invoking_from = body
+        .get("invoking_from")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "web request requires invoking actor identity".to_owned())?;
+    if invoking_from != actor_id {
+        return Err("web request invoking actor does not match invocation provenance".into());
+    }
+    let capability_id = nonempty_web_field(invocation, "capability_id")?;
+    let caller_id = body
+        .get("caller_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "web request requires gate caller correlation".to_owned())?;
+    if caller_id != capability_id {
+        return Err("web request caller correlation does not match capability provenance".into());
+    }
+    let inner_id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "web request requires gate correlation id".to_owned())?;
+    if inner_id == capability_id {
+        return Err("web request gate correlation must be distinct from capability id".into());
+    }
+    let session_id = nonempty_web_field(invocation, "session_id")?;
+    let _run_id = nonempty_web_field(invocation, "run_id")?;
+    let run_scope = nonempty_web_field(invocation, "run_scope")?;
+    if !capability_id.starts_with(&format!("{run_scope}/")) {
+        return Err("web request capability id is outside its invocation scope".into());
+    }
+    let logical_scope = ["conversation_id", "root_conversation_id"]
+        .into_iter()
+        .find_map(|field| {
+            invocation
+                .get(field)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{session_id}/{run_scope}"));
+
+    Ok(WebInvocationProvenance {
+        provider: provider.to_owned(),
+        model: model.to_owned(),
+        actor_id: actor_id.to_owned(),
+        capability_id: capability_id.to_owned(),
+        logical_scope,
+    })
+}
+
+async fn send_web_error(
+    ctx: &DispatcherContext,
+    id: Option<&str>,
+    error: impl Into<String>,
+) -> Result<(), ChatgptError> {
+    let error = error.into();
+    let Some(id) = id.filter(|id| !id.is_empty()) else {
+        tracing::warn!(%error, "web request missing correlation id; dropping");
+        return Ok(());
+    };
+    send_event(&ctx.out_tx, web_result_body(&ctx.args, id, Err(error))).await
+}
+
+async fn handle_web_request(
+    ctx: &DispatcherContext,
+    from: &PluginName,
+    body: &Map<String, Value>,
+) -> Result<(), ChatgptError> {
+    let id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    if from.as_str() != "engine" {
+        return send_web_error(ctx, id, "web request requires engine origin").await;
+    }
+    let Some(id) = id.map(str::to_owned) else {
+        tracing::warn!("web.request missing `id`; dropping");
+        return Ok(());
+    };
+    let provenance = match web_invocation_provenance(&ctx.args, body) {
+        Ok(provenance) => provenance,
+        Err(error) => return send_web_error(ctx, Some(&id), error).await,
+    };
+    if let Some(error) = body.get("validation_error").and_then(Value::as_str) {
+        return send_web_error(ctx, Some(&id), error.to_owned()).await;
+    }
+    let command = match body.get("commands") {
+        Some(commands) => match WebCommand::from_commands(commands) {
+            Ok(command) => command,
+            Err(error) => return send_web_error(ctx, Some(&id), error).await,
+        },
+        None => {
+            return send_web_error(ctx, Some(&id), "web request missing `commands`").await;
+        }
+    };
+    if let Some(name) = body.get("name").and_then(Value::as_str) {
+        if name != command.tool_name() {
+            return send_web_error(
+                ctx,
+                Some(&id),
+                format!(
+                    "web request tool `{name}` does not match command `{}`",
+                    command.tool_name()
+                ),
+            )
+            .await;
+        }
+    }
+    let model = provenance.model.clone();
+    let session_id = provider_routing_identity(&provenance.logical_scope).session_id;
+    let execution = match ctx.web_executions.begin(id.clone(), provenance).await {
+        Ok(execution) => execution,
+        Err(error) => return send_web_error(ctx, Some(&id), error).await,
+    };
+    let request = SearchRequest::new(session_id, model, command);
+    let owned = ctx.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let auth = owned.auth.snapshot().await;
+            if !matches!(auth.state, AuthState::Connected) {
+                return Err("auth not connected; cannot execute web request".to_owned());
+            }
+            owned
+                .auth
+                .current_access_token()
+                .await
+                .map_err(|error| format!("web auth refresh failed: {error}"))?;
+            let auth = owned.auth.snapshot().await;
+            owned
+                .web_client
+                .execute(&request, &auth, &execution.cancellation)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        .await;
+        if owned.web_executions.finish(&id, execution.owner).await {
+            let _ = send_event(&owned.out_tx, web_result_body(&owned.args, &id, result)).await;
+        }
+    });
+    Ok(())
+}
+
+async fn handle_web_cancel(
+    ctx: &DispatcherContext,
+    from: &PluginName,
+    body: &Map<String, Value>,
+) -> Result<(), ChatgptError> {
+    let id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    if from.as_str() != "engine" {
+        tracing::warn!(
+            origin = from.as_str(),
+            "rejected web.cancel from non-engine origin"
+        );
+        return Ok(());
+    }
+    let Some(id) = id else {
+        return Ok(());
+    };
+    let provenance = match web_invocation_provenance(&ctx.args, body) {
+        Ok(provenance) => provenance,
+        Err(error) => {
+            tracing::warn!(%id, %error, "rejected web.cancel with invalid provenance");
+            return Ok(());
+        }
+    };
+    if ctx.web_executions.cancel(id, &provenance).await {
+        send_event(
+            &ctx.out_tx,
+            web_result_body(&ctx.args, id, Err("web request cancelled".into())),
+        )
+        .await?;
+    } else {
+        tracing::debug!(%id, "web.cancel for unknown or settled request; no-op");
+    }
+    Ok(())
 }
 
 async fn handle_completion_request(
@@ -2700,297 +3045,6 @@ async fn handle_chat_delete(
 // Per-turn task.
 // ---------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-struct NativeToolCallObservation {
-    arguments: Value,
-    settled: bool,
-    anonymous: bool,
-}
-
-struct NativeToolLifecycle {
-    request_id: String,
-    calls: HashMap<String, NativeToolCallObservation>,
-    upstream_ids: HashMap<String, String>,
-    output_ids: HashMap<u32, String>,
-    next_sequence: u32,
-}
-
-impl NativeToolLifecycle {
-    fn new(request_id: String) -> Self {
-        Self {
-            request_id,
-            calls: HashMap::new(),
-            upstream_ids: HashMap::new(),
-            output_ids: HashMap::new(),
-            next_sequence: 0,
-        }
-    }
-
-    fn known_id(&self, upstream_id: Option<&str>, output_index: Option<u32>) -> Option<String> {
-        let upstream = upstream_id
-            .filter(|id| !id.is_empty())
-            .and_then(|id| self.upstream_ids.get(id));
-        let indexed = output_index.and_then(|index| self.output_ids.get(&index));
-        match (upstream, indexed) {
-            (Some(upstream), Some(indexed)) if upstream != indexed => Some(upstream.clone()),
-            (Some(id), _) | (_, Some(id)) => Some(id.clone()),
-            (None, None) => None,
-        }
-    }
-
-    fn new_id(&mut self, upstream_id: Option<&str>, output_index: Option<u32>) -> String {
-        if let Some(id) = upstream_id.filter(|id| !id.is_empty()) {
-            return id.to_owned();
-        }
-        if let Some(index) = output_index {
-            return format!("{}:web_search:{index}", self.request_id);
-        }
-        let sequence = self.next_sequence;
-        self.next_sequence = self.next_sequence.saturating_add(1);
-        format!("{}:web_search:anonymous:{sequence}", self.request_id)
-    }
-
-    fn bind_aliases(&mut self, id: &str, upstream_id: Option<&str>, output_index: Option<u32>) {
-        if let Some(upstream_id) = upstream_id.filter(|value| !value.is_empty()) {
-            self.upstream_ids
-                .entry(upstream_id.to_owned())
-                .or_insert_with(|| id.to_owned());
-        }
-        if let Some(output_index) = output_index {
-            self.output_ids
-                .entry(output_index)
-                .or_insert_with(|| id.to_owned());
-        }
-    }
-
-    fn id_for_start(&mut self, upstream_id: Option<&str>, output_index: Option<u32>) -> String {
-        let id = self
-            .known_id(upstream_id, output_index)
-            .unwrap_or_else(|| self.new_id(upstream_id, output_index));
-        self.bind_aliases(&id, upstream_id, output_index);
-        id
-    }
-
-    fn id_for_terminal(&mut self, upstream_id: Option<&str>, output_index: Option<u32>) -> String {
-        let known = self.known_id(upstream_id, output_index).or_else(|| {
-            // With no protocol key, a terminal can soundly settle an anonymous
-            // start only when exactly one remains open. Multiple candidates are
-            // inherently ambiguous, so the terminal becomes a distinct done-only call.
-            if upstream_id.filter(|id| !id.is_empty()).is_none() && output_index.is_none() {
-                let mut anonymous = self
-                    .calls
-                    .iter()
-                    .filter(|(_, call)| call.anonymous && !call.settled);
-                let only = anonymous.next().map(|(id, _)| id.clone());
-                if anonymous.next().is_none() {
-                    return only;
-                }
-            }
-            None
-        });
-        let id = known.unwrap_or_else(|| self.new_id(upstream_id, output_index));
-        self.bind_aliases(&id, upstream_id, output_index);
-        id
-    }
-
-    fn started(
-        &mut self,
-        upstream_id: Option<&str>,
-        output_index: Option<u32>,
-        action: Option<&crate::responses::request::WebSearchAction>,
-    ) -> Option<Map<String, Value>> {
-        let id = self.id_for_start(upstream_id, output_index);
-        let arguments = sanitize_web_search_action(action);
-        if let Some(call) = self.calls.get_mut(&id) {
-            if arguments
-                .as_object()
-                .is_some_and(|object| !object.is_empty())
-            {
-                call.arguments = arguments;
-            }
-            return None;
-        }
-        self.calls.insert(
-            id.clone(),
-            NativeToolCallObservation {
-                arguments: arguments.clone(),
-                settled: false,
-                anonymous: upstream_id.filter(|id| !id.is_empty()).is_none()
-                    && output_index.is_none(),
-            },
-        );
-        Some(native_tool_event(
-            &self.request_id,
-            "tool_execution_started",
-            &id,
-            arguments,
-            None,
-        ))
-    }
-
-    fn completed(
-        &mut self,
-        upstream_id: Option<&str>,
-        output_index: Option<u32>,
-        status: Option<&str>,
-        action: Option<&crate::responses::request::WebSearchAction>,
-    ) -> Vec<Map<String, Value>> {
-        let id = self.id_for_terminal(upstream_id, output_index);
-        let final_arguments = sanitize_web_search_action(action);
-        let mut events = Vec::new();
-        if !self.calls.contains_key(&id) {
-            self.calls.insert(
-                id.clone(),
-                NativeToolCallObservation {
-                    arguments: final_arguments.clone(),
-                    settled: false,
-                    anonymous: upstream_id.filter(|id| !id.is_empty()).is_none()
-                        && output_index.is_none(),
-                },
-            );
-            events.push(native_tool_event(
-                &self.request_id,
-                "tool_execution_started",
-                &id,
-                final_arguments.clone(),
-                None,
-            ));
-        }
-        let Some(call) = self.calls.get_mut(&id) else {
-            return events;
-        };
-        if call.settled {
-            return events;
-        }
-        if final_arguments
-            .as_object()
-            .is_some_and(|object| !object.is_empty())
-        {
-            call.arguments = final_arguments;
-        }
-        call.settled = true;
-        let arguments = call.arguments.clone();
-        let failed = matches!(status, Some("failed" | "incomplete" | "cancelled"));
-        events.push(if failed {
-            native_tool_event(
-                &self.request_id,
-                "tool_execution_failed",
-                &id,
-                arguments,
-                Some((
-                    "error",
-                    Value::String(bounded_diagnostic(status.unwrap_or("failed"))),
-                )),
-            )
-        } else {
-            native_tool_event(
-                &self.request_id,
-                "tool_execution_completed",
-                &id,
-                arguments,
-                Some(("result", serde_json::json!({"status":"completed"}))),
-            )
-        });
-        events
-    }
-
-    fn fail_open(&mut self, diagnostic: &str) -> Vec<Map<String, Value>> {
-        let mut ids = self
-            .calls
-            .iter()
-            .filter(|(_, call)| !call.settled)
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        ids.sort();
-        ids.into_iter()
-            .filter_map(|id| {
-                let call = self.calls.get_mut(&id)?;
-                call.settled = true;
-                Some(native_tool_event(
-                    &self.request_id,
-                    "tool_execution_failed",
-                    &id,
-                    call.arguments.clone(),
-                    Some(("error", Value::String(bounded_diagnostic(diagnostic)))),
-                ))
-            })
-            .collect()
-    }
-}
-
-fn sanitize_web_search_action(
-    action: Option<&crate::responses::request::WebSearchAction>,
-) -> Value {
-    let mut arguments = Map::new();
-    let Some(action) = action else {
-        return Value::Object(arguments);
-    };
-    if let Some(kind) = action.kind.as_deref().filter(|kind| !kind.is_empty()) {
-        arguments.insert("action".into(), Value::String(kind.to_owned()));
-        match kind {
-            "search" => {
-                if let Some(query) = action.query.as_deref().filter(|query| !query.is_empty()) {
-                    arguments.insert("query".into(), Value::String(query.to_owned()));
-                }
-                if let Some(queries) = &action.queries {
-                    arguments.insert(
-                        "queries".into(),
-                        Value::Array(
-                            queries
-                                .iter()
-                                .filter(|query| !query.is_empty())
-                                .cloned()
-                                .map(Value::String)
-                                .collect(),
-                        ),
-                    );
-                }
-            }
-            "open_page" => {
-                if let Some(url) = action.url.as_deref().filter(|url| !url.is_empty()) {
-                    arguments.insert("url".into(), Value::String(url.to_owned()));
-                }
-            }
-            "find_in_page" => {
-                if let Some(url) = action.url.as_deref().filter(|url| !url.is_empty()) {
-                    arguments.insert("url".into(), Value::String(url.to_owned()));
-                }
-                if let Some(pattern) = action.pattern.as_deref().filter(|value| !value.is_empty()) {
-                    arguments.insert("pattern".into(), Value::String(pattern.to_owned()));
-                }
-            }
-            _ => {}
-        }
-    }
-    Value::Object(arguments)
-}
-
-fn bounded_diagnostic(message: &str) -> String {
-    message.chars().take(500).collect()
-}
-
-fn native_tool_event(
-    request_id: &str,
-    event: &str,
-    tool_call_id: &str,
-    arguments: Value,
-    terminal: Option<(&str, Value)>,
-) -> Map<String, Value> {
-    let mut fields = Map::new();
-    fields.insert("request_id".into(), Value::String(request_id.to_owned()));
-    fields.insert("event".into(), Value::String(event.to_owned()));
-    fields.insert(
-        "tool_call_id".into(),
-        Value::String(tool_call_id.to_owned()),
-    );
-    fields.insert("name".into(), Value::String("web_search".into()));
-    fields.insert("arguments".into(), arguments);
-    if let Some((name, value)) = terminal {
-        fields.insert(name.into(), value);
-    }
-    fields
-}
-
 #[derive(Default)]
 struct NativeOutputBuffer {
     indexed: BTreeMap<u32, ResponseItem>,
@@ -3599,9 +3653,6 @@ fn spawn_turn(
         let mut final_stream_attempts: u32 = 0;
         let mut final_terminal_event_seen = false;
         let mut auth_401_recovery_stage: u8 = 0;
-        let mut native_tool_lifecycle = direct_request
-            .as_ref()
-            .map(|(request_id, _)| NativeToolLifecycle::new(request_id.clone()));
         let conversation_id = logical_routing_id(
             ctx.chats
                 .conversation_id(&chat_id)
@@ -4159,23 +4210,6 @@ fn spawn_turn(
                                     tool_buf.on_item_done(item_id.as_deref(), &arguments);
                                 }
                                 ResponseEvent::OutputItemAdded {
-                                    item: ResponseItem::WebSearchCall { id, action, .. },
-                                    output_index,
-                                } => {
-                                    native_output_state_observed = true;
-                                    if let Some(lifecycle) = &mut native_tool_lifecycle {
-                                        if let Some(body) = lifecycle.started(
-                                            id.as_deref(), output_index, action.as_ref())
-                                        {
-                                            let body = make_event(
-                                                format!("{}completion.event", ctx.args.event_prefix()),
-                                                body,
-                                            );
-                                            let _ = ctx.out_tx.try_send(PluginOutgoing::event(body));
-                                        }
-                                    }
-                                }
-                                ResponseEvent::OutputItemAdded {
                                     item:
                                         ResponseItem::FunctionCall {
                                             id,
@@ -4203,21 +4237,6 @@ fn spawn_turn(
                                     output_index,
                                 } => {
                                     native_output_state_observed = true;
-                                    let mut retain_native_item = true;
-                                    if let ResponseItem::WebSearchCall { id, status, action, .. } = &item {
-                                        if let Some(lifecycle) = &mut native_tool_lifecycle {
-                                            let events = lifecycle.completed(
-                                                id.as_deref(), output_index, status.as_deref(), action.as_ref());
-                                            retain_native_item = !events.is_empty();
-                                            for body in events {
-                                                let body = make_event(
-                                                    format!("{}completion.event", ctx.args.event_prefix()),
-                                                    body,
-                                                );
-                                                let _ = ctx.out_tx.try_send(PluginOutgoing::event(body));
-                                            }
-                                        }
-                                    }
                                     if let ResponseItem::FunctionCall {
                                         id,
                                         call_id,
@@ -4242,11 +4261,9 @@ fn spawn_turn(
                                             tool_buf.on_item_done(Some(&item_id), arguments);
                                         }
                                     }
-                                    if retain_native_item {
-                                        if let Err(error) = iter_native_output.push(output_index, item) {
-                                            iter_errored = Some(error);
-                                            break;
-                                        }
+                                    if let Err(error) = iter_native_output.push(output_index, item) {
+                                        iter_errored = Some(error);
+                                        break;
                                     }
                                 }
                                 ResponseEvent::Completed { response } => {
@@ -4357,9 +4374,6 @@ fn spawn_turn(
                     let _ = ctx.out_tx.send(PluginOutgoing::event(body)).await;
                 }
                 if decision.retry {
-                    if let Some((request_id, _)) = &direct_request {
-                        native_tool_lifecycle = Some(NativeToolLifecycle::new(request_id.clone()));
-                    }
                     pre_output_stream_retries += 1;
                     iterations = iterations.saturating_sub(1);
                     if direct_request.is_none() {
@@ -4530,22 +4544,6 @@ fn spawn_turn(
             final_finish_reason = iter_finish_reason.or(Some("stop".into()));
             final_native_output = iter_native_output;
             break;
-        }
-
-        if let Some(lifecycle) = &mut native_tool_lifecycle {
-            let diagnostic = if cancel.is_suppressed() {
-                "provider request cancelled"
-            } else if interrupted {
-                "provider request interrupted"
-            } else if errored {
-                final_error.as_deref().unwrap_or("provider request failed")
-            } else {
-                "provider request completed before web search settled"
-            };
-            for body in lifecycle.fail_open(diagnostic) {
-                let body = make_event(format!("{}completion.event", ctx.args.event_prefix()), body);
-                let _ = ctx.out_tx.send(PluginOutgoing::event(body)).await;
-            }
         }
 
         // Suppressed hard-cancel: release the slot and return without
@@ -4841,206 +4839,6 @@ mod tests {
             translator::tools_to_responses_format(&projected, "chatgpt").expect("mapping");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["type"], "function");
-    }
-
-    #[test]
-    fn hosted_search_requires_selected_matching_descriptor() {
-        let specs = vec![
-            crate::catalog::ToolSpec {
-                name: "read_file".into(),
-                owner: "basic-tools".into(),
-                description: "read".into(),
-                input_schema: serde_json::json!({}),
-                execution: crate::catalog::ToolExecution::Routed,
-            },
-            crate::catalog::ToolSpec {
-                name: "web_search".into(),
-                owner: "chatgpt".into(),
-                description: "search".into(),
-                input_schema: serde_json::json!({}),
-                execution: crate::catalog::ToolExecution::ProviderNative {
-                    provider: "chatgpt".into(),
-                },
-            },
-        ];
-        let (_, tools) = translator::tools_to_responses_format(&specs, "chatgpt").expect("mapping");
-        assert_eq!(tools.len(), 2);
-        assert_eq!(
-            tools[1],
-            serde_json::json!({"type":"web_search","external_web_access":false})
-        );
-        let (_, wrong_provider) =
-            translator::tools_to_responses_format(&specs, "openai").expect("mapping");
-        assert_eq!(wrong_provider.len(), 1);
-    }
-
-    #[test]
-    fn native_web_search_lifecycle_is_sanitized_stable_and_deduplicated() {
-        let mut lifecycle = NativeToolLifecycle::new("request-1".into());
-        let action = crate::responses::request::WebSearchAction {
-            kind: Some("search".into()),
-            query: Some("rust ownership".into()),
-            queries: Some(vec!["rust ownership".into(), String::new()]),
-            url: Some("must-not-leak".into()),
-            pattern: None,
-            extra: serde_json::Map::from_iter([(
-                "secret".into(),
-                Value::String("must-not-leak".into()),
-            )]),
-        };
-        let started = lifecycle
-            .started(None, Some(3), Some(&action))
-            .expect("first start");
-        assert_eq!(started["tool_call_id"], "request-1:web_search:3");
-        assert_eq!(
-            started["arguments"],
-            serde_json::json!({
-                "action":"search", "query":"rust ownership", "queries":["rust ownership"]
-            })
-        );
-        assert!(lifecycle.started(None, Some(3), Some(&action)).is_none());
-        let terminal = lifecycle.completed(None, Some(3), Some("completed"), Some(&action));
-        assert_eq!(terminal.len(), 1);
-        assert_eq!(terminal[0]["event"], "tool_execution_completed");
-        assert_eq!(
-            terminal[0]["result"],
-            serde_json::json!({"status":"completed"})
-        );
-        assert!(lifecycle
-            .completed(None, Some(3), Some("completed"), Some(&action))
-            .is_empty());
-    }
-
-    #[test]
-    fn native_web_search_keeps_index_fallback_when_id_appears_on_done() {
-        let mut lifecycle = NativeToolLifecycle::new("request-index".into());
-        let started = lifecycle
-            .started(None, Some(4), None)
-            .expect("fallback start");
-        assert_eq!(started["tool_call_id"], "request-index:web_search:4");
-
-        let terminal = lifecycle.completed(Some("ws_late"), Some(4), Some("completed"), None);
-        assert_eq!(terminal.len(), 1);
-        assert_eq!(terminal[0]["event"], "tool_execution_completed");
-        assert_eq!(terminal[0]["tool_call_id"], started["tool_call_id"]);
-        assert!(lifecycle.fail_open("must not split").is_empty());
-        assert!(lifecycle
-            .completed(Some("ws_late"), Some(4), Some("completed"), None)
-            .is_empty());
-    }
-
-    #[test]
-    fn native_web_search_distinguishes_fully_unkeyed_starts() {
-        let mut lifecycle = NativeToolLifecycle::new("request-anonymous".into());
-        let first = lifecycle.started(None, None, None).expect("first start");
-        let second = lifecycle.started(None, None, None).expect("second start");
-        assert_ne!(first["tool_call_id"], second["tool_call_id"]);
-        assert_eq!(
-            first["tool_call_id"],
-            "request-anonymous:web_search:anonymous:0"
-        );
-        assert_eq!(
-            second["tool_call_id"],
-            "request-anonymous:web_search:anonymous:1"
-        );
-
-        let ambiguous_terminal = lifecycle.completed(None, None, Some("completed"), None);
-        assert_eq!(ambiguous_terminal.len(), 2);
-        assert_eq!(
-            ambiguous_terminal[0]["tool_call_id"],
-            "request-anonymous:web_search:anonymous:2"
-        );
-        assert_eq!(
-            ambiguous_terminal[1]["tool_call_id"],
-            ambiguous_terminal[0]["tool_call_id"]
-        );
-        assert_eq!(lifecycle.fail_open("ambiguous terminal").len(), 2);
-    }
-
-    #[test]
-    fn native_web_search_done_only_synthesizes_start_and_open_calls_fail_once() {
-        let mut lifecycle = NativeToolLifecycle::new("request-2".into());
-        let done = lifecycle.completed(Some("ws_1"), None, Some("failed"), None);
-        assert_eq!(done.len(), 2);
-        assert_eq!(done[0]["event"], "tool_execution_started");
-        assert_eq!(done[1]["event"], "tool_execution_failed");
-        assert!(lifecycle.fail_open("late failure").is_empty());
-
-        let _ = lifecycle.started(Some("ws_2"), Some(1), None);
-        let failed = lifecycle.fail_open(&"x".repeat(600));
-        assert_eq!(failed.len(), 1);
-        assert_eq!(failed[0]["error"].as_str().map(str::len), Some(500));
-        assert!(lifecycle.fail_open("duplicate").is_empty());
-    }
-
-    #[test]
-    fn direct_completion_tools_are_a_closed_validated_sum() {
-        assert_eq!(
-            parse_direct_completion_tools(None),
-            Ok(DirectCompletionTools::Disabled)
-        );
-        assert_eq!(
-            parse_direct_completion_tools(Some(&Value::Bool(false))),
-            Ok(DirectCompletionTools::Disabled)
-        );
-        assert_eq!(
-            parse_direct_completion_tools(Some(&serde_json::json!([]))),
-            Ok(DirectCompletionTools::Disabled)
-        );
-        assert_eq!(
-            parse_direct_completion_tools(Some(&serde_json::json!(["alpha", "beta"]))),
-            Ok(DirectCompletionTools::Allowlist(vec![
-                "alpha".into(),
-                "beta".into()
-            ]))
-        );
-
-        for invalid in [
-            serde_json::json!(true),
-            serde_json::json!(null),
-            serde_json::json!(1),
-            serde_json::json!("alpha"),
-            serde_json::json!({"name": "alpha"}),
-            serde_json::json!(["alpha", 1]),
-            serde_json::json!([{"name": "alpha"}]),
-            serde_json::json!(["alpha", {"name": "beta"}]),
-            serde_json::json!([""]),
-            serde_json::json!(["alpha", "alpha"]),
-        ] {
-            assert!(
-                parse_direct_completion_tools(Some(&invalid)).is_err(),
-                "accepted invalid tools value {invalid}"
-            );
-        }
-    }
-
-    #[test]
-    fn completion_provider_options_are_closed_and_typed() {
-        assert_eq!(parse_completion_provider_options(None), Ok(None));
-        assert_eq!(
-            parse_completion_provider_options(Some(&serde_json::json!({}))),
-            Ok(None)
-        );
-        assert_eq!(
-            parse_completion_provider_options(Some(&serde_json::json!({
-                "service_tier": "fast"
-            }))),
-            Ok(Some(ServiceTier::Fast))
-        );
-
-        for invalid in [
-            serde_json::json!(null),
-            serde_json::json!([]),
-            serde_json::json!("fast"),
-            serde_json::json!({"service_tier": null}),
-            serde_json::json!({"service_tier": "standard"}),
-            serde_json::json!({"service_tier": "fast", "unknown": true}),
-        ] {
-            assert!(
-                parse_completion_provider_options(Some(&invalid)).is_err(),
-                "accepted invalid provider_options {invalid}"
-            );
-        }
     }
 
     #[tokio::test]

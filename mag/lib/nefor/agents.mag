@@ -169,7 +169,9 @@
     (let llm-template (template-actor "llm" llm-id llm
       [(as nefor.mag.ScalarParameterBinding
          {:path ["system"] :value (get system "id")})]))
-    (let run-tool-template (template-actor "run-tool" run-tool-id run-tool []))
+    (let run-tool-template (template-actor "run-tool" run-tool-id run-tool
+      [(as nefor.mag.ScalarParameterBinding
+         {:path ["conversation_peer"] :value (get llm-id "id")})]))
     (let tool-result-template (template-actor "tool-result" tool-result-id tool-result []))
     (let entry-in (get entry-template "input"))
     (let entry-out (first (get entry-template "outputs")))

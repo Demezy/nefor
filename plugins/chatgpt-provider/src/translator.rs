@@ -21,7 +21,7 @@ use std::collections::HashSet;
 
 use serde_json::{Map, Value};
 
-use crate::catalog::{ToolExecution, ToolSpec};
+use crate::catalog::ToolSpec;
 use crate::provider_tool_names::{ProviderToolNameError, ProviderToolNames};
 use crate::responses::request::{MessageContent, ResponseItem};
 use crate::state::{HistoryEntry, Message};
@@ -223,7 +223,7 @@ fn parse_image_tool_output(content: &str) -> Option<ImageToolOutput> {
 /// job — apply before calling this function.
 pub fn tools_to_responses_format(
     tools: &[ToolSpec],
-    provider: &str,
+    _provider: &str,
 ) -> Result<(ProviderToolNames, Vec<Value>), ProviderToolNameError> {
     let routed = tools
         .iter()
@@ -231,7 +231,7 @@ pub fn tools_to_responses_format(
         .cloned()
         .collect::<Vec<_>>();
     let names = ProviderToolNames::from_specs(&routed)?;
-    let mut values = routed
+    let values = routed
         .iter()
         .map(|tool| {
             let mut object = Map::new();
@@ -249,15 +249,6 @@ pub fn tools_to_responses_format(
             Ok(Value::Object(object))
         })
         .collect::<Result<Vec<_>, ProviderToolNameError>>()?;
-    if tools.iter().any(|tool| {
-        tool.name == "web_search"
-            && matches!(&tool.execution, ToolExecution::ProviderNative { provider: owner } if owner == provider)
-    }) {
-        values.push(serde_json::json!({
-            "type": "web_search",
-            "external_web_access": false,
-        }));
-    }
     Ok((names, values))
 }
 
@@ -273,6 +264,7 @@ pub fn model_supports_reasoning(model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::ToolExecution;
     use crate::state::{HistoryEntry, Message, ToolCall, ToolCallFunction};
     use serde_json::json;
 

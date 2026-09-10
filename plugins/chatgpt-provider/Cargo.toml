@@ -67,3 +67,8 @@ required-features = ["full-tests"]
 name = "cancel_integration"
 path = "tests/cancel_integration.rs"
 required-features = ["full-tests"]
+
+[[test]]
+name = "routed_web_integration"
+path = "tests/routed_web_integration.rs"
+required-features = ["full-tests"]

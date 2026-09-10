@@ -1047,7 +1047,7 @@ function M:on_capability_invoke(id, message)
   local request_id = self.correlation:open(id, message.ref)
   local invocation = nil
   if type(self.invocation_provenance) == "function" then
-    invocation = self.invocation_provenance(id, request_id)
+    invocation = self.invocation_provenance(id, request_id, message)
   end
   self.bus_emit({
     kind = "tool.invoke",

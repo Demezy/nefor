@@ -10,3 +10,4 @@ pub mod request_usage;
 pub mod responses;
 pub mod state;
 pub mod translator;
+pub mod web;

@@ -260,9 +260,19 @@ async fn chatgpt_projects_stale_allowlist_and_returns_tool_result_through_gate()
         "artifact": artifact, "params_overlay": {"actor:10:answer.llm": {"provider": PROVIDER}}
     }))).await;
 
+    let mut companion_conversation_id = None;
     for round in 0..2 {
         let request = next_kind(&mut mag_out, "conversation.provider.invoke.request").await;
         assert_eq!(request["provider"], PROVIDER);
+        let request_conversation_id = request["conversation_id"]
+            .as_str()
+            .expect("companion LLM invocation conversation_id")
+            .to_owned();
+        if let Some(expected) = &companion_conversation_id {
+            assert_eq!(&request_conversation_id, expected);
+        } else {
+            companion_conversation_id = Some(request_conversation_id.clone());
+        }
         assert!(
             request.get("messages").is_none(),
             "thin invoke has no history"
@@ -373,6 +383,19 @@ async fn chatgpt_projects_stale_allowlist_and_returns_tool_result_through_gate()
             assert_eq!(source_invoke["invocation"]["session_id"], "tool-session");
             assert_eq!(source_invoke["invocation"]["run_id"], "tool-run");
             assert_eq!(source_invoke["invocation"]["actor_id"], "answer.run-tool");
+            assert_eq!(
+                source_invoke["invocation"]["conversation_id"],
+                companion_conversation_id
+                    .as_deref()
+                    .expect("companion LLM conversation identity captured"),
+                "tool invocation must use the exact companion LLM conversation identity"
+            );
+            assert_eq!(
+                source_invoke["invocation"]["root_conversation_id"],
+                "chatgpt-tools-conversation"
+            );
+            assert_eq!(source_invoke["invocation"]["provider"], "provider");
+            assert_eq!(source_invoke["invocation"]["model"], "test-model");
             assert_eq!(
                 source_invoke.get("caller_id").and_then(Value::as_str),
                 Some(upstream_invoke_id.as_str()),

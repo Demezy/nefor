@@ -75,6 +75,7 @@ M.declaration = {
   },
 
   params = {
+    model = "string?", provider = "string?", conversation_peer = "string?",
     allowlist = "table?",  -- tool-name allowlist for this node (lowered from :tools)
     ["da-policy"] = "table?", -- per-node bash approval rules (lowered from :da-policy)
   },
@@ -113,6 +114,8 @@ function M.construct(id, params, emit, deps)
   if allowlist == nil then
     allowlist = params.tools
   end
+  local provider = params.provider
+  local model = params.model
 
   local function sign(message)
     message.from = id
@@ -195,6 +198,8 @@ function M.construct(id, params, emit, deps)
       emit(sign({
         kind = "capability.invoke",
         capability = call_name,
+        provider = provider,
+        model = model,
         -- Invocation args forwarded verbatim by routing as the tool.invoke
         -- payload, carrying the per-node gating alongside the tool name/args.
         request = {

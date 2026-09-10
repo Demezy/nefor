@@ -46,15 +46,36 @@ structured output, and reasoning controls each enter through their one wire
 representation. Events carry only counts and accuracy, never request content.
 Aggregate input/output usage remains separate from current request occupancy.
 
-Provider-hosted `web_search` is advertised by the ChatGPT provider through
-the composition-selected tool gate. An agent selects it by name through the
-same catalog and per-request `tools` list as routed functions. Only a selected,
-advertised descriptor whose `execution.provider` matches this provider lowers
-to `{ "type": "web_search", "external_web_access": false }`; otherwise it is
-absent. Native search calls remain Responses output items for private provider
-continuation, while sanitized start/completion/failure observations travel on
-the ordinary completion-event channel. They never enter local invocation,
-`ToolBroker`, or terminal function `tool_calls`.
+The provider advertises six ordinary routed read tools through the
+composition-selected tool gate: `web_search`, `web_open`, `web_click`,
+`web_find`, `web_image_search`, and `web_screenshot`. They are ordinary
+function tools in Responses requests. When invoked, the gate routes them back
+to this provider under an independent correlation ID; the provider's standalone
+web client posts exactly one supported command family to `POST /alpha/search`.
+Each call uses the model carried by the originating model invocation and a
+stable provider routing identity derived from its conversation scope, so
+search/open/click/find/screenshot references remain usable across related calls.
+Calls execute concurrently outside the completion `ToolBroker`; cancellation
+removes only the named web execution, emits one cancellation result, and ignores
+late completion.
+
+Successful results preserve the endpoint's exact plaintext output, optional
+opaque result JSON, and opaque encrypted provider state. Empty text remains
+empty. Errors remain specific and are returned as ordinary tool errors; invalid
+Lua arguments are rejected before HTTP. `web_image_search` remains
+`image_query`, and `web_screenshot` preserves the zero-indexed screenshot
+request plus plaintext/opaque response data. Screenshot media decoding is not
+claimed because no verified response media DTO exists yet.
+
+The private web request kinds are not public bus capabilities. The provider
+compositor accepts routed invoke/cancel traffic only from its selected tool gate
+and delivers the lowered request under engine identity; the Rust boundary then
+revalidates provider, model, invoking actor, gate/capability correlation, and the
+shared companion-LLM conversation identity before HTTP. Large structured web
+results use the ordinary tool-gate output policy: values over the inline budget
+are JSON-encoded into the established `tool-results` store, while the routed
+result carries a bounded summary and retrievable `output_path` into model
+projection.
 
 Direct completions and compaction chats accept an optional closed
 `provider_options` object. Its only supported field is

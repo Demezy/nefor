@@ -281,6 +281,10 @@ impl ResponsesClient {
         &self.originator
     }
 
+    pub(crate) fn http_client(&self) -> reqwest::Client {
+        self.http.clone()
+    }
+
     /// POST the request and return a typed SSE stream.
     ///
     /// On any non-2xx response, drains the body once and surfaces it

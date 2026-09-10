@@ -704,13 +704,29 @@ fn assert_dynamic_program_envelope(artifact: &Value) {
             assert!(position < index, "expressions are topologically ordered");
         }
     }
-    let slots = operation["template"]["actors"]
+    let template_actors = operation["template"]["actors"]
         .as_array()
-        .expect("template actors")
+        .expect("template actors");
+    let slots = template_actors
         .iter()
         .map(|actor| actor["slot"].as_str().expect("actor slot"))
         .collect::<Vec<_>>();
     assert_eq!(slots, ["entry", "llm", "run-tool", "tool-result", "result"]);
+    let llm = template_actors
+        .iter()
+        .find(|actor| actor["slot"] == "llm")
+        .expect("llm template actor");
+    let run_tool = template_actors
+        .iter()
+        .find(|actor| actor["slot"] == "run-tool")
+        .expect("run-tool template actor");
+    let conversation_peer = run_tool["parameter_bindings"]
+        .as_array()
+        .expect("run-tool parameter bindings")
+        .iter()
+        .find(|binding| binding["path"] == json!(["conversation_peer"]))
+        .expect("run-tool conversation peer binding");
+    assert_eq!(conversation_peer["value"], llm["id"]);
     assert!(operation.get("fn").is_none());
     assert!(operation.get("source").is_none());
     assert!(operation.get("bytecode").is_none());
@@ -828,6 +844,13 @@ fn assert_materialized_item(events: &[Value], expected: &Value, index: usize) {
             .unwrap_or_else(|| panic!("missing materialized actor {id}"));
         assert_eq!(spawned["factory"], actor["factory"]);
         assert_eq!(spawned["spec"]["params"]["system"], actor["system"]);
+        if actor["factory"] == "nefor.factory.run-tool" {
+            let peer = id
+                .strip_suffix(".run-tool")
+                .map(|prefix| format!("{prefix}.llm"))
+                .expect("dynamic run-tool id suffix");
+            assert_eq!(spawned["spec"]["params"]["conversation_peer"], peer);
+        }
         let dynamic = if actor["dynamic"].is_object() {
             json!({
                 "collection": "<runtime>",

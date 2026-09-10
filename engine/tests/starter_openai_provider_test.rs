@@ -21,7 +21,7 @@ fn repo_root() -> PathBuf {
 }
 
 #[test]
-fn starter_chatgpt_command_has_no_web_search_bypass_and_compositor_advertises_native_tool() {
+fn starter_chatgpt_command_has_no_web_search_bypass_and_compositor_advertises_routed_tools() {
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
     set_package_path(&lua).expect("set package.path");
@@ -51,11 +51,18 @@ fn starter_chatgpt_command_has_no_web_search_bypass_and_compositor_advertises_na
         assert(#sent == 1)
         assert(sent[1].kind == "selected-gate.tools.advertise")
         assert(sent[1].body.source == "chatgpt")
-        assert(#sent[1].body.tools == 1)
-        local web = sent[1].body.tools[1]
-        assert(web.name == "web_search")
-        assert(web.execution.kind == "provider_native")
-        assert(web.execution.provider == "chatgpt")
+        assert(#sent[1].body.tools == 6)
+        local expected_tools = {
+          web_search = true, web_open = true, web_click = true,
+          web_find = true, web_image_search = true, web_screenshot = true,
+        }
+        for _, web in ipairs(sent[1].body.tools) do
+          assert(expected_tools[web.name])
+          expected_tools[web.name] = nil
+          assert(web.execution.kind == "routed")
+          assert(web.execution.provider == nil)
+        end
+        assert(next(expected_tools) == nil)
         "#,
     )
     .exec()

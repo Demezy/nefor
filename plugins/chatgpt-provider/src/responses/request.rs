@@ -96,7 +96,7 @@ pub enum Verbosity {
 ///   - `message` — user/assistant text turns
 ///   - `function_call` — model invoking a tool
 ///   - `function_call_output` — result fed back to the model
-///   - `web_search_call` — provider-hosted search state, replayed natively
+///   - `web_search_call` — legacy provider-native state preserved opaquely when replayed
 ///   - `reasoning` — chain-of-thought (passed through verbatim across
 ///     turns to preserve state on the subscription path)
 ///   - `compaction` — native opaque compaction state returned by the
