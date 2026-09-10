@@ -23,6 +23,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - uses: taiki-e/install-action@just
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
 
       - name: Install managed tui-driver
         run: cargo install --git https://github.com/amenocturne/tui-driver.git --rev 0919a8efb130f5e5784dab227a84550284e08ad4 --locked tui-driver
