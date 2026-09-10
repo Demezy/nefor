@@ -25,6 +25,7 @@ local queued_input = require("libs.chat.queued_input")
 local model_selection = require("libs.chat.model_selection")
 local dispatch      = require("libs.chat.dispatch")
 local mag_run_bindings = require("libs.mag-run-bindings")
+local raw_selector = require("libs.chat.raw_selector")
 
 local shallow_merge = common.shallow_merge
 local NIL_SENTINEL  = common.NIL_SENTINEL
@@ -131,6 +132,7 @@ local function prompt_widget_opts(state)
     on_change   = "input.changed",
     on_submit   = "input.submit",
     completions = state.command_completions or {},
+    completion_context = state,
     history     = function() return state.prompt_history or {} end,
   }
 end
@@ -143,6 +145,15 @@ local function fold_prompt_patch(state, patch)
   if patch.completion     ~= nil then out.completion     = patch.completion     end
   if patch.history_cursor ~= nil then out.history_cursor = patch.history_cursor end
   return shallow_merge(state, out)
+end
+
+local function refresh_prompt_completion(state)
+  if state.completion == nil then return state end
+  local patch = W.prompt.refresh_completion(prompt_widget_opts(state), {
+    value = state.input_value,
+    completion = state.completion,
+  })
+  return fold_prompt_patch(state, patch or {})
 end
 
 local function has_pending_plan(state)
@@ -321,6 +332,7 @@ local function reset_session_state(state, patch)
     pending_user_echo_id = NIL_SENTINEL,
     queued_entry_id = NIL_SENTINEL,
     raw_tool_id = NIL_SENTINEL,
+    raw_selector = raw_selector.initial(),
     resume_loading = NIL_SENTINEL,
     replay_mode = NIL_SENTINEL,
     last_esc_ms = NIL_SENTINEL,
@@ -606,6 +618,7 @@ local function handle_session_end(msg, state)
     usage = clear_session_usage(state),
     pending_plan_status = NIL_SENTINEL,
     raw_tool_id = NIL_SENTINEL,
+    raw_selector = raw_selector.initial(),
     popup = NIL_SENTINEL,
     popup_queue = NIL_SENTINEL,
     toasts = {},
@@ -924,10 +937,11 @@ local function handle_tool_start(msg, state)
   else input_str = tostring(msg.input) end
   local raw_input = msg.input
   local contract = (state.tool_displays or {})[msg.name]
-  return transcript.upsert_tool_call(
+  local next_state = transcript.upsert_tool_call(
     state, msg.id, msg.name, input_str,
     type(msg.input) == "table" and msg.input or nil,
-    contract, raw_input, msg.turn_id), {}
+    contract, raw_input, msg.turn_id)
+  return refresh_prompt_completion(next_state), {}
 end
 
 local function handle_tool_register(msg, state)
@@ -958,7 +972,8 @@ local function handle_tool_end(msg, state)
   end
   local next_state = transcript.attach_tool_end(
     state, msg.id, msg.output, msg.error == true, msg.completion_delivery)
-  return transcript.flush_graph_results_if_stable(next_state), {}
+  next_state = transcript.flush_graph_results_if_stable(next_state)
+  return refresh_prompt_completion(next_state), {}
 end
 
 local function handle_graph_result_append(msg, state)
@@ -1570,6 +1585,8 @@ local function apply_conversation_action(state, item)
       in_flight = NIL_SENTINEL,
       active_turn_id = NIL_SENTINEL,
       active_turn_entry_start = NIL_SENTINEL,
+      raw_selector = raw_selector.initial(),
+      raw_tool_id = NIL_SENTINEL,
     })
   end
   if item.kind == "active_cleared" then
@@ -1581,7 +1598,11 @@ local function apply_conversation_action(state, item)
   end
   if item.kind == "snapshot_reset" then
     state = close_and_flush_lead_unit(state)
-    return shallow_merge(state, { entries = {} })
+    return shallow_merge(state, {
+      entries = {},
+      raw_selector = raw_selector.initial(),
+      raw_tool_id = NIL_SENTINEL,
+    })
   end
   if item.kind == "turn_started" then
     if state.active_turn_id == item.turn_id then

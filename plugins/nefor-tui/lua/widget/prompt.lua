@@ -81,10 +81,11 @@ local function compute_completion(opts, text, prev)
   -- `source(body)` lets the caller derive a per-keystroke listing from
   -- the trigger body — @-path autocomplete uses it to scope the
   -- directory listing to the prefix in body.
-  local entries = cfg.source and cfg.source(body or "") or {}
+  local context = opts.completion_context
+  local entries = cfg.source and cfg.source(body or "", context) or {}
   local matches
   if cfg.filter ~= nil then
-    matches = cfg.filter(entries, body or "")
+    matches = cfg.filter(entries, body or "", context)
   else
     local q = (body or ""):lower()
     matches = {}
@@ -217,7 +218,7 @@ end
 -- caller re-open the dropdown after externally editing `value` (e.g.
 -- after applying a directory-style entry).
 function M.refresh_completion(opts, state)
-  return compute_completion(opts, state.value or "", state.completion)
+  return compute_completion(opts, state.value or "", nil)
 end
 
 -- Handle a reducer message. Returns `{ state = <patch> }` when consumed,

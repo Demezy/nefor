@@ -6,6 +6,7 @@
 local M = {}
 local extensions = require("libs.chat.extensions")
 local quota_policy = require("libs.chat.quota_policy")
+local raw_selector = require("libs.chat.raw_selector")
 
 local function active_usage_config()
   local ok, config = pcall(require, "config")
@@ -28,7 +29,7 @@ M.BASE_COMMANDS = {
   { name = "yolo",    aliases = {},          hint = "approve all tool requests (DANGEROUS)",  takes_args = false },
   { name = "approve", aliases = {},          hint = "approve the pending plan (optional reason)", takes_args = true },
   { name = "reject",  aliases = {},          hint = "reject the pending plan with a reason", takes_args = true },
-  { name = "raw",     aliases = {},          hint = "reveal one tool receipt by id",          takes_args = true },
+  { name = "raw",     aliases = {},          hint = "reveal one numbered tool receipt",       takes_args = true },
 }
 
 local function commands()
@@ -73,13 +74,17 @@ local function ranked_command_matches(q)
   return out
 end
 
-local function slash_arg_filter(query)
+local function slash_arg_filter(query, state)
   local q = (query or ""):lower()
   local cmd_name, arg_query = q:match("^(%S+)%s+(.*)$")
   if cmd_name == nil then return nil end
 
   local cmd = command_by_exact_name_or_alias(cmd_name)
-  if cmd == nil or type(cmd.arg_completions) ~= "table" then return {} end
+  if cmd == nil then return {} end
+  if cmd.name == "raw" then
+    return raw_selector.candidates(state and state.entries or {}, arg_query)
+  end
+  if type(cmd.arg_completions) ~= "table" then return {} end
 
   local out = {}
   for _, arg in ipairs(cmd.arg_completions) do
@@ -95,8 +100,8 @@ local function slash_arg_filter(query)
   return out
 end
 
-local function slash_filter(query)
-  local arg_matches = slash_arg_filter(query)
+local function slash_filter(query, state)
+  local arg_matches = slash_arg_filter(query, state)
   if arg_matches ~= nil then return arg_matches end
 
   -- Case-insensitive prefix match against name OR aliases.
@@ -259,16 +264,16 @@ function M.completions()
     {
       trigger      = "/",
       anchor       = "start",
-      source       = commands,
-      filter       = function(_, body) return slash_filter(body or "") end,
+      source       = function() return commands() end,
+      filter       = function(_, body, state) return slash_filter(body or "", state) end,
       format_entry = slash_format,
       apply        = slash_apply,
     },
     {
       trigger      = "/",
       anchor       = "start-spaced",
-      source       = commands,
-      filter       = function(_, body) return slash_filter(body or "") end,
+      source       = function() return commands() end,
+      filter       = function(_, body, state) return slash_filter(body or "", state) end,
       format_entry = slash_format,
       apply        = slash_apply,
     },

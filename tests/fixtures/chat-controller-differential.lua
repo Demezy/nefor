@@ -87,7 +87,8 @@ local function stable(value, seen)
   for _, key in ipairs(keys) do
     -- Entry versions and generated optimistic IDs are representation noise;
     -- their surrounding canonical IDs, content, ordering, and effects remain.
-    if key ~= "version" and key ~= "v" then
+    if key ~= "version" and key ~= "v"
+        and key ~= "raw_selector" and key ~= "raw_number" then
       parts[#parts + 1] = stable(key, seen) .. "=" .. stable(value[key], seen)
     end
   end

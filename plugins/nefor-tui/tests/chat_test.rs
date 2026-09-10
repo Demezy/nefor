@@ -3382,6 +3382,158 @@ fn ctrl_o_toggles_expanded_details() {
     );
 }
 
+#[test]
+fn raw_picker_uses_stable_numbers_semantic_titles_and_newest_first_completion() {
+    let mut engine = Engine::new(120, 32).expect("engine");
+    load_chat_scenario(&mut engine);
+    let _ = render_str(&mut engine);
+
+    dispatch_event(
+        &mut engine,
+        json!({ "kind": "tool.register", "tools": [{
+            "name": "shell.script",
+            "display": {"compact":{"label":"Run command","primary":{"label":"command","select":{"source":"args","path":"command"},"kind":"scalar"}},"expanded":{"label":"Run command","fields":[]},"result":{"kind":"receipt","text":"done","fields":[]}}
+        }] }),
+    );
+    fixture_tool_started(
+        &mut engine,
+        "exchange-first",
+        "shell.script",
+        json!({ "command": "echo first", "secret": "RAW FIRST" }),
+    );
+    fixture_tool_started(
+        &mut engine,
+        "exchange-second",
+        "shell.script",
+        json!({ "command": "echo second", "secret": "RAW SECOND" }),
+    );
+    fixture_tool_completed(&mut engine, "exchange-first", json!({ "ok": true }), false);
+
+    dispatch_event(
+        &mut engine,
+        json!({ "kind": "input.changed", "value": "/raw " }),
+    );
+    {
+        let state = engine.state_table().expect("state");
+        let completion: mlua::Table = state.get("completion").expect("completion");
+        let matches: mlua::Table = completion.get("matches").expect("matches");
+        let rows = matches
+            .sequence_values::<mlua::Table>()
+            .map(|entry| {
+                let entry = entry.expect("candidate");
+                (
+                    entry.get::<String>("name").expect("name"),
+                    entry.get::<String>("hint").expect("hint"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![
+                ("raw 2".into(), "Run command · echo second …".into()),
+                ("raw 1".into(), "Run command · echo first".into()),
+            ]
+        );
+    }
+
+    fixture_tool_started(
+        &mut engine,
+        "exchange-third",
+        "shell.script",
+        json!({ "command": "echo third", "secret": "RAW THIRD" }),
+    );
+    let state = engine.state_table().expect("state");
+    let completion: mlua::Table = state.get("completion").expect("completion");
+    let matches: mlua::Table = completion.get("matches").expect("matches");
+    let names = matches
+        .sequence_values::<mlua::Table>()
+        .map(|entry| entry.unwrap().get::<String>("name").unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["raw 3", "raw 2", "raw 1"]);
+    drop(state);
+
+    engine
+        .handle_key(key("enter"))
+        .expect("select newest raw suggestion");
+    let selected = render_str(&mut engine);
+    assert!(
+        selected.contains("RAW THIRD"),
+        "Enter should select the newest candidate: {selected}"
+    );
+    assert!(
+        selected.contains("raw: visible (/raw 3 to hide)"),
+        "{selected}"
+    );
+
+    dispatch_event(
+        &mut engine,
+        json!({ "kind": "input.changed", "value": "/raw 1" }),
+    );
+    let state = engine.state_table().expect("state");
+    let completion: mlua::Table = state.get("completion").expect("completion");
+    let matches: mlua::Table = completion.get("matches").expect("matches");
+    assert_eq!(
+        matches.raw_len(),
+        1,
+        "numeric prefix must filter candidates"
+    );
+    drop(state);
+
+    dispatch_event(
+        &mut engine,
+        json!({ "kind": "input.submit", "value": "/raw 1" }),
+    );
+    let raw = render_str(&mut engine);
+    assert!(
+        raw.contains("RAW FIRST"),
+        "first numbered call was not revealed: {raw}"
+    );
+    assert!(
+        !raw.contains("RAW SECOND") && !raw.contains("RAW THIRD"),
+        "only one raw call may be selected: {raw}"
+    );
+    assert!(
+        raw.contains("raw: visible (/raw 1 to hide)"),
+        "short-number hint missing: {raw}"
+    );
+
+    dispatch_event(
+        &mut engine,
+        json!({ "kind": "input.submit", "value": "/raw exchange-first" }),
+    );
+    let hidden = render_str(&mut engine);
+    assert!(
+        !hidden.contains("RAW FIRST"),
+        "full exchange id fallback must resolve the same call: {hidden}"
+    );
+
+    dispatch_event(
+        &mut engine,
+        json!({ "kind": "input.changed", "value": "/raw 01" }),
+    );
+    let state = engine.state_table().expect("state");
+    let completion: mlua::Table = state.get("completion").expect("completion");
+    let matches: mlua::Table = completion.get("matches").expect("matches");
+    assert_eq!(
+        matches.raw_len(),
+        0,
+        "non-canonical leading-zero selectors must not autocomplete"
+    );
+    drop(state);
+
+    dispatch_event(
+        &mut engine,
+        json!({ "kind": "input.submit", "value": "/raw 01" }),
+    );
+    let state = engine.state_table().expect("state");
+    let popup: mlua::Table = state.get("popup").expect("popup");
+    assert_eq!(
+        popup.get::<String>("body").expect("popup body"),
+        "No tool call matching `01`",
+        "the resolver must reject the same non-canonical selector as completion"
+    );
+}
+
 fn collapsed_read_file_snapshot(width: u16, running: bool) -> String {
     let mut engine = Engine::new(width, 24).expect("engine");
     load_chat_scenario(&mut engine);
@@ -10421,6 +10573,17 @@ fn live_semantic_tools_render_without_a_display_catalog() {
             open.contains(name),
             "an open canonical exchange must render through the ordinary tool row:\n{open}"
         );
+        let raw_number_before = {
+            let state = engine.state_table().expect("state");
+            let entries: mlua::Table = state.get("entries").expect("entries");
+            (1..=entries.raw_len())
+                .find_map(|index| {
+                    let entry = entries.get::<mlua::Table>(index).ok()?;
+                    (entry.get::<String>("id").ok()?.as_str() == id)
+                        .then(|| entry.get::<i64>("raw_number").expect("raw number"))
+                })
+                .expect("open tool row")
+        };
         dispatch_event(
             &mut engine,
             json!({
@@ -10436,18 +10599,16 @@ fn live_semantic_tools_render_without_a_display_catalog() {
             .get("entries")
             .expect("entries");
         let matching = (1..=entries.raw_len())
-            .filter(|index| {
-                entries
-                    .get::<mlua::Table>(*index)
-                    .ok()
-                    .and_then(|entry| entry.get::<String>("id").ok())
-                    .as_deref()
-                    == Some(id)
+            .filter_map(|index| {
+                let entry = entries.get::<mlua::Table>(index).ok()?;
+                (entry.get::<String>("id").ok()?.as_str() == id)
+                    .then(|| entry.get::<i64>("raw_number").expect("raw number"))
             })
-            .count();
+            .collect::<Vec<_>>();
         assert_eq!(
-            matching, 1,
-            "call completion must enrich rather than duplicate the open tool row"
+            matching,
+            vec![raw_number_before],
+            "call completion must enrich one row without changing its raw number"
         );
     }
     for (id, kind, exchange) in [
@@ -10566,6 +10727,40 @@ fn replayed_semantic_tools_render_without_a_display_catalog() {
         }),
         "snapshot/replay of canonical tool facts must not execute a tool: {replay_effects:?}"
     );
+
+    dispatch_event(
+        &mut engine,
+        json!({
+            "kind": "conversation.projection.delta", "conversation_id": "generic-replay-tools",
+            "change": { "kind": "tool_call_completed", "turn_id": "fresh-turn",
+                "exchange": { "id": "replay-three", "name": "archive.search",
+                    "status": "call_completed", "arguments": { "needle": "later marker" } } }
+        }),
+    );
+    let state = engine.state_table().expect("state");
+    let entries: mlua::Table = state.get("entries").expect("entries");
+    let numbered = (1..=entries.raw_len())
+        .filter_map(|index| {
+            let entry = entries.get::<mlua::Table>(index).ok()?;
+            if entry.get::<String>("kind").ok()?.as_str() != "tool_call" {
+                return None;
+            }
+            Some((
+                entry.get::<String>("id").ok()?,
+                entry.get::<i64>("raw_number").ok()?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        numbered,
+        vec![
+            ("replay-one".into(), 1),
+            ("replay-two".into(), 2),
+            ("replay-three".into(), 3),
+        ],
+        "snapshot replay must reconstruct chronological numbers before live calls continue them"
+    );
+    drop(state);
 
     engine
         .handle_key(key("ctrl_o"))

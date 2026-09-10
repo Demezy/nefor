@@ -16,6 +16,7 @@ local usage_config = ok_config and config.active and config.active.usage or {
 }
 local Entry = require("libs.chat.entry")
 local height_cache = require("libs.chat.height_cache")
+local raw_selector = require("libs.chat.raw_selector")
 local queued_input = require("libs.chat.queued_input")
 local model_selection = require("libs.chat.model_selection")
 local extensions = require("libs.chat.extensions")
@@ -129,22 +130,21 @@ return function(msg, state)
     if type(requested) ~= "string" or requested == "" then
       return shallow_merge(state, {
         input_value = "", completion = NIL_SENTINEL,
-        popup = { variant = "warning", title = "/raw", body = "Usage: /raw <tool-call-id>" },
+        popup = { variant = "warning", title = "/raw", body = "Usage: /raw <number>" },
       }), {}
     end
-    for _, entry in ipairs(state.entries or {}) do
-      if entry.kind == "tool_call" and entry.id == requested then
-        height_cache.invalidate_all()
-        return shallow_merge(state, {
-          input_value = "", completion = NIL_SENTINEL,
-          expanded_details = true,
-          raw_tool_id = state.raw_tool_id == requested and NIL_SENTINEL or requested,
-        }), {}
-      end
+    local entry = raw_selector.resolve(state.entries, requested)
+    if entry ~= nil then
+      height_cache.invalidate_all()
+      return shallow_merge(state, {
+        input_value = "", completion = NIL_SENTINEL,
+        expanded_details = true,
+        raw_tool_id = state.raw_tool_id == entry.id and NIL_SENTINEL or entry.id,
+      }), {}
     end
     return shallow_merge(state, {
       input_value = "", completion = NIL_SENTINEL,
-      popup = { variant = "warning", title = "/raw", body = "No tool call with id `" .. requested .. "`" },
+      popup = { variant = "warning", title = "/raw", body = "No tool call matching `" .. requested .. "`" },
     }), {}
   end
   if cmd == "login" or cmd == "logout" then

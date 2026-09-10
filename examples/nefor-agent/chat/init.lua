@@ -186,6 +186,7 @@ local extensions = require("libs.chat.extensions")
 extensions.load(active_config())
 
 local history = require("libs.chat.history")
+local raw_selector = require("libs.chat.raw_selector")
 local statusline = require("chat.statusline")
 local slash = require("chat.slash")
 local view = require("libs.chat.view").build {
@@ -274,6 +275,7 @@ local function initial_state()
     usage_request_seq = 0,
     expanded_details = false,
     raw_tool_id     = nil,
+    raw_selector    = raw_selector.initial(),
     tool_displays   = {},
     completion       = nil,
     last_esc_ms      = nil,

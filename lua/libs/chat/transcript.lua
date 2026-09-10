@@ -3,6 +3,7 @@ local log     = require("libs.chat.log")
 local common  = require("libs.chat.common")
 local shallow_merge = common.shallow_merge
 local NIL_SENTINEL  = common.NIL_SENTINEL
+local raw_selector = require("libs.chat.raw_selector")
 
 local M = {}
 
@@ -279,8 +280,10 @@ function M.upsert_tool_call(state, id, name, input, input_table, display, raw_in
       return shallow_merge(state, { entries = replace_entry(state.entries, i, updated) })
     end
   end
-  return M.push_entry(state,
-    Entry.tool_call(id, name, input, input_table, display, raw_input, turn_id))
+  local selector, raw_number = raw_selector.assign(state.raw_selector)
+  return shallow_merge(M.push_entry(state,
+    Entry.tool_call(id, name, input, input_table, display, raw_input, turn_id, raw_number)),
+    { raw_selector = selector })
 end
 
 function M.attach_tool_end(state, id, output, error_flag, completion_delivery)

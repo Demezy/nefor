@@ -14,6 +14,8 @@ local pretty_json = common.pretty_json
 local humanize_duration_ms = common.humanize_duration_ms
 local format_wall_clock_duration_ms = common.format_wall_clock_duration_ms
 local bordered_box = common.bordered_box
+local tool_presentation = require("libs.chat.tool_presentation")
+local raw_selector = require("libs.chat.raw_selector")
 
 local M = {}
 
@@ -132,35 +134,12 @@ local function raw_tool_expanded(entry)
   end
   return tui.column { gap = 0, children = rows }
 end
-local function delayed_mag_delivery(entry, args)
-  if type(entry.display) ~= "table" or entry.display.lifecycle ~= "delayed" then return nil end
-  local is_detached_dispatch = entry.name == "mag-apply"
-    and type(args) == "table" and args.run_id == nil
-  if not is_detached_dispatch or entry.output == nil then return nil end
-  if entry.completion_delivery == "sync" or entry.completion_delivery == "async" then
-    return entry.completion_delivery
-  end
-  return nil
+local function semantic_projection(entry)
+  return tool_presentation.projection(entry)
 end
 
-local function semantic_projection(entry)
-  local display = require("libs.chat.tool_display")
-  local args = entry.raw_input
-  if args == nil then args = entry.input_table or entry.input end
-  local contract = entry.display or display.generic(entry.name)
-  local projected, err = display.project(contract, args, entry.output, entry.error)
-  if not projected then error("tool display invariant: " .. tostring(err)) end
-  local delivery = delayed_mag_delivery(entry, args)
-  if delivery then projected.label = projected.label .. " [" .. delivery .. "]" end
-  return projected
-end
 local function tool_header(entry, glyph)
-  local p = assert(semantic_projection(entry))
-  local label = p.label
-  local header = glyph .. label
-  if p and p.primary and p.primary ~= "" then header = header .. " · " .. p.primary end
-  if entry.output == nil and not entry.error then header = header .. " …" end
-  return header
+  return glyph .. tool_presentation.title(entry)
 end
 local function collapsed_tool_header(entry)
   return tool_header(entry, "▸ ")
@@ -227,9 +206,7 @@ local function tool_expanded(entry, raw)
     rows[#rows + 1] = tui.text { content = "  " .. field.label .. ": " .. field.value, style = STYLE.footer, wrap = "word" }
   end
   rows[#rows + 1] = tui.text {
-    content = raw
-      and "  raw: visible (/raw " .. tostring(entry.id or "?") .. " to hide)"
-      or "  raw: hidden (/raw " .. tostring(entry.id or "?") .. " to reveal)",
+    content = raw_selector.hint(entry, raw),
     style = STYLE.footer,
     wrap = "none",
   }

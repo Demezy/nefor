@@ -131,7 +131,7 @@ The transcript deliberately favors semantic summaries:
 
 - tool calls render as compact **receipts** rather than raw payload dumps;
 - reasoning and tool details are collapsed until `Ctrl+O`;
-- `Ctrl+R` reveals raw data for the latest expanded tool receipt, and `/raw <tool-call-id>` targets one receipt;
+- `Ctrl+R` reveals raw data for the latest expanded tool receipt; expanded receipts show stable short numbers, and `/raw N` offers newest-first completion to target one;
 - selecting transcript text with the mouse copies it to the clipboard and shows a toast.
 
 ## Paths, images, and links
