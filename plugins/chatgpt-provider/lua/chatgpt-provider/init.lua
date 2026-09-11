@@ -77,6 +77,8 @@ local function object_schema(properties, required)
   }
 end
 
+local citation_guidance = " When citing web sources in a user-facing answer, use regular Markdown links with URLs returned by these tools. Raw OpenAI citation markers are not rendered in this interface, so do not use them as citations. Keep opaque source IDs for tool navigation."
+
 local function tools(provider)
   assert(type(provider) == "string" and #provider > 0,
     "chatgpt-provider.tools: provider required")
@@ -85,7 +87,7 @@ local function tools(provider)
   return {
     {
       name = "web_search",
-      description = "Search the public web. Use separate calls for separate queries.",
+      description = "Search the public web. Use separate calls for separate queries." .. citation_guidance,
       parameters = query_schema(),
       display = content_display("web search", "query", {
         field("query", "args", "query", "scalar", "missing"),
@@ -97,7 +99,7 @@ local function tools(provider)
     },
     {
       name = "web_open",
-      description = "Open a URL or web result reference, optionally near a zero-indexed line number.",
+      description = "Open a URL or web result reference, optionally near a zero-indexed line number." .. citation_guidance,
       parameters = object_schema({
         url = { type = "string", minLength = 1, description = "URL or web result reference." },
         line = { type = "integer", minimum = 0, description = "Optional zero-indexed line number." },
@@ -112,7 +114,7 @@ local function tools(provider)
     },
     {
       name = "web_click",
-      description = "Open a numbered link from a URL or provider-issued web result reference.",
+      description = "Open a numbered link from a URL or provider-issued web result reference." .. citation_guidance,
       parameters = object_schema({
         url = { type = "string", minLength = 1, description = "URL or web result reference." },
         link = { type = "integer", minimum = 0, description = "Numbered link from the opened page." },
@@ -130,7 +132,7 @@ local function tools(provider)
     },
     {
       name = "web_find",
-      description = "Find text within a URL or provider-issued web result reference.",
+      description = "Find text within a URL or provider-issued web result reference." .. citation_guidance,
       parameters = object_schema({
         url = { type = "string", minLength = 1, description = "URL or web result reference." },
         pattern = { type = "string", minLength = 1, description = "Text to find." },
@@ -149,7 +151,7 @@ local function tools(provider)
     },
     {
       name = "web_image_search",
-      description = "Search the public web for images. This remains an image query on the provider wire.",
+      description = "Search the public web for images. This remains an image query on the provider wire." .. citation_guidance,
       parameters = query_schema(),
       display = content_display("web image search", "query", {
         field("query", "args", "query", "scalar", "missing"),
@@ -161,7 +163,7 @@ local function tools(provider)
     },
     {
       name = "web_screenshot",
-      description = "Request a zero-indexed PDF page screenshot. Open the PDF with web_open first, then pass the provider-issued PDF reference returned in its output; direct PDF URLs may not resolve. The endpoint currently returns plaintext and opaque references, not proven image media.",
+      description = "Request a zero-indexed PDF page screenshot. Open the PDF with web_open first, then pass the provider-issued PDF reference returned in its output; direct PDF URLs may not resolve. The endpoint currently returns plaintext and opaque references, not proven image media." .. citation_guidance,
       parameters = object_schema({
         url = { type = "string", minLength = 1, description = "Provider-issued PDF reference returned by web_open." },
         page = { type = "integer", minimum = 0, description = "Zero-indexed PDF page number." },

@@ -65,6 +65,10 @@ fn advertises_six_routed_read_tools_with_closed_schemas_and_content_results() {
           assert(tool.display.result.kind == "content")
           assert(tool.display.result.text == nil)
           assert(tool.display.lifecycle == "delayed")
+          assert(tool.description:find("use regular Markdown links with URLs returned by these tools", 1, true))
+          assert(tool.description:find("Raw OpenAI citation markers are not rendered in this interface", 1, true))
+          assert(tool.description:find("do not use them as citations", 1, true))
+          assert(tool.description:find("Keep opaque source IDs for tool navigation", 1, true))
           assert(display.validate(tool.display))
         end
         assert(next(expected) == nil)
