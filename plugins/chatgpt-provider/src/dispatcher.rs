@@ -2227,7 +2227,7 @@ async fn handle_completion_request(
             effective_model.as_deref(),
         ) {
             Ok(Some(items)) => {
-                history.extend(items.into_iter().map(|item| HistoryEntry::Native { item }));
+                history.extend(items.into_iter().map(HistoryEntry::from));
                 continue;
             }
             Ok(None) => {}

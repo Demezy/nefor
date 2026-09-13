@@ -70,7 +70,7 @@ pub fn history_to_input(history: &[HistoryEntry], system_prompt: Option<&str>) -
     for entry in history {
         let msg = match entry {
             HistoryEntry::Native { item } => {
-                match item {
+                match item.as_ref() {
                     ResponseItem::FunctionCall { call_id, .. } => {
                         unanswered_tool_calls.insert(call_id.clone());
                     }
@@ -79,7 +79,7 @@ pub fn history_to_input(history: &[HistoryEntry], system_prompt: Option<&str>) -
                     }
                     _ => {}
                 }
-                input.push(item.clone());
+                input.push(item.as_ref().clone());
                 continue;
             }
             HistoryEntry::Message { message } => message,
@@ -552,21 +552,17 @@ mod tests {
     fn native_reasoning_and_call_stay_ordered_before_neutral_tool_output() {
         let history = vec![
             HistoryEntry::from(Message::user("inspect the project")),
-            HistoryEntry::Native {
-                item: ResponseItem::Reasoning {
-                    id: Some("rs_1".into()),
-                    encrypted_content: Some("sealed-plan".into()),
-                    summary: vec![],
-                },
-            },
-            HistoryEntry::Native {
-                item: ResponseItem::FunctionCall {
-                    id: Some("fc_1".into()),
-                    name: "inspect".into(),
-                    arguments: "{}".into(),
-                    call_id: "call_1".into(),
-                },
-            },
+            HistoryEntry::from(ResponseItem::Reasoning {
+                id: Some("rs_1".into()),
+                encrypted_content: Some("sealed-plan".into()),
+                summary: vec![],
+            }),
+            HistoryEntry::from(ResponseItem::FunctionCall {
+                id: Some("fc_1".into()),
+                name: "inspect".into(),
+                arguments: "{}".into(),
+                call_id: "call_1".into(),
+            }),
             HistoryEntry::from(Message::tool_result("call_1".into(), "project details")),
         ];
 

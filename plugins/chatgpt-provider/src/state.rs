@@ -93,12 +93,20 @@ pub enum Message {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HistoryEntry {
     Message { message: Message },
-    Native { item: ResponseItem },
+    Native { item: Box<ResponseItem> },
 }
 
 impl From<Message> for HistoryEntry {
     fn from(message: Message) -> Self {
         Self::Message { message }
+    }
+}
+
+impl From<ResponseItem> for HistoryEntry {
+    fn from(item: ResponseItem) -> Self {
+        Self::Native {
+            item: Box::new(item),
+        }
     }
 }
 
@@ -737,10 +745,7 @@ impl Chats {
         let chat = g
             .get_mut(id)
             .ok_or_else(|| ChatsError::NotFound(id.clone()))?;
-        chat.history = items
-            .into_iter()
-            .map(|item| HistoryEntry::Native { item })
-            .collect();
+        chat.history = items.into_iter().map(HistoryEntry::from).collect();
         Ok(())
     }
 
@@ -758,7 +763,7 @@ impl Chats {
             .ok_or_else(|| ChatsError::NotFound(id.clone()))?;
         let mut history = items
             .into_iter()
-            .map(|item| HistoryEntry::Native { item })
+            .map(HistoryEntry::from)
             .collect::<Vec<_>>();
         history.append(&mut chat.history);
         chat.history = history;
@@ -775,7 +780,7 @@ impl Chats {
             .get_mut(id)
             .ok_or_else(|| ChatsError::NotFound(id.clone()))?;
         chat.history
-            .extend(items.into_iter().map(|item| HistoryEntry::Native { item }));
+            .extend(items.into_iter().map(HistoryEntry::from));
         Ok(())
     }
 
@@ -946,16 +951,15 @@ fn has_unanswered_tool_call(history: &[HistoryEntry], tool_call_id: &str) -> boo
     let mut seen_call = false;
     for entry in history {
         match entry {
-            HistoryEntry::Native {
-                item: ResponseItem::FunctionCall { call_id, .. },
-            } if call_id == tool_call_id => {
-                seen_call = true;
-            }
-            HistoryEntry::Native {
-                item: ResponseItem::FunctionCallOutput { call_id, .. },
-            } if call_id == tool_call_id => {
-                seen_call = false;
-            }
+            HistoryEntry::Native { item } => match item.as_ref() {
+                ResponseItem::FunctionCall { call_id, .. } if call_id == tool_call_id => {
+                    seen_call = true;
+                }
+                ResponseItem::FunctionCallOutput { call_id, .. } if call_id == tool_call_id => {
+                    seen_call = false;
+                }
+                _ => {}
+            },
             HistoryEntry::Message {
                 message: Message::Assistant { tool_calls, .. },
             } if tool_calls.iter().any(|tc| tc.id == tool_call_id) => {
@@ -982,25 +986,24 @@ fn repair_tool_call_history(history: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
 
     for entry in history {
         match &entry {
-            HistoryEntry::Native {
-                item: ResponseItem::FunctionCall { call_id, .. },
-            } => {
-                pending.push(call_id.clone());
-                repaired.push(entry);
-            }
-            HistoryEntry::Native {
-                item: ResponseItem::FunctionCallOutput { call_id, .. },
-            } => {
-                if let Some(i) = pending.iter().position(|id| id == call_id) {
-                    pending.remove(i);
+            HistoryEntry::Native { item } => match item.as_ref() {
+                ResponseItem::FunctionCall { call_id, .. } => {
+                    pending.push(call_id.clone());
                     repaired.push(entry);
-                } else {
-                    tracing::warn!(
-                        tool_call_id = %call_id,
-                        "dropping orphan native function_call_output during chat.restore"
-                    );
                 }
-            }
+                ResponseItem::FunctionCallOutput { call_id, .. } => {
+                    if let Some(i) = pending.iter().position(|id| id == call_id) {
+                        pending.remove(i);
+                        repaired.push(entry);
+                    } else {
+                        tracing::warn!(
+                            tool_call_id = %call_id,
+                            "dropping orphan native function_call_output during chat.restore"
+                        );
+                    }
+                }
+                _ => repaired.push(entry),
+            },
             HistoryEntry::Message {
                 message: Message::Assistant { tool_calls, .. },
             } => {
@@ -1030,7 +1033,6 @@ fn repair_tool_call_history(history: Vec<HistoryEntry>) -> Vec<HistoryEntry> {
                 close_pending_tool_calls(&mut repaired, &mut pending);
                 repaired.push(entry);
             }
-            HistoryEntry::Native { .. } => repaired.push(entry),
         }
     }
 
