@@ -94,6 +94,7 @@ test-engine target *args:
 test-provider:
     cargo test -p openai-provider --lib
     cargo test -p openai-provider --features full-tests --test stream_integration
+    cargo test -p openai-provider --features full-tests --test completion_dispatch
     cargo test -p chatgpt-provider --features full-tests
     cargo test -p generic-provider
     cargo test -p nefor --test openai_provider_lib_test

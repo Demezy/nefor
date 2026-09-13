@@ -21,8 +21,8 @@ use reqwest::header::{ACCEPT, ACCEPT_ENCODING, CONTENT_TYPE, RETRY_AFTER};
 use tokio_util::sync::CancellationToken;
 
 use crate::openai::{
-    parse_models_response, parse_sse_chunk, ChatRequest, Message, ModelInfo, SseEvent,
-    StreamOptions, ToolCall, ToolCallFunction, Usage,
+    parse_models_response, parse_sse_chunk, ChatRequest, Message, ModelInfo, ReasoningContinuation,
+    ReasoningDetails, SseEvent, StreamOptions, ToolCall, ToolCallFunction, Usage,
 };
 use crate::wire::WireTrace;
 
@@ -56,6 +56,7 @@ pub struct StreamOutcome {
     pub interrupted: bool,
     pub tool_calls: Vec<ToolCall>,
     pub reasoning_text: String,
+    pub reasoning_continuation: Option<ReasoningContinuation>,
 }
 
 /// Errors that can come out of the HTTP/SSE pipeline. All of them lower
@@ -639,6 +640,7 @@ impl StreamAttemptFailure {
         let replay_safe = matches!(error, StreamError::Body(_))
             && outcome.full_text.is_empty()
             && outcome.reasoning_text.is_empty()
+            && outcome.reasoning_continuation.is_none()
             && tool_calls.is_empty();
         Self { error, replay_safe }
     }
@@ -997,6 +999,34 @@ where
         SseEvent::ReasoningDelta(text) => {
             outcome.reasoning_text.push_str(&text);
             on_reasoning(ReasoningEvent::Delta(&text));
+        }
+        SseEvent::ReasoningContentDelta(text) => {
+            outcome.reasoning_text.push_str(&text);
+            if !matches!(
+                outcome.reasoning_continuation,
+                Some(ReasoningContinuation::Details { .. })
+            ) {
+                let mut accumulated = match outcome.reasoning_continuation.take() {
+                    Some(ReasoningContinuation::Content { reasoning_content }) => reasoning_content,
+                    _ => String::new(),
+                };
+                accumulated.push_str(&text);
+                outcome.reasoning_continuation = Some(ReasoningContinuation::Content {
+                    reasoning_content: accumulated,
+                });
+            }
+            on_reasoning(ReasoningEvent::Delta(&text));
+        }
+        SseEvent::ReasoningDetails(details) => {
+            let mut accumulated = match outcome.reasoning_continuation.take() {
+                Some(ReasoningContinuation::Details { reasoning_details }) => {
+                    reasoning_details.as_slice().to_vec()
+                }
+                _ => Vec::new(),
+            };
+            accumulated.extend(details);
+            outcome.reasoning_continuation = ReasoningDetails::from_chunks(accumulated)
+                .map(|reasoning_details| ReasoningContinuation::Details { reasoning_details });
         }
         SseEvent::ToolCallFragment {
             index,

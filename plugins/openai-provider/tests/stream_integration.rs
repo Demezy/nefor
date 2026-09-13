@@ -5,7 +5,7 @@
 //! pulling in axum/hyper-server for one test file.
 
 use nefor_mag::schema::{SchemaField, SchemaType, TypeSchema, SCHEMA_VERSION};
-use openai_provider::openai::Message;
+use openai_provider::openai::{Message, ReasoningContinuation};
 use openai_provider::state::{ChatId, Chats};
 use openai_provider::stream::{
     list_models, run_chat_stream, run_chat_stream_with_retry_progress,
@@ -1854,6 +1854,35 @@ async fn reasoning_content_reaches_the_reasoning_stream_accumulator() {
     assert_eq!(reasoning, ["thought"]);
     assert_eq!(outcome.full_text, "answer");
     assert_eq!(outcome.reasoning_text, "thought");
+    assert_eq!(
+        outcome.reasoning_continuation,
+        Some(ReasoningContinuation::Content {
+            reasoning_content: "thought".into()
+        })
+    );
+}
+
+#[tokio::test]
+async fn streamed_reasoning_details_preserve_every_chunk_and_unknown_field() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"first\",\"index\":0,\"future\":true}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"data\":\"sealed\",\"index\":1}],\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        "data: [DONE]\n\n"
+    )
+    .to_owned();
+    let (result, _, _) = run_scripted_stream(body).await;
+    let outcome = result.expect("valid structured reasoning stream");
+    assert_eq!(outcome.tool_calls[0].id, "call_1");
+    assert_eq!(
+        serde_json::to_value(outcome.reasoning_continuation.expect("continuation"))
+            .expect("serialize continuation"),
+        serde_json::json!({
+            "reasoning_details": [
+                {"type":"reasoning.text","text":"first","index":0,"future":true},
+                {"type":"reasoning.encrypted","data":"sealed","index":1}
+            ]
+        })
+    );
 }
 
 #[tokio::test]

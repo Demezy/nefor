@@ -70,6 +70,93 @@ pub fn provider_arguments(arguments: &str) -> String {
     }
 }
 
+/// Versioned provider-context format for an OpenAI-compatible assistant
+/// message's opaque native reasoning continuation.
+pub const REASONING_CONTEXT_FORMAT: &str = "openai-chat-reasoning-v1";
+
+/// Opaque structured reasoning details returned by an OpenAI-compatible provider.
+///
+/// OpenRouter requires every object, including unknown fields and duplicate
+/// entries, to be replayed in its original order. We therefore validate only
+/// the stable array-of-objects boundary and otherwise retain the JSON verbatim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReasoningDetails(Vec<Value>);
+
+impl ReasoningDetails {
+    pub fn from_value(value: &Value) -> Result<Option<Self>, String> {
+        if value.is_null() {
+            return Ok(None);
+        }
+        let values = value
+            .as_array()
+            .ok_or_else(|| "assistant `reasoning_details` must be an array or null".to_owned())?;
+        if values.is_empty() {
+            return Ok(None);
+        }
+        if values.iter().any(|detail| !detail.is_object()) {
+            return Err("assistant `reasoning_details` entries must be objects".to_owned());
+        }
+        Ok(Some(Self(values.clone())))
+    }
+
+    pub fn from_chunks(chunks: Vec<Value>) -> Option<Self> {
+        (!chunks.is_empty()).then_some(Self(chunks))
+    }
+
+    pub fn as_slice(&self) -> &[Value] {
+        &self.0
+    }
+}
+
+/// Provider-native assistant reasoning that must be replayed on continuation.
+/// The variants are mutually exclusive on the outgoing wire: structured
+/// details take precedence over DeepSeek's plaintext `reasoning_content`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ReasoningContinuation {
+    Details { reasoning_details: ReasoningDetails },
+    Content { reasoning_content: String },
+}
+
+impl ReasoningContinuation {
+    pub fn from_object(object: &Map<String, Value>) -> Result<Option<Self>, String> {
+        if let Some(value) = object.get("reasoning_details") {
+            if let Some(reasoning_details) = ReasoningDetails::from_value(value)? {
+                return Ok(Some(Self::Details { reasoning_details }));
+            }
+        }
+        Ok(object
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .filter(|content| !content.is_empty())
+            .map(|content| Self::Content {
+                reasoning_content: content.to_owned(),
+            }))
+    }
+
+    pub fn artifact(&self) -> Value {
+        match self {
+            Self::Details { reasoning_details } => {
+                let mut artifact = Map::new();
+                artifact.insert(
+                    "reasoning_details".into(),
+                    Value::Array(reasoning_details.as_slice().to_vec()),
+                );
+                Value::Object(artifact)
+            }
+            Self::Content { reasoning_content } => {
+                let mut artifact = Map::new();
+                artifact.insert(
+                    "reasoning_content".into(),
+                    Value::String(reasoning_content.clone()),
+                );
+                Value::Object(artifact)
+            }
+        }
+    }
+}
+
 /// Single chat message in the conversation.
 ///
 /// The OpenAI chat schema has four roles, each with a different field
@@ -98,6 +185,8 @@ pub enum Message {
         content: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
         tool_calls: Vec<ToolCall>,
+        #[serde(flatten, skip_serializing_if = "Option::is_none", default)]
+        reasoning: Option<ReasoningContinuation>,
     },
     System {
         content: String,
@@ -136,6 +225,13 @@ impl Message {
         }
     }
 
+    pub fn reasoning(&self) -> Option<&ReasoningContinuation> {
+        match self {
+            Message::Assistant { reasoning, .. } => reasoning.as_ref(),
+            _ => None,
+        }
+    }
+
     pub fn tool_call_id(&self) -> Option<&str> {
         match self {
             Message::Tool { tool_call_id, .. } => Some(tool_call_id),
@@ -161,6 +257,7 @@ impl Message {
         Message::Assistant {
             content: Some(text.into()),
             tool_calls: Vec::new(),
+            reasoning: None,
         }
     }
 
@@ -171,6 +268,7 @@ impl Message {
         Message::Assistant {
             content: None,
             tool_calls,
+            reasoning: None,
         }
     }
 
@@ -181,6 +279,22 @@ impl Message {
         Message::Assistant {
             content: Some(text.into()),
             tool_calls,
+            reasoning: None,
+        }
+    }
+
+    pub fn with_reasoning(self, reasoning: Option<ReasoningContinuation>) -> Self {
+        match self {
+            Message::Assistant {
+                content,
+                tool_calls,
+                ..
+            } => Message::Assistant {
+                content,
+                tool_calls,
+                reasoning,
+            },
+            other => other,
         }
     }
 
@@ -263,6 +377,8 @@ pub enum SseEvent {
     Delta(String),
     Refusal(String),
     ReasoningDelta(String),
+    ReasoningContentDelta(String),
+    ReasoningDetails(Vec<Value>),
     ToolCallFragment {
         index: usize,
         id: Option<String>,
@@ -477,14 +593,35 @@ pub fn parse_sse_chunk(payload: &str) -> SseEvent {
             events.push(SseEvent::Refusal(refusal.to_owned()));
         }
     }
-    if let Some(reasoning) = delta.and_then(|delta| {
-        delta
-            .get("reasoning_content")
-            .and_then(Value::as_str)
-            .or_else(|| delta.get("reasoning").and_then(Value::as_str))
-    }) {
+    if let Some(reasoning) = delta
+        .and_then(|delta| delta.get("reasoning_content"))
+        .and_then(Value::as_str)
+    {
+        if !reasoning.is_empty() {
+            events.push(SseEvent::ReasoningContentDelta(reasoning.to_owned()));
+        }
+    } else if let Some(reasoning) = delta
+        .and_then(|delta| delta.get("reasoning"))
+        .and_then(Value::as_str)
+    {
         if !reasoning.is_empty() {
             events.push(SseEvent::ReasoningDelta(reasoning.to_owned()));
+        }
+    }
+    if let Some(details) = delta
+        .and_then(|delta| delta.get("reasoning_details"))
+        .filter(|details| !details.is_null())
+    {
+        let Some(details) = details.as_array() else {
+            return SseEvent::Malformed("reasoning_details chunk must be an array".to_owned());
+        };
+        if details.iter().any(|detail| !detail.is_object()) {
+            return SseEvent::Malformed(
+                "reasoning_details chunk entries must be objects".to_owned(),
+            );
+        }
+        if !details.is_empty() {
+            events.push(SseEvent::ReasoningDetails(details.clone()));
         }
     }
     if let Some(tool_calls) = delta
@@ -715,9 +852,88 @@ mod tests {
             parse_sse_chunk(payload),
             SseEvent::Batch(vec![
                 SseEvent::Delta("answer".into()),
-                SseEvent::ReasoningDelta("thought".into()),
+                SseEvent::ReasoningContentDelta("thought".into()),
             ])
         );
+    }
+
+    #[test]
+    fn reasoning_details_absence_null_and_empty_are_absent_but_bad_shapes_fail() {
+        assert_eq!(ReasoningContinuation::from_object(&Map::new()), Ok(None));
+        for value in [Value::Null, json!([])] {
+            let object = Map::from_iter([("reasoning_details".into(), value)]);
+            assert_eq!(ReasoningContinuation::from_object(&object), Ok(None));
+        }
+        for value in [json!("bad"), json!(["bad"]), json!([null])] {
+            let object = Map::from_iter([("reasoning_details".into(), value)]);
+            assert!(ReasoningContinuation::from_object(&object).is_err());
+        }
+        assert_eq!(
+            parse_sse_chunk(r#"{"choices":[{"delta":{"reasoning_details":null}}]}"#),
+            SseEvent::Empty
+        );
+    }
+
+    #[test]
+    fn assistant_history_serializes_one_native_reasoning_shape_beside_tool_calls() {
+        let calls = vec![ToolCall {
+            id: "call_1".into(),
+            kind: "function".into(),
+            function: ToolCallFunction {
+                name: "read_file".into(),
+                arguments: r#"{"path":"/x"}"#.into(),
+            },
+        }];
+        let details = ReasoningDetails::from_value(&json!([
+            {"type":"reasoning.encrypted","data":"sealed","index":0,"extra":"kept"}
+        ]))
+        .expect("valid details")
+        .expect("nonempty details");
+        let message = Message::assistant_tool_calls(calls.clone()).with_reasoning(Some(
+            ReasoningContinuation::Details {
+                reasoning_details: details,
+            },
+        ));
+        assert_eq!(
+            serde_json::to_value(message).expect("serialize"),
+            json!({
+                "role": "assistant",
+                "tool_calls": calls,
+                "reasoning_details": [
+                    {"type":"reasoning.encrypted","data":"sealed","index":0,"extra":"kept"}
+                ]
+            })
+        );
+
+        let content =
+            Message::assistant("answer").with_reasoning(Some(ReasoningContinuation::Content {
+                reasoning_content: "full thought".into(),
+            }));
+        assert_eq!(
+            serde_json::to_value(content).expect("serialize"),
+            json!({
+                "role": "assistant",
+                "content": "answer",
+                "reasoning_content": "full thought"
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_reasoning_details_fail_at_the_provider_boundary() {
+        for payload in [
+            r#"{"choices":[{"delta":{"reasoning_details":"opaque"}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_details":["not-an-object"]}}]}"#,
+        ] {
+            assert!(matches!(parse_sse_chunk(payload), SseEvent::Malformed(_)));
+        }
+    }
+
+    #[test]
+    fn assistant_without_native_reasoning_omits_reasoning_fields() {
+        let wire = serde_json::to_value(Message::assistant("answer")).expect("assistant wire");
+        assert!(wire.get("reasoning_details").is_none());
+        assert!(wire.get("reasoning_content").is_none());
     }
 
     #[test]

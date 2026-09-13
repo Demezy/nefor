@@ -56,7 +56,9 @@ use openai_provider::auth::{AuthSnapshot, AuthState, AuthStore, LogoutOutcome};
 use openai_provider::broker::{ToolBroker, ToolResult};
 use openai_provider::catalog::ToolCatalog;
 use openai_provider::config::Config;
-use openai_provider::openai::{Message, ModelInfo, ToolCall};
+use openai_provider::openai::{
+    Message, ModelInfo, ReasoningContinuation, ToolCall, REASONING_CONTEXT_FORMAT,
+};
 use openai_provider::state::{
     ChatId, ChatRestore, ChatStats, Chats, ChatsError, CompletionRuns, TurnToken,
 };
@@ -448,9 +450,14 @@ async fn dispatch_event(
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned);
             let mut history = Vec::new();
+            let parsing_model = model.as_deref().or(config.model.as_deref());
             if let Some(items) = body.get("history").and_then(Value::as_array) {
                 for item in items {
-                    let parsed = match parse_provider_message(Some(item)) {
+                    let parsed = match parse_provider_message(
+                        Some(item),
+                        &config.provider_name,
+                        parsing_model,
+                    ) {
                         Ok(m) => m,
                         Err(msg) => {
                             send_event(out_tx, chat_error_body_msg(config, &chat_id, msg)).await?;
@@ -516,7 +523,12 @@ async fn dispatch_event(
                     return Ok(());
                 }
             };
-            let parsed = match parse_provider_message(body.get("message")) {
+            let active_model = chats.model(&chat_id).await.ok();
+            let parsed = match parse_provider_message(
+                body.get("message"),
+                &config.provider_name,
+                active_model.as_deref(),
+            ) {
                 Ok(m) => m,
                 Err(msg) => {
                     send_event(out_tx, chat_error_body_msg(config, &chat_id, msg)).await?;
@@ -928,11 +940,21 @@ async fn dispatch_completion_request(
         return Ok(());
     };
 
+    let requested_model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+        .or_else(|| config.model.clone());
     let messages = match body.get("messages").and_then(Value::as_array) {
         Some(items) => {
             let mut messages = Vec::with_capacity(items.len());
             for item in items {
-                match parse_provider_message(Some(item)) {
+                match parse_provider_message(
+                    Some(item),
+                    &config.provider_name,
+                    requested_model.as_deref(),
+                ) {
                     Ok(parsed) if parsed.tool_call_failures.is_empty() => {
                         messages.push(parsed.message)
                     }
@@ -988,13 +1010,7 @@ async fn dispatch_completion_request(
         }
     };
     let cancel = run.cancellation_token();
-    let model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .filter(|model| !model.is_empty())
-        .map(str::to_owned)
-        .or_else(|| config.model.clone());
-    let Some(model) = model else {
+    let Some(model) = requested_model else {
         completions.finish(&request_id, &run).await;
         send_event(
             out_tx,
@@ -1185,6 +1201,11 @@ async fn dispatch_completion_request(
                         )))
                         .await;
                 }
+                let provider_context = reasoning_provider_context(
+                    &config,
+                    &model,
+                    outcome.reasoning_continuation.as_ref(),
+                );
                 let mut fields = vec![
                     ("text", Value::String(outcome.full_text)),
                     ("reasoning", Value::String(outcome.reasoning_text)),
@@ -1198,6 +1219,9 @@ async fn dispatch_completion_request(
                     ("model", Value::String(model.clone())),
                     ("duration_ms", Value::Number(elapsed_ms.into())),
                 ];
+                if let Some(provider_context) = provider_context {
+                    fields.push(("provider_context", provider_context));
+                }
                 if let Some(completion_id) = outcome.completion_id {
                     fields.push(("completion_id", Value::String(completion_id)));
                 }
@@ -1489,6 +1513,7 @@ fn spawn_turn(
         // (each firing produces its own thinking trace; we surface the
         // most recent one on `chat.complete.result`).
         let mut final_reasoning = String::new();
+        let mut final_reasoning_continuation: Option<ReasoningContinuation> = None;
         let mut final_error: Option<String> = None;
         let mut interrupted = false;
         let mut errored = false;
@@ -1666,9 +1691,11 @@ fn spawn_turn(
                     }
 
                     if outcome.interrupted {
-                        // Treat partial deltas (if any) as the assistant's
-                        // last word; same shape as the v1 path.
-                        if !outcome.full_text.is_empty() {
+                        // A provider-native reasoning artifact is valid only for a
+                        // completed assistant response. Do not retain a partial
+                        // assistant without the continuation its provider requires.
+                        if !outcome.full_text.is_empty() && outcome.reasoning_continuation.is_none()
+                        {
                             let _ = chats
                                 .push_assistant(&chat_id, outcome.full_text.clone())
                                 .await;
@@ -1684,13 +1711,16 @@ fn spawn_turn(
                         // Persist the raw assistant turn. Provider-bound serialization
                         // normalizes malformed arguments without changing what tool
                         // execution receives below.
-                        let _ = chats
-                            .push_assistant_tool_calls(
-                                &chat_id,
+                        let assistant = if outcome.full_text.is_empty() {
+                            Message::assistant_tool_calls(outcome.tool_calls.clone())
+                        } else {
+                            Message::assistant_with_tool_calls(
                                 outcome.full_text.clone(),
                                 outcome.tool_calls.clone(),
                             )
-                            .await;
+                        }
+                        .with_reasoning(outcome.reasoning_continuation.clone());
+                        let _ = chats.append(&chat_id, assistant).await;
 
                         // Stage 1+ (chat.complete API): defer the tool
                         // loop to the caller. reasoner-graph dispatches
@@ -1707,6 +1737,7 @@ fn spawn_turn(
                         if !legacy_default_chat {
                             final_text = outcome.full_text;
                             final_reasoning = outcome.reasoning_text;
+                            final_reasoning_continuation = outcome.reasoning_continuation;
                             final_finish_reason = outcome.finish_reason;
                             final_tool_calls = outcome.tool_calls;
                             break;
@@ -1800,12 +1831,13 @@ fn spawn_turn(
 
                     // No tool calls — the turn is done.
                     if !outcome.full_text.is_empty() {
-                        let _ = chats
-                            .push_assistant(&chat_id, outcome.full_text.clone())
-                            .await;
+                        let assistant = Message::assistant(outcome.full_text.clone())
+                            .with_reasoning(outcome.reasoning_continuation.clone());
+                        let _ = chats.append(&chat_id, assistant).await;
                     }
                     final_text = outcome.full_text;
                     final_reasoning = outcome.reasoning_text;
+                    final_reasoning_continuation = outcome.reasoning_continuation;
                     final_finish_reason = outcome.finish_reason;
                     final_tool_calls = outcome.tool_calls;
                     break;
@@ -1967,6 +1999,7 @@ fn spawn_turn(
                 observed_usage.then_some((total_prompt_tokens, total_completion_tokens)),
                 &active_model,
                 &final_reasoning,
+                final_reasoning_continuation.as_ref(),
             );
             let _ = out_tx.send(PluginOutgoing::event(body)).await;
         }
@@ -2237,7 +2270,37 @@ struct ParsedMessage {
 /// and the openai-native variants too. Returns a string error message
 /// when the shape is wrong (used by `chat.append` to reply with a
 /// `chat.error`).
-fn parse_provider_message(value: Option<&Value>) -> Result<ParsedMessage, String> {
+fn provider_message_reasoning(
+    message: &Map<String, Value>,
+    provider: &str,
+    model: Option<&str>,
+) -> Result<Option<ReasoningContinuation>, String> {
+    let Some(context) = message.get("provider_context").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    if context.get("provider").and_then(Value::as_str) != Some(provider)
+        || context.get("format").and_then(Value::as_str) != Some(REASONING_CONTEXT_FORMAT)
+    {
+        return Ok(None);
+    }
+    let context_model = context.get("model").and_then(Value::as_str);
+    if context_model.is_some() && context_model != model {
+        return Ok(None);
+    }
+    let artifact = context
+        .get("artifact")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "compatible provider_context has invalid reasoning artifact".to_owned())?;
+    ReasoningContinuation::from_object(artifact)?
+        .ok_or_else(|| "compatible provider_context contains no reasoning continuation".to_owned())
+        .map(Some)
+}
+
+fn parse_provider_message(
+    value: Option<&Value>,
+    provider: &str,
+    model: Option<&str>,
+) -> Result<ParsedMessage, String> {
     let obj = value
         .and_then(Value::as_object)
         .ok_or_else(|| "chat.append `message` must be an object".to_owned())?;
@@ -2299,10 +2362,12 @@ fn parse_provider_message(value: Option<&Value>) -> Result<ParsedMessage, String
                     "assistant message must have non-empty `content` or `tool_calls`".to_owned(),
                 );
             }
+            let reasoning = provider_message_reasoning(obj, provider, model)?;
             Ok(ParsedMessage {
                 message: Message::Assistant {
                     content,
                     tool_calls,
+                    reasoning,
                 },
                 tool_call_failures,
             })
@@ -2361,6 +2426,7 @@ fn request_history_has_model_input(history: &[Message]) -> bool {
         Message::Assistant {
             content,
             tool_calls,
+            ..
         } => {
             content
                 .as_deref()
@@ -2693,9 +2759,23 @@ fn chat_error_body_msg(config: &Config, chat_id: &ChatId, message: String) -> Ma
 /// trace for the final firing. It rides on `chat.complete.result`
 /// (control-plane only) so non-streaming consumers (sub-graph node
 /// outputs, replay tooling, audit logs) can see it without subscribing
-/// to per-chunk `stream.reasoning_delta` events. It is NEVER fed back
-/// into the next request's history — `push_assistant` only stores the
-/// content text.
+/// to per-chunk `stream.reasoning_delta` events. Provider-native continuation
+/// is carried separately in `provider_context` and never concatenated into
+/// this display field.
+fn reasoning_provider_context(
+    config: &Config,
+    model: &str,
+    reasoning: Option<&ReasoningContinuation>,
+) -> Option<Value> {
+    let reasoning = reasoning?;
+    Some(serde_json::json!({
+        "provider": config.provider_name,
+        "model": model,
+        "format": REASONING_CONTEXT_FORMAT,
+        "artifact": reasoning.artifact(),
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn chat_complete_result_body(
     config: &Config,
@@ -2706,11 +2786,17 @@ fn chat_complete_result_body(
     token_usage: Option<(u64, u64)>,
     model: &str,
     reasoning: &str,
+    reasoning_continuation: Option<&ReasoningContinuation>,
 ) -> Map<String, Value> {
     let mut output = Map::new();
     output.insert("text".into(), Value::String(text.to_owned()));
     if !reasoning.is_empty() {
         output.insert("reasoning".into(), Value::String(reasoning.to_owned()));
+    }
+    if let Some(provider_context) =
+        reasoning_provider_context(config, model, reasoning_continuation)
+    {
+        output.insert("provider_context".into(), provider_context);
     }
     if !tool_calls.is_empty() {
         let arr: Vec<Value> = tool_calls
