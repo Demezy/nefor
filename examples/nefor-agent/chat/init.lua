@@ -285,7 +285,6 @@ local function initial_state()
     last_ctrl_c_ms   = nil,
     exit_token       = nil,
     exit_token_seq   = 0,
-    runs             = {},
     toasts           = {},
     -- Hydrate from <data_root>/input-history so arrow-up in the chat
     -- input recalls submissions from prior nefor processes. Empty on

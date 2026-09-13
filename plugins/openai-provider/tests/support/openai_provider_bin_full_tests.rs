@@ -323,8 +323,10 @@
                 "basic-tools",
                 vec![openai_provider::catalog::ToolSpec {
                     name: "read_file".into(),
+                    owner: "basic-tools".into(),
                     description: "Read a file.".into(),
                     parameters: serde_json::json!({"type": "object"}),
+                    execution: openai_provider::catalog::ToolExecution::Routed,
                 }],
             )
             .await;
@@ -1102,13 +1104,17 @@
                 vec![
                     openai_provider::catalog::ToolSpec {
                         name: "read_file".into(),
+                        owner: "basic-tools".into(),
                         description: "Read a file.".into(),
                         parameters: serde_json::json!({"type":"object"}),
+                        execution: openai_provider::catalog::ToolExecution::Routed,
                     },
                     openai_provider::catalog::ToolSpec {
                         name: "spawn_graph".into(),
+                        owner: "basic-tools".into(),
                         description: "Reasoner-graph internal.".into(),
                         parameters: serde_json::json!({"type":"object"}),
+                        execution: openai_provider::catalog::ToolExecution::Routed,
                     },
                 ],
             )

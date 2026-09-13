@@ -32,7 +32,7 @@ git -C "$repo" commit -qm initial
 git -C "$repo" tag v1.0.0
 
 build() {
-  cargo build --manifest-path "$1/engine/Cargo.toml" --target-dir "$target" -v 2>&1
+  cargo build --color never --manifest-path "$1/engine/Cargo.toml" --target-dir "$target" -v 2>&1
 }
 version() {
   "$target/debug/build-version-fixture"

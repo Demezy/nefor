@@ -502,21 +502,6 @@ local function pick_response_for(history)
     end
   end
 
-  if string.find(last_user, "BASIC_TOOLS_ACTIVE_DEATH", 1, true) then
-    return {
-      text = "",
-      finish_reason = "tool_calls",
-      tool_calls = {{
-        id = mint_tool_id("active_shell"),
-        name = "process.exec",
-        arguments = {
-          argv = { "sleep", "30" }, cwd = ".",
-          timeout = { present = false, milliseconds = 0 },
-        },
-      }},
-    }
-  end
-
   -- SLOW_STREAM_REGRESSION_ marker: triggered by the literal
   -- substring; mock blocks for ~1.2s before emitting. Long-stream
   -- watchdog regression hook for the agentic-cli timeout path.

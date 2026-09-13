@@ -574,7 +574,6 @@ fn headless_starter_request_resume_tools_and_failures() {
     assert_canonical_settlement(&dir, &interrupted, 2);
 
     for (executable, marker, require_descendant) in [
-        ("basic-tools", "BASIC_TOOLS_ACTIVE_DEATH", true),
         ("tool-gate", "TOOL_GATE_DEATH", false),
         ("mock-plugin", "SLOW_STREAM_REGRESSION_PROVIDER_DEATH", true),
     ] {

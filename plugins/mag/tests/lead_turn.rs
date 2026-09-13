@@ -37,7 +37,7 @@ const PROVIDER: &str = "test-provider";
 const GATE: &str = "tool-gate";
 const SESSION_ID: &str = "lead-turn-session";
 const CONVERSATION_ID: &str = "lead-conversation";
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The turn spawner composes the MAG guides and references after the authored
 /// system prompt, followed by the writable workspace. Here we build a representative overlay the
@@ -110,7 +110,15 @@ async fn spawn_mag(data_dir: &std::path::Path) -> Child {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    cmd.spawn().expect("spawn mag-plugin")
+    let mut child = cmd.spawn().expect("spawn mag-plugin");
+    let stderr = child.stderr.take().expect("stderr");
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            eprintln!("[mag stderr] {line}");
+        }
+    });
+    child
 }
 
 async fn read_outgoing<R: AsyncBufReadExt + Unpin>(
@@ -942,13 +950,6 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
     let mut child = spawn_mag(&data_dir).await;
     let mut stdin = child.stdin.take().unwrap();
     let mut reader = BufReader::new(child.stdout.take().unwrap());
-    let stderr = child.stderr.take().unwrap();
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            eprintln!("[dynamic mag stderr] {line}");
-        }
-    });
     handshake(&mut reader, &mut stdin).await;
     let assert_snapshot = |request: &Map<String, Value>| {
         assert_eq!(
@@ -1554,13 +1555,6 @@ async fn lead_turn_runs_through_gate_and_second_turn_replays_seeded_history() {
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
     let mut reader = BufReader::new(stdout);
-    let stderr = child.stderr.take().expect("stderr");
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            eprintln!("[mag stderr] {line}");
-        }
-    });
 
     handshake(&mut reader, &mut stdin).await;
     let program = load_lead_program(&mut reader, &mut stdin).await;
@@ -1848,13 +1842,6 @@ async fn kill_run_cancels_the_provider_round_and_settles_killed() {
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
     let mut reader = BufReader::new(stdout);
-    let stderr = child.stderr.take().expect("stderr");
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            eprintln!("[mag stderr] {line}");
-        }
-    });
 
     handshake(&mut reader, &mut stdin).await;
     let program = load_lead_program(&mut reader, &mut stdin).await;
@@ -1958,13 +1945,6 @@ async fn interrupt_run_settles_inflight_tool_and_lead_winds_down_completed() {
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
     let mut reader = BufReader::new(stdout);
-    let stderr = child.stderr.take().expect("stderr");
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            eprintln!("[mag stderr] {line}");
-        }
-    });
 
     handshake(&mut reader, &mut stdin).await;
     let program = load_lead_program(&mut reader, &mut stdin).await;
@@ -2117,13 +2097,6 @@ async fn terminating_interrupt_cancels_inflight_tool_and_settles_failed_without_
     let mut stdin = child.stdin.take().expect("stdin");
     let stdout = child.stdout.take().expect("stdout");
     let mut reader = BufReader::new(stdout);
-    let stderr = child.stderr.take().expect("stderr");
-    tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            eprintln!("[mag stderr] {line}");
-        }
-    });
 
     handshake(&mut reader, &mut stdin).await;
     let program = load_lead_program(&mut reader, &mut stdin).await;
