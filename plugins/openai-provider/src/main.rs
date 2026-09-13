@@ -2284,7 +2284,7 @@ fn provider_message_reasoning(
         return Ok(None);
     }
     let context_model = context.get("model").and_then(Value::as_str);
-    if context_model.is_some() && context_model != model {
+    if context_model != model {
         return Ok(None);
     }
     let artifact = context

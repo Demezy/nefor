@@ -308,13 +308,96 @@ async fn native_reasoning_round_trips_beside_assistant_tool_calls_and_tool_resul
 }
 
 #[tokio::test]
+async fn deepseek_reasoning_content_round_trips_without_visible_text_substitution() {
+    let history = json!([
+        {"role":"user","content":"inspect"},
+        {
+            "role":"assistant",
+            "content":"I will inspect it.",
+            "tool_calls":[{
+                "id":"call_1",
+                "type":"function",
+                "function":{"name":"read_file","arguments":"{\"path\":\"/x\"}"}
+            }],
+            "provider_context":{
+                "provider":"fixture",
+                "model":"fixture-model",
+                "format":"openai-chat-reasoning-v1",
+                "artifact":{"reasoning_content":"private thought"}
+            }
+        },
+        {"role":"tool","tool_call_id":"call_1","content":"contents"}
+    ]);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let request = read_request_json(&mut stream).await;
+        assert_eq!(
+            request["messages"],
+            json!([
+                {"role":"user","content":"inspect"},
+                {
+                    "role":"assistant",
+                    "content":"I will inspect it.",
+                    "tool_calls":[{
+                        "id":"call_1",
+                        "type":"function",
+                        "function":{"name":"read_file","arguments":"{\"path\":\"/x\"}"}
+                    }],
+                    "reasoning_content":"private thought"
+                },
+                {"role":"tool","tool_call_id":"call_1","content":"contents"}
+            ])
+        );
+        let events = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"next thought\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", events.len(), events);
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("response");
+    });
+
+    let (mut child, mut stdin, mut stdout) = spawn_provider(&format!("http://{addr}")).await;
+    send_completion_messages(&mut stdin, "deepseek-continuation", history).await;
+    let completed = loop {
+        let event = next_completion_event(&mut stdout, "deepseek-continuation").await;
+        if event["event"] == "completed" {
+            break event;
+        }
+    };
+    assert_eq!(completed["text"], "done");
+    assert_eq!(completed["reasoning"], "next thought");
+    assert_eq!(
+        completed["provider_context"],
+        json!({
+            "provider":"fixture",
+            "model":"fixture-model",
+            "format":"openai-chat-reasoning-v1",
+            "artifact":{"reasoning_content":"next thought"}
+        })
+    );
+    server.await.expect("server");
+    child.kill().await.expect("kill provider");
+}
+
+#[tokio::test]
 async fn incompatible_context_is_ignored_and_malformed_compatible_context_fails() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept");
         let request = read_request_json(&mut stream).await;
-        assert!(request["messages"][1].get("reasoning_details").is_none());
+        for index in 1..=3 {
+            assert!(request["messages"][index]
+                .get("reasoning_details")
+                .is_none());
+        }
         let events = concat!(
             "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
             "data: [DONE]\n\n"
@@ -331,8 +414,18 @@ async fn incompatible_context_is_ignored_and_malformed_compatible_context_fails(
         "foreign",
         json!([
             {"role":"user","content":"go"},
-            {"role":"assistant","content":"prior","provider_context":{
+            {"role":"assistant","content":"foreign provider","provider_context":{
                 "provider":"other","model":"fixture-model",
+                "format":"openai-chat-reasoning-v1",
+                "artifact":{"reasoning_details":[{"type":"opaque"}]}
+            }},
+            {"role":"assistant","content":"missing model","provider_context":{
+                "provider":"fixture",
+                "format":"openai-chat-reasoning-v1",
+                "artifact":{"reasoning_details":[{"type":"opaque"}]}
+            }},
+            {"role":"assistant","content":"different model","provider_context":{
+                "provider":"fixture","model":"other-model",
                 "format":"openai-chat-reasoning-v1",
                 "artifact":{"reasoning_details":[{"type":"opaque"}]}
             }}
