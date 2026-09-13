@@ -183,6 +183,7 @@ pub fn run_sample(source_root: &Path, name: &str) -> CacheScenarioSample {
 
 /// Exercise the historical semantic catalog against actual project storage,
 /// leaving the cold worker protocol and its measurements unchanged.
+#[allow(dead_code)]
 pub fn run_project_sample(source_root: &Path, name: &str) {
     use nefor_mag::project_cache::{
         build_with_identity, CachePolicy, CacheStatus, CompilerBuildId,

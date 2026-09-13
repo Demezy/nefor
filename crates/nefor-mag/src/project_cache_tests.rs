@@ -477,7 +477,8 @@ fn shared_project_preparation_preserves_order_duplicates_and_error_precedence() 
         "mag.toml",
         "version = 1\nmodule-roots = [\"extra\", \"extra\"]",
     );
-    let prepared = crate::project_config::prepare(&fixture.root, &[fixture.root.clone()]).unwrap();
+    let prepared =
+        crate::project_config::prepare(&fixture.root, std::slice::from_ref(&fixture.root)).unwrap();
     assert_eq!(prepared.config_version, 1);
     assert_eq!(
         prepared.module_roots,
