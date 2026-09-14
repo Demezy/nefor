@@ -1,0 +1,22 @@
+(require "core.types")
+
+;; Native maps are unordered immutable data. Their storage order is never
+;; observable; deterministic ordering exists only at artifact serialization.
+(let empty (fn [K V] [[key-type (TypeTag K)]] -> (Map K V)
+  (__map-empty key-type)))
+;; insert requires a new key. put is the explicit replacement/upsert operation.
+(let insert (fn [K V] [[map (Map K V)] [key K] [value V]] -> (Map K V)
+  (__map-insert map key value)))
+(let put (fn [K V] [[map (Map K V)] [key K] [value V]] -> (Map K V)
+  (__map-put map key value)))
+(let contains-key? (fn [K V] [[map (Map K V)] [key K]] -> Bool
+  (__map-contains map key)))
+(let get (fn [K V] [[map (Map K V)] [key K]] -> V
+  (__map-get map key)))
+(let get-or (fn [K V] [[map (Map K V)] [key K] [fallback V]] -> V
+  (__map-get-or map key fallback)))
+(let lookup (fn [K V] [[map (Map K V)] [key K]] -> (core.types.Option V)
+  (if (__map-contains map key)
+    (construct (core.types.Option V) Some (__map-get map key))
+    (construct (core.types.Option V) None nil))))
+(let count (fn [K V] [[map (Map K V)]] -> Int (__map-count map)))

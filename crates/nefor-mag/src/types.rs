@@ -24,6 +24,7 @@ pub enum MagType {
     Named(String, Vec<MagType>),
     TypeTag(Box<MagType>),
     List(Box<MagType>),
+    Set(Box<MagType>),
     EmptyList,
     Map(Box<MagType>, Box<MagType>),
     Record(BTreeMap<String, MagType>),
@@ -54,6 +55,9 @@ pub enum ConcreteType {
         constructors: Vec<ConcreteConstructor>,
     },
     List {
+        item: Box<ConcreteType>,
+    },
+    Set {
         item: Box<ConcreteType>,
     },
     Map {
@@ -150,6 +154,7 @@ impl ConcreteType {
                 arguments.iter().map(Self::to_mag_type).collect(),
             ),
             Self::List { item } => MagType::List(Box::new(item.to_mag_type())),
+            Self::Set { item } => MagType::Set(Box::new(item.to_mag_type())),
             Self::Map { key, value } => {
                 MagType::Map(Box::new(key.to_mag_type()), Box::new(value.to_mag_type()))
             }
@@ -245,7 +250,7 @@ impl ConcreteType {
                     constructor.payload.collect_declarations(declarations)?;
                 }
             }
-            Self::List { item } => item.collect_declarations(declarations)?,
+            Self::List { item } | Self::Set { item } => item.collect_declarations(declarations)?,
             Self::Map { key, value } => {
                 key.collect_declarations(declarations)?;
                 value.collect_declarations(declarations)?;
@@ -281,7 +286,8 @@ impl ConcreteType {
             return arms.iter().any(|arm| arm.accepts(actual));
         }
         match (self, actual) {
-            (Self::List { item: expected }, Self::List { item: actual }) => {
+            (Self::List { item: expected }, Self::List { item: actual })
+            | (Self::Set { item: expected }, Self::Set { item: actual }) => {
                 expected.accepts(actual)
             }
             (
@@ -294,11 +300,6 @@ impl ConcreteType {
                     value: actual_value,
                 },
             ) => expected_key.accepts(actual_key) && expected_value.accepts(actual_value),
-            (Self::Map { key, value }, Self::Record { fields })
-                if key.as_ref() == &Self::String =>
-            {
-                fields.values().all(|actual| value.accepts(actual))
-            }
             (Self::Record { fields: expected }, Self::Record { fields: actual })
                 if expected.len() == actual.len() =>
             {
@@ -477,6 +478,9 @@ fn resolve(
         MagType::List(item) => ConcreteType::List {
             item: Box::new(resolve(env, item, resolving)?),
         },
+        MagType::Set(item) => ConcreteType::Set {
+            item: Box::new(resolve(env, item, resolving)?),
+        },
         MagType::Map(key, value) => ConcreteType::Map {
             key: Box::new(resolve(env, key, resolving)?),
             value: Box::new(resolve(env, value, resolving)?),
@@ -620,6 +624,7 @@ impl fmt::Display for MagType {
             Self::Named(name, args) => write!(f, "({name} {})", join(args)),
             Self::TypeTag(ty) => write!(f, "(TypeTag {ty})"),
             Self::List(item) => write!(f, "(List {item})"),
+            Self::Set(item) => write!(f, "(Set {item})"),
             Self::EmptyList => write!(f, "(List _)"),
             Self::Map(key, value) => write!(f, "(Map {key} {value})"),
             Self::Record(fields) => {
@@ -849,6 +854,26 @@ mod tests {
             first.constructor_id("Ok").unwrap(),
             other.constructor_id("Ok").unwrap()
         );
+    }
+
+    #[test]
+    fn sets_resolve_round_trip_and_use_item_compatibility() {
+        let env = Env::new();
+        let concrete = ConcreteType::resolve(&env, &MagType::Set(Box::new(MagType::Int))).unwrap();
+        assert_eq!(
+            concrete,
+            ConcreteType::Set {
+                item: Box::new(ConcreteType::Int)
+            }
+        );
+        assert_eq!(concrete.to_mag_type(), MagType::Set(Box::new(MagType::Int)));
+        assert!(concrete.accepts(&ConcreteType::Set {
+            item: Box::new(ConcreteType::Int)
+        }));
+        assert!(!concrete.accepts(&ConcreteType::Set {
+            item: Box::new(ConcreteType::String)
+        }));
+        assert_eq!(concrete.stable_id(), concrete.clone().stable_id());
     }
 
     #[test]

@@ -1,3 +1,5 @@
+(require "core.map")
+(require "core.set")
 (require "core.validated")
 (require "nefor.contracts")
 (require "nefor.mag")
@@ -88,10 +90,10 @@
    :logical_nodes (List LogicalNode)
    :outputs (List StoredNode)})
 
-(type OrderedNodes {:seen (Map String Bool) :values (List StoredNode)})
-(type OrderedStrings {:seen (Map String Bool) :values (List String)})
+(type OrderedNodes {:seen (Set String) :values (List StoredNode)})
+(type OrderedStrings {:seen (Set String) :values (List String)})
 (type ReachabilityState
-  {:visited (Map String Bool) :frontier (List String)})
+  {:visited (Set String) :frontier (List String)})
 (type IndexedPosition {:index String :position Int})
 
 (type FactoryTypeScheme {:input_tags (List String)
@@ -303,7 +305,7 @@
 (let same-edge? (fn [[left Edge] [right Edge]] -> Bool
   (if (= (get (get left "from") "id") (get (get right "from") "id"))
     (if (= (get (get left "to") "id") (get (get right "to") "id"))
-      (= (get left "route") (get right "route")) false)
+      (serialized-equal? (get left "route") (get right "route")) false)
     false)))
 (let edge-key (fn [[value Edge]] -> String
   (canonical {:from-node (get (get value "from") "id")
@@ -313,7 +315,7 @@
   (not (= (count (filter (fn [[value Edge]] -> Bool
                            (same-edge? value candidate)) edges)) 0))))
 (let same-edge-definition? (fn [[left Edge] [right Edge]] -> Bool
-  (= left right)))
+  (serialized-equal? left right)))
 (let insert-edge (fn [[edges (List Edge)] [candidate Edge]] -> (List Edge)
   ;; Equal logical edges are set-idempotent. A duplicate logical edge whose
   ;; embedded node definition differs is retained long enough for validate to
@@ -334,12 +336,10 @@
       (concat definitions [candidate])
       definitions)))
 (let normalize-edges (fn [[edges (List Edge)]] -> (List Edge)
-  (let edges-by-key (group-by edge-key edges))
-  (flat-map
-    (fn [[key String]] -> (List Edge)
-      (fold insert-edge-definition (as (List Edge) [])
-        (or (get edges-by-key key) (as (List Edge) []))))
-    (keys edges-by-key))))
+  (fold insert-edge (as (List Edge) []) edges)))
+
+(let serialized-equal? (fn [T] [[left T] [right T]] -> Bool
+  (= (canonical left) (canonical right))))
 
 (let empty-graph (as Graph {:edges (as (List Edge) [])}))
 (let graph (fn [[edges (List Edge)]] -> Graph
@@ -363,31 +363,31 @@
 (let insert-ordered-node
   (fn [[state OrderedNodes] [candidate StoredNode]] -> OrderedNodes
     (let id (node-id candidate))
-    (if (or (get (get state "seen") id) false)
+    (if (core.set.contains? (get state "seen") id)
       state
       (as OrderedNodes
-        {:seen (assoc (get state "seen") id true)
+        {:seen (core.set.insert (get state "seen") id)
          :values (concat (get state "values") [candidate])}))))
 (let ordered-nodes (fn [[values (List StoredNode)]] -> (List StoredNode)
   (get
     (fold insert-ordered-node
       (as OrderedNodes
-        {:seen (as (Map String Bool) {})
+        {:seen (core.set.empty (type-tag String))
          :values (as (List StoredNode) [])})
       values)
     "values")))
 (let insert-ordered-string
   (fn [[state OrderedStrings] [candidate String]] -> OrderedStrings
-    (if (or (get (get state "seen") candidate) false)
+    (if (core.set.contains? (get state "seen") candidate)
       state
       (as OrderedStrings
-        {:seen (assoc (get state "seen") candidate true)
+        {:seen (core.set.insert (get state "seen") candidate)
          :values (concat (get state "values") [candidate])}))))
 (let ordered-strings (fn [[values (List String)]] -> (List String)
   (get
     (fold insert-ordered-string
       (as OrderedStrings
-        {:seen (as (Map String Bool) {})
+        {:seen (core.set.empty (type-tag String))
          :values (as (List String) [])})
       values)
     "values")))
@@ -412,7 +412,7 @@
   (let roots
     (filter (fn [[candidate StoredNode]] -> Bool
               (= (count
-                   (or (get edges-by-to-node (node-id candidate))
+                   (__map-get-or edges-by-to-node (node-id candidate)
                        (as (List Edge) [])))
                  0))
             nodes))
@@ -558,9 +558,9 @@
   (fn [[routes-by-input (Map String (List StoredRoute))]
        [messages-by-input (Map String (List Message))] [input StoredPort]] -> Bool
     (if (unit-input? input)
-      (if (= (count (or (get routes-by-input (port-address-key input))
+      (if (= (count (__map-get-or routes-by-input (port-address-key input)
                         (as (List StoredRoute) []))) 0)
-        (= (count (or (get messages-by-input (port-address-key input))
+        (= (count (__map-get-or messages-by-input (port-address-key input)
                        (as (List Message) []))) 0)
         false)
       false)))
@@ -586,12 +586,12 @@
 
 (let graph-logical-nodes (fn [[value Graph]] -> (List LogicalNode)
   (get (graph-projection value) "logical_nodes")))
-(let insert-string
-  (fn [[values (Map String Bool)] [value String]] -> (Map String Bool)
-    (assoc values value true)))
 (let string-set
-  (fn [[values (List String)]] -> (Map String Bool)
-    (fold insert-string (as (Map String Bool) {}) values)))
+  (fn [[values (List String)]] -> (Set String)
+    (fold
+      (fn [[set (Set String)] [value String]] -> (Set String)
+        (if (core.set.contains? set value) set (core.set.insert set value)))
+      (core.set.empty (type-tag String)) values)))
 (let logical-paths-valid? (fn [[value Graph]] -> Bool
   (let nodes (graph-logical-nodes value))
   (let paths
@@ -605,7 +605,7 @@
               (= (count (get candidate "path")) 0)) nodes))
   (if (= (count empty-paths) 0)
     (if (= (count (filter (fn [[name String]] -> Bool (= name "")) segments)) 0)
-      (= (count (keys (string-set paths))) (count paths))
+      (= (core.set.count (string-set paths)) (count paths))
       false)
     false)))
 (let logical-members-valid? (fn [[value Graph]] -> Bool
@@ -614,7 +614,7 @@
                 (get candidate "members"))
               (graph-logical-nodes value)))
   (let actors (actor-ids (graph-actors value)))
-  (if (= (count (keys (string-set members))) (count members))
+  (if (= (core.set.count (string-set members)) (count members))
     (= (string-set members) (string-set actors))
     false)))
 
@@ -622,7 +622,7 @@
   (= (get candidate "role") role)))
 (let indexed-count
   (fn [T] [[index (Map String (List T))] [id String]] -> Int
-    (count (or (get index id) (as (List T) [])))))
+    (count (__map-get-or index id (as (List T) [])))))
 (let incoming-count (fn [[analysis GraphAnalysis] [id String]] -> Int
   (indexed-count (get analysis "edges_by_to_node") id)))
 (let outgoing-count (fn [[analysis GraphAnalysis] [id String]] -> Int
@@ -642,16 +642,16 @@
 
 (let enqueue-unvisited
   (fn [[state ReachabilityState] [id String]] -> ReachabilityState
-    (if (or (get (get state "visited") id) false)
+    (if (core.set.contains? (get state "visited") id)
       state
       (as ReachabilityState
-        {:visited (assoc (get state "visited") id true)
+        {:visited (core.set.insert (get state "visited") id)
          :frontier (concat (get state "frontier") [id])}))))
 (let initial-reachability-state
   (fn [[ids (List String)]] -> ReachabilityState
     (fold enqueue-unvisited
       (as ReachabilityState
-        {:visited (as (Map String Bool) {})
+        {:visited (core.set.empty (type-tag String))
          :frontier (as (List String) [])})
       ids)))
 (let next-forward-frontier
@@ -661,7 +661,7 @@
         (fn [[id String]] -> (List String)
           (map (fn [[candidate Edge]] -> String
                  (node-id (get candidate "to")))
-               (or (get (get analysis "edges_by_from_node") id)
+               (__map-get-or (get analysis "edges_by_from_node") id
                    (as (List Edge) []))))
         (get state "frontier")))
     (fold enqueue-unvisited
@@ -671,11 +671,11 @@
       next)))
 (let walk-forward
   (fn [[analysis GraphAnalysis] [state ReachabilityState]]
-    -> (Map String Bool)
+    -> (Set String)
     (if (= (count (get state "frontier")) 0)
       (get state "visited")
       (walk-forward analysis (next-forward-frontier analysis state)))))
-(let forward-reachable (fn [[analysis GraphAnalysis]] -> (Map String Bool)
+(let forward-reachable (fn [[analysis GraphAnalysis]] -> (Set String)
   (walk-forward analysis
     (initial-reachability-state
       (map node-id (get analysis "roots"))))))
@@ -686,7 +686,7 @@
         (fn [[id String]] -> (List String)
           (map (fn [[candidate Edge]] -> String
                  (node-id (get candidate "from")))
-               (or (get (get analysis "edges_by_to_node") id)
+               (__map-get-or (get analysis "edges_by_to_node") id
                    (as (List Edge) []))))
         (get state "frontier")))
     (fold enqueue-unvisited
@@ -696,25 +696,17 @@
       previous)))
 (let walk-reverse
   (fn [[analysis GraphAnalysis] [state ReachabilityState]]
-    -> (Map String Bool)
+    -> (Set String)
     (if (= (count (get state "frontier")) 0)
       (get state "visited")
       (walk-reverse analysis (next-reverse-frontier analysis state)))))
 (let reverse-reachable
-  (fn [[analysis GraphAnalysis] [result StoredNode]] -> (Map String Bool)
+  (fn [[analysis GraphAnalysis] [result StoredNode]] -> (Set String)
     (walk-reverse analysis
       (initial-reachability-state [(node-id result)]))))
 
 (let factory-contract
-  (fn [[entry {:identity String
-               :type_scheme {:input_tags (List String)
-                             :outputs (List String)}}]]
-      -> FactoryContract
-    (as FactoryContract
-      {:identity (get entry "identity")
-       :type_scheme (as FactoryTypeScheme
-                      {:input_tags (get (get entry "type_scheme") "input_tags")
-                       :outputs (get (get entry "type_scheme") "outputs")})})))
+  (fn [[entry FactoryContract]] -> FactoryContract entry))
 
 (let contains-string? (fn [[values (List String)] [value String]] -> Bool
   (not (= (count (filter (fn [[candidate String]] -> Bool (= candidate value)) values)) 0))))
@@ -722,7 +714,7 @@
   (= (count (filter (fn [[value String]] -> Bool
                       (not (contains-string? right value))) left)) 0)))
 (let one-port? (fn [[ports (List StoredPort)] [expected StoredPort]] -> Bool
-  (= ports [expected])))
+  (serialized-equal? ports [expected])))
 (let empty-packed-map? (fn [[value PackedValue]] -> Bool
   (packed-empty-record? value)))
 (let source-params-valid? (fn [[value PackedValue]] -> Bool
@@ -731,7 +723,7 @@
   (packed-field-conforms? (get value "params") "value"
                           (get output "type"))))
 (let one-type-argument? (fn [[value Actor] [expected TypeDescriptor]] -> Bool
-  (= (get value "type_arguments") [expected])))
+  (serialized-equal? (get value "type_arguments") [expected])))
 (let concrete-source? (fn [[candidate StoredNode]] -> Bool
   (let id (get candidate "id"))
   (let actors (get candidate "actors"))
@@ -742,14 +734,14 @@
         (let boundary (first actors))
         (if (= (get boundary "id") id)
           (if (= (get boundary "factory") source-factory)
-            (if (= input (as StoredPort
+            (if (serialized-equal? input (as StoredPort
                     {:actor id
                      :type (type-evidence (type-tag Unit))
                      :type_id (type-id (type-evidence (type-tag Unit)))
                      :wire "mag.Unit"}))
               (if (= (get output "actor") id)
                 (if (= (get output "wire") "nefor.graph.Value")
-                  (if (= (get boundary "input") input)
+                  (if (serialized-equal? (get boundary "input") input)
                     (if (one-type-argument? boundary (get output "type"))
                       (if (one-port? (get boundary "outputs") output)
                         (if (= (count (get candidate "routes")) 0)
@@ -772,7 +764,7 @@
   (let matching
     (filter (fn [[actor Actor]] -> Bool
               (if (= (get actor "factory") source-factory)
-                (= (get actor "input") input)
+                (serialized-equal? (get actor "input") input)
                 false))
             (get candidate "actors")))
   (if (= (count matching) 1)
@@ -805,8 +797,8 @@
               (if (= (get output "actor") id)
                 (if (= (get input "wire") "nefor.graph.Value")
                   (if (= (get output "wire") "nefor.graph.Value")
-                    (if (= (get input "type") (get output "type"))
-                      (if (= (get boundary "input") input)
+                    (if (= (canonical (type-id (get input "type"))) (canonical (type-id (get output "type"))))
+                      (if (serialized-equal? (get boundary "input") input)
                         (if (one-type-argument? boundary (get input "type"))
                           (if (one-port? (get boundary "outputs") output)
                             (if (empty-packed-map? (get boundary "params"))
@@ -840,7 +832,7 @@
     -> (List String)
     (let identity (get value "factory"))
     (let matching
-      (or (get contracts-by-id identity) (as (List FactoryContract) [])))
+      (__map-get-or contracts-by-id identity (as (List FactoryContract) [])))
     (if (= (count matching) 0)
       [(str (str (str "actor " (canonical (get value "id")))
                  ": factory identity ")
@@ -875,11 +867,11 @@
   (not (= (count
     (filter (fn [[candidate StoredNode]] -> Bool
               (let matching
-                (or (get (get analysis "nodes_by_id") (node-id candidate))
+                (__map-get-or (get analysis "nodes_by_id") (node-id candidate)
                     (as (List StoredNode) [])))
               (if (= (count matching) 0)
                 false
-                (not (= (first matching) candidate))))
+                (not (serialized-equal? (first matching) candidate))))
             (get analysis "all_nodes")))
     0))))
 (let actor-ids-valid? (fn [[analysis GraphAnalysis]] -> Bool
@@ -895,8 +887,8 @@
 (let port-is-output?
   (fn [[analysis GraphAnalysis] [value StoredPort]] -> Bool
     (let candidates
-      (or (get (get analysis "output_ports_by_address")
-               (port-address-key value))
+      (__map-get-or (get analysis "output_ports_by_address")
+               (port-address-key value)
           (as (List StoredPort) [])))
     (= (count
       (filter (fn [[output StoredPort]] -> Bool
@@ -906,8 +898,8 @@
 (let port-is-input?
   (fn [[analysis GraphAnalysis] [value StoredPort]] -> Bool
     (let candidates
-      (or (get (get analysis "input_actors_by_address")
-               (port-address-key value))
+      (__map-get-or (get analysis "input_actors_by_address")
+               (port-address-key value)
           (as (List Actor) [])))
     (= (count
       (filter (fn [[candidate Actor]] -> Bool
@@ -936,27 +928,27 @@
 (let actor-input-sources (fn [[analysis GraphAnalysis] [candidate Actor]] -> (List String)
   (let key (port-address-key (get candidate "input")))
   (concat
-    (map describe-route-source (or (get (get analysis "diagnostic_routes_by_input") key)
+    (map describe-route-source (__map-get-or (get analysis "diagnostic_routes_by_input") key
                                   (as (List StoredRoute) [])))
-    (map describe-message-source (or (get (get analysis "messages_by_input") key)
+    (map describe-message-source (__map-get-or (get analysis "messages_by_input") key
                                     (as (List Message) []))))))
 (let output-handlers
   (fn [[analysis GraphAnalysis] [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
        [output StoredPort]] -> (List String)
     (let key (port-address-key output))
     (concat
-      (map describe-route-handler (or (get (get analysis "routes_by_output") key)
+      (map describe-route-handler (__map-get-or (get analysis "routes_by_output") key
                                      (as (List StoredRoute) [])))
-      (map describe-operation-handler (or (get operations-by-output key) (as (List nefor.mag.ProgramOperation) []))))))
+      (map describe-operation-handler (__map-get-or operations-by-output key (as (List nefor.mag.ProgramOperation) []))))))
 
 (let actor-input-source-types
   (fn [[analysis GraphAnalysis] [candidate Actor]] -> (List TypeDescriptor)
     (let key (port-address-key (get candidate "input")))
     (let incoming
-      (or (get (get analysis "routes_by_input") key)
+      (__map-get-or (get analysis "routes_by_input") key
           (as (List StoredRoute) [])))
     (let messages
-      (or (get (get analysis "messages_by_input") key)
+      (__map-get-or (get analysis "messages_by_input") key
           (as (List Message) [])))
     (concat
       (map (fn [[route StoredRoute]] -> TypeDescriptor
@@ -974,15 +966,15 @@
   (fn [[analysis GraphAnalysis] [output StoredPort]] -> (List TypeDescriptor)
     (map (fn [[route StoredRoute]] -> TypeDescriptor
            (get (get route "to") "type"))
-         (or (get (get analysis "routes_by_output")
-                  (port-address-key output))
+         (__map-get-or (get analysis "routes_by_output")
+                  (port-address-key output)
              (as (List StoredRoute) [])))))
 (let operation-handler-types
   (fn [[operations-by-output (Map String (List nefor.mag.ProgramOperation))] [output StoredPort]]
     -> (List TypeDescriptor)
     (map (fn [[candidate nefor.mag.ProgramOperation]] -> TypeDescriptor
            (get (operation-port candidate) "type"))
-         (or (get operations-by-output (port-address-key output))
+         (__map-get-or operations-by-output (port-address-key output)
              (as (List nefor.mag.ProgramOperation) [])))))
 (let terminal-output?
   (fn [[analysis GraphAnalysis] [output StoredPort]] -> Bool
@@ -1049,7 +1041,7 @@
     (let reverse (reverse-reachable analysis result))
     (let dead
       (filter (fn [[candidate StoredNode]] -> Bool
-                (not (or (get reverse (node-id candidate)) false)))
+                (not (core.set.contains? reverse (node-id candidate))))
               (get analysis "nodes")))
     (if (= (count dead) 0)
         (validate-contracts-stage value analysis contracts)
@@ -1062,7 +1054,7 @@
     (let forward (forward-reachable analysis))
     (let unreachable
       (filter (fn [[candidate StoredNode]] -> Bool
-                (not (or (get forward (node-id candidate)) false)))
+                (not (core.set.contains? forward (node-id candidate))))
               (get analysis "nodes")))
     (if (= (count unreachable) 0)
         (validate-dead-stage value analysis contracts result)
@@ -1166,7 +1158,7 @@
   (fn [[analysis GraphAnalysis] [value nefor.mag.ProgramOperation]] -> Bool
     (let on (operation-port value))
     (if (= (get value "id") "") false
-      (if (not (= (get value "trigger_type_id") (get on "type_id"))) false
+      (if (not (= (canonical (get value "trigger_type_id")) (canonical (get on "type_id")))) false
         (if (= (indexed-count (get analysis "output_ports_by_address")
                  (port-address-key on)) 0) false
           (not (terminal-output? analysis on)))))))
@@ -1176,7 +1168,7 @@
     -> (core.validated.Validated String Graph)
     (let all-operations (concat (get analysis "graph_operations") operations))
     (let operation-ids-unique
-      (= (count (keys (group-by operation-id all-operations)))
+      (= (count (ordered-strings (map operation-id all-operations)))
          (count all-operations)))
     (let invalid
       (filter (fn [[candidate nefor.mag.ProgramOperation]] -> Bool
@@ -1240,7 +1232,7 @@
         (as AssignedRoute
           {:route route
            :product_position
-             (get (first (get positions-by-index (str index))) "position")}))
+             (get (first (core.map.get positions-by-index (str index))) "position")}))
       routes)))
 (let route-destination-descriptor-key
   (fn [[value StoredRoute]] -> String
@@ -1259,16 +1251,17 @@
            [descriptor-key String]]
         -> (Map String (Map String (List AssignedRoute)))
         (let descriptor-routes
-          (or (get routes-by-descriptor descriptor-key)
+          (__map-get-or routes-by-descriptor descriptor-key
               (as (List StoredRoute) [])))
         (let positions
           (descriptor-input-assignments
             (get (get (first descriptor-routes) "to") "type")
             sources))
-        (assoc out descriptor-key
+        (core.map.insert out descriptor-key
           (group-by assigned-route-id
             (zip-route-assignments routes positions))))
-      (as (Map String (Map String (List AssignedRoute))) {})
+      (as (Map String (Map String (List AssignedRoute)))
+        (core.map.empty (type-tag String)))
       descriptor-keys)))
 (let assigned-input-bucket
   (fn [[routes (List StoredRoute)]] -> (List AssignedRoute)
@@ -1283,15 +1276,18 @@
           (group-by route-destination-descriptor-key routes))
         (let assignments-by-descriptor
           (descriptor-assignment-index
-            routes (keys routes-by-descriptor) routes-by-descriptor sources))
+            routes
+            (ordered-strings (map route-destination-descriptor-key routes))
+            routes-by-descriptor sources))
         (map
           (fn [[candidate StoredRoute]] -> AssignedRoute
             (let assignments-by-id
-              (or (get assignments-by-descriptor
-                       (route-destination-descriptor-key candidate))
-                  (as (Map String (List AssignedRoute)) {})))
+              (__map-get-or assignments-by-descriptor
+                       (route-destination-descriptor-key candidate)
+                  (as (Map String (List AssignedRoute))
+                    (core.map.empty (type-tag String)))))
             (first
-              (or (get assignments-by-id (route-id candidate))
+              (__map-get-or assignments-by-id (route-id candidate)
                   (as (List AssignedRoute) []))))
           routes))))))
 (let route-assignment-key
@@ -1310,7 +1306,7 @@
       (flat-map
         (fn [[address String]] -> (List AssignedRoute)
           (assigned-input-bucket
-            (or (get routes-by-input address)
+            (__map-get-or routes-by-input address
                 (as (List StoredRoute) []))))
         route-input-addresses))))
 (let reconstruct-assigned-routes
@@ -1320,7 +1316,7 @@
     (map
       (fn [[candidate StoredRoute]] -> AssignedRoute
         (first
-          (or (get assignments-by-key (route-assignment-key candidate))
+          (__map-get-or assignments-by-key (route-assignment-key candidate)
               (as (List AssignedRoute) []))))
       routes)))
 (let assigned-routes-from-indexes
@@ -1381,12 +1377,13 @@
     (fold
       (fn [[out (Map String (List LowerDestination))] [wire String]]
         -> (Map String (List LowerDestination))
-        (assoc out wire
+        (core.map.insert out wire
           (map lower-destination
-            (or (get routes-by-wire wire)
+            (__map-get-or routes-by-wire wire
                 (as (List AssignedRoute) [])))))
-      (as (Map String (List LowerDestination)) {})
-      (keys routes-by-wire))))
+      (as (Map String (List LowerDestination))
+        (core.map.empty (type-tag String)))
+      (ordered-strings (map assigned-route-source-wire routes)))))
 (let lower-actor-with-routes
   (fn [[routes (List AssignedRoute)] [value Actor]] -> LowerActor
     (as LowerActor
@@ -1453,7 +1450,7 @@
     {:actors
        (map (fn [[candidate Actor]] -> LowerActor
               (lower-actor-with-routes
-                (or (get assigned-by-source (actor-id candidate))
+                (__map-get-or assigned-by-source (actor-id candidate)
                     (as (List AssignedRoute) []))
                 candidate))
             (get analysis "actors"))
@@ -1511,7 +1508,8 @@
   ;; Unit actor bootstrap rule rather than activate newly eligible internals.
   (let unit-ports
     (filter (fn [[input StoredPort]] -> Bool
-              (= (get input "type") (type-evidence (type-tag Unit))))
+              (= (canonical (type-id (get input "type")))
+                 (canonical (type-id (type-evidence (type-tag Unit))))))
       (map (fn [[candidate Actor]] -> StoredPort
              (get candidate "input")) actors)))
   (let routes (assigned-routes (get value "routes")))
@@ -1520,7 +1518,7 @@
   (as LowerDelta
     {:actors (map (fn [[candidate Actor]] -> LowerActor
                     (lower-actor-with-routes
-                      (or (get routes-by-source (actor-id candidate))
+                      (__map-get-or routes-by-source (actor-id candidate)
                           (as (List AssignedRoute) []))
                       candidate))
                   actors)

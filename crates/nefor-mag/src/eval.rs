@@ -327,9 +327,9 @@ fn eval_checked_expr(env: &mut Env, expression: &CheckedExpr) -> Result<Value, M
         CheckedExprKind::Int(value) => Ok(Value::Int(*value)),
         CheckedExprKind::Float(value) => Ok(Value::Float(*value)),
         CheckedExprKind::Bool(value) => Ok(Value::Bool(*value)),
-        CheckedExprKind::Keyword(value) => Ok(Value::Keyword(value.clone())),
+        CheckedExprKind::Keyword(value) => Ok(Value::Str(format!(":{value}"))),
         CheckedExprKind::BindingRef(id) => force_binding(env, *id),
-        CheckedExprKind::Vector(items) => Ok(Value::Vector(std::sync::Arc::new(
+        CheckedExprKind::Vector(items) => Ok(Value::List(std::sync::Arc::new(
             items
                 .iter()
                 .map(|item| eval_checked_expr(env, item))
@@ -340,7 +340,7 @@ fn eval_checked_expr(env: &mut Env, expression: &CheckedExpr) -> Result<Value, M
                 .iter()
                 .map(|(name, value)| Ok((name.clone(), eval_checked_expr(env, value)?)))
                 .collect::<Result<BTreeMap<_, _>, MagError>>()?;
-            Ok(Value::Map(std::sync::Arc::new(fields)))
+            Ok(Value::Record(std::sync::Arc::new(fields)))
         }
         CheckedExprKind::If {
             condition,
@@ -401,11 +401,18 @@ fn eval_checked_expr(env: &mut Env, expression: &CheckedExpr) -> Result<Value, M
                 _ => None,
             };
             let resolved_signature = runtime_type(env, &callee.ty);
-            apply_resolved(env, &function, &args, &resolved_signature)
+            let value = apply_resolved(env, &function, &args, &resolved_signature)?;
+            let ty = runtime_type(env, &expression.ty);
+            if matches!(ty, MagType::Map(_, _) | MagType::Set(_)) {
+                Ok(Value::Typed(std::sync::Arc::new(value), ty))
+            } else {
+                Ok(value)
+            }
         }
         CheckedExprKind::Function(function) => Ok(Value::Fn(std::sync::Arc::new(FnValue {
             name: function.name.clone(),
             type_params: function.type_params.clone(),
+            equality_params: function.equality_params.clone(),
             params: function
                 .params
                 .iter()
@@ -443,6 +450,7 @@ fn runtime_type(env: &Env, ty: &MagType) -> MagType {
         ),
         MagType::TypeTag(ty) => MagType::TypeTag(Box::new(runtime_type(env, ty))),
         MagType::List(ty) => MagType::List(Box::new(runtime_type(env, ty))),
+        MagType::Set(ty) => MagType::Set(Box::new(runtime_type(env, ty))),
         MagType::Map(key, value) => MagType::Map(
             Box::new(runtime_type(env, key)),
             Box::new(runtime_type(env, value)),
@@ -497,7 +505,7 @@ fn record_fields(env: &Env, ty: &MagType) -> Option<BTreeMap<String, MagType>> {
 }
 
 fn record_field_diff(env: &Env, value: &Value, ty: &MagType) -> Option<String> {
-    let Value::Map(actual) = raw(value) else {
+    let Value::Record(actual) = raw(value) else {
         return None;
     };
     let expected = record_fields(env, ty)?;
@@ -544,7 +552,7 @@ fn record_field_diff(env: &Env, value: &Value, ty: &MagType) -> Option<String> {
 fn checked_typed_value(env: &Env, value: Value, ty: MagType) -> Result<Value, MagError> {
     if let MagType::Product(components) = &ty {
         let values = match raw(&value) {
-            Value::List(values) | Value::Vector(values) | Value::Product(values) => values,
+            Value::List(values) | Value::Product(values) => values,
             _ => {
                 return Err(MagError::Type(format!(
                     "value does not conform to {ty}: expected an ordered tuple"
@@ -661,20 +669,24 @@ fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError
         MagType::Float => matches!(value, Value::Float(_)),
         MagType::String => matches!(value, Value::Str(_)),
         MagType::List(item) => match value {
-            Value::List(xs) | Value::Vector(xs) => {
-                xs.iter().all(|x| validate_value(env, x, item).is_ok())
-            }
+            Value::List(xs) => xs.iter().all(|x| validate_value(env, x, item).is_ok()),
             _ => false,
         },
         MagType::EmptyList => {
-            matches!(value, Value::List(items) | Value::Vector(items) if items.is_empty())
+            matches!(value, Value::List(items) if items.is_empty())
         }
-        MagType::Map(_, item) => match value {
-            Value::Map(map) => map.values().all(|x| validate_value(env, x, item).is_ok()),
+        MagType::Map(key, item) => match value {
+            Value::Map(map) => map.iter().all(|(k, v)| {
+                validate_value(env, k, key).is_ok() && validate_value(env, v, item).is_ok()
+            }),
+            _ => false,
+        },
+        MagType::Set(item) => match value {
+            Value::Set(items) => items.iter().all(|v| validate_value(env, v, item).is_ok()),
             _ => false,
         },
         MagType::Record(fields) => match value {
-            Value::Map(map) => {
+            Value::Record(map) => {
                 map.len() == fields.len()
                     && fields.iter().all(|(key, field)| {
                         map.get(key)
@@ -708,7 +720,7 @@ fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError
         ),
         MagType::Union(types) => types.iter().any(|t| validate_value(env, value, t).is_ok()),
         MagType::Product(types) => match value {
-            Value::List(values) | Value::Vector(values) | Value::Product(values) => {
+            Value::List(values) | Value::Product(values) => {
                 values.len() == types.len()
                     && values
                         .iter()
@@ -762,7 +774,7 @@ fn apply_with_signature(
                 .or_default() += 1;
         }
     });
-    match f {
+    match raw(f) {
         Value::Fn(fun) => {
             let _call_depth = fuel::enter_call()?;
             if args.len() != fun.params.len() {
@@ -860,10 +872,8 @@ pub fn apply_named(env: &Env, name: &str, arg: Value) -> Result<Value, MagError>
 
 fn collection_len(value: &Value) -> Option<u64> {
     match raw(value) {
-        Value::List(values) | Value::Vector(values) | Value::Product(values) => {
-            Some(values.len() as u64)
-        }
-        Value::Map(values) => Some(values.len() as u64),
+        Value::List(values) | Value::Product(values) => Some(values.len() as u64),
+        Value::Record(values) => Some(values.len() as u64),
         _ => None,
     }
 }
@@ -929,6 +939,120 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
         }
     });
     match name {
+        "__map-empty" => {
+            if !(1..=2).contains(&args.len()) {
+                return Err(MagError::Arity {
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            Ok(Value::Map(std::sync::Arc::new(Vec::new())))
+        }
+        "__set-empty" => {
+            arity(args, 1)?;
+            Ok(Value::Set(std::sync::Arc::new(Vec::new())))
+        }
+        "__map-insert" => {
+            arity(args, 3)?;
+            let Value::Map(entries) = raw(&args[0]) else {
+                return Err(MagError::Type("__map-insert expects Map".into()));
+            };
+            if entries.iter().any(|(key, _)| equal(env, key, &args[1])) {
+                return Err(MagError::Eval("duplicate Map key".into()));
+            }
+            let mut entries = entries.as_ref().clone();
+            entries.push((args[1].clone(), args[2].clone()));
+            Ok(Value::Map(std::sync::Arc::new(entries)))
+        }
+        "__map-put" => {
+            arity(args, 3)?;
+            let Value::Map(entries) = raw(&args[0]) else {
+                return Err(MagError::Type("__map-put expects Map".into()));
+            };
+            let mut entries = entries.as_ref().clone();
+            if let Some((_, value)) = entries
+                .iter_mut()
+                .find(|(key, _)| equal(env, key, &args[1]))
+            {
+                *value = args[2].clone();
+            } else {
+                entries.push((args[1].clone(), args[2].clone()));
+            }
+            Ok(Value::Map(std::sync::Arc::new(entries)))
+        }
+        "__set-insert" => {
+            arity(args, 2)?;
+            let Value::Set(items) = raw(&args[0]) else {
+                return Err(MagError::Type("__set-insert expects Set".into()));
+            };
+            if items.iter().any(|item| equal(env, item, &args[1])) {
+                return Err(MagError::Eval("duplicate Set member".into()));
+            }
+            let mut items = items.as_ref().clone();
+            items.push(args[1].clone());
+            Ok(Value::Set(std::sync::Arc::new(items)))
+        }
+        "__map-get-or" => {
+            arity(args, 3)?;
+            let Value::Map(entries) = raw(&args[0]) else {
+                return Err(MagError::Type("__map-get-or expects Map".into()));
+            };
+            Ok(entries
+                .iter()
+                .find(|(key, _)| equal(env, key, &args[1]))
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| args[2].clone()))
+        }
+        "__map-get" | "__map-contains" => {
+            arity(args, 2)?;
+            let Value::Map(entries) = raw(&args[0]) else {
+                return Err(MagError::Type(format!("{name} expects Map")));
+            };
+            let found = entries.iter().find(|(key, _)| equal(env, key, &args[1]));
+            if name == "__map-contains" {
+                Ok(Value::Bool(found.is_some()))
+            } else {
+                found
+                    .map(|(_, value)| value.clone())
+                    .ok_or_else(|| MagError::Eval("Map key not found".into()))
+            }
+        }
+        "__set-contains" => {
+            arity(args, 2)?;
+            let Value::Set(items) = raw(&args[0]) else {
+                return Err(MagError::Type("__set-contains expects Set".into()));
+            };
+            Ok(Value::Bool(
+                items.iter().any(|item| equal(env, item, &args[1])),
+            ))
+        }
+        "__map-union-left" => {
+            arity(args, 2)?;
+            let (Value::Map(left), Value::Map(right)) = (raw(&args[0]), raw(&args[1])) else {
+                return Err(MagError::Type(
+                    "__map-union-left expects Map arguments".into(),
+                ));
+            };
+            let mut entries = left.as_ref().clone();
+            for (key, value) in right.iter() {
+                if !entries
+                    .iter()
+                    .any(|(existing, _)| equal(env, existing, key))
+                {
+                    entries.push((key.clone(), value.clone()));
+                }
+            }
+            Ok(Value::Map(std::sync::Arc::new(entries)))
+        }
+        "__map-count" | "__set-count" => {
+            arity(args, 1)?;
+            let count = match (name, raw(&args[0])) {
+                ("__map-count", Value::Map(entries)) => entries.len(),
+                ("__set-count", Value::Set(items)) => items.len(),
+                _ => return Err(MagError::Type(format!("invalid collection for {name}"))),
+            };
+            Ok(Value::Int(count as i64))
+        }
         "artifact" => {
             arity(args, 1)?;
             Ok(Value::Artifact(crate::json::value_to_json(env, &args[0])?))
@@ -1002,8 +1126,8 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
         "count" => {
             arity(args, 1)?;
             let n = match raw(&args[0]) {
-                Value::List(v) | Value::Vector(v) => v.len(),
-                Value::Map(v) => v.len(),
+                Value::List(v) => v.len(),
+                Value::Record(v) => v.len(),
                 Value::Str(v) => v.chars().count(),
                 _ => return Err(MagError::Eval("count expects a collection".into())),
             };
@@ -1012,7 +1136,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
         "remove-at" => {
             arity(args, 2)?;
             let mut values = match raw(&args[0]) {
-                Value::List(values) | Value::Vector(values) => values.as_ref().clone(),
+                Value::List(values) => values.as_ref().clone(),
                 _ => return Err(MagError::Eval("remove-at expects List".into())),
             };
             let index = match raw(&args[1]) {
@@ -1030,13 +1154,13 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 )));
             }
             values.remove(index);
-            Ok(Value::Vector(std::sync::Arc::new(values)))
+            Ok(Value::List(std::sync::Arc::new(values)))
         }
         "get" => {
             arity(args, 2)?;
             let key = value_string(&args[1]);
             match raw(&args[0]) {
-                Value::Map(m) => Ok(m
+                Value::Record(m) => Ok(m
                     .get(key.trim_start_matches(':'))
                     .cloned()
                     .unwrap_or(Value::Unit)),
@@ -1046,19 +1170,19 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
         "assoc" => {
             arity(args, 3)?;
             let mut m = match raw(&args[0]) {
-                Value::Map(m) => m.as_ref().clone(),
+                Value::Record(m) => m.as_ref().clone(),
                 _ => return Err(MagError::Eval("assoc expects a map".into())),
             };
             m.insert(
                 value_string(&args[1]).trim_start_matches(':').into(),
                 args[2].clone(),
             );
-            Ok(Value::Map(std::sync::Arc::new(m)))
+            Ok(Value::Record(std::sync::Arc::new(m)))
         }
         "keys" => {
             arity(args, 1)?;
             match raw(&args[0]) {
-                Value::Map(m) => Ok(Value::Vector(std::sync::Arc::new(
+                Value::Record(m) => Ok(Value::List(std::sync::Arc::new(
                     m.keys().cloned().map(Value::Str).collect(),
                 ))),
                 _ => Err(MagError::Eval("keys expects a map".into())),
@@ -1067,7 +1191,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
         "first" => {
             arity(args, 1)?;
             match raw(&args[0]) {
-                Value::List(values) | Value::Vector(values) => values
+                Value::List(values) => values
                     .first()
                     .cloned()
                     .ok_or_else(|| MagError::Eval("first expects a non-empty List".into())),
@@ -1078,9 +1202,6 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             arity(args, 2)?;
             match (raw(&args[0]), raw(&args[1])) {
                 (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}"))),
-                (Value::Vector(a), Value::Vector(b)) => Ok(Value::Vector(std::sync::Arc::new(
-                    a.iter().chain(b.iter()).cloned().collect(),
-                ))),
                 (Value::List(a), Value::List(b)) => Ok(Value::List(std::sync::Arc::new(
                     a.iter().chain(b.iter()).cloned().collect(),
                 ))),
@@ -1115,7 +1236,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             let value = inputs
                 .get(key)
                 .ok_or_else(|| MagError::Type(format!("host input {key:?} is not present")))?;
-            crate::json::json_to_typed_value(env, value, &expected.to_mag_type())
+            crate::json::project_typed_value(env, value, &expected.to_mag_type())
                 .map_err(|error| MagError::Type(format!("host input {key:?}: {error}")))
         }
         "type-evidence" => {
@@ -1178,7 +1299,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 ));
             };
             Ok(Value::Bool(
-                matches!(raw(value), Value::Map(fields) if fields.is_empty()),
+                matches!(raw(value), Value::Record(fields) if fields.is_empty()),
             ))
         }
         "packed-record-has-only-key?" => {
@@ -1193,7 +1314,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 .ok_or_else(|| MagError::Type("packed record key must be String".into()))?;
             Ok(Value::Bool(matches!(
                 raw(value),
-                Value::Map(fields) if fields.len() == 1 && fields.contains_key(key)
+                Value::Record(fields) if fields.len() == 1 && fields.contains_key(key)
             )))
         }
         "packed-record-has-only-keys?" => {
@@ -1204,7 +1325,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 ));
             };
             let values = match raw(&args[1]) {
-                Value::List(values) | Value::Vector(values) => values,
+                Value::List(values) => values,
                 _ => {
                     return Err(MagError::Type(
                         "packed-record-has-only-keys? expects a String list".into(),
@@ -1221,7 +1342,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 .collect::<Result<BTreeSet<_>, _>>()?;
             Ok(Value::Bool(matches!(
                 raw(value),
-                Value::Map(fields)
+                Value::Record(fields)
                     if fields.len() == keys.len()
                         && fields.keys().all(|key| keys.contains(key.as_str()))
             )))
@@ -1242,7 +1363,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 ));
             };
             let valid = match raw(value) {
-                Value::Map(fields) => fields
+                Value::Record(fields) => fields
                     .get(key)
                     .is_some_and(|field| validate_value(env, field, &ty.to_mag_type()).is_ok()),
                 _ => false,
@@ -1275,7 +1396,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 ));
             };
             let sources = match raw(&args[1]) {
-                Value::List(sources) | Value::Vector(sources) => sources,
+                Value::List(sources) => sources,
                 _ => {
                     return Err(MagError::Type(
                         "descriptor-input-covered-by? expects a descriptor list".into(),
@@ -1416,7 +1537,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             Ok(Value::Map(std::sync::Arc::new(
                 declarations
                     .into_iter()
-                    .map(|(id, descriptor)| (id, Value::TypeDescriptor(descriptor)))
+                    .map(|(id, descriptor)| (Value::Str(id), Value::TypeDescriptor(descriptor)))
                     .collect(),
             )))
         }
@@ -1451,7 +1572,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 &full,
                 &s,
             );
-            if let Some(Value::Map(m)) = args.get(1) {
+            if let Some(Value::Record(m)) = args.get(1) {
                 for (k, v) in m.iter() {
                     s = s.replace(&format!("{{{{{k}}}}}"), &value_string(v));
                 }
@@ -1508,13 +1629,13 @@ fn canonical_json(value: serde_json::Value) -> serde_json::Value {
 
 fn collection_builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
     let seq = |v: &Value| match raw(v) {
-        Value::List(v) | Value::Vector(v) => Ok(v.clone()),
+        Value::List(v) => Ok(v.clone()),
         _ => Err(MagError::Eval(format!("{name} expects a collection"))),
     };
     match name {
         "map" => {
             arity(args, 2)?;
-            Ok(Value::Vector(std::sync::Arc::new(
+            Ok(Value::List(std::sync::Arc::new(
                 seq(&args[1])?
                     .iter()
                     .map(|v| apply(env, &args[0], std::slice::from_ref(v)))
@@ -1537,13 +1658,15 @@ fn collection_builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, Ma
             Ok(Value::Map(std::sync::Arc::new(
                 groups
                     .into_iter()
-                    .map(|(key, values)| (key, Value::Vector(std::sync::Arc::new(values))))
+                    .map(|(key, values)| {
+                        (Value::Str(key), Value::List(std::sync::Arc::new(values)))
+                    })
                     .collect(),
             )))
         }
         "indexed-map" => {
             arity(args, 2)?;
-            Ok(Value::Vector(std::sync::Arc::new(
+            Ok(Value::List(std::sync::Arc::new(
                 seq(&args[1])?
                     .iter()
                     .cloned()
@@ -1560,7 +1683,7 @@ fn collection_builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, Ma
                     out.push(v)
                 }
             }
-            Ok(Value::Vector(std::sync::Arc::new(out)))
+            Ok(Value::List(std::sync::Arc::new(out)))
         }
         "flat-map" => {
             arity(args, 2)?;
@@ -1568,7 +1691,7 @@ fn collection_builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, Ma
             for v in seq(&args[1])?.iter().cloned() {
                 out.extend(seq(&apply(env, &args[0], &[v])?)?.iter().cloned())
             }
-            Ok(Value::Vector(std::sync::Arc::new(out)))
+            Ok(Value::List(std::sync::Arc::new(out)))
         }
         "fold" => {
             arity(args, 3)?;
@@ -1595,7 +1718,7 @@ fn collection_builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, Ma
                 })
                 .collect::<Result<Vec<_>, MagError>>()?;
             keyed.sort_by(|left, right| left.0.cmp(&right.0));
-            Ok(Value::Vector(std::sync::Arc::new(
+            Ok(Value::List(std::sync::Arc::new(
                 keyed.into_iter().map(|(_, value)| value).collect(),
             )))
         }
@@ -1700,7 +1823,7 @@ fn descriptor_node_count(descriptor: &ConcreteType) -> u64 {
                     .map(|constructor| descriptor_node_count(&constructor.payload))
                     .sum::<u64>()
         }
-        ConcreteType::List { item } => descriptor_node_count(item),
+        ConcreteType::List { item } | ConcreteType::Set { item } => descriptor_node_count(item),
         ConcreteType::Map { key, value } => {
             descriptor_node_count(key) + descriptor_node_count(value)
         }
@@ -1736,7 +1859,7 @@ fn descriptor_hashed_bytes(descriptor: &ConcreteType) -> u64 {
                     .map(|constructor| descriptor_hashed_bytes(&constructor.payload))
                     .sum::<u64>()
         }
-        ConcreteType::List { item } => descriptor_hashed_bytes(item),
+        ConcreteType::List { item } | ConcreteType::Set { item } => descriptor_hashed_bytes(item),
         ConcreteType::Map { key, value } => {
             descriptor_hashed_bytes(key) + descriptor_hashed_bytes(value)
         }
@@ -1754,7 +1877,7 @@ fn descriptor_hashed_bytes(descriptor: &ConcreteType) -> u64 {
 
 fn descriptor_list(value: &Value, error: &str) -> Result<Vec<ConcreteType>, MagError> {
     let values = match raw(value) {
-        Value::List(values) | Value::Vector(values) => values,
+        Value::List(values) => values,
         _ => return Err(MagError::Type(error.into())),
     };
     values
@@ -1818,19 +1941,33 @@ pub(crate) fn equal(env: &Env, a: &Value, b: &Value) -> bool {
     env.profile_counters(|counters| {
         counters.value_equality_visits = counters.value_equality_visits.saturating_add(1);
     });
+    fn nominal<'a>(env: &Env, value: &'a Value) -> Option<(ConcreteType, &'a Value)> {
+        match value {
+            Value::Typed(inner, ty) => {
+                if let Ok(concrete @ ConcreteType::Named { .. }) = ConcreteType::resolve(env, ty) {
+                    Some((concrete, inner))
+                } else {
+                    nominal(env, inner)
+                }
+            }
+            _ => None,
+        }
+    }
+    match (nominal(env, a), nominal(env, b)) {
+        (Some((left, a)), Some((right, b))) => return left == right && equal(env, a, b),
+        (Some(_), None) | (None, Some(_)) => return false,
+        (None, None) => {}
+    }
     match (raw(a), raw(b)) {
         (Value::Unit, Value::Unit) => true,
         (Value::Str(a), Value::Str(b)) => a == b,
         (Value::Int(a), Value::Int(b)) => a == b,
-        (Value::Float(a), Value::Float(b)) => a == b,
+        // Equality is bit-exact, including the sign of zero and NaN payloads.
+        (Value::Float(a), Value::Float(b)) => a.to_bits() == b.to_bits(),
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Keyword(a), Value::Keyword(b)) => a == b,
         (Value::Symbol(a), Value::Symbol(b)) => a == b,
-        (Value::BuiltinFn(a), Value::BuiltinFn(b)) => a == b,
-        (Value::Fn(a), Value::Fn(b)) => std::sync::Arc::ptr_eq(a, b),
-        (Value::List(a), Value::List(b))
-        | (Value::Vector(a), Value::Vector(b))
-        | (Value::Product(a), Value::Product(b)) => {
+        (Value::List(a), Value::List(b)) | (Value::Product(a), Value::Product(b)) => {
             a.len() == b.len()
                 && a.iter()
                     .zip(b.iter())
@@ -1838,12 +1975,22 @@ pub(crate) fn equal(env: &Env, a: &Value, b: &Value) -> bool {
         }
         (Value::Map(a), Value::Map(b)) => {
             a.len() == b.len()
+                && a.iter().all(|(key, value)| {
+                    b.iter().any(|(other_key, other_value)| {
+                        equal(env, key, other_key) && equal(env, value, other_value)
+                    })
+                })
+        }
+        (Value::Set(a), Value::Set(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|item| b.iter().any(|other| equal(env, item, other)))
+        }
+        (Value::Record(a), Value::Record(b)) => {
+            a.len() == b.len()
                 && a.iter()
                     .all(|(key, value)| b.get(key).is_some_and(|other| equal(env, value, other)))
         }
-        (Value::Type(a), Value::Type(b)) => a == b,
-        (Value::TypeTag(a), Value::TypeTag(b)) => a == b,
-        (Value::TypeDecl(a), Value::TypeDecl(b)) => a == b,
         (
             Value::Adt {
                 owner: left_owner,
@@ -1856,18 +2003,34 @@ pub(crate) fn equal(env: &Env, a: &Value, b: &Value) -> bool {
                 payload: right_payload,
             },
         ) => {
-            left_owner == right_owner
+            ConcreteType::resolve(env, left_owner)
+                .ok()
+                .zip(ConcreteType::resolve(env, right_owner).ok())
+                .is_some_and(|(left, right)| left == right)
                 && left_constructor == right_constructor
                 && equal(env, left_payload, right_payload)
         }
-        (Value::TypeDescriptor(a), Value::TypeDescriptor(b)) => a == b,
-        (Value::TypeSchema(a), Value::TypeSchema(b)) => a == b,
-        (Value::SemanticTypeId(a), Value::SemanticTypeId(b)) => a == b,
-        (Value::PackedValue(a), Value::PackedValue(b)) => equal(env, a, b),
-        (Value::JsonValue(a), Value::JsonValue(b)) => a == b,
-        (Value::HostInputs(a), Value::HostInputs(b)) => a == b,
-        (Value::Artifact(a), Value::Artifact(b)) => a == b,
+        (Value::JsonValue(a), Value::JsonValue(b)) => json_equal(a, b),
         _ => false,
+    }
+}
+
+pub(crate) fn json_equal(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value as Json;
+    match (a, b) {
+        (Json::Number(a), Json::Number(b)) if a.is_f64() && b.is_f64() => a
+            .as_f64()
+            .zip(b.as_f64())
+            .is_some_and(|(a, b)| a.to_bits() == b.to_bits()),
+        (Json::Array(a), Json::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| json_equal(a, b))
+        }
+        (Json::Object(a), Json::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(k, a)| b.get(k).is_some_and(|b| json_equal(a, b)))
+        }
+        _ => a == b,
     }
 }
 
@@ -1903,7 +2066,7 @@ fn selected_value_type(
 fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
     if let Some(defs) = env.module_cached(name) {
         env.install_module(name, defs.clone());
-        return Ok(Value::Map(std::sync::Arc::new(module_value_map(&defs))));
+        return Ok(Value::Record(std::sync::Arc::new(module_value_map(&defs))));
     }
     env.begin_module(name)?;
     let resolve_phase = env.profile_phase(Phase::ModuleResolve);
@@ -1936,7 +2099,7 @@ fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
             for (module_name, module_defs) in env.loaded_modules() {
                 env.install_module(&module_name, module_defs);
             }
-            Ok(Value::Map(std::sync::Arc::new(module_value_map(&defs))))
+            Ok(Value::Record(std::sync::Arc::new(module_value_map(&defs))))
         }
         Err(e) => Err(e),
     }
@@ -1977,6 +2140,7 @@ mod tests {
         Ok(Value::Fn(std::sync::Arc::new(FnValue {
             name: None,
             type_params: vec![],
+            equality_params: vec![],
             params: vec![],
             param_types: vec![],
             return_type: MagType::Int,
@@ -1996,11 +2160,21 @@ mod tests {
     }
 
     #[test]
+    fn float_equality_preserves_every_bit() {
+        let env = Env::new();
+        let nan = f64::from_bits(0x7ff8_0000_0000_0001);
+        let other_nan = f64::from_bits(0x7ff8_0000_0000_0002);
+        assert!(equal(&env, &Value::Float(nan), &Value::Float(nan)));
+        assert!(!equal(&env, &Value::Float(nan), &Value::Float(other_nan)));
+        assert!(!equal(&env, &Value::Float(0.0), &Value::Float(-0.0)));
+    }
+
+    #[test]
     fn group_by_defensively_rejects_a_runtime_non_string_key() {
         let env = Env::new_with_stdlib();
-        let values = Value::Vector(std::sync::Arc::new(vec![Value::Vector(
-            std::sync::Arc::new(vec![Value::Int(1)]),
-        )]));
+        let values = Value::List(std::sync::Arc::new(vec![Value::List(std::sync::Arc::new(
+            vec![Value::Int(1)],
+        ))]));
         let error = collection_builtin(
             &env,
             "group-by",
@@ -2089,6 +2263,7 @@ mod tests {
         let function = Value::Fn(std::sync::Arc::new(FnValue {
             name: None,
             type_params,
+            equality_params: vec![],
             params,
             param_types,
             return_type: result,

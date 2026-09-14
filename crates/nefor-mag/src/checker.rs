@@ -6,8 +6,31 @@ use crate::authored::{BlockItem, Expr, Function, Type};
 use crate::env::Env;
 use crate::error::MagError;
 use crate::types::MagType;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+
+thread_local! {
+    static EQUALITY_OBLIGATIONS: RefCell<Vec<HashSet<String>>> = const { RefCell::new(Vec::new()) };
+}
+
+fn with_equality_obligation_scope<T>(
+    operation: impl FnOnce() -> Result<T, MagError>,
+) -> Result<(T, HashSet<String>), MagError> {
+    EQUALITY_OBLIGATIONS.with(|scopes| scopes.borrow_mut().push(HashSet::new()));
+    let result = operation();
+    let obligations =
+        EQUALITY_OBLIGATIONS.with(|scopes| scopes.borrow_mut().pop().unwrap_or_default());
+    result.map(|value| (value, obligations))
+}
+
+fn record_equality_variables(variables: impl IntoIterator<Item = String>) {
+    EQUALITY_OBLIGATIONS.with(|scopes| {
+        if let Some(scope) = scopes.borrow_mut().last_mut() {
+            scope.extend(variables);
+        }
+    });
+}
 
 type Locals = HashMap<String, Vec<MagType>>;
 
@@ -66,7 +89,14 @@ pub(crate) fn compile_resolved_function(
             ty: ty.clone(),
         });
     }
-    let checked_body = compile_block_in(env, &[parameter_scope], body, Some(result))?;
+    let (checked_body, equality_variables) = with_equality_obligation_scope(|| {
+        compile_block_in(env, &[parameter_scope], body, Some(result))
+    })?;
+    let equality_params = type_params
+        .iter()
+        .filter(|parameter| equality_variables.contains(*parameter))
+        .cloned()
+        .collect::<Vec<_>>();
     let actual = checked_body
         .expressions
         .last()
@@ -81,6 +111,7 @@ pub(crate) fn compile_resolved_function(
     Ok(CheckedFn {
         name: name.map(str::to_owned),
         type_params: type_params.to_vec(),
+        equality_params,
         params: checked_params,
         result: result.clone(),
         body: Arc::new(checked_body),
@@ -180,6 +211,16 @@ pub fn check_call(
         let expected = substitute(&function.param_types[index], &subst);
         compatible(env, actual, &expected, &mut subst).map_err(MagError::Type)?;
     }
+    validate_equality_requirements(
+        env,
+        &function
+            .equality_params
+            .iter()
+            .cloned()
+            .map(MagType::Var)
+            .collect::<Vec<_>>(),
+        &subst,
+    )?;
     Ok((substitute(&function.return_type, &subst), subst))
 }
 
@@ -210,6 +251,16 @@ pub fn check_resolved_call(
     }
     let expected_result = substitute(&function.return_type, &substitution);
     compatible(env, result, &expected_result, &mut substitution).map_err(MagError::Type)?;
+    validate_equality_requirements(
+        env,
+        &function
+            .equality_params
+            .iter()
+            .cloned()
+            .map(MagType::Var)
+            .collect::<Vec<_>>(),
+        &substitution,
+    )?;
     Ok((result.as_ref().clone(), substitution))
 }
 
@@ -246,11 +297,18 @@ fn infer(env: &Env, locals: &mut Locals, expr: &Expr) -> Result<MagType, MagErro
                 .ok_or_else(|| MagError::Unresolved(name.clone())),
         },
         Expr::Vector(items) => infer_list(env, locals, items),
-        Expr::Record(fields) => fields
-            .iter()
-            .map(|(key, value)| Ok((key.clone(), infer(env, locals, value)?)))
-            .collect::<Result<BTreeMap<_, _>, MagError>>()
-            .map(MagType::Record),
+        Expr::Record(fields) => {
+            let mut inferred = BTreeMap::new();
+            for (key, value) in fields {
+                if inferred
+                    .insert(key.clone(), infer(env, locals, value)?)
+                    .is_some()
+                {
+                    return Err(MagError::Type(format!("duplicate record field {key}")));
+                }
+            }
+            Ok(MagType::Record(inferred))
+        }
         Expr::If {
             condition,
             then_branch,
@@ -507,6 +565,107 @@ fn infer_match(
     Ok(result.unwrap_or(MagType::Unit))
 }
 
+fn require_equality_admissible(env: &Env, ty: &MagType) -> Result<(), MagError> {
+    let mut variables = HashSet::new();
+    equality_admissible_in(env, ty, &mut variables, &mut HashSet::new()).map_err(MagError::Type)?;
+    record_equality_variables(variables);
+    Ok(())
+}
+
+fn equality_admissible_in(
+    env: &Env,
+    ty: &MagType,
+    variables: &mut HashSet<String>,
+    visiting: &mut HashSet<MagType>,
+) -> Result<(), String> {
+    match ty {
+        MagType::Var(name) => {
+            variables.insert(name.clone());
+            Ok(())
+        }
+        MagType::Unit
+        | MagType::Bool
+        | MagType::Int
+        | MagType::Float
+        | MagType::String
+        | MagType::JsonValue
+        | MagType::Never
+        | MagType::EmptyList => Ok(()),
+        MagType::List(item) | MagType::Set(item) => {
+            equality_admissible_in(env, item, variables, visiting)
+        }
+        MagType::Map(key, value) => {
+            equality_admissible_in(env, key, variables, visiting)?;
+            equality_admissible_in(env, value, variables, visiting)
+        }
+        MagType::Record(fields) => fields
+            .values()
+            .try_for_each(|field| equality_admissible_in(env, field, variables, visiting)),
+        MagType::Union(items) | MagType::Product(items) => items
+            .iter()
+            .try_for_each(|item| equality_admissible_in(env, item, variables, visiting)),
+        MagType::Named(name, arguments) => {
+            for argument in arguments {
+                equality_admissible_in(env, argument, variables, visiting)?;
+            }
+            if !visiting.insert(ty.clone()) {
+                return Ok(());
+            }
+            let declaration = env
+                .type_decl(name)
+                .ok_or_else(|| format!("unknown nominal type {name}"))?;
+            let substitution = declaration
+                .params
+                .iter()
+                .cloned()
+                .zip(arguments.iter().cloned())
+                .collect::<HashMap<_, _>>();
+            let result = match declaration.body {
+                TypeDeclBody::Nominal(body) => equality_admissible_in(
+                    env,
+                    &substitute(&body, &substitution),
+                    variables,
+                    visiting,
+                ),
+                TypeDeclBody::Adt(constructors) => {
+                    constructors.iter().try_for_each(|constructor| {
+                        equality_admissible_in(
+                            env,
+                            &substitute(&constructor.payload, &substitution),
+                            variables,
+                            visiting,
+                        )
+                    })
+                }
+                TypeDeclBody::Native => Err(format!(
+                    "type {ty} has opaque native behavior and does not support equality"
+                )),
+            };
+            visiting.remove(ty);
+            result
+        }
+        MagType::Function(_, _) => Err(format!("function type {ty} does not support equality")),
+        MagType::Artifact
+        | MagType::TypeDescriptor
+        | MagType::TypeSchema
+        | MagType::SemanticTypeId
+        | MagType::PackedValue
+        | MagType::HostInputs
+        | MagType::TypeTag(_) => Err(format!("type {ty} does not support equality")),
+    }
+}
+
+fn validate_equality_requirements(
+    env: &Env,
+    requirements: &[MagType],
+    substitution: &HashMap<String, MagType>,
+) -> Result<(), MagError> {
+    for requirement in requirements {
+        require_equality_admissible(env, &substitute(requirement, substitution))?;
+    }
+    Ok(())
+}
+
 fn infer_builtin(
     env: &Env,
     locals: &mut Locals,
@@ -524,11 +683,138 @@ fn infer_builtin(
         }
     };
     match name {
+        "__map-empty" => {
+            if !(1..=2).contains(&args.len()) {
+                return Err(MagError::Type(format!(
+                    "__map-empty expects 1-2 arguments, got {}",
+                    args.len()
+                )));
+            }
+            let key = match infer(env, locals, &args[0])? {
+                MagType::TypeTag(key) => *key,
+                actual => {
+                    return Err(MagError::Type(format!(
+                        "__map-empty expects TypeTag keys, got {actual}"
+                    )))
+                }
+            };
+            require_equality_admissible(env, &key)?;
+            let value = if let Some(value) = args.get(1) {
+                match infer(env, locals, value)? {
+                    MagType::TypeTag(value) => *value,
+                    actual => {
+                        return Err(MagError::Type(format!(
+                            "__map-empty expects TypeTag values, got {actual}"
+                        )))
+                    }
+                }
+            } else {
+                MagType::Var("\0builtin.value".into())
+            };
+            Ok(MagType::Map(Box::new(key), Box::new(value)))
+        }
+        "__map-insert" | "__map-put" | "__map-get-or" | "__map-get" | "__map-contains" => {
+            exact(
+                if matches!(name, "__map-insert" | "__map-put" | "__map-get-or") {
+                    3
+                } else {
+                    2
+                },
+            )?;
+            let target = infer(env, locals, &args[0])?;
+            let MagType::Map(key, value) = target else {
+                return Err(MagError::Type(format!("{name} expects Map, got {target}")));
+            };
+            require_equality_admissible(env, &key)?;
+            let actual_key = infer(env, locals, &args[1])?;
+            compatible(env, &actual_key, &key, &mut HashMap::new()).map_err(MagError::Type)?;
+            if matches!(name, "__map-insert" | "__map-put" | "__map-get-or") {
+                let actual_value = infer(env, locals, &args[2])?;
+                compatible(env, &actual_value, &value, &mut HashMap::new())
+                    .map_err(MagError::Type)?;
+                if name == "__map-get-or" {
+                    Ok(*value)
+                } else {
+                    Ok(MagType::Map(key, value))
+                }
+            } else if name == "__map-get" {
+                Ok(*value)
+            } else {
+                Ok(MagType::Bool)
+            }
+        }
+        "__map-union-left" => {
+            exact(2)?;
+            let left = infer(env, locals, &args[0])?;
+            let right = infer(env, locals, &args[1])?;
+            compatible(env, &right, &left, &mut HashMap::new()).map_err(MagError::Type)?;
+            let MagType::Map(key, value) = left else {
+                return Err(MagError::Type(format!(
+                    "__map-union-left expects Map, got {left}"
+                )));
+            };
+            require_equality_admissible(env, &key)?;
+            Ok(MagType::Map(key, value))
+        }
+        "__map-count" => {
+            exact(1)?;
+            match infer(env, locals, &args[0])? {
+                MagType::Map(key, _) => {
+                    require_equality_admissible(env, &key)?;
+                    Ok(MagType::Int)
+                }
+                actual => Err(MagError::Type(format!(
+                    "__map-count expects Map, got {actual}"
+                ))),
+            }
+        }
+        "__set-empty" => {
+            exact(1)?;
+            let item = match infer(env, locals, &args[0])? {
+                MagType::TypeTag(item) => *item,
+                actual => {
+                    return Err(MagError::Type(format!(
+                        "__set-empty expects TypeTag, got {actual}"
+                    )))
+                }
+            };
+            require_equality_admissible(env, &item)?;
+            Ok(MagType::Set(Box::new(item)))
+        }
+        "__set-insert" | "__set-contains" => {
+            exact(2)?;
+            let target = infer(env, locals, &args[0])?;
+            let MagType::Set(item) = target else {
+                return Err(MagError::Type(format!("{name} expects Set, got {target}")));
+            };
+            require_equality_admissible(env, &item)?;
+            let actual = infer(env, locals, &args[1])?;
+            compatible(env, &actual, &item, &mut HashMap::new()).map_err(MagError::Type)?;
+            if name == "__set-insert" {
+                Ok(MagType::Set(item))
+            } else {
+                Ok(MagType::Bool)
+            }
+        }
+        "__set-count" => {
+            exact(1)?;
+            match infer(env, locals, &args[0])? {
+                MagType::Set(item) => {
+                    require_equality_admissible(env, &item)?;
+                    Ok(MagType::Int)
+                }
+                actual => Err(MagError::Type(format!(
+                    "__set-count expects Set, got {actual}"
+                ))),
+            }
+        }
         "get" => {
             exact(2)?;
             let target = infer(env, locals, &args[0])?;
-            if matches!(target, MagType::HostInputs) {
-                return Err(MagError::Type("get expects a map".into()));
+            if matches!(target, MagType::HostInputs | MagType::Map(_, _)) {
+                return Err(MagError::Type(format!(
+                    "get expects a record, got {target}"
+                )));
             }
             let key_type = infer(env, locals, &args[1])?;
             compatible(env, &key_type, &MagType::String, &mut HashMap::new())
@@ -543,6 +829,9 @@ fn infer_builtin(
         "assoc" => {
             exact(3)?;
             let target = infer(env, locals, &args[0])?;
+            if matches!(target, MagType::Map(_, _)) {
+                return Err(MagError::Type("assoc expects a record".into()));
+            }
             let key_type = infer(env, locals, &args[1])?;
             compatible(env, &key_type, &MagType::String, &mut HashMap::new())
                 .map_err(MagError::Type)?;
@@ -559,9 +848,7 @@ fn infer_builtin(
         "count" => {
             exact(1)?;
             match infer(env, locals, &args[0])? {
-                MagType::List(_) | MagType::Map(_, _) | MagType::Record(_) | MagType::String => {
-                    Ok(MagType::Int)
-                }
+                MagType::List(_) | MagType::Record(_) | MagType::String => Ok(MagType::Int),
                 actual => Err(MagError::Type(format!(
                     "count expects a collection, got {actual}"
                 ))),
@@ -572,6 +859,8 @@ fn infer_builtin(
             let left = infer(env, locals, &args[0])?;
             let right = infer(env, locals, &args[1])?;
             compatible(env, &left, &right, &mut HashMap::new()).map_err(MagError::Type)?;
+            require_equality_admissible(env, &left)?;
+            require_equality_admissible(env, &right)?;
             Ok(MagType::Bool)
         }
         "not" => {
@@ -845,10 +1134,10 @@ fn infer_builtin(
         "keys" => {
             exact(1)?;
             match infer(env, locals, &args[0])? {
-                MagType::Map(_, _) | MagType::Record(_) => {
-                    Ok(MagType::List(Box::new(MagType::String)))
-                }
-                actual => Err(MagError::Type(format!("keys expects a map, got {actual}"))),
+                MagType::Record(_) => Ok(MagType::List(Box::new(MagType::String))),
+                actual => Err(MagError::Type(format!(
+                    "keys expects a record, got {actual}"
+                ))),
             }
         }
         "first" => {
@@ -961,6 +1250,18 @@ type CheckedScope = HashMap<String, Vec<CheckedCandidate>>;
 const TYPE_BINDER_SCOPE_KEY: &str = "\0type-binders";
 
 pub(crate) const BUILTIN_NAMES: &[&str] = &[
+    "__map-empty",
+    "__map-insert",
+    "__map-put",
+    "__map-get",
+    "__map-get-or",
+    "__map-contains",
+    "__map-count",
+    "__map-union-left",
+    "__set-empty",
+    "__set-insert",
+    "__set-contains",
+    "__set-count",
     "str",
     "strip-margin",
     "replace",
@@ -1013,11 +1314,51 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
     let function =
         |params: Vec<MagType>, result: MagType| MagType::Function(params, Box::new(result));
     let list = |item: MagType| MagType::List(Box::new(item));
+    let set = |item: MagType| MagType::Set(Box::new(item));
     let map = |key: MagType, value: MagType| MagType::Map(Box::new(key), Box::new(value));
     let tag = |value: MagType| MagType::TypeTag(Box::new(value));
     let descriptor = MagType::TypeDescriptor;
     let packed = MagType::PackedValue;
     let mut signatures = match name {
+        "__map-empty" => vec![
+            function(vec![tag(var("key"))], map(var("key"), var("value"))),
+            function(
+                vec![tag(var("key")), tag(var("value"))],
+                map(var("key"), var("value")),
+            ),
+        ],
+        "__map-insert" => vec![function(
+            vec![map(var("key"), var("value")), var("key"), var("value")],
+            map(var("key"), var("value")),
+        )],
+        "__map-put" => vec![function(
+            vec![map(var("key"), var("value")), var("key"), var("value")],
+            map(var("key"), var("value")),
+        )],
+        "__map-get-or" => vec![function(
+            vec![map(var("key"), var("value")), var("key"), var("value")],
+            var("value"),
+        )],
+        "__map-get" => vec![function(
+            vec![map(var("key"), var("value")), var("key")],
+            var("value"),
+        )],
+        "__map-contains" => vec![function(
+            vec![map(var("key"), var("value")), var("key")],
+            MagType::Bool,
+        )],
+        "__map-count" => vec![function(vec![map(var("key"), var("value"))], MagType::Int)],
+        "__map-union-left" => vec![function(
+            vec![map(var("key"), var("value")), map(var("key"), var("value"))],
+            map(var("key"), var("value")),
+        )],
+        "__set-empty" => vec![function(vec![tag(var("item"))], set(var("item")))],
+        "__set-insert" => vec![function(
+            vec![set(var("item")), var("item")],
+            set(var("item")),
+        )],
+        "__set-contains" => vec![function(vec![set(var("item")), var("item")], MagType::Bool)],
+        "__set-count" => vec![function(vec![set(var("item"))], MagType::Int)],
         "str" => candidate
             .and_then(|candidate| match candidate {
                 MagType::Function(params, _) => {
@@ -1034,7 +1375,6 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
         "count" => vec![
             function(vec![list(var("item"))], MagType::Int),
             function(vec![MagType::String], MagType::Int),
-            function(vec![map(var("key"), var("value"))], MagType::Int),
         ],
         "first" => vec![function(vec![list(var("item"))], var("item"))],
         "remove-at" => vec![function(
@@ -1117,16 +1457,20 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
         "artifact" => vec![function(vec![var("value")], MagType::Artifact)],
         "or" => vec![function(vec![var("value"), var("value")], var("value"))],
         "keys" => vec![function(
-            vec![map(var("key"), var("value"))],
+            vec![MagType::Record(BTreeMap::new())],
             list(MagType::String),
         )],
         "get" => vec![function(
-            vec![map(var("key"), var("value")), MagType::String],
-            var("value"),
+            vec![MagType::Record(BTreeMap::new()), MagType::String],
+            var("field"),
         )],
         "assoc" => vec![function(
-            vec![map(var("key"), var("value")), MagType::String, var("value")],
-            map(var("key"), var("value")),
+            vec![
+                MagType::Record(BTreeMap::new()),
+                MagType::String,
+                var("field"),
+            ],
+            MagType::Record(BTreeMap::new()),
         )],
         "map" => vec![function(
             vec![
@@ -1221,6 +1565,274 @@ fn collides_with_builtin(env: &Env, name: &str, candidate: &MagType) -> bool {
         })
 }
 
+// A function's constraints must survive value transport (records, conditionals,
+// returned callbacks), not only a direct call through its original name.
+fn check_equality_specialization(
+    env: &Env,
+    expression: &CheckedExpr,
+    expected: &MagType,
+    outer: &HashMap<String, MagType>,
+) -> Result<(), MagError> {
+    let mut substitutions = outer.clone();
+    let original = substitute(&expression.ty, outer);
+    let expected = substitute(expected, outer);
+    let mut bindable = HashSet::new();
+    collect_vars(&original, &mut bindable);
+    // This mapping is local evidence propagation; ordinary checking has already
+    // established compatibility and owns diagnostics for mismatched types.
+    let _ = compatible_with_bindable(env, &expected, &original, &mut substitutions, &bindable);
+    let resolved = substitute(&expression.ty, &substitutions);
+    match &expression.kind {
+        CheckedExprKind::BindingRef(id) => {
+            for requirement in resolved_binding_requirements(env, *id, &resolved) {
+                require_equality_admissible(env, &substitute(&requirement, &substitutions))?;
+            }
+        }
+        CheckedExprKind::Function(function) => {
+            for parameter in &function.equality_params {
+                require_equality_admissible(
+                    env,
+                    &substitute(&MagType::Var(parameter.clone()), &substitutions),
+                )?;
+            }
+            for binding in &function.body.bindings {
+                check_equality_specialization(
+                    env,
+                    &binding.initializer,
+                    &binding.ty,
+                    &substitutions,
+                )?;
+            }
+            for expression in &function.body.expressions {
+                check_equality_specialization(env, expression, &expression.ty, &substitutions)?;
+            }
+        }
+        CheckedExprKind::Call { callee, args } => {
+            let signature = substitute(&callee.ty, &substitutions);
+            check_equality_specialization(env, callee, &signature, &substitutions)?;
+            if let MagType::Function(params, _) = signature {
+                for (argument, parameter) in args.iter().zip(params) {
+                    check_equality_specialization(env, argument, &parameter, &substitutions)?;
+                }
+            }
+        }
+        CheckedExprKind::Vector(items) => {
+            for (index, item) in items.iter().enumerate() {
+                let expected = match &resolved {
+                    MagType::List(item) => item.as_ref(),
+                    MagType::Product(items) => items.get(index).unwrap_or(&item.ty),
+                    _ => &item.ty,
+                };
+                check_equality_specialization(env, item, expected, &substitutions)?;
+            }
+        }
+        CheckedExprKind::Map(fields) => {
+            for (name, field) in fields {
+                let expected = match &resolved {
+                    MagType::Record(fields) => fields.get(name).unwrap_or(&field.ty),
+                    _ => &field.ty,
+                };
+                check_equality_specialization(env, field, expected, &substitutions)?;
+            }
+        }
+        CheckedExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            check_equality_specialization(env, condition, &MagType::Bool, &substitutions)?;
+            check_equality_specialization(env, then_branch, &resolved, &substitutions)?;
+            check_equality_specialization(env, else_branch, &resolved, &substitutions)?;
+        }
+        CheckedExprKind::Ascribe { value, .. } => {
+            check_equality_specialization(env, value, &resolved, &substitutions)?
+        }
+        CheckedExprKind::Construct { payload, .. } => {
+            check_equality_specialization(env, payload, &payload.ty, &substitutions)?
+        }
+        CheckedExprKind::Match { value, arms } => {
+            check_equality_specialization(env, value, &value.ty, &substitutions)?;
+            for arm in arms {
+                check_equality_specialization(env, &arm.body, &resolved, &substitutions)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn collect_called_bindings(expression: &CheckedExpr, calls: &mut Vec<(BindingId, MagType)>) {
+    match &expression.kind {
+        CheckedExprKind::Call { callee, args } => {
+            if let CheckedExprKind::BindingRef(id) = callee.kind {
+                calls.push((id, callee.ty.clone()));
+            }
+            collect_called_bindings(callee, calls);
+            for argument in args {
+                collect_called_bindings(argument, calls);
+            }
+        }
+        CheckedExprKind::Vector(items) => {
+            for item in items {
+                collect_called_bindings(item, calls);
+            }
+        }
+        CheckedExprKind::Map(fields) => {
+            for (_, value) in fields {
+                collect_called_bindings(value, calls);
+            }
+        }
+        CheckedExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_called_bindings(condition, calls);
+            collect_called_bindings(then_branch, calls);
+            collect_called_bindings(else_branch, calls);
+        }
+        CheckedExprKind::Construct { payload, .. }
+        | CheckedExprKind::Ascribe { value: payload, .. } => {
+            collect_called_bindings(payload, calls);
+        }
+        CheckedExprKind::Match { value, arms } => {
+            collect_called_bindings(value, calls);
+            for arm in arms {
+                collect_called_bindings(&arm.body, calls);
+            }
+        }
+        CheckedExprKind::Function(function) => {
+            collect_called_bindings_in_block(&function.body, calls)
+        }
+        CheckedExprKind::Unit
+        | CheckedExprKind::Str(_)
+        | CheckedExprKind::Int(_)
+        | CheckedExprKind::Float(_)
+        | CheckedExprKind::Bool(_)
+        | CheckedExprKind::Keyword(_)
+        | CheckedExprKind::BindingRef(_)
+        | CheckedExprKind::TypeTag(_) => {}
+    }
+}
+
+fn collect_called_bindings_in_block(block: &CheckedBlock, calls: &mut Vec<(BindingId, MagType)>) {
+    for binding in &block.bindings {
+        collect_called_bindings(&binding.initializer, calls);
+    }
+    for expression in &block.expressions {
+        collect_called_bindings(expression, calls);
+    }
+}
+
+fn resolved_binding_requirements(env: &Env, id: BindingId, resolved: &MagType) -> Vec<MagType> {
+    let mut requirements = env.equality_requirements(id);
+    if requirements.is_empty() {
+        if let Ok(Value::Fn(function)) = env.ready_binding(id) {
+            requirements = function
+                .equality_params
+                .iter()
+                .cloned()
+                .map(MagType::Var)
+                .collect();
+        }
+    }
+    let Some(original) = env.binding_metadata(id).and_then(|metadata| metadata.ty) else {
+        return requirements;
+    };
+    let mut variables = HashSet::new();
+    collect_vars(&original, &mut variables);
+    let mut substitution = HashMap::new();
+    if compatible_with_bindable(env, resolved, &original, &mut substitution, &variables).is_err() {
+        return requirements;
+    }
+    requirements
+        .iter()
+        .map(|requirement| substitute(requirement, &substitution))
+        .collect()
+}
+
+fn finalize_block_equality_requirements(
+    env: &Env,
+    bindings: &mut [CheckedBinding],
+) -> Result<(), MagError> {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for binding in bindings.iter() {
+            let CheckedExprKind::Function(function) = &binding.initializer.kind else {
+                let (_, variables) = with_equality_obligation_scope(|| {
+                    check_equality_specialization(
+                        env,
+                        &binding.initializer,
+                        &binding.ty,
+                        &HashMap::new(),
+                    )
+                })?;
+                let mut requirements = variables.into_iter().map(MagType::Var).collect::<Vec<_>>();
+                requirements.sort_by_key(ToString::to_string);
+                if requirements != env.equality_requirements(binding.id) {
+                    env.set_equality_requirements(binding.id, requirements);
+                    changed = true;
+                }
+                continue;
+            };
+            let mut required = env
+                .equality_requirements(binding.id)
+                .into_iter()
+                .collect::<HashSet<_>>();
+            let (_, variables) = with_equality_obligation_scope(|| {
+                check_equality_specialization(
+                    env,
+                    &binding.initializer,
+                    &binding.ty,
+                    &HashMap::new(),
+                )
+            })?;
+            required.extend(
+                variables
+                    .into_iter()
+                    .filter(|name| function.type_params.contains(name))
+                    .map(MagType::Var),
+            );
+            let mut calls = Vec::new();
+            collect_called_bindings_in_block(&function.body, &mut calls);
+            for (callee, resolved) in calls {
+                for requirement in resolved_binding_requirements(env, callee, &resolved) {
+                    let mut variables = HashSet::new();
+                    equality_admissible_in(env, &requirement, &mut variables, &mut HashSet::new())
+                        .map_err(MagError::Type)?;
+                    required.extend(variables.into_iter().map(MagType::Var));
+                }
+            }
+            let mut required = required.into_iter().collect::<Vec<_>>();
+            required.sort_by_key(ToString::to_string);
+            if required != env.equality_requirements(binding.id) {
+                env.set_equality_requirements(binding.id, required);
+                changed = true;
+            }
+        }
+    }
+    for binding in bindings {
+        let CheckedExprKind::Function(function) = &binding.initializer.kind else {
+            continue;
+        };
+        let mut updated = function.as_ref().clone();
+        updated.equality_params = env
+            .equality_requirements(binding.id)
+            .into_iter()
+            .filter_map(|requirement| match requirement {
+                MagType::Var(name) if updated.type_params.contains(&name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        binding.initializer = Arc::new(checked(
+            binding.ty.clone(),
+            CheckedExprKind::Function(Arc::new(updated)),
+        ));
+    }
+    Ok(())
+}
+
 /// Resolves a source block into typed expressions whose authored references
 /// point at stable binding identities. Evaluation never has to repeat name or
 /// overload resolution.
@@ -1280,7 +1892,18 @@ fn compile_block_in(
         let mut progressed = false;
         for (name, initializer, id) in pending {
             let mut types = visible_types(env, outer, &current);
-            match infer_shape(env, &mut types, &scoped_type_vars, initializer) {
+            let inferred = if let Expr::Name(source) = initializer {
+                let candidates = visible_candidates(env, outer, &current, source);
+                match candidates.as_slice() {
+                    [candidate] if !candidate.generic_binders.is_empty() => {
+                        Ok(instantiate_candidate(candidate).0)
+                    }
+                    _ => infer_shape(env, &mut types, &scoped_type_vars, initializer),
+                }
+            } else {
+                infer_shape(env, &mut types, &scoped_type_vars, initializer)
+            };
+            match inferred {
                 Ok(ty) => {
                     insert_checked_candidate(
                         env,
@@ -1322,7 +1945,14 @@ fn compile_block_in(
             .and_then(|candidates| candidates.iter().find(|candidate| candidate.id == id))
             .ok_or_else(|| MagError::Unresolved(name.into()))?;
         let checked = if let Expr::Function(function) = initializer {
-            compile_function(env, &scopes, Some(name), function, Some(&candidate.ty))?
+            compile_function(
+                env,
+                &scopes,
+                Some(name),
+                function,
+                Some(&candidate.ty),
+                Some(id),
+            )?
         } else {
             compile_expr(env, &scopes, initializer, Some(&candidate.ty))?
         };
@@ -1333,6 +1963,7 @@ fn compile_block_in(
             initializer: Arc::new(checked),
         });
     }
+    finalize_block_equality_requirements(env, &mut bindings)?;
 
     let last_expression = expressions
         .iter()
@@ -1489,13 +2120,14 @@ fn compile_expr(
         Expr::Match { value, arms } => compile_match(env, scopes, value, arms, expected)?,
         Expr::Ascribe { target, value } => compile_ascribe(env, scopes, target, value)?,
         Expr::TypeTag(target) => compile_type_tag(env, scopes, target)?,
-        Expr::Function(function) => compile_function(env, scopes, None, function, expected)?,
+        Expr::Function(function) => compile_function(env, scopes, None, function, expected, None)?,
         Expr::Call { callee, args } => compile_call(env, scopes, callee, args, expected)?,
         Expr::Invalid(error) => return Err(error.clone().into_mag_error()),
     };
     if let Some(expected) = expected {
         compatible_static(env, &value.ty, expected, &mut HashMap::new()).map_err(MagError::Type)?;
     }
+    check_equality_specialization(env, &value, expected.unwrap_or(&value.ty), &HashMap::new())?;
     env.profile_counters(|counters| {
         counters.checked_expressions = counters.checked_expressions.saturating_add(1);
     });
@@ -1654,11 +2286,12 @@ fn compile_map(
         let key = key.clone();
         let expected_field = match expected {
             Some(MagType::Record(fields)) => fields.get(&key),
-            Some(MagType::Map(_, value)) => Some(value.as_ref()),
             _ => None,
         };
         let value = compile_expr(env, scopes, value, expected_field)?;
-        field_types.insert(key.clone(), value.ty.clone());
+        if field_types.insert(key.clone(), value.ty.clone()).is_some() {
+            return Err(MagError::Type(format!("duplicate record field {key}")));
+        }
         checked_fields.push((key, value));
     }
     Ok(checked(
@@ -1982,6 +2615,11 @@ fn compile_overloaded_call(
         if let Some(expected) = expected_result {
             constrain_result(env, &output, expected, &mut substitution, &bindable)?;
         }
+        validate_equality_requirements(
+            env,
+            &instantiated_equality_requirements(env, candidate),
+            &substitution,
+        )?;
         let output = substitute(result, &substitution);
         let callee_type = MagType::Function(
             params
@@ -2018,6 +2656,15 @@ fn compile_overloaded_call(
                 if constrain_result(env, &output, expected, &mut substitution, &bindable).is_err() {
                     continue;
                 }
+            }
+            if validate_equality_requirements(
+                env,
+                &instantiated_equality_requirements(env, candidate),
+                &substitution,
+            )
+            .is_err()
+            {
+                continue;
             }
             let output = substitute(result, &substitution);
             let callee_type = MagType::Function(
@@ -2100,6 +2747,14 @@ fn compile_call_args(
         .into_iter()
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| MagError::Type("internal error: unchecked call argument".into()))?;
+    for (argument, parameter) in args.iter().zip(params) {
+        check_equality_specialization(
+            env,
+            argument,
+            &substitute(parameter, &substitution),
+            &substitution,
+        )?;
+    }
     Ok((args, substitution))
 }
 
@@ -2111,6 +2766,31 @@ fn compile_builtin_call(
     expressions: &[Expr],
     expected: Option<&MagType>,
 ) -> Result<CheckedExpr, MagError> {
+    if name == "__map-empty" && expressions.len() == 1 {
+        let Some(MagType::Map(key_type, _)) = expected else {
+            return Err(MagError::Type(
+                "one-argument __map-empty requires an expected Map type".into(),
+            ));
+        };
+        require_equality_admissible(env, key_type)?;
+        let key = compile_expr(
+            env,
+            scopes,
+            &expressions[0],
+            Some(&MagType::TypeTag(key_type.clone())),
+        )?;
+        let output = expected.cloned().unwrap_or_else(|| unreachable!());
+        return Ok(checked(
+            output.clone(),
+            CheckedExprKind::Call {
+                callee: Box::new(checked(
+                    MagType::Function(vec![key.ty.clone()], Box::new(output.clone())),
+                    CheckedExprKind::BindingRef(id),
+                )),
+                args: vec![key],
+            },
+        ));
+    }
     if name == "get" {
         if expressions.len() != 2 {
             return Err(MagError::Arity {
@@ -2119,8 +2799,11 @@ fn compile_builtin_call(
             });
         }
         let target = compile_expr(env, scopes, &expressions[0], None)?;
-        if matches!(target.ty, MagType::HostInputs) {
-            return Err(MagError::Type("get expects a map".into()));
+        if matches!(target.ty, MagType::HostInputs | MagType::Map(_, _)) {
+            return Err(MagError::Type(format!(
+                "get expects a record, got {}",
+                target.ty
+            )));
         }
         let key = compile_expr(env, scopes, &expressions[1], Some(&MagType::String))?;
         let key_name = match &expressions[1] {
@@ -2364,6 +3047,7 @@ fn compile_function(
     name: Option<&str>,
     authored: &Function,
     expected: Option<&MagType>,
+    binding_id: Option<BindingId>,
 ) -> Result<CheckedExpr, MagError> {
     let function = parse_function(env, scopes, authored)?;
     let signature = MagType::Function(
@@ -2416,7 +3100,27 @@ fn compile_function(
     }
     let mut body_scopes = scopes.to_vec();
     body_scopes.push(parameter_scope);
-    let body = compile_block_in(env, &body_scopes, &function.body, Some(&function.result))?;
+    let (body, equality_variables) = with_equality_obligation_scope(|| {
+        compile_block_in(env, &body_scopes, &function.body, Some(&function.result))
+    })?;
+    record_equality_variables(
+        equality_variables
+            .iter()
+            .filter(|variable| !function.type_params.contains(variable))
+            .cloned(),
+    );
+    let equality_params = function
+        .type_params
+        .iter()
+        .filter(|parameter| equality_variables.contains(*parameter))
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(id) = binding_id {
+        env.set_equality_requirements(
+            id,
+            equality_params.iter().cloned().map(MagType::Var).collect(),
+        );
+    }
     let actual = body
         .expressions
         .last()
@@ -2434,6 +3138,7 @@ fn compile_function(
         CheckedExprKind::Function(Arc::new(CheckedFn {
             name: name.map(str::to_owned),
             type_params: function.type_params,
+            equality_params,
             params: checked_params,
             result: function.result,
             body: Arc::new(body),
@@ -2473,11 +3178,20 @@ pub(crate) fn resolve_type(
                 _ => Err(MagError::Type(format!("ambiguous type name {name}"))),
             }
         }
-        Type::Record(fields) => fields
-            .iter()
-            .map(|(name, ty)| Ok((name.clone(), resolve_type(env, ty, vars)?)))
-            .collect::<Result<BTreeMap<_, _>, MagError>>()
-            .map(MagType::Record),
+        Type::Record(fields) => {
+            let mut resolved = BTreeMap::new();
+            for (name, ty) in fields {
+                if resolved
+                    .insert(name.clone(), resolve_type(env, ty, vars)?)
+                    .is_some()
+                {
+                    return Err(MagError::Type(format!(
+                        "duplicate record type field {name}"
+                    )));
+                }
+            }
+            Ok(MagType::Record(resolved))
+        }
         Type::Product(types) => types
             .iter()
             .map(|ty| resolve_type(env, ty, vars))
@@ -2522,6 +3236,9 @@ pub(crate) fn resolve_type(
                 (TypeDeclBody::Native, [key, value]) if declaration.name == "core.Map" => {
                     Ok(MagType::Map(Box::new(key.clone()), Box::new(value.clone())))
                 }
+                (TypeDeclBody::Native, [item]) if declaration.name == "core.Set" => {
+                    Ok(MagType::Set(Box::new(item.clone())))
+                }
                 (TypeDeclBody::Native, _) => Err(MagError::Type(format!(
                     "unsupported native type application {}",
                     declaration.name
@@ -2555,7 +3272,9 @@ fn contains_union(ty: &MagType) -> bool {
         MagType::Named(_, arguments) | MagType::Product(arguments) => {
             arguments.iter().any(contains_union)
         }
-        MagType::TypeTag(value) | MagType::List(value) => contains_union(value),
+        MagType::TypeTag(value) | MagType::List(value) | MagType::Set(value) => {
+            contains_union(value)
+        }
         MagType::Map(key, value) => contains_union(key) || contains_union(value),
         MagType::Record(fields) => fields.values().any(contains_union),
         MagType::Function(parameters, result) => {
@@ -2563,6 +3282,35 @@ fn contains_union(ty: &MagType) -> bool {
         }
         _ => false,
     }
+}
+
+fn instantiated_equality_requirements(env: &Env, candidate: &CheckedCandidate) -> Vec<MagType> {
+    let substitutions = candidate
+        .generic_binders
+        .iter()
+        .enumerate()
+        .map(|(index, binder)| {
+            (
+                binder.clone(),
+                MagType::Var(format!("\0binding{}.{index}", candidate.id.0)),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut requirements = env.equality_requirements(candidate.id);
+    if requirements.is_empty() {
+        if let Ok(Value::Fn(function)) = env.ready_binding(candidate.id) {
+            requirements = function
+                .equality_params
+                .iter()
+                .cloned()
+                .map(MagType::Var)
+                .collect();
+        }
+    }
+    requirements
+        .iter()
+        .map(|requirement| substitute(requirement, &substitutions))
+        .collect()
 }
 
 fn instantiate_candidate(candidate: &CheckedCandidate) -> (MagType, HashSet<String>) {
@@ -2619,6 +3367,7 @@ fn canonical_type(ty: &MagType) -> String {
                 MagType::TypeTag(Box::new(canonicalize(item, variables, next)))
             }
             MagType::List(item) => MagType::List(Box::new(canonicalize(item, variables, next))),
+            MagType::Set(item) => MagType::Set(Box::new(canonicalize(item, variables, next))),
             MagType::Map(key, value) => MagType::Map(
                 Box::new(canonicalize(key, variables, next)),
                 Box::new(canonicalize(value, variables, next)),
@@ -2661,18 +3410,25 @@ pub(crate) fn value_type(value: &Value) -> Option<MagType> {
         Value::Int(_) => Some(MagType::Int),
         Value::Float(_) => Some(MagType::Float),
         Value::Str(_) | Value::Keyword(_) | Value::Symbol(_) => Some(MagType::String),
-        Value::List(v) | Value::Vector(v) if v.is_empty() => Some(MagType::EmptyList),
-        Value::List(v) | Value::Vector(v) => {
-            Some(MagType::List(Box::new(v.first().and_then(value_type)?)))
-        }
+        Value::List(v) if v.is_empty() => Some(MagType::EmptyList),
+        Value::List(v) => Some(MagType::List(Box::new(v.first().and_then(value_type)?))),
         Value::Product(v) => Some(MagType::Product(
             v.iter().map(value_type).collect::<Option<Vec<_>>>()?,
         )),
-        Value::Map(m) => Some(MagType::Record(
-            m.iter()
-                .filter_map(|(k, v)| Some((k.clone(), value_type(v)?)))
-                .collect(),
+        Value::Record(fields) => Some(MagType::Record(
+            fields
+                .iter()
+                .map(|(key, value)| Some((key.clone(), value_type(value)?)))
+                .collect::<Option<BTreeMap<_, _>>>()?,
         )),
+        Value::Map(entries) => {
+            let (key, value) = entries.first()?;
+            Some(MagType::Map(
+                Box::new(value_type(key)?),
+                Box::new(value_type(value)?),
+            ))
+        }
+        Value::Set(items) => Some(MagType::Set(Box::new(value_type(items.first()?)?))),
         Value::Fn(f) => Some(MagType::Function(
             f.param_types.clone(),
             Box::new(f.return_type.clone()),
@@ -2722,7 +3478,6 @@ pub(crate) fn canonical_value_type(value: &Value) -> Option<String> {
 fn field_type(env: &Env, ty: &MagType, key: Option<&str>) -> Option<MagType> {
     match ty {
         MagType::JsonValue => Some(MagType::JsonValue),
-        MagType::Map(_, v) => Some((**v).clone()),
         MagType::Record(fields) => key.and_then(|k| fields.get(k).cloned()),
         MagType::Named(name, args) => env.type_decl(name).and_then(|decl| {
             let substitutions = decl
@@ -2792,6 +3547,9 @@ fn compatible_in(
     subst: &mut HashMap<String, MagType>,
     bindable: Option<&HashSet<String>>,
 ) -> Result<(), String> {
+    if actual == expected {
+        return Ok(());
+    }
     if let MagType::Var(name) = expected {
         if bindable.is_none_or(|bindable| bindable.contains(name)) {
             if let Some(bound) = subst.get(name) {
@@ -2906,16 +3664,14 @@ fn compatible_in(
             MagType::List(a) => compatible_in(env, a, e, subst, bindable),
             _ => Err(format!("expected {expected}, got {actual}")),
         },
+        MagType::Set(e) => match actual {
+            MagType::Set(a) => compatible_in(env, a, e, subst, bindable),
+            _ => Err(format!("expected {expected}, got {actual}")),
+        },
         MagType::Map(ek, ev) => match actual {
             MagType::Map(ak, av) => {
                 compatible_in(env, ak, ek, subst, bindable)?;
                 compatible_in(env, av, ev, subst, bindable)
-            }
-            MagType::Record(fields) if matches!(ek.as_ref(), MagType::String) => {
-                for value in fields.values() {
-                    compatible_in(env, value, ev, subst, bindable)?;
-                }
-                Ok(())
             }
             _ => Err(format!("expected {expected}, got {actual}")),
         },
@@ -2963,6 +3719,7 @@ pub(crate) fn substitute(ty: &MagType, subst: &HashMap<String, MagType>) -> MagT
         }
         MagType::TypeTag(t) => MagType::TypeTag(Box::new(substitute(t, subst))),
         MagType::List(t) => MagType::List(Box::new(substitute(t, subst))),
+        MagType::Set(t) => MagType::Set(Box::new(substitute(t, subst))),
         MagType::Map(k, v) => MagType::Map(
             Box::new(substitute(k, subst)),
             Box::new(substitute(v, subst)),
@@ -2992,7 +3749,7 @@ fn collect_vars(ty: &MagType, out: &mut HashSet<String>) {
                 collect_vars(arg, out);
             }
         }
-        MagType::List(item) => collect_vars(item, out),
+        MagType::List(item) | MagType::Set(item) => collect_vars(item, out),
         MagType::TypeTag(item) => collect_vars(item, out),
         MagType::Map(key, value) => {
             collect_vars(key, out);

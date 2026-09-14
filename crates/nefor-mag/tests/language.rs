@@ -922,7 +922,7 @@ fn host_inputs_are_opaque_outside_typed_projections() {
     )
     .unwrap_err()
     .to_string();
-    assert!(error.contains("get expects a map"), "{error}");
+    assert!(error.contains("get expects a record"), "{error}");
 }
 
 #[test]
@@ -960,15 +960,14 @@ fn empty_lists_retain_expected_element_types_at_runtime() {
 }
 
 #[test]
-fn record_literals_satisfy_precise_homogeneous_string_maps() {
+fn record_literals_do_not_construct_native_maps() {
     let root = workspace("record-map");
     let source = r#"
       (let accept-string-map (fn [[value (Map String String)]] -> Int (count value)))
       (artifact {:count (accept-string-map
           (as (Map String String) {:kind "task" :prompt "Audit"}))})
     "#;
-    let artifact = compile(source, &root).unwrap();
-    assert_eq!(artifact["count"], 2);
+    assert!(compile(source, &root).is_err());
 }
 
 #[test]
@@ -1228,7 +1227,7 @@ fn builtin_type_rules_are_total_and_assoc_checks_values() {
 }
 
 #[test]
-fn group_by_orders_keys_and_preserves_bucket_source_order() {
+fn group_by_produces_native_map_and_preserves_bucket_source_order() {
     let root = workspace("group-by-order");
     let artifact = compile(
         r#"
@@ -1251,15 +1250,15 @@ fn group_by_orders_keys_and_preserves_bucket_source_order() {
                   (if (= value "a2") "a" "b")))
               ["a1" "b1" "a2" "b2"]))
           (artifact
-            {:keys (keys grouped)
-             :a (get grouped "a")
-             :b (get grouped "b")
-             :b-concatenated (concat (get grouped "b") ["b3"])
-             :b-equals-list (= (get grouped "b") ["b1" "b2"])
+            {:grouped grouped
+             :a (__map-get grouped "a")
+             :b (__map-get grouped "b")
+             :b-concatenated (concat (__map-get grouped "b") ["b3"])
+             :b-equals-list (= (__map-get grouped "b") ["b1" "b2"])
              :empty empty
-             :skewed (get skewed "all")
-             :interleaved-a (get interleaved "a")
-             :interleaved-b (get interleaved "b")})
+             :skewed (__map-get skewed "all")
+             :interleaved-a (__map-get interleaved "a")
+             :interleaved-b (__map-get interleaved "b")})
         "#,
         &root,
     )
@@ -1268,7 +1267,7 @@ fn group_by_orders_keys_and_preserves_bucket_source_order() {
     assert_eq!(
         artifact,
         json!({
-            "keys": ["a", "b"],
+            "grouped": {"a": ["a1"], "b": ["b1", "b2"]},
             "a": ["a1"],
             "b": ["b1", "b2"],
             "b-concatenated": ["b1", "b2", "b3"],
@@ -1337,7 +1336,7 @@ fn group_by_builtin_and_non_colliding_user_overload_are_distinguishable() {
             (group-by
               (fn [[value String]] -> String value)
               ["builtin" "builtin"]))
-          (artifact {:custom (group-by 1) :builtin (get grouped "builtin")})
+          (artifact {:custom (group-by 1) :builtin (__map-get grouped "builtin")})
         "#,
         &root,
     )
@@ -1553,7 +1552,7 @@ fn type_schema_preserves_qualified_nominals_and_substitutes_generics() {
 }
 
 #[test]
-fn type_schema_rejects_non_data_and_non_string_map_keys() {
+fn type_schema_rejects_non_data() {
     let root = workspace("type-schema-errors");
     for (ty, expected) in [
         (
@@ -1568,7 +1567,6 @@ fn type_schema_rejects_non_data_and_non_string_map_keys() {
             "(TypeTag String)",
             "TypeTag cannot enter a concrete semantic descriptor",
         ),
-        ("(Map Int String)", "JSON object keys must be String"),
     ] {
         let source = format!("(artifact (type-schema (type-tag {ty})))");
         let error = compile(&source, &root).unwrap_err().to_string();
@@ -1584,9 +1582,378 @@ fn generic_list_inference_preserves_element_evidence() {
             r#"
           (let values [1 2])
           (let element-tag (fn [T] [[values (List T)]] -> (TypeTag T) (type-tag T)))
-          (artifact (= (type-evidence (element-tag {values})) (type-evidence (type-tag Int))))
+          (artifact [(type-evidence (element-tag {values})) (type-evidence (type-tag Int))])
         "#
         );
-        assert_eq!(compile(&source, &root).unwrap(), json!(true), "{values}");
+        let evidence = compile(&source, &root).unwrap();
+        assert_eq!(evidence[0], evidence[1], "{values}");
     }
+}
+
+#[test]
+fn concrete_data_equality_is_recursive_and_float_bit_exact() {
+    let root = workspace("concrete-equality");
+    let artifact = compile(
+        r#"
+        (let mapped (map (fn [[x Int]] -> Int x) [1 2]))
+        (artifact {:list (= mapped [1 2])
+                   :record (= {:b [true false] :a mapped} {:a [1 2] :b [true false]})
+                   :ordered (not (= [1 2] [2 1]))
+                   :close (not (= 1.0 1.0000000000000002))
+                   :signed-zero (not (= 0.0 -0.0))
+                   :same (= -0.0 -0.0)})
+        "#,
+        &root,
+    )
+    .unwrap();
+    assert_eq!(
+        artifact,
+        json!({"list":true,"record":true,"ordered":true,"close":true,"signed-zero":true,"same":true})
+    );
+}
+
+#[test]
+fn native_maps_and_sets_are_unordered_concrete_data() {
+    let root = workspace("native-unordered-data");
+    let artifact = compile(
+        r#"
+        (let empty (__map-empty (type-tag {:id Int}) (type-tag String)))
+        (let left (__map-insert (__map-insert empty {:id 2} "two") {:id 1} "one"))
+        (let right (__map-insert (__map-insert empty {:id 1} "one") {:id 2} "two"))
+        (let set-empty (__set-empty (type-tag Int)))
+        (let a (__set-insert (__set-insert set-empty 2) 1))
+        (let b (__set-insert (__set-insert set-empty 1) 2))
+        (let keyed (__map-insert (__map-empty (type-tag (Set Int)) (type-tag Bool)) a true))
+        (artifact {:map left :set a :map-equal (= left right) :set-equal (= a b)
+                   :lookup (__map-get left {:id 1}) :set-key (__map-get keyed b)
+                   :map-count (__map-count left) :set-count (__set-count a)
+                   :map-has (__map-contains left {:id 2}) :map-missing (__map-contains left {:id 3})
+                   :set-has (__set-contains a 1) :set-missing (__set-contains a 3)})
+        "#,
+        &root,
+    )
+    .unwrap();
+    assert_eq!(
+        artifact,
+        json!({
+            "map":{"$mag":"map","entries":[[{"id":1},"one"],[{"id":2},"two"]]},
+            "set":{"$mag":"set","items":[1,2]},
+            "map-equal":true,"set-equal":true,"lookup":"one","set-key":true,
+            "map-count":2,"set-count":2,"map-has":true,"map-missing":false,"set-has":true,"set-missing":false
+        })
+    );
+}
+
+#[test]
+fn native_collection_duplicates_and_missing_lookup_fail() {
+    let root = workspace("native-duplicate-data");
+    for (source, message) in [
+        (
+            r#"(let m (__map-empty (type-tag Int) (type-tag String)))
+            (artifact (__map-insert (__map-insert m 1 "first") 1 "second"))"#,
+            "duplicate Map key",
+        ),
+        (
+            r#"(let s (__set-empty (type-tag {:x Int})))
+            (artifact (__set-insert (__set-insert s {:x 1}) {:x 1}))"#,
+            "duplicate Set member",
+        ),
+        (
+            r#"(artifact (__map-get (__map-empty (type-tag Int) (type-tag String)) 1))"#,
+            "Map key not found",
+        ),
+        (r#"(artifact {:same 1 :same 2})"#, "duplicate"),
+        (
+            r#"(type Bad {:same Int :same String}) (artifact {})"#,
+            "duplicate",
+        ),
+    ] {
+        let error = compile(source, &root).unwrap_err().to_string();
+        assert!(error.contains(message), "{source}: {error}");
+    }
+}
+
+#[test]
+fn maps_and_sets_have_no_ordered_collection_or_record_surface() {
+    let root = workspace("native-no-enumeration");
+    for expression in [
+        "(keys m)",
+        "(get m \"key\")",
+        "(assoc m \"key\" 1)",
+        "(first m)",
+        "(remove-at m 0)",
+        "(map (fn [[x Int]] -> Int x) m)",
+        "(keys s)",
+        "(first s)",
+        "(remove-at s 0)",
+        "(fold (fn [[a Int] [b Int]] -> Int a) 0 s)",
+    ] {
+        let source = format!(
+            r#"
+            (let m (__map-empty (type-tag String) (type-tag Int)))
+            (let s (__set-empty (type-tag Int)))
+            (artifact {expression})"#
+        );
+        assert!(compile(&source, &root).is_err(), "{expression}");
+    }
+    assert_eq!(compile(r#"(artifact {:keys (keys {:b 2 :a 1}) :get (get {:a 1} "a") :assoc (assoc {:a 1} "a" 2)})"#, &root).unwrap(), json!({"keys":["a","b"],"get":1,"assoc":{"a":2}}));
+}
+
+#[test]
+fn equality_rejects_behavior_in_nested_and_generic_positions() {
+    let root = workspace("equality-obligations");
+    for source in [
+        "(let f (fn [[x Int]] -> Int x)) (artifact (= f f))",
+        "(let f (fn [[x Int]] -> Int x)) (artifact (= [f] [f]))",
+        "(let f (fn [[x Int]] -> Int x)) (artifact (= {:f f} {:f f}))",
+        "(type Box [T] (adt [Box T])) (let f (fn [[x Int]] -> Int x)) (let b (construct (Box (Fn Int Int)) Box f)) (artifact (= b b))",
+        "(let eq (fn [T] [[a T] [b T]] -> Bool (= a b))) (let f (fn [[x Int]] -> Int x)) (artifact (eq f f))",
+        "(let eq (fn [T] [[a T] [b T]] -> Bool (= a b))) (let alias eq) (let f (fn [[x Int]] -> Int x)) (artifact (alias f f))",
+        "(let eq (fn [T] [[a T] [b T]] -> Bool (= a b))) (let twice (fn [T] [[a T]] -> Bool (eq a a))) (let f (fn [[x Int]] -> Int x)) (artifact (twice f))",
+        "(let eq (fn [T] [[a T] [b T]] -> Bool (= a b))) (let f (fn [[x Int]] -> Int x)) (artifact (if true true (eq f f)))",
+        "(artifact (__set-empty (type-tag (Fn Int Int))))",
+        "(artifact (__map-empty (type-tag {:f (Fn Int Int)}) (type-tag String)))",
+    ] {
+        assert!(compile(source, &root).is_err(), "accepted {source}");
+    }
+    assert_eq!(
+        compile(
+            r#"
+        (let eq (fn [T] [[a T] [b T]] -> Bool (= a b)))
+        (let twice (fn [T] [[a T]] -> Bool (eq a a)))
+        (let identity (fn [T] [[a T]] -> T a))
+        (let f (identity (fn [[x Int]] -> Int x)))
+        (artifact {:equal (twice {:data [1 2]}) :function (f 7)})"#,
+            &root
+        )
+        .unwrap(),
+        json!({"equal":true,"function":7})
+    );
+}
+
+#[test]
+fn native_collection_wire_and_schema_agree_recursively() {
+    use nefor_mag::{
+        env::Env,
+        json::{json_to_typed_value, value_to_json},
+        schema::TypeSchema,
+        types::MagType,
+    };
+    let env = Env::new();
+    let cases = [
+        (
+            MagType::Map(Box::new(MagType::Int), Box::new(MagType::String)),
+            json!({"$mag":"map","entries":[]}),
+        ),
+        (
+            MagType::Map(Box::new(MagType::String), Box::new(MagType::Int)),
+            json!({}),
+        ),
+        (
+            MagType::Set(Box::new(MagType::Int)),
+            json!({"$mag":"set","items":[]}),
+        ),
+        (
+            MagType::Map(
+                Box::new(MagType::Set(Box::new(MagType::Int))),
+                Box::new(MagType::Bool),
+            ),
+            json!({"$mag":"map","entries":[[{"$mag":"set","items":[1,2]},true]]}),
+        ),
+    ];
+    for (ty, wire) in cases {
+        let schema = TypeSchema::reify(&env, &ty).unwrap();
+        assert!(schema.validate_json(&wire.to_string()).ok, "{ty}: {wire}");
+        let value = json_to_typed_value(&env, &wire, &ty).unwrap();
+        assert_eq!(value_to_json(&env, &value).unwrap(), wire, "{ty}");
+    }
+    for (ty, wire) in [
+        (
+            MagType::Set(Box::new(MagType::Set(Box::new(MagType::Int)))),
+            json!({"$mag":"set","items":[{"$mag":"set","items":[1,2]},{"$mag":"set","items":[2,1]}]}),
+        ),
+        (
+            MagType::Map(
+                Box::new(MagType::Set(Box::new(MagType::Int))),
+                Box::new(MagType::Bool),
+            ),
+            json!({"$mag":"map","entries":[[{"$mag":"set","items":[1,2]},true],[{"$mag":"set","items":[2,1]},false]]}),
+        ),
+        (
+            MagType::Set(Box::new(MagType::Float)),
+            json!({"$mag":"set","items":[1,1.0]}),
+        ),
+    ] {
+        assert!(
+            json_to_typed_value(&env, &wire, &ty).is_err(),
+            "decoder accepted {wire}"
+        );
+        assert!(
+            !TypeSchema::reify(&env, &ty)
+                .unwrap()
+                .validate_json(&wire.to_string())
+                .ok,
+            "schema accepted {wire}"
+        );
+    }
+    let signed_zeros = json!({"$mag":"set","items":[0.0,-0.0]});
+    let ty = MagType::Set(Box::new(MagType::Float));
+    assert!(json_to_typed_value(&env, &signed_zeros, &ty).is_ok());
+    assert!(
+        TypeSchema::reify(&env, &ty)
+            .unwrap()
+            .validate_json(&signed_zeros.to_string())
+            .ok
+    );
+}
+
+#[test]
+fn empty_native_collections_keep_their_wire_type() {
+    let root = workspace("empty-native-wire");
+    assert_eq!(
+        compile(
+            r#"(artifact {:map (__map-empty (type-tag Int) (type-tag Bool))
+        :strings (__map-empty (type-tag String) (type-tag Int))
+        :set (__set-empty (type-tag String))})"#,
+            &root
+        )
+        .unwrap(),
+        json!({
+            "map":{"$mag":"map","entries":[]},"strings":{},"set":{"$mag":"set","items":[]}
+        })
+    );
+}
+
+#[test]
+fn nominal_constructor_and_product_keys_remain_distinct_data() {
+    let root = workspace("native-key-constructor");
+    assert_eq!(compile(r#"
+        (type Key (adt [Left Int] [Right Int]))
+        (let m (__map-empty (type-tag Key) (type-tag String)))
+        (let m1 (__map-insert m (construct Key Left 1) "left"))
+        (let m2 (__map-insert m1 (construct Key Right 1) "right"))
+        (let tuple (as (+ Int String) [1 "a"]))
+        (let tuples (__set-insert (__set-empty (type-tag (+ Int String))) tuple))
+        (artifact {:left (__map-get m2 (construct Key Left 1)) :right (__map-get m2 (construct Key Right 1))
+                   :tuple (__set-contains tuples (as (+ Int String) [1 "a"]))})"#, &root).unwrap(), json!({"left":"left","right":"right","tuple":true}));
+}
+
+#[test]
+fn ordinary_core_modules_expose_unordered_maps_and_sets() {
+    let root = workspace("core-native-collections");
+    fs::write(
+        root.join("main.mag"),
+        r#"
+        (require "core.map")
+        (require "core.set")
+        (let map
+          (core.map.insert
+            (as (Map Int String) (core.map.empty (type-tag Int)))
+            1 "one"))
+        (let set (core.set.insert (core.set.empty (type-tag String)) "ready"))
+        (artifact {:map-value (core.map.get map 1)
+                   :map-count (core.map.count map)
+                   :set-member (core.set.contains? set "ready")
+                   :set-count (core.set.count set)})
+        "#,
+    )
+    .unwrap();
+    let module_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
+    assert_eq!(
+        compile_file_with_inputs_and_module_roots(
+            &root,
+            "main.mag",
+            json!({}),
+            std::slice::from_ref(&module_root),
+        )
+        .unwrap(),
+        json!({"map-value":"one", "map-count":1, "set-member":true, "set-count":1})
+    );
+
+    for source in [
+        r#"(require "core.map")
+        (let map (core.map.insert
+          (as (Map Int String) (core.map.empty (type-tag Int))) 1 "one"))
+        (artifact (core.map.insert map 1 "again"))"#,
+        r#"(require "core.set")
+        (let set (core.set.insert (core.set.empty (type-tag String)) "ready"))
+        (artifact (core.set.insert set "ready"))"#,
+    ] {
+        fs::write(root.join("main.mag"), source).unwrap();
+        assert!(compile_file_with_inputs_and_module_roots(
+            &root,
+            "main.mag",
+            json!({}),
+            std::slice::from_ref(&module_root),
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn generic_equality_obligations_are_static_in_higher_order_dead_code() {
+    let root = workspace("equality-higher-order-static");
+    for invocation in [
+        "(apply eq f)",
+        "(apply (if true eq eq) f)",
+        "(apply (get {:equal eq} \"equal\") f)",
+    ] {
+        let source = format!(
+            r#"
+            (let eq (fn [T] [[a T] [b T]] -> Bool (= a b)))
+            (let apply (fn [T] [[compare (Fn T T Bool)] [value T]] -> Bool (compare value value)))
+            (let f (fn [[x Int]] -> Int x))
+            (artifact (if true true {invocation}))"#
+        );
+        let valid = source.replace(invocation, &invocation.replace(" f)", " 7)"));
+        assert_eq!(
+            compile(&valid, &root).unwrap_or_else(|error| panic!("{invocation}: {error}")),
+            json!(true),
+            "valid {invocation}"
+        );
+        assert!(compile(&source, &root).is_err(), "accepted {invocation}");
+    }
+}
+
+#[test]
+fn native_collections_support_ordinary_generic_wrappers() {
+    let root = workspace("native-generic-wrappers");
+    let source = r#"
+        (let empty (fn [K V] [[key (TypeTag K)] [value (TypeTag V)]] -> (Map K V)
+          (__map-empty key value)))
+        (let insert (fn [K V] [[map (Map K V)] [key K] [value V]] -> (Map K V)
+          (__map-insert map key value)))
+        (let lookup (fn [K V] [[map (Map K V)] [key K]] -> V (__map-get map key)))
+        (let same (fn [T] [[left T] [right T]] -> Bool (= left right)))
+        (let table (insert (empty (type-tag String) (type-tag Int)) :key 1))
+        (artifact {:lookup (lookup table ":key") :table table :keyword (= :key ":key")
+                   :equal (same table (insert (empty (type-tag String) (type-tag Int)) ":key" 1))})
+    "#;
+    assert_eq!(
+        compile(source, &root).unwrap(),
+        json!({"lookup":1,"table":{":key":1},"keyword":true,"equal":true})
+    );
+}
+
+#[test]
+fn equality_obligations_survive_forward_computed_function_bindings() {
+    let root = workspace("equality-forward-computed");
+    let source = r#"
+        (let compare (as (Fn (Fn Int Int) (Fn Int Int) Bool) (if true eq eq)))
+        (let eq (fn [T] [[a T] [b T]] -> Bool (= a b)))
+        (let f (fn [[x Int]] -> Int x))
+        (artifact (if true true (compare f f)))
+    "#;
+    assert!(compile(source, &root).is_err());
+    assert_eq!(
+        compile(
+            r#"
+        (let compare (as (Fn Int Int Bool) (if true eq eq)))
+        (let eq (fn [T] [[a T] [b T]] -> Bool (= a b)))
+        (artifact (compare 1 1))"#,
+            &root
+        )
+        .unwrap(),
+        json!(true)
+    );
 }

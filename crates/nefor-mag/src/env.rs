@@ -47,9 +47,10 @@ impl PartialEq for MemoArg {
             (Value::Int(left), Value::Int(right)) => left == right,
             (Value::Float(left), Value::Float(right)) => left.to_bits() == right.to_bits(),
             (Value::Bool(left), Value::Bool(right)) => left == right,
-            (Value::List(left), Value::List(right)) => Arc::ptr_eq(left, right),
-            (Value::Vector(left), Value::Vector(right))
-            | (Value::Product(left), Value::Product(right)) => Arc::ptr_eq(left, right),
+            (Value::List(left), Value::List(right))
+            | (Value::Product(left), Value::Product(right))
+            | (Value::Set(left), Value::Set(right)) => Arc::ptr_eq(left, right),
+            (Value::Record(left), Value::Record(right)) => Arc::ptr_eq(left, right),
             (Value::Map(left), Value::Map(right)) => Arc::ptr_eq(left, right),
             (Value::Fn(left), Value::Fn(right)) => Arc::ptr_eq(left, right),
             (Value::Type(left), Value::Type(right)) => left == right,
@@ -93,9 +94,10 @@ impl Hash for MemoArg {
             Value::Int(value) => value.hash(state),
             Value::Float(value) => value.to_bits().hash(state),
             Value::Bool(value) => value.hash(state),
-            Value::List(value) | Value::Vector(value) | Value::Product(value) => {
+            Value::List(value) | Value::Product(value) | Value::Set(value) => {
                 Arc::as_ptr(value).hash(state)
             }
+            Value::Record(value) => Arc::as_ptr(value).hash(state),
             Value::Map(value) => Arc::as_ptr(value).hash(state),
             Value::Fn(value) => Arc::as_ptr(value).hash(state),
             Value::Type(value) => value.hash(state),
@@ -122,6 +124,26 @@ impl Hash for MemoArg {
             | Value::JsonValue(_)
             | Value::HostInputs(_) => unreachable!("opaque values are not memoized arguments"),
         }
+    }
+}
+
+// Import idempotence includes compiler values; it is not language-level equality.
+fn same_imported_value(env: &Env, left: &Value, right: &Value) -> bool {
+    if MemoArg::new(left)
+        .zip(MemoArg::new(right))
+        .is_some_and(|(a, b)| a == b)
+    {
+        return true;
+    }
+    match (left, right) {
+        (Value::TypeDescriptor(a), Value::TypeDescriptor(b)) => a == b,
+        (Value::TypeSchema(a), Value::TypeSchema(b)) => a == b,
+        (Value::SemanticTypeId(a), Value::SemanticTypeId(b)) => a == b,
+        (Value::PackedValue(a), Value::PackedValue(b)) => Arc::ptr_eq(a, b),
+        (Value::HostInputs(a), Value::HostInputs(b)) | (Value::Artifact(a), Value::Artifact(b)) => {
+            a == b
+        }
+        _ => crate::eval::equal(env, left, right),
     }
 }
 
@@ -158,6 +180,7 @@ struct CompilationState {
     frame_allocations_since_collection: usize,
     frame_collection_interval: usize,
     bindings: HashMap<BindingId, BindingMetadata>,
+    equality_requirements: HashMap<BindingId, Vec<crate::types::MagType>>,
     frames: HashMap<FrameId, ScopeFrame>,
     frame_roots: HashMap<FrameId, usize>,
     loaded: HashMap<String, BTreeMap<String, Vec<Value>>>,
@@ -273,7 +296,11 @@ impl Env {
         for &name in crate::checker::BUILTIN_NAMES {
             env.define(name, Value::BuiltinFn(name.into()));
         }
-        for (name, params) in [("List", vec!["T"]), ("Map", vec!["K", "V"])] {
+        for (name, params) in [
+            ("List", vec!["T"]),
+            ("Map", vec!["K", "V"]),
+            ("Set", vec!["T"]),
+        ] {
             env.define(
                 name,
                 Value::TypeDecl(TypeDecl {
@@ -423,6 +450,27 @@ impl Env {
         {
             binding.ty = Some(ty);
         }
+    }
+    pub(crate) fn set_equality_requirements(
+        &self,
+        id: BindingId,
+        requirements: Vec<crate::types::MagType>,
+    ) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if requirements.is_empty() {
+            state.equality_requirements.remove(&id);
+        } else {
+            state.equality_requirements.insert(id, requirements);
+        }
+    }
+    pub(crate) fn equality_requirements(&self, id: BindingId) -> Vec<crate::types::MagType> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .equality_requirements
+            .get(&id)
+            .cloned()
+            .unwrap_or_default()
     }
     pub fn declare_binding_slot(
         &mut self,
@@ -879,7 +927,7 @@ impl Env {
                     && !self
                         .lookup_candidates(&name)
                         .iter()
-                        .any(|existing| crate::eval::equal(self, existing, &value))
+                        .any(|existing| same_imported_value(self, existing, &value))
                 {
                     self.define(&name, value);
                 }
@@ -960,15 +1008,24 @@ impl Env {
                     {
                         pending_frames.extend(function.closure.iter().copied());
                     }
-                    Value::List(values) | Value::Vector(values) | Value::Product(values)
+                    Value::List(values) | Value::Product(values) | Value::Set(values)
                         if visited_values.insert(Arc::as_ptr(&values).cast::<()>()) =>
                     {
                         pending_values.extend(values.iter().cloned());
                     }
-                    Value::Map(values)
+                    Value::Record(values)
                         if visited_values.insert(Arc::as_ptr(&values).cast::<()>()) =>
                     {
                         pending_values.extend(values.values().cloned());
+                    }
+                    Value::Map(values)
+                        if visited_values.insert(Arc::as_ptr(&values).cast::<()>()) =>
+                    {
+                        pending_values.extend(
+                            values
+                                .iter()
+                                .flat_map(|(key, value)| [key.clone(), value.clone()]),
+                        );
                     }
                     Value::Typed(value, _)
                     | Value::PackedValue(value)
@@ -1110,7 +1167,7 @@ impl Env {
                 if !self
                     .lookup_candidates(&qualified)
                     .iter()
-                    .any(|existing| crate::eval::equal(self, existing, &value))
+                    .any(|existing| same_imported_value(self, existing, &value))
                 {
                     self.define(&qualified, value);
                 }
@@ -1270,12 +1327,14 @@ mod frame_arena_tests {
         Value::Fn(Arc::new(FnValue {
             name: None,
             type_params: vec![],
+            equality_params: vec![],
             params: vec![],
             param_types: vec![],
             return_type: crate::types::MagType::Unit,
             checked: Arc::new(crate::ast::CheckedFn {
                 name: None,
                 type_params: vec![],
+                equality_params: vec![],
                 params: vec![],
                 result: crate::types::MagType::Unit,
                 body: Arc::new(crate::ast::CheckedBlock {

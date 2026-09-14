@@ -318,7 +318,7 @@ fn descriptor_assignment_and_table_work_are_generic_and_deterministic() {
     let root = temp_dir("profile-descriptors");
     let profile = profile(
         &root,
-        "(let target (type-evidence (type-tag (+ Int Int))))\n(let sources [(type-evidence (type-tag Int)) (type-evidence (type-tag Int))])\n(let assignments (descriptor-input-assignments target sources))\n(let table (descriptor-table [target]))\n(artifact {:assignments assignments :declarations (count table)})",
+        "(let target (type-evidence (type-tag (+ Int Int))))\n(let sources [(type-evidence (type-tag Int)) (type-evidence (type-tag Int))])\n(let assignments (descriptor-input-assignments target sources))\n(let table (descriptor-table [target]))\n(artifact {:assignments assignments :declarations (__map-count table)})",
     );
     let counters = profile.counters;
 

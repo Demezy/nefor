@@ -1413,7 +1413,7 @@ pub mod kernel {
     (let input (nefor.graph.port "echo" (type-tag nefor.contracts.Text) "stub.In"))
     (let output (nefor.graph.port "echo" (type-tag nefor.contracts.Text) "stub.Out"))
     (let actor (nefor.graph.actor "echo"
-                  "nefor.factory.stub" [] (as (Map String String) {})
+                  "nefor.factory.stub" [] (as (Map String String) (core.map.empty (type-tag String)))
                   (nefor.graph.store-port input) [(nefor.graph.store-port output)]))
     (let echo (nefor.graph.node "echo" "ordinary" [actor]
                  (as (List nefor.graph.StoredRoute) [])
@@ -1469,7 +1469,9 @@ pub mod kernel {
     (let input (nefor.graph.port "broken" (type-tag nefor.contracts.Text) "stub.In"))
     (let output (nefor.graph.port "broken" (type-tag nefor.contracts.Text) "stub.Out"))
     (let actor (nefor.graph.actor "broken" "nefor.factory.stub" []
-                  (as (Map String String) {:value "not-a-Text-record"})
+                  (core.map.insert
+                    (as (Map String String) (core.map.empty (type-tag String)))
+                    "value" "not-a-Text-record")
                   (nefor.graph.store-port input) [(nefor.graph.store-port output)]))
     (let broken (nefor.graph.node "broken" "ordinary" [actor]
                    (as (List nefor.graph.StoredRoute) [])
@@ -1610,7 +1612,7 @@ pub mod kernel {
       (let output (nefor.graph.port id type "stub.Out"))
       (let actor (nefor.graph.actor id
                     "nefor.factory.stub" []
-                    (as (Map String String) {})
+                    (as (Map String String) (core.map.empty (type-tag String)))
                     (nefor.graph.store-port input)
                     [(nefor.graph.store-port output)]))
       (nefor.graph.node id "ordinary" [actor]

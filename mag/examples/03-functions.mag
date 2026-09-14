@@ -1,4 +1,5 @@
 (type Entry [K V] {:key K :value V})
+(type NamedValue {:name String :value Int})
 
 ;; Both type parameters are inferred from a call such as
 ;; (entry "answer" 42), which returns Entry String Int.
@@ -6,12 +7,12 @@
   (as (Entry K V) {:key key :value value})))
 
 ;; A regular helper can itself be passed into a higher-order operation.
-(let label (fn [[name String] [value Int]] -> {:name String :value Int}
-  {:name name :value value}))
+(let label (fn [[name String] [value Int]] -> NamedValue
+  (as NamedValue {:name name :value value})))
 
 (let names ["one" "two" "three"])
 (let entries (indexed-map
-                (fn [[index Int] [name String]] -> {:name String :value Int}
+                (fn [[index Int] [name String]] -> NamedValue
                   (label name index))
                 names))
 

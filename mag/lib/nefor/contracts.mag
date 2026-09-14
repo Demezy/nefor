@@ -1,6 +1,7 @@
 ;; Shared runtime-facing domain values used across actor families. Factory
 ;; identities and actor parameter records live with their constructors.
 
+(require "core.map")
 (require "core.types")
 
 (type Task {:prompt String})
@@ -49,7 +50,7 @@
 (let identifier (fn [[value String]] -> OptionalIdentifier
   (as OptionalIdentifier {:present true :value value})))
 (let no-da-policy (fn [] -> DaPolicy
-  (as DaPolicy {:rules (as (Map String String) {})})))
+  (as DaPolicy {:rules (as (Map String String) (core.map.empty (type-tag String)))})))
 (let da-policy (fn [[rules (Map String String)]] -> DaPolicy
   (as DaPolicy {:rules rules})))
 (let no-timeout (fn [] -> Timeout

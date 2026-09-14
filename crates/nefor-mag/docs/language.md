@@ -59,6 +59,31 @@ leading whitespace through `|` while preserving line breaks:
 (let command (replace script "\n" " "))
 ```
 
+## Native data collections and equality
+
+`[...]` constructs the single native `List` representation unless an expected
+`(+ A B ...)` product type makes it an ordered tuple. Record literals remain
+closed fixed-field construction values and are refined explicitly to nominal
+record types when they carry reusable meaning.
+
+Native `Map K V` and `Set T` values have no literal syntax. Require `core.map`
+or `core.set` and construct them through those ordinary modules. Map/Set lookup,
+membership, count, and insertion do not reveal storage order; no ordered fold or
+enumeration API is exposed. Inserting an equal existing key or member is an
+evaluation error. Map and Set equality is extensional and unordered.
+
+`=` performs exact recursive equality over concrete data. It preserves nominal
+ADT ownership and constructor identity, compares tuples/lists positionally,
+and compares Float bit patterns. Functions, type witnesses/descriptors, packed
+compiler values, artifacts, and data containing such opaque behavior are
+rejected statically. Generic functions that use equality carry this requirement
+to each instantiation.
+
+Artifact serialization is deterministic but does not make collection order
+observable. String-keyed maps become canonically keyed JSON objects; other maps
+and sets use reserved `$mag` envelopes whose entries are sorted only while
+serializing.
+
 ## Bindings and lexical blocks
 
 MAG has one binding form:

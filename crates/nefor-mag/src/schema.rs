@@ -34,7 +34,11 @@ pub enum SchemaType {
     List {
         item: Box<SchemaType>,
     },
+    Set {
+        item: Box<SchemaType>,
+    },
     Map {
+        key: Box<SchemaType>,
         value: Box<SchemaType>,
     },
     Record {
@@ -293,13 +297,17 @@ fn provider_schema_at_path(schema: &SchemaType, path: &str) -> Result<Value, Mag
             "type": "array",
             "items": provider_schema_at_path(item, &format!("{path}[]"))?,
         }),
-        SchemaType::Map { value } => serde_json::json!({
+        SchemaType::Set { item } => serde_json::json!({
+            "type": "array",
+            "items": provider_schema_at_path(item, &format!("{path}[]"))?,
+        }),
+        SchemaType::Map { key, value } => serde_json::json!({
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
-                    "key": {"type": "string"},
-                    "value": provider_schema_at_path(value, &format!("{path}.*"))?,
+                    "key": provider_schema_at_path(key, &format!("{path}.key"))?,
+                    "value": provider_schema_at_path(value, &format!("{path}.value"))?,
                 },
                 "required": ["key", "value"],
                 "additionalProperties": false,
@@ -395,7 +403,24 @@ fn decode_provider_value(
 ) -> Result<Value, Violation> {
     match schema {
         SchemaType::Named { body, .. } => decode_provider_value(body, value, path),
-        SchemaType::Map { value: item } => {
+        SchemaType::Set { item } => {
+            let Value::Array(items) = value else {
+                return Err(provider_decode_violation(
+                    path,
+                    "array of set items",
+                    &value,
+                ));
+            };
+            let decoded = items
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    decode_provider_value(item, value, &format!("{path}[{index}]"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(serde_json::json!({"$mag": "set", "items": decoded}))
+        }
+        SchemaType::Map { key, value: item } => {
             let Value::Array(entries) = value else {
                 return Err(provider_decode_violation(
                     path,
@@ -403,7 +428,9 @@ fn decode_provider_value(
                     &value,
                 ));
             };
-            let mut decoded = serde_json::Map::new();
+            let string_keys = matches!(key.as_ref(), SchemaType::String);
+            let mut object = serde_json::Map::new();
+            let mut decoded_entries = Vec::new();
             for (index, entry) in entries.into_iter().enumerate() {
                 let entry_path = format!("{path}[{index}]");
                 let Value::Object(mut fields) = entry else {
@@ -421,30 +448,37 @@ fn decode_provider_value(
                         &Value::Object(fields),
                     ));
                 }
-                let key_value = fields.remove("key").unwrap_or(Value::Null);
-                let Some(key) = key_value.as_str() else {
-                    return Err(provider_decode_violation(
-                        &format!("{entry_path}.key"),
-                        "string",
-                        &key_value,
-                    ));
-                };
-                if decoded.contains_key(key) {
-                    return Err(Violation {
-                        path: format!("{entry_path}.key"),
-                        code: "duplicate_map_key".into(),
-                        expected: "unique map key".into(),
-                        actual: key.into(),
-                        message: format!("map key '{key}' appears more than once"),
-                    });
+                let key_value = decode_provider_value(
+                    key,
+                    fields.remove("key").unwrap_or(Value::Null),
+                    &format!("{entry_path}.key"),
+                )?;
+                let item_value = decode_provider_value(
+                    item,
+                    fields.remove("value").unwrap_or(Value::Null),
+                    &format!("{entry_path}.value"),
+                )?;
+                if string_keys {
+                    let Some(key) = key_value.as_str() else {
+                        return Err(provider_decode_violation(
+                            &format!("{entry_path}.key"),
+                            "string",
+                            &key_value,
+                        ));
+                    };
+                    if object.contains_key(key) {
+                        return Err(duplicate_violation(&format!("{entry_path}.key"), "map key"));
+                    }
+                    object.insert(key.into(), item_value);
+                } else {
+                    decoded_entries.push(Value::Array(vec![key_value, item_value]));
                 }
-                let item_value = fields.remove("value").unwrap_or(Value::Null);
-                decoded.insert(
-                    key.into(),
-                    decode_provider_value(item, item_value, &field_path(path, key))?,
-                );
             }
-            Ok(Value::Object(decoded))
+            if string_keys {
+                Ok(Value::Object(object))
+            } else {
+                Ok(serde_json::json!({"$mag": "map", "entries": decoded_entries}))
+            }
         }
         SchemaType::Product { components } => {
             let Value::Object(mut fields) = value else {
@@ -596,9 +630,37 @@ fn schema_type_to_json_schema(schema: &SchemaType) -> Value {
             "type": "array",
             "items": schema_type_to_json_schema(item),
         }),
-        SchemaType::Map { value } => serde_json::json!({
+        SchemaType::Set { item } => serde_json::json!({
             "type": "object",
-            "additionalProperties": schema_type_to_json_schema(value),
+            "properties": {
+                "$mag": {"const": "set"},
+                "items": {"type": "array", "items": schema_type_to_json_schema(item)},
+            },
+            "required": ["$mag", "items"],
+            "additionalProperties": false,
+        }),
+        SchemaType::Map { key, value } if matches!(key.as_ref(), SchemaType::String) => {
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": schema_type_to_json_schema(value),
+            })
+        }
+        SchemaType::Map { key, value } => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "$mag": {"const": "map"},
+                "entries": {
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "prefixItems": [schema_type_to_json_schema(key), schema_type_to_json_schema(value)],
+                        "minItems": 2,
+                        "maxItems": 2,
+                    },
+                },
+            },
+            "required": ["$mag", "entries"],
+            "additionalProperties": false,
         }),
         SchemaType::Record { fields } => {
             let properties = fields
@@ -674,16 +736,13 @@ fn reify_concrete(ty: &crate::types::ConcreteType) -> Result<SchemaType, MagErro
         ConcreteType::List { item } => SchemaType::List {
             item: Box::new(reify_concrete(item)?),
         },
-        ConcreteType::Map { key, value } if key.as_ref() == &ConcreteType::String => {
-            SchemaType::Map {
-                value: Box::new(reify_concrete(value)?),
-            }
-        }
-        ConcreteType::Map { key, .. } => {
-            return Err(MagError::Type(format!(
-                "cannot reify Map<{key:?}, _>: JSON object keys must be String"
-            )))
-        }
+        ConcreteType::Set { item } => SchemaType::Set {
+            item: Box::new(reify_concrete(item)?),
+        },
+        ConcreteType::Map { key, value } => SchemaType::Map {
+            key: Box::new(reify_concrete(key)?),
+            value: Box::new(reify_concrete(value)?),
+        },
         ConcreteType::Record { fields } => SchemaType::Record {
             fields: fields
                 .iter()
@@ -767,14 +826,18 @@ fn validate_at(schema: &SchemaType, value: &Value, path: &str, out: &mut Vec<Vio
             }
             _ => expect(false, path, "List", value, out),
         },
-        SchemaType::Map { value: item } => match value {
-            Value::Object(entries) => {
-                for (key, item_value) in entries {
-                    validate_at(item, item_value, &field_path(path, key), out);
+        SchemaType::Set { item } => validate_set(item, value, path, out),
+        SchemaType::Map { key, value: item } if matches!(key.as_ref(), SchemaType::String) => {
+            match value {
+                Value::Object(entries) => {
+                    for (entry_key, item_value) in entries {
+                        validate_at(item, item_value, &field_path(path, entry_key), out);
+                    }
                 }
+                _ => expect(false, path, "Map String", value, out),
             }
-            _ => expect(false, path, "Map String", value, out),
-        },
+        }
+        SchemaType::Map { key, value: item } => validate_map(key, item, value, path, out),
         SchemaType::Record { fields } => match value {
             Value::Object(entries) => {
                 let declared = fields
@@ -964,6 +1027,197 @@ fn validate_at(schema: &SchemaType, value: &Value, path: &str, out: &mut Vec<Vio
     }
 }
 
+fn validate_set(item: &SchemaType, value: &Value, path: &str, out: &mut Vec<Violation>) {
+    let Some(items) = exact_wire_array(value, "set", "items", path, out) else {
+        return;
+    };
+    for (index, item_value) in items.iter().enumerate() {
+        validate_at(item, item_value, &format!("{path}.items[{index}]"), out);
+        if items[..index]
+            .iter()
+            .any(|previous| semantic_json_equal(item, previous, item_value))
+        {
+            out.push(duplicate_violation(
+                &format!("{path}.items[{index}]"),
+                "set item",
+            ));
+        }
+    }
+}
+
+fn validate_map(
+    key: &SchemaType,
+    item: &SchemaType,
+    value: &Value,
+    path: &str,
+    out: &mut Vec<Violation>,
+) {
+    let Some(entries) = exact_wire_array(value, "map", "entries", path, out) else {
+        return;
+    };
+    let mut keys: Vec<&Value> = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let entry_path = format!("{path}.entries[{index}]");
+        let Some(pair) = entry.as_array().filter(|pair| pair.len() == 2) else {
+            expect(false, &entry_path, "[key, value]", entry, out);
+            continue;
+        };
+        validate_at(key, &pair[0], &format!("{entry_path}[0]"), out);
+        validate_at(item, &pair[1], &format!("{entry_path}[1]"), out);
+        if keys
+            .iter()
+            .any(|previous| semantic_json_equal(key, previous, &pair[0]))
+        {
+            out.push(duplicate_violation(&format!("{entry_path}[0]"), "map key"));
+        }
+        keys.push(&pair[0]);
+    }
+}
+
+fn exact_wire_array<'a>(
+    value: &'a Value,
+    tag: &str,
+    field: &str,
+    path: &str,
+    out: &mut Vec<Violation>,
+) -> Option<&'a Vec<Value>> {
+    let Value::Object(object) = value else {
+        expect(false, path, &format!("{tag} envelope"), value, out);
+        return None;
+    };
+    if object.len() != 2
+        || object.get("$mag").and_then(Value::as_str) != Some(tag)
+        || !object.contains_key(field)
+    {
+        expect(false, path, &format!("exact {tag} envelope"), value, out);
+        return None;
+    }
+    match object.get(field) {
+        Some(Value::Array(items)) => Some(items),
+        Some(other) => {
+            expect(false, &field_path(path, field), "array", other, out);
+            None
+        }
+        None => None,
+    }
+}
+
+// Equality follows the schema, not the envelope's incidental array ordering.
+fn semantic_json_equal(schema: &SchemaType, left: &Value, right: &Value) -> bool {
+    fn ordered(
+        items: &[Value],
+        others: &[Value],
+        schemas: impl Iterator<Item = SchemaType>,
+    ) -> bool {
+        items.len() == others.len()
+            && items
+                .iter()
+                .zip(others)
+                .zip(schemas)
+                .all(|((a, b), schema)| semantic_json_equal(&schema, a, b))
+    }
+    match schema {
+        SchemaType::Named { body, .. } => semantic_json_equal(body, left, right),
+        SchemaType::Float => left
+            .as_f64()
+            .zip(right.as_f64())
+            .is_some_and(|(a, b)| a.to_bits() == b.to_bits()),
+        SchemaType::List { item } => left
+            .as_array()
+            .zip(right.as_array())
+            .is_some_and(|(a, b)| ordered(a, b, std::iter::repeat(item.as_ref().clone()))),
+        SchemaType::Product { components } => {
+            left.as_array().zip(right.as_array()).is_some_and(|(a, b)| {
+                a.len() == components.len() && ordered(a, b, components.iter().cloned())
+            })
+        }
+        SchemaType::Record { fields } => fields.iter().all(|field| {
+            left.get(&field.name)
+                .zip(right.get(&field.name))
+                .is_some_and(|(a, b)| semantic_json_equal(&field.schema, a, b))
+        }),
+        SchemaType::Set { item } => left
+            .get("items")
+            .and_then(Value::as_array)
+            .zip(right.get("items").and_then(Value::as_array))
+            .is_some_and(|(a, b)| {
+                a.len() == b.len()
+                    && a.iter()
+                        .all(|a| b.iter().any(|b| semantic_json_equal(item, a, b)))
+            }),
+        SchemaType::Map { key, value } if matches!(key.as_ref(), SchemaType::String) => left
+            .as_object()
+            .zip(right.as_object())
+            .is_some_and(|(a, b)| {
+                a.len() == b.len()
+                    && a.iter().all(|(key, a)| {
+                        b.get(key).is_some_and(|b| semantic_json_equal(value, a, b))
+                    })
+            }),
+        SchemaType::Map { key, value } => left
+            .get("entries")
+            .and_then(Value::as_array)
+            .zip(right.get("entries").and_then(Value::as_array))
+            .is_some_and(|(a, b)| {
+                a.len() == b.len()
+                    && a.iter().all(|a| {
+                        b.iter().any(|b| {
+                            a.as_array().zip(b.as_array()).is_some_and(|(a, b)| {
+                                a.len() == 2
+                                    && b.len() == 2
+                                    && semantic_json_equal(key, &a[0], &b[0])
+                                    && semantic_json_equal(value, &a[1], &b[1])
+                            })
+                        })
+                    })
+            }),
+        SchemaType::Union { variants } => {
+            left.get("type")
+                .zip(right.get("type"))
+                .is_some_and(|(a, b)| {
+                    a == b
+                        && variants
+                            .iter()
+                            .find(|variant| Some(variant.tag.as_str()) == a.as_str())
+                            .is_some_and(|variant| {
+                                left.get("value")
+                                    .zip(right.get("value"))
+                                    .is_some_and(|(a, b)| {
+                                        semantic_json_equal(&variant.schema, a, b)
+                                    })
+                            })
+                })
+        }
+        SchemaType::Adt { constructors, .. } => left
+            .get("constructor")
+            .zip(right.get("constructor"))
+            .is_some_and(|(a, b)| {
+                a == b
+                    && constructors
+                        .iter()
+                        .find(|constructor| Some(constructor.name.as_str()) == a.as_str())
+                        .is_some_and(|constructor| {
+                            left.get("value")
+                                .zip(right.get("value"))
+                                .is_some_and(|(a, b)| {
+                                    semantic_json_equal(&constructor.schema, a, b)
+                                })
+                        })
+            }),
+        _ => crate::eval::json_equal(left, right),
+    }
+}
+
+fn duplicate_violation(path: &str, label: &str) -> Violation {
+    Violation {
+        path: path.into(),
+        code: format!("duplicate_{}", label.replace(' ', "_")),
+        expected: format!("unique {label}"),
+        actual: format!("duplicate {label}"),
+        message: format!("{label} appears more than once"),
+    }
+}
+
 fn expect(valid: bool, path: &str, expected: &str, value: &Value, out: &mut Vec<Violation>) {
     if !valid {
         let actual = json_kind(value);
@@ -986,7 +1240,8 @@ fn describe(schema: &SchemaType) -> String {
         SchemaType::Float => "Float".into(),
         SchemaType::String => "String".into(),
         SchemaType::List { item } => format!("List<{}>", describe(item)),
-        SchemaType::Map { value } => format!("Map<String, {}>", describe(value)),
+        SchemaType::Set { item } => format!("Set<{}>", describe(item)),
+        SchemaType::Map { key, value } => format!("Map<{}, {}>", describe(key), describe(value)),
         SchemaType::Record { .. } => "record".into(),
         SchemaType::Union { variants } => variants
             .iter()
@@ -1085,6 +1340,7 @@ mod tests {
                     SchemaField {
                         name: "labels".into(),
                         schema: SchemaType::Map {
+                            key: Box::new(SchemaType::String),
                             value: Box::new(SchemaType::Int),
                         },
                     },
@@ -1387,6 +1643,7 @@ mod tests {
         let map = TypeSchema {
             version: SCHEMA_VERSION,
             root: SchemaType::Map {
+                key: Box::new(SchemaType::String),
                 value: Box::new(SchemaType::Int),
             },
         };
@@ -1516,6 +1773,39 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("recursive semantic type main.Node is unsupported"));
+    }
+
+    #[test]
+    fn arbitrary_maps_and_sets_validate_exact_envelopes_and_uniqueness() {
+        let map = TypeSchema {
+            version: SCHEMA_VERSION,
+            root: SchemaType::Map {
+                key: Box::new(SchemaType::Int),
+                value: Box::new(SchemaType::String),
+            },
+        };
+        assert!(
+            map.validate_json(r#"{"$mag":"map","entries":[[1,"a"],[2,"b"]]}"#)
+                .ok
+        );
+        let duplicate = map.validate_json(r#"{"$mag":"map","entries":[[1,"a"],[1,"b"]]}"#);
+        assert!(duplicate
+            .violations
+            .iter()
+            .any(|violation| violation.code == "duplicate_map_key"));
+
+        let set = TypeSchema {
+            version: SCHEMA_VERSION,
+            root: SchemaType::Set {
+                item: Box::new(SchemaType::Int),
+            },
+        };
+        assert!(set.validate_json(r#"{"$mag":"set","items":[1,2]}"#).ok);
+        assert!(set
+            .validate_json(r#"{"$mag":"set","items":[1,1]}"#)
+            .violations
+            .iter()
+            .any(|violation| violation.code == "duplicate_set_item"));
     }
 
     #[test]

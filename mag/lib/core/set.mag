@@ -1,0 +1,9 @@
+;; Native sets are unordered immutable data. Duplicate insertion fails during
+;; eager MAG evaluation rather than silently becoming idempotent.
+(let empty (fn [T] [[item-type (TypeTag T)]] -> (Set T)
+  (__set-empty item-type)))
+(let insert (fn [T] [[set (Set T)] [item T]] -> (Set T)
+  (__set-insert set item)))
+(let contains? (fn [T] [[set (Set T)] [item T]] -> Bool
+  (__set-contains set item)))
+(let count (fn [T] [[set (Set T)]] -> Int (__set-count set)))

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use nefor_mag::compile_file_with_inputs;
+use nefor_mag::{compile_file_with_inputs_and_module_roots, compile_with_inputs_and_module_roots};
 
 fn book_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/examples")
@@ -29,8 +29,14 @@ fn mag_book_examples_compile() {
     ];
 
     for entry in examples {
-        compile_file_with_inputs(&root, entry, serde_json::json!({}))
-            .unwrap_or_else(|error| panic!("MAG Book example {entry} failed: {error}"));
+        let module_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
+        compile_file_with_inputs_and_module_roots(
+            &root,
+            entry,
+            serde_json::json!({}),
+            &[root.clone(), module_root],
+        )
+        .unwrap_or_else(|error| panic!("MAG Book example {entry} failed: {error}"));
     }
 }
 
@@ -40,6 +46,12 @@ fn mag_in_five_minutes_program_compiles() {
     let path = crate_root.join("../../mag/book/01. core/00. MAG in Five Minutes.md");
     let source = first_lisp_fence(&path);
 
-    nefor_mag::compile(&source, &crate_root)
-        .unwrap_or_else(|error| panic!("MAG in Five Minutes failed: {error}"));
+    let module_root = crate_root.join("../../mag/lib");
+    compile_with_inputs_and_module_roots(
+        &source,
+        &crate_root,
+        serde_json::json!({}),
+        &[crate_root.clone(), module_root],
+    )
+    .unwrap_or_else(|error| panic!("MAG in Five Minutes failed: {error}"));
 }

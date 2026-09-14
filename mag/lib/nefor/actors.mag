@@ -117,9 +117,9 @@
   ;; unchanged. Every other semantic type starts a fresh typed user turn.
   ;; The runtime wire is derived here and is not part of the authoring API.
   (let input-wire
-    (if (= (type-id (type-evidence input-type))
-           (type-id
-             (type-evidence (type-tag nefor.contracts.ProviderInput))))
+    (if (= (canonical (type-id (type-evidence input-type)))
+           (canonical (type-id
+             (type-evidence (type-tag nefor.contracts.ProviderInput)))))
       "generic-provider.ProviderOut"
       "nefor.agent.Input"))
   (let entry-in (nefor.graph.port entry-id input-type input-wire))
@@ -154,8 +154,8 @@
          (nefor.graph.store-port entry-in)
          [(nefor.graph.store-port entry-out)])
        (if (if (not dynamic)
-             (= (type-id (type-evidence output-type))
-                (type-id (type-evidence (type-tag nefor.contracts.TextAnswer))))
+             (= (canonical (type-id (type-evidence output-type)))
+                (canonical (type-id (type-evidence (type-tag nefor.contracts.TextAnswer)))))
              false)
          (nefor.graph.actor llm-id llm-factory [(type-evidence (type-tag (core.types.Result nefor.contracts.AgentError O)))]
            (as LlmParams {:model (get resolved-model "model")

@@ -1108,8 +1108,12 @@ fn preflight_provider_schemas(program: &DecodedProgram) -> Result<(), String> {
 fn schema_contains_named(schema: &nefor_mag::schema::SchemaType, expected: &str) -> bool {
     use nefor_mag::schema::SchemaType;
     match schema {
-        SchemaType::List { item } => schema_contains_named(item, expected),
-        SchemaType::Map { value } => schema_contains_named(value, expected),
+        SchemaType::List { item } | SchemaType::Set { item } => {
+            schema_contains_named(item, expected)
+        }
+        SchemaType::Map { key, value } => {
+            schema_contains_named(key, expected) || schema_contains_named(value, expected)
+        }
         SchemaType::Record { fields } => fields
             .iter()
             .any(|field| schema_contains_named(&field.schema, expected)),

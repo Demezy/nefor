@@ -1,4 +1,5 @@
 (require "core.types")
+(require "core.map")
 (require "nefor.actors")
 (require "nefor.contracts")
 (require "nefor.dynamic")
@@ -200,7 +201,8 @@
     (let result-segment (nefor.dynamic.fixed-segment "result"))
     (let template
       (as nefor.mag.DeltaTemplate
-        {:types (as (Map String TypeDescriptor) {})
+        {:types (as (Map String TypeDescriptor)
+                  (core.map.empty (type-tag String)))
          :actors [entry-template llm-template run-tool-template tool-result-template result-actor]
          :routes routes :messages [message]
          :nodes

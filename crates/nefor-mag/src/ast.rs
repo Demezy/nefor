@@ -84,6 +84,7 @@ pub struct CheckedParam {
 pub struct CheckedFn {
     pub name: Option<String>,
     pub type_params: Vec<String>,
+    pub equality_params: Vec<String>,
     pub params: Vec<CheckedParam>,
     pub result: MagType,
     pub body: Arc<CheckedBlock>,
@@ -153,6 +154,7 @@ impl Expr {
 pub struct FnValue {
     pub name: Option<String>,
     pub type_params: Vec<String>,
+    pub equality_params: Vec<String>,
     pub params: Vec<String>,
     pub param_types: Vec<MagType>,
     pub return_type: MagType,
@@ -196,11 +198,12 @@ pub enum Value {
     Keyword(String),
     Symbol(String),
     List(Arc<Vec<Value>>),
-    Vector(Arc<Vec<Value>>),
-    /// A checked ordered product. Unlike a Vector, every position retains its
+    /// A checked ordered product. Unlike a List, every position retains its
     /// own trusted type and constructor evidence.
     Product(Arc<Vec<Value>>),
-    Map(Arc<BTreeMap<String, Value>>),
+    Record(Arc<BTreeMap<String, Value>>),
+    Map(Arc<Vec<(Value, Value)>>),
+    Set(Arc<Vec<Value>>),
     Fn(Arc<FnValue>),
     BuiltinFn(String),
     Type(MagType),
@@ -239,9 +242,10 @@ impl Value {
             Self::Keyword(_) => "keyword",
             Self::Symbol(_) => "symbol",
             Self::List(_) => "list",
-            Self::Vector(_) => "vector",
             Self::Product(_) => "product",
+            Self::Record(_) => "record",
             Self::Map(_) => "map",
+            Self::Set(_) => "set",
             Self::Fn(_) => "fn",
             Self::BuiltinFn(_) => "builtin-fn",
             Self::Type(_) | Self::TypeDecl(_) => "type",

@@ -1,5 +1,7 @@
 (require "nefor.artifact")
 (require "nefor.contracts")
+(require "core.map")
+(require "core.set")
 (require "nefor.graph")
 (require "nefor.mag")
 (require "nefor.node")
@@ -31,7 +33,7 @@
                           :expressions (List nefor.mag.Expression)})
 
 (let expression-id (fn [T] [[value T]] -> String (canonical value)))
-(type OrderedExpressions {:seen (Map String Bool)
+(type OrderedExpressions {:seen (Set String)
                           :values (List nefor.mag.Expression)})
 (let stored-expression-id
   (fn [[value nefor.mag.Expression]] -> String
@@ -44,17 +46,17 @@
 (let insert-expression
   (fn [[state OrderedExpressions] [value nefor.mag.Expression]] -> OrderedExpressions
     (let id (stored-expression-id value))
-    (if (or (get (get state "seen") id) false)
+    (if (core.set.contains? (get state "seen") id)
       state
       (as OrderedExpressions
-        {:seen (assoc (get state "seen") id true)
+        {:seen (core.set.insert (get state "seen") id)
          :values (concat (get state "values") [value])}))))
 (let unique-expressions
   (fn [[values (List nefor.mag.Expression)]] -> (List nefor.mag.Expression)
     (get
       (fold insert-expression
         (as OrderedExpressions
-          {:seen (as (Map String Bool) {})
+          {:seen (core.set.empty (type-tag String))
            :values (as (List nefor.mag.Expression) [])})
         values)
       "values")))
@@ -71,17 +73,17 @@
       (fn [[out (Map String nefor.mag.TypedCapture)]
            [next (Map String nefor.mag.TypedCapture)]]
         -> (Map String nefor.mag.TypedCapture)
-        (fold (fn [[merged (Map String nefor.mag.TypedCapture)] [key String]]
-                -> (Map String nefor.mag.TypedCapture)
-                (assoc merged key (get next key))) out (keys next)))
-      (as (Map String nefor.mag.TypedCapture) {}) values)))
+        (__map-union-left out next))
+      (as (Map String nefor.mag.TypedCapture)
+        (core.map.empty (type-tag String))) values)))
 
 (let trigger-ref
   (fn [T] [[type (TypeTag T)]] -> (ValueRef T)
     (let descriptor (type-evidence type))
     (as (ValueRef T)
       {:id "trigger" :type type
-       :captures (as (Map String nefor.mag.TypedCapture) {})
+       :captures (as (Map String nefor.mag.TypedCapture)
+         (core.map.empty (type-tag String)))
        :expressions
          [(construct nefor.mag.Expression Trigger (as nefor.mag.Trigger {:id "trigger" :result_type (type-id descriptor)}))]})))
 (let capture-ref
@@ -95,7 +97,10 @@
          :value (pack value)}))
     (as (ValueRef T)
       {:id id :type type
-       :captures (assoc (as (Map String nefor.mag.TypedCapture) {}) capture-id captured)
+       :captures (core.map.insert
+         (as (Map String nefor.mag.TypedCapture)
+           (core.map.empty (type-tag String)))
+         capture-id captured)
        :expressions
          [(construct nefor.mag.Expression Capture (as nefor.mag.Capture {:id id :result_type (type-id descriptor) :capture capture-id}))]})))
 (let field-ref

@@ -67,10 +67,12 @@ fn analysis_preserves_normalized_first_occurrence_and_flattening_order() {
           (let test-operation
             (fn [T] [[id String] [on (nefor.graph.Port T)]] -> nefor.mag.ProgramOperation
               (nefor.graph.instantiate-delta-template id on
-                (as (Map String nefor.mag.TypedCapture) {})
+                (as (Map String nefor.mag.TypedCapture)
+                  (core.map.empty (type-tag String)))
                 (as (List nefor.mag.Expression) [])
                 (as nefor.mag.DeltaTemplate
-                  {:types (as (Map String TypeDescriptor) {})
+                  {:types (as (Map String TypeDescriptor)
+                    (core.map.empty (type-tag String)))
                    :actors [] :routes [] :messages [] :nodes []
                    :actor_reference_relocations []}))))
 
@@ -113,7 +115,7 @@ fn analysis_preserves_normalized_first_occurrence_and_flattening_order() {
                       (get candidate "id"))
                     (get analysis "nodes"))
              :middle-occurrences
-               (count (get (get analysis "nodes_by_id") "m-middle"))
+               (count (core.map.get (get analysis "nodes_by_id") "m-middle"))
              :actor-ids
                (map (fn [[candidate nefor.graph.Actor]] -> String
                       (get candidate "id"))
@@ -141,17 +143,17 @@ fn analysis_preserves_normalized_first_occurrence_and_flattening_order() {
     assert_eq!(artifact["edge-count"], 2);
     assert_eq!(
         artifact["node-ids"],
-        json!(["m-middle", "a-result", "z-start"])
+        json!(["z-start", "m-middle", "a-result"])
     );
     assert_eq!(artifact["middle-occurrences"], 2);
     assert_eq!(
         artifact["actor-ids"],
-        json!(["m-middle", "a-result", "z-start"])
+        json!(["z-start", "m-middle", "a-result"])
     );
     assert_eq!(artifact["message-targets"], json!(["z-start"]));
     assert_eq!(
         artifact["rule-ids"],
-        json!(["middle-1", "middle-2", "start-1"])
+        json!(["start-1", "middle-1", "middle-2"])
     );
     assert_eq!(artifact["duplicate-lowers-identically"], true);
     assert_eq!(
@@ -213,14 +215,14 @@ fn route_assignment_sorts_product_buckets_but_lowers_original_route_order() {
           (let analysis (nefor.graph.analyze-graph topology))
           (let input-key
             (nefor.graph.port-address-key (nefor.graph.store-port join-input)))
-          (let sorted-bucket (get (get analysis "routes_by_input") input-key))
+          (let sorted-bucket (core.map.get (get analysis "routes_by_input") input-key))
           (let lowered (nefor.graph.lower topology))
           (let lowered-emitter
             (first
               (filter (fn [[candidate nefor.graph.LowerActor]] -> Bool
                         (= (get candidate "id") "emitter"))
                       (get lowered "actors"))))
-          (let destinations (get (get lowered-emitter "routes") "test.Value"))
+          (let destinations (core.map.get (get lowered-emitter "routes") "test.Value"))
           (let duplicate-first
             (as nefor.graph.StoredRoute
               {:id "duplicate"
@@ -335,10 +337,12 @@ fn indexed_reachability_handles_cycles_and_preserves_dead_path_diagnostics() {
           (let test-operation
             (fn [T] [[id String] [on (nefor.graph.Port T)]] -> nefor.mag.ProgramOperation
               (nefor.graph.instantiate-delta-template id on
-                (as (Map String nefor.mag.TypedCapture) {})
+                (as (Map String nefor.mag.TypedCapture)
+                  (core.map.empty (type-tag String)))
                 (as (List nefor.mag.Expression) [])
                 (as nefor.mag.DeltaTemplate
-                  {:types (as (Map String TypeDescriptor) {})
+                  {:types (as (Map String TypeDescriptor)
+                    (core.map.empty (type-tag String)))
                    :actors [] :routes [] :messages [] :nodes []
                    :actor_reference_relocations []}))))
 
@@ -464,20 +468,23 @@ fn duplicate_precedence_contract_selection_and_sequence_order_are_stable() {
                  (nefor.graph.identity "ordinary" (type-tag nefor.contracts.Text)))]))
 
           (let first-contract
-            (nefor.graph.factory-contract
+            (as nefor.graph.FactoryContract
               {:identity "nefor.factory.source"
-               :type_scheme {:input_tags ["wrong"]
-                             :outputs ["nefor.graph.Value"]}}))
+               :type_scheme (as nefor.graph.FactoryTypeScheme
+                 {:input_tags ["wrong"]
+                  :outputs ["nefor.graph.Value"]})}))
           (let second-contract
-            (nefor.graph.factory-contract
+            (as nefor.graph.FactoryContract
               {:identity "nefor.factory.source"
-               :type_scheme {:input_tags ["mag.Unit"]
-                             :outputs ["nefor.graph.Value"]}}))
+               :type_scheme (as nefor.graph.FactoryTypeScheme
+                 {:input_tags ["mag.Unit"]
+                  :outputs ["nefor.graph.Value"]})}))
           (let output-contract
-            (nefor.graph.factory-contract
+            (as nefor.graph.FactoryContract
               {:identity "nefor.factory.output"
-               :type_scheme {:input_tags ["nefor.graph.Value"]
-                             :outputs ["nefor.graph.Value"]}}))
+               :type_scheme (as nefor.graph.FactoryTypeScheme
+                 {:input_tags ["nefor.graph.Value"]
+                  :outputs ["nefor.graph.Value"]})}))
           (let valid-graph
             (nefor.graph.graph [(nefor.graph.edge start result)]))
 
@@ -703,8 +710,10 @@ fn indexed_output_diagnostics_include_explicit_operations_and_each_port() {
       (let graph (nefor.graph.graph [(nefor.graph.edge node result)]))
       (let on (nefor.graph.port "worker" (type-tag Arm) "one"))
       (let operation (nefor.graph.instantiate-delta-template "explicit-arm" on
-        (as (Map String nefor.mag.TypedCapture) {}) []
-        (as nefor.mag.DeltaTemplate {:types (as (Map String TypeDescriptor) {})
+        (as (Map String nefor.mag.TypedCapture)
+                  (core.map.empty (type-tag String))) []
+        (as nefor.mag.DeltaTemplate {:types (as (Map String TypeDescriptor)
+                    (core.map.empty (type-tag String)))
           :actors [] :routes [] :messages [] :nodes [] :actor_reference_relocations []})))
       (let validation (nefor.graph.validate-with-operations graph [operation] []))
       (artifact (match validation
@@ -757,11 +766,11 @@ fn input_diagnostics_keep_raw_occurrences_and_actual_message_evidence() {
       (let message (as nefor.graph.Message (assoc (nefor.graph.stored-message input {:kind "nefor.graph.Value" :value nil})
                          "semantic_type" (type-evidence (type-tag Unit)))))
       (let with-message (as nefor.graph.GraphAnalysis (assoc analysis "messages_by_input"
-        (assoc (get analysis "messages_by_input") (nefor.graph.port-address-key input) [message]))))
+        (core.map.put (get analysis "messages_by_input") (nefor.graph.port-address-key input) [message]))))
       (artifact {:sources (nefor.graph.actor-input-sources with-message actor)
         :covered (nefor.graph.actor-input-coverage-valid? with-message actor)
         :assignment-order (map (fn [[r nefor.graph.StoredRoute]] -> String (get r "id"))
-          (or (get (get analysis "routes_by_input") (nefor.graph.port-address-key input)) (as (List nefor.graph.StoredRoute) [])))})
+          (core.map.get-or (get analysis "routes_by_input") (nefor.graph.port-address-key input) (as (List nefor.graph.StoredRoute) [])))})
     "#,
         json!({}),
     );
@@ -811,8 +820,10 @@ fn generic_list_inference_supports_nested_sequence_with_error_union() {
           (let workers [runtime configs])
           (let task (nefor.graph.source "task" (type-tag nefor.contracts.Task) (as nefor.contracts.Task {{:prompt "Investigate"}})))
           (let work (nefor.node.>>> task (nefor.node.sequence "traces" {nodes})))
-          (artifact (= (get (get work "output") "type")
-                       (type-tag (List (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer)))))
+          (artifact
+            (= (str (type-id (type-evidence (get (get work "output") "type"))))
+               (str (type-id (type-evidence
+                 (type-tag (List (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))))))
         "#);
         let artifact = run(&format!("generic-list-{name}"), &source, json!({}));
         assert_eq!(artifact, json!(true), "{name}");
