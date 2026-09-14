@@ -54,14 +54,6 @@ fn direct_file_path_context() -> Value {
     })
 }
 
-fn path_or_file_context() -> Value {
-    json!({
-        "folders": [
-            { "from": "path_or_file", "arg": "path", "cwd_arg": "cwd", "default": "." }
-        ]
-    })
-}
-
 fn cwd_context() -> Value {
     json!({
         "folders": [
@@ -109,13 +101,6 @@ pub const TOOLS: &[ToolDescriptor] = &[
         context: cwd_context,
         display: shell_script::display,
     },
-    ToolDescriptor {
-        name: search_text::NAME,
-        description: search_text::DESCRIPTION,
-        schema: search_text::schema,
-        context: path_or_file_context,
-        display: search_text::display,
-    },
 ];
 
 /// Run a tool by name. Returns the tool's textual output on success or a
@@ -134,7 +119,6 @@ pub async fn run_tool(name: &str, args: &Value) -> Result<Value, ToolError> {
         write_file::NAME => write_file::run(args).await.map(Value::String),
         process_exec::NAME => process_exec::run(args).await,
         shell_script::NAME => shell_script::run(args).await,
-        search_text::NAME => search_text::run(args).await.map(Value::String),
         other => Err(ToolError::BadArgs {
             tool: other.to_owned(),
             message: format!("unknown tool `{other}`"),

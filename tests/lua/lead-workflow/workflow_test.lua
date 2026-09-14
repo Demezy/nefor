@@ -1189,8 +1189,17 @@ do
   invoke_tool("inline-create", "mag-apply", {
     file = "inline.mag", content = READ_ONLY_MAG,
   })
-  assert_true(find_call(decode_calls(), function(call) return call.body.kind == "mag.load" end) ~= nil,
-    "inline content creates source and starts compilation")
+  local load = find_call(decode_calls(), function(c) return c.body.kind == "mag.load" end)
+  assert_true(load ~= nil, "inline content creates source and starts compilation")
+  feed("mag", { kind = "mag.error", in_reply_to = load.body.id,
+    message = "invalid source" })
+  local failed = tool_result("inline-create")
+  assert_true(failed and failed.body.error:find("invalid source", 1, true) ~= nil,
+    "inline apply returns the compiler failure")
+  assert_eq(find_call(decode_calls(), function(c)
+    return c.body.kind == "mag.execute" or c.body.kind == "mag.apply"
+  end), nil, "inline compile failure dispatches no work")
+  _test.calls_clear()
   invoke_tool("inline-conflict", "mag-apply", {
     file = "inline.mag", content = READ_ONLY_MAG,
   })
@@ -1199,6 +1208,9 @@ do
     "inline content refuses to overwrite an existing source")
   assert_true(conflict.body.error:find("mag-write-file", 1, true) ~= nil,
     "inline conflict explains the repair flow")
+  assert_eq(find_call(decode_calls(), function(c)
+    return c.body.kind == "mag.load" or c.body.kind == "mag.execute" or c.body.kind == "mag.apply"
+  end), nil, "source creation failure stops before compilation and dispatch")
 end
 
 -- ------------------------------------------------------------------

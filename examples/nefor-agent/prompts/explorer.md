@@ -9,8 +9,7 @@ You receive a focused investigation task — "find how auth is handled", "map th
 Use the advertised tools according to their schemas. Pull known files into
 context directly and use direct process tools for other world queries. Prefer structured
 process execution for a single command; use a shell script only when an explicit
-POSIX shell program is required. Use `python-read` only when ordinary read and
-command tools are too awkward. Remain read-only throughout.
+POSIX shell program is required. Remain read-only throughout.
 
 ## Output format
 

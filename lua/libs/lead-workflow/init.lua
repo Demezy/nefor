@@ -1811,7 +1811,7 @@ local function lead_workflow_tool_schemas()
       name = "mag-write-file",
       display = display_contract("mag write file", display_field("file", "args", "file", "path"),
         {}, "receipt", "MAG source written", {}),
-      description = "Create or overwrite a session MAG source file, or replace one exact unique string in it. The file path is relative to this session's MAG workspace; absolute, non-normalized, traversal, and symlink paths are rejected. Omit old_string to make new_string the complete contents. Supply old_string to edit an existing file. Empty new_string is valid.",
+      description = "Prepare or edit a session MAG source file without executing it. Use this for changes to existing source or to save source for inspection. Omit old_string to make new_string the complete contents, creating or overwriting the file. Supply old_string to replace one exact unique string. Empty new_string is valid. The file path is relative to this session's MAG workspace; absolute, non-normalized, traversal, and symlink paths are rejected.",
       parameters = { type = "object", additionalProperties = false, properties = {
         file = { type = "string", description = "Normalized path relative to the session MAG workspace." },
         new_string = { type = "string", description = "Complete contents or replacement text; may be empty." },
@@ -1823,7 +1823,7 @@ local function lead_workflow_tool_schemas()
       display = display_contract("mag preview", display_field("file", "args", "file", "path"),
         {}, "content", nil, { display_field("workflow", "result", "workflow_tree", "text",
           { max_lines = 120, max_bytes = 12000 }) }, "delayed"),
-      description = "Compile and validate an existing session MAG source file without changing the file or running the workflow. Returns only the fully expanded authored node tree; compilation errors are returned as tool errors.",
+      description = "Inspect the fully expanded authored node tree of an existing session MAG source file without changing the file or executing the workflow. This optional preview compiles and validates the source; mag-apply also compiles and validates on execution. Compilation errors are returned as tool errors.",
       parameters = { type = "object", additionalProperties = false, properties = {
         file = { type = "string", description = "Existing normalized path relative to the session MAG workspace." },
       }, required = { "file" } },
@@ -1838,7 +1838,7 @@ local function lead_workflow_tool_schemas()
           display_field("workflow", "result", "workflow_tree", "text",
             { omit = "missing", max_lines = 120, max_bytes = 12000 }),
         }, "delayed"),
-      description = "Compile and apply a session MAG source file. Omit run_id for a fresh graph; supply a directly dispatched live run_id for a delta. Optional content atomically creates a new source file before compilation and fails if that file already exists. Without content, the file must already exist. A fresh run returns quick terminal results directly or an asynchronous run_id acknowledgment; the acknowledgment includes the complete authored node tree. Use mag-await when dependent work needs an asynchronous result, never mag-status for waiting.",
+      description = "Execute a MAG operation or workflow, including a single command. To execute a new graph in one call, pass file and content together: this atomically writes a new source file, compiles and validates it, then dispatches it. Source-write, compilation, or pre-dispatch validation errors return without dispatch; created source remains available for editing. Existing files cannot be overwritten via content; edit them with mag-write-file and omit content when applying. Omit run_id for a fresh graph; supply a directly dispatched live run_id to apply a delta. Quick runs return the terminal result. Asynchronous acknowledgments include run_id, the complete authored node tree, and completion instructions for the calling role.",
       parameters = { type = "object", additionalProperties = false, properties = {
         file = { type = "string", description = "Normalized path relative to the session MAG workspace." },
         content = { type = "string", description = "Optional complete source for a new file. Existing files are never overwritten here." },

@@ -1,9 +1,9 @@
 # basic-tools
 
-NCP plugin: file, image, search, edit, and process capability primitives.
+NCP plugin: file, image, edit, and process capability primitives.
 
 The shipped tool set is `read_file`, `read_image`, `write_file`,
-`process.exec`, `shell.script`, and `search_text`. Destructive or long-running
+`process.exec`, and `shell.script`. Destructive or long-running
 operations are intended to be run behind `tool-gate` in the starter composition.
 
 ## Wire contract
@@ -79,7 +79,6 @@ it with an explicit error when the active model does not support image input.
   text file; add non-empty `old_string` to replace exactly one match in an
   existing UTF-8 file. An empty `new_string` is valid in both forms. The tool
   has no `cwd`, mode, action, or model-controlled policy fields.
-- `search_text` — search text under files/directories.
 
 ### Process capabilities
 

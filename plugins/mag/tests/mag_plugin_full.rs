@@ -1359,6 +1359,52 @@ let operation = nefor.graph.node_with_operations_and_nodes("wrapper", "ordinary"
         }
 
         #[test]
+        fn nefor_mag_single_command_guide_executes_without_agent() {
+            let host = shipped_host();
+            let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let markdown = std::fs::read_to_string(
+                repository.join("mag/book/02. nefor/00. Nefor MAG in Five Minutes.md"),
+            )
+            .expect("read Nefor guide");
+            let source = markdown
+                .split_once("```mag\n")
+                .and_then(|(_, rest)| rest.split_once("\n```").map(|(source, _)| source))
+                .expect("Nefor guide starts with a complete single-command program");
+            let run_id = "guide-single-command";
+            let modification = compile_mag_source(&host, run_id, source);
+            assert!(host.begin_run(run_id, run_id, None).unwrap().ok);
+            host.drain_emits().unwrap();
+            let started = host.start(run_id, &modification).unwrap();
+            assert!(started.ok, "{:?}", started.error);
+            let emits = host.drain_emits().unwrap();
+            assert_eq!(
+                emits
+                    .iter()
+                    .filter(|event| event["kind"] == "tool.invoke")
+                    .count(),
+                1,
+                "the documented graph dispatches one shell command"
+            );
+            assert!(host.take_run_complete(run_id).unwrap().is_none());
+            execute_unit_root_command(&host, tool_invoke(&emits, "shell.script"));
+            let completion = host
+                .take_run_complete(run_id)
+                .unwrap()
+                .expect("shell output completes the documented graph");
+            let result = completion.result.unwrap();
+            assert_eq!(result["value"]["stdout"], "hello\n");
+            assert_eq!(result["value"]["stderr"], "");
+            assert!(
+                !host
+                    .drain_emits()
+                    .unwrap()
+                    .iter()
+                    .any(|event| event["kind"] == "tool.invoke"),
+                "command completion needs no agent or further tool invocation"
+            );
+        }
+
+        #[test]
         fn unit_accepting_roots_execute_once_and_dependencies_do_not_start_early() {
             for (name, definitions, dependent) in [
                 (

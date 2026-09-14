@@ -133,13 +133,6 @@ mod tools {
         ));
     }
 
-    pub mod search_text {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/tools/search_text.rs"
-        ));
-    }
-
     pub mod shell_script {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),

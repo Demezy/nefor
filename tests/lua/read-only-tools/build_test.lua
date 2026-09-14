@@ -1,123 +1,109 @@
--- tests/lua/read-only-tools/build_test.lua — the opt-in `include` seam.
---
--- Base tools are advertised only when a config names them in `build{ include }`.
--- Driven by engine/tests/read_only_tools_test.rs (stubs nefor json/log, wires
--- package.path). This file stubs nefor.engine.send to capture the advertise.
+-- The shipped tool boundary retains repository discovery and ordinary skills.
+-- Driven by engine/tests/read_only_tools_test.rs with isolated on-disk fixtures.
 
 local function assert_true(cond, msg)
   if not cond then error("assertion failed: " .. (msg or "(no message)"), 2) end
 end
 
 local captured
+local replies = {}
 nefor.engine = {
-  now  = function() return 0 end,
+  now = function() return 0 end,
   send = function(payload)
-    local ok, decoded = pcall(nefor.json.decode, payload)
-    if ok and type(decoded) == "table" and type(decoded.body) == "table"
-       and decoded.body.kind == "tool-gate.tools.advertise" then
-      captured = decoded.body.tools
-    end
+    local decoded = nefor.json.decode(payload)
+    local body = decoded.body or {}
+    if body.kind == "tool-gate.tools.advertise" then captured = body.tools end
+    if body.kind == "tool.result" then replies[body.id] = body end
   end,
 }
 
-NEFOR_CONFIG_DIR = "/custom/runtime-config"
-NEFOR_DATA_DIR = "/custom/runtime-data"
-
 local rot = require("libs.read-only-tools")
+local removed = { "list_dir", "search_text", "python-read", "instructions" }
+local invocation = 0
 
-local function advertised_tools(opts)
+local function advertise(spec)
   captured = nil
-  local spec = rot.build(opts)
-  local hello = nefor.json.encode({ body = { kind = "tool-gate.hello" } })
-  spec.receive_msg({ origin = "plugin", payload = hello })
-  return captured or {}
-end
-
--- Build a spec, drive a tool-gate.hello, return the advertised names as a set.
-local function advertised_names(opts)
+  spec.receive_msg({ origin = "plugin", payload = nefor.json.encode({
+    body = { kind = "tool-gate.hello" },
+  }) })
   local names = {}
-  for _, t in ipairs(advertised_tools(opts)) do names[t.name] = true end
+  for _, tool in ipairs(captured or {}) do names[tool.name] = true end
   return names
 end
 
--- opt-in: only the included base tools are advertised.
-do
-  local n = advertised_names { include = { "list_dir", "skill" } }
-  assert_true(n.list_dir, "list_dir advertised when included")
-  assert_true(n.skill, "skill advertised when included")
-  assert_true(not n.search_text, "search_text NOT advertised when omitted")
-  assert_true(not n["python-read"], "python-read NOT advertised when omitted")
-  assert_true(not n.instructions, "instructions NOT advertised when omitted")
-  assert_true(not n.discover_instruction_files, "discover NOT advertised when omitted")
+local function invoke(spec, name, args)
+  invocation = invocation + 1
+  local id = "tool-call-" .. invocation
+  spec.receive_msg({ origin = "plugin", payload = nefor.json.encode({ body = {
+    kind = "read-only-tools.tool.invoke", id = id, name = name, args = args,
+  } }) })
+  return assert(replies[id], "every invocation settles its tool result")
 end
 
--- skill description exposes the effective config-root convention.
-do
-  local skill
-  for _, tool in ipairs(advertised_tools { include = { "skill" } }) do
-    if tool.name == "skill" then skill = tool end
-  end
-  assert_true(skill ~= nil, "skill schema advertised")
-  assert_true(
-    skill.description:find("/custom/runtime-config/skills/<name>/skill.md", 1, true),
-    "skill description contains resolved config-root path convention")
-  assert_true(
-    not skill.description:find("/custom/runtime-data", 1, true),
-    "skill description does not use data root")
-  assert_true(
-    not skill.description:find("<config>", 1, true),
-    "skill description does not leave config root ambiguous")
+local remaining = rot.build { include = { "discover_instruction_files", "skill" } }
+local names = advertise(remaining)
+assert_true(names.discover_instruction_files and names.skill, "remaining tools are advertised")
+for _, name in ipairs(removed) do
+  assert_true(not names[name], "removed tool is not advertised: " .. name)
+  assert_true(not pcall(rot.build, { include = { name } }), "removed base tool cannot be registered: " .. name)
+  local reply = invoke(remaining, name, {})
+  assert_true(type(reply.error) == "string" and reply.output == nil, "removed invocation fails: " .. name)
 end
 
--- omitted include => no base tools (pure opt-in default; no contamination).
-do
-  local n = advertised_names {}
-  assert_true(next(n) == nil, "no base tools advertised without include")
-end
+local skill = invoke(remaining, "skill", { name = "example" })
+assert_true(skill.output == "Ordinary workflow skill.\n" and skill.error == nil,
+  "ordinary skill loading retains its complete configured content")
+local discovery = invoke(remaining, "discover_instruction_files", {
+  path = READ_ONLY_TEST_WORKSPACE, scope = "subfolders",
+})
+assert_true(discovery.error == nil and discovery.output:find("AGENTS.md", 1, true)
+  and discovery.output:find("nested/CLAUDE.md", 1, true), "repository instruction discovery remains callable")
+assert_true(not discovery.output:find("Root repository guidance", 1, true),
+  "discovery lists instruction paths without loading their contents")
 
--- extra_tools ride alongside the included base tools.
-do
-  local n = advertised_names {
-    include = { "list_dir" },
-    extra_tools = {
-      {
-        schema = { name = "custom", description = "x", parameters = { type = "object" }, display = {
-          compact = { label = "Custom" }, expanded = { label = "Custom", fields = {} },
-          result = { kind = "content", fields = {} },
-        } },
-        handler = function(_, emit) emit.ok("ok") end,
-      },
-    },
-  }
-  assert_true(n.list_dir, "included base advertised alongside extra")
-  assert_true(n.custom, "extra tool advertised")
+-- The actual starter source advertises a surviving capability and can satisfy
+-- a readiness barrier without any deleted base tool.
+local starter = require("read-only-tools")
+local starter_names = advertise(starter)
+assert_true(starter_names.discover_instruction_files, "starter advertises repository discovery")
+for _, name in ipairs(removed) do
+  assert_true(not starter_names[name], "starter does not advertise removed tool: " .. name)
 end
+local ready = false
+local barrier = require("libs.startup-readiness")._new {
+  required_plugins = {}, required_tools = { "discover_instruction_files" },
+  on_ready = function() ready = true end,
+}
+barrier.observe({ kind = "tool.register", tools = captured }, "tool-gate")
+assert_true(ready, "surviving starter advertisement satisfies readiness")
+assert_true(invoke(starter, "discover_instruction_files", {
+  path = READ_ONLY_TEST_WORKSPACE, scope = "subfolders",
+}).error == nil, "starter dispatches the surviving capability")
 
--- unknown base tool name in include errors (catches typos loudly).
-do
-  local ok = pcall(rot.build, { include = { "does_not_exist" } })
-  assert_true(not ok, "unknown base tool in include raises")
-end
+assert_true(next(advertise(rot.build {})) == nil, "base tools remain opt-in")
+assert_true(not pcall(rot.build, { include = { "does_not_exist" } }), "unknown base name fails")
+assert_true(not pcall(rot.build, { include = { "skill", "skill" } }), "duplicate base name fails")
 
--- duplicate base tool in include errors.
-do
-  local ok = pcall(rot.build, { include = { "list_dir", "list_dir" } })
-  assert_true(not ok, "duplicate base tool in include raises")
-end
-
--- a base tool colliding with an extra tool name errors.
-do
-  local ok = pcall(rot.build, {
-    include = { "list_dir" },
-    extra_tools = {
-      {
-        schema = { name = "list_dir", description = "x", parameters = { type = "object" } },
-        handler = function(_, emit) emit.ok("ok") end,
-      },
-    },
-  })
-  assert_true(not ok, "extra tool colliding with an included base name raises")
-end
+local custom_schema = {
+  name = "custom", description = "Custom lookup", parameters = { type = "object" },
+  display = {
+    compact = { label = "Custom" }, expanded = { label = "Custom", fields = {} },
+    result = { kind = "content", fields = {} },
+  },
+}
+local extras = rot.build {
+  include = { "skill" },
+  extra_tools = { { schema = custom_schema, handler = function(args, emit) emit.ok(args.value) end } },
+}
+local extra_names = advertise(extras)
+assert_true(extra_names.skill and extra_names.custom, "config extras compose with remaining base tools")
+assert_true(invoke(extras, "custom", { value = "custom result" }).output == "custom result",
+  "custom handler still receives its arguments and settles the invocation")
+assert_true(not pcall(rot.build, {
+  include = { "skill" }, extra_tools = { {
+    schema = { name = "skill" }, handler = function(_, emit) emit.ok("unexpected") end,
+  } },
+}), "extra tool cannot collide with an included base name")
 
 local display = require("libs.chat.tool_display")
 local contract = {

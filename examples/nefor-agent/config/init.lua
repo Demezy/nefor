@@ -135,7 +135,7 @@ M.active = {
     -- approves before the call lands.
     default_action = "prompt",
     -- Tools that bypass the popup entirely. Context I/O
-    -- (read_file / read_image / instructions) is safe to auto-allow —
+    -- (read_file / read_image / instruction discovery) is safe to auto-allow —
     -- nothing on disk changes. The MAG tools are control-plane
     -- dispatch: the graphs they run deliver their capability invokes
     -- (bash, …) back through this gate, where policy applies
@@ -147,7 +147,7 @@ M.active = {
     -- plan still appears in chat as a chat.plan.append entry where
     -- the user accepts/rejects with /approve / /reject.
     auto_tools     = {
-      "read_file", "read_image", "python-read", "instructions", "discover_instruction_files",
+      "read_file", "read_image", "discover_instruction_files",
       "write-review", "submit-plan", "mag-status", "mag-await", "mag-terminate",
       "mag-write-file", "mag-preview", "mag-apply",
     },

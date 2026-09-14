@@ -197,7 +197,7 @@ local function summarise(payload, path)
     preview,
     "",
     "... [output continues; full content at " .. path
-      .. "; use search_text/grep on the path, or read_file with offset + "
+      .. "; use a search command on the path, or read_file with offset + "
       .. "max_bytes to read bounded chunks] ...",
   }, "\n")
 end

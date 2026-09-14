@@ -231,7 +231,7 @@ type InvestigationInput {prompt: String}
 let exact_model: fn(nefor.actors.ResolvedModel) -> nefor.actors.AuthoredModel = |model| => named(nefor.actors.AuthoredModel, ResolvedModel, model)
 let resolved = nefor.actors.ResolvedModel {provider: "provider", model: "test-model", reasoning_effort: nefor.actors.reasoning_effort("medium")}
 let start = nefor.graph.source("task", InvestigationInput {prompt: "read fixture"})
-let answer = nefor.actors.agent<nefor.actors.ResolvedModel, InvestigationInput, nefor.contracts.TextAnswer>("answer", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: resolved, system: "Read fixture.txt, then answer.", tools: ["read_file", "python-read"], tool_approval_policy: named(nefor.contracts.ToolApprovalPolicy, Default, nil), max_corrections: 0})
+let answer = nefor.actors.agent<nefor.actors.ResolvedModel, InvestigationInput, nefor.contracts.TextAnswer>("answer", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: resolved, system: "Read fixture.txt, then answer.", tools: ["read_file", "unavailable_fixture_tool"], tool_approval_policy: named(nefor.contracts.ToolApprovalPolicy, Default, nil), max_corrections: 0})
 let output = nefor.graph.output<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>("result")
 let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.add_edges(graph, [
   nefor.graph.edge(start, answer),
@@ -351,7 +351,10 @@ nefor.artifact.compile(topology)
             assert_eq!(invoke["name"], "read_file");
             assert_eq!(invoke["args"]["path"], "fixture.txt");
             assert_eq!(invoke["invocation"]["run_id"], "tool-run");
-            assert_eq!(invoke["allowlist"], json!(["read_file", "python-read"]));
+            assert_eq!(
+                invoke["allowlist"],
+                json!(["read_file", "unavailable_fixture_tool"])
+            );
             let upstream_invoke_id = invoke
                 .get("id")
                 .and_then(Value::as_str)
@@ -361,7 +364,10 @@ nefor.artifact.compile(topology)
 
             let permission = next_kind(&mut gate_out, "chat.tool.permission_request").await;
             assert_eq!(permission["tool"], "read_file");
-            assert_eq!(permission["allowlist"], json!(["read_file", "python-read"]));
+            assert_eq!(
+                permission["allowlist"],
+                json!(["read_file", "unavailable_fixture_tool"])
+            );
             send(
                 &mut gate_in,
                 "tool-validator",
@@ -379,7 +385,7 @@ nefor.artifact.compile(topology)
             assert_eq!(source_invoke["from"], "answer.run-tool");
             assert_eq!(
                 source_invoke["allowlist"],
-                json!(["read_file", "python-read"])
+                json!(["read_file", "unavailable_fixture_tool"])
             );
             assert_eq!(source_invoke["invocation"]["session_id"], "tool-session");
             assert_eq!(source_invoke["invocation"]["run_id"], "tool-run");

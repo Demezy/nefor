@@ -1410,7 +1410,7 @@ mod tests {
         lua.load(
             r#"
             local spec = require("libs.read-only-tools").build({
-              include = { "list_dir", "skill" },
+              include = { "discover_instruction_files", "skill" },
             })
             spec.receive_msg({
               origin = "tool-gate",
@@ -1440,7 +1440,7 @@ mod tests {
             "mag-write-file",
             "mag-preview",
             "mag-apply",
-            "list_dir",
+            "discover_instruction_files",
             "skill",
         ] {
             assert!(state.tool_owner.contains_key(name), "missing {name}");

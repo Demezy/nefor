@@ -118,12 +118,12 @@ agentic_cli.configure {
   readiness = {
     required_plugins = { cfg.provider.name, "mag", "tool-gate", "basic-tools" },
     required_tools = {
-      "read_file", "read_image", "write_file", "search_text", "process.exec", "shell.script",
+      "read_file", "read_image", "write_file", "process.exec", "shell.script",
       "mag-status", "mag-await", "mag-terminate", "write-review",
       "mag-write-file", "mag-preview", "mag-apply",
     },
     tool_sources = {
-      ["basic-tools"] = { "read_file", "read_image", "write_file", "search_text", "process.exec", "shell.script" },
+      ["basic-tools"] = { "read_file", "read_image", "write_file", "process.exec", "shell.script" },
       ["lead-workflow"] = { "mag-status", "mag-await", "mag-terminate", "write-review", "mag-write-file", "mag-preview", "mag-apply" },
     },
     timeout_ms = tonumber(os.getenv("NEFOR_STARTUP_TIMEOUT_MS")) or 10000,

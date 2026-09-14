@@ -75,8 +75,7 @@ function M.translator(gate_name)
 end
 
 -- Swap huge tool.result outputs for an on-disk dump + summary string.
--- Canonical `instructions` results stay inline because their full text is the
--- requested value. Process tools also stay intact: MAG consumes their
+-- Process tools stay intact: MAG consumes their
 -- structured output before any model-facing projection can summarize it.
 -- Below budget or on bodies without a string id: return body unchanged.
 -- On dump failure: log warn and forward the original output.
@@ -87,7 +86,6 @@ end
 ---@return string|nil dump_path
 function M.maybe_dump_output(body, chat_id)
   if not is_tool_result(body) then return body, nil end
-  if body.name == "instructions" then return body, nil end
   if body.name == "process.exec" or body.name == "shell.script" then
     return body, nil
   end

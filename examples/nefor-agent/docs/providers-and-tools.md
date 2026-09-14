@@ -37,9 +37,6 @@ standard UI as routed tools.
 ```lua
 return require("libs.read-only-tools").build {
   include = {
-    "list_dir",
-    "search_text",
-    "instructions",
     "discover_instruction_files",
     "skill",
   },
@@ -56,9 +53,9 @@ return require("libs.read-only-tools").build {
           required = { "query" },
         },
         display = {
-          label = "My read tool",
-          primary = { arg = "query" },
-          result = { kind = "content" },
+          compact = { label = "My read tool" },
+          expanded = { label = "My read tool", fields = {} },
+          result = { kind = "content", fields = {} },
         },
       },
       handler = function(args, emit)
@@ -70,7 +67,7 @@ return require("libs.read-only-tools").build {
 }
 ```
 
-Base tools are opt-in: `build {}` advertises none. `python-read` is currently an unavailable placeholder. Extra schemas require Nefor's `display` metadata in addition to JSON Schema. Handlers should call exactly one emitter and results are stringified. All tools built here share source identity `read-only-tools`.
+Base tools are opt-in: `build {}` advertises none. The available base tools are repository instruction discovery and ordinary workflow skill loading; shell/process capabilities handle directory listings, searches, and Python analysis. Extra schemas require Nefor's `display` metadata in addition to JSON Schema. Handlers should call exactly one emitter and results are stringified. All tools built here share source identity `read-only-tools`.
 
 Spawn the actor before `tool-gate`, which triggers its one-shot advertisement. A tool intended for delegated agents may also need entries in the MAG toolset/allowlist, the validator's read-only inventory, gate policy, and startup readiness.
 

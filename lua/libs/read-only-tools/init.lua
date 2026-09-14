@@ -1,53 +1,13 @@
--- libs/read-only-tools — read-only investigation tools (base mechanism).
+-- Config-selected instruction discovery and skill tools.
 --
--- Advertised through tool-gate as source `read-only-tools`. The lib holds
--- five base tool implementations but advertises NONE by default: each config
--- opts in explicitly via `build{ include = {...} }`, and plugs in its own
--- tools via `extra_tools`, without forking this file. Opt-in (not opt-out)
--- keeps a new base tool from leaking into every config the moment it lands.
+-- Advertised through tool-gate as source `read-only-tools`. Base tools are
+-- opt-in through `build{ include = {...} }`: discover_instruction_files finds
+-- repository AGENTS.md/CLAUDE.md paths, while skill loads an ordinary workflow
+-- skill from the config. Neither is enabled by default.
 --
---   * `list_dir`   — args { path }. Returns a one-line-per-entry listing
---                    of `path`, with `(d)` / `(f)` prefixes for dirs vs
---                    files. Uses the engine's nefor.fs.list_dir binding,
---                    so it can't traverse outside whatever the engine
---                    process can already see.
---
---   * `search_text` — args { pattern, path?, max_results?, files_only?,
---                    case_insensitive? }. Shells out via nefor.process.run
---                    to `rg -n --color=never` (preferred) or
---                    `grep -rn --color=never` as fallback. Path defaults
---                    to ".". Pure read; the subprocess has no write
---                    semantics.
---
---   * `python-read` — advertised as the single Python analysis surface for
---                    complex read-only workspace inspection. MVP semantics:
---                    read workspace, write scratch only, deny network,
---                    subprocess, dynamic code, and arbitrary imports.
---
---   * `instructions` / `discover_instruction_files` — read the config's
---                    instruction files (`<config>/instructions/*.md`).
---
---   * `skill`      — read a workflow skill body by name from the config's
---                    `<config>/skills/<name>/skill.md`. Sibling of
---                    `instructions`; carries CLI workflows / conventions.
---
--- Layered so an explorer / reviewer agent can investigate the codebase
--- without needing the full `bash` surface (which is a sandbox-escape
--- hatch via shell composition).
---
--- ## Registration seam
---
--- `build{ include = {...}, extra_tools = {...} }` returns the actor spec.
--- `include` is the list of base tool names this config advertises (a subset
--- of list_dir / search_text / python-read / instructions /
--- discover_instruction_files / skill) — omit a name and it is not advertised.
--- Each
--- extra tool is `{ schema = <advertise entry>, handler = function(args, emit) }`
--- where `emit.ok(text)` / `emit.err(msg)` publish the tool.result; the dispatch
--- key is `schema.name`. The included base tools plus the extras are advertised
--- together on the first `tool-gate.hello`. A downstream config (e.g. a typed
--- `mirror-projects` wrapper, a `skill` reader) registers its tools this way
--- instead of copying the plumbing.
+-- Config-specific tools use `extra_tools = { { schema, handler } }`, where
+-- handler(args, emit) settles with emit.ok(text) or emit.err(message). Included
+-- tools and extras share advertisement and dispatch on the first gate hello.
 
 local json = nefor.json
 
@@ -71,8 +31,6 @@ local function display(label, primary, fields, result_kind, result_text, result_
   }
 end
 
-local INSTRUCTIONS_DIR = (rawget(_G, "NEFOR_CONFIG_DIR") or ".") .. "/instructions"
-
 local SOURCE_NAME = "read-only-tools"
 
 local function emit_ok(firing_id, text)
@@ -91,204 +49,6 @@ local function emit_err(firing_id, err)
   })
 end
 
-local function tool_list_dir(firing_id, args)
-  local path = args and args.path
-  if type(path) ~= "string" or #path == 0 then
-    emit_err(firing_id, "list_dir: args.path must be a non-empty string")
-    return
-  end
-  local entries, err = nefor.fs.list_dir(path)
-  if entries == nil then
-    emit_err(firing_id, "list_dir: " .. tostring(err or "unknown error"))
-    return
-  end
-  table.sort(entries, function(a, b)
-    if a.is_dir ~= b.is_dir then return a.is_dir end
-    return a.name < b.name
-  end)
-  local lines = {}
-  for _, e in ipairs(entries) do
-    lines[#lines + 1] = (e.is_dir and "(d) " or "(f) ") .. e.name
-  end
-  if #lines == 0 then lines[1] = "(empty directory)" end
-  emit_ok(firing_id, table.concat(lines, "\n"))
-end
-
--- Pick the search backend on first use. rg is preferred — faster, sane
--- defaults, respects .gitignore. Falls back to POSIX grep -rn.
-local search_cmd = nil
-local function resolve_search_cmd()
-  if search_cmd ~= nil then return search_cmd end
-  local probe = nefor.process.run { cmd = "rg", args = { "--version" } }
-  if type(probe) == "table" and probe.code == 0 then
-    search_cmd = "rg"
-  else
-    search_cmd = "grep"
-  end
-  return search_cmd
-end
-
-local function tool_search_text(firing_id, args)
-  args = args or {}
-  local supported = {
-    pattern = true,
-    path = true,
-    max_results = true,
-    files_only = true,
-    case_insensitive = true,
-  }
-  for k, _ in pairs(args) do
-    if not supported[k] then
-      emit_err(firing_id, "search_text: unsupported arg `" .. tostring(k) .. "`")
-      return
-    end
-  end
-
-  local pattern = args and args.pattern
-  if type(pattern) ~= "string" or #pattern == 0 then
-    emit_err(firing_id, "search_text: args.pattern must be a non-empty string")
-    return
-  end
-  local path = (type(args.path) == "string" and #args.path > 0) and args.path or "."
-  local cap  = tonumber(args.max_results) or 200
-  if cap < 1 then cap = 1 end
-  if cap > 2000 then cap = 2000 end
-
-  local backend = resolve_search_cmd()
-  local argv
-  local files_only = args.files_only == true
-  local case_insensitive = args.case_insensitive == true
-  if backend == "rg" then
-    argv = { "--color=never" }
-    if case_insensitive then argv[#argv + 1] = "-i" end
-    if files_only then
-      argv[#argv + 1] = "-l"
-    else
-      argv[#argv + 1] = "-n"
-      argv[#argv + 1] = "--max-count"
-      argv[#argv + 1] = tostring(cap)
-    end
-    argv[#argv + 1] = "--max-columns"
-    argv[#argv + 1] = "500"
-    argv[#argv + 1] = "--max-columns-preview"
-    argv[#argv + 1] = "--"
-    argv[#argv + 1] = pattern
-    argv[#argv + 1] = path
-  else
-    local flags = files_only and "-rl" or "-rn"
-    if case_insensitive then flags = flags .. "i" end
-    argv = { flags, "--color=never", "--", pattern, path }
-  end
-  local out = nefor.process.run { cmd = backend, args = argv }
-  if type(out) ~= "table" then
-    emit_err(firing_id, "search_text: nefor.process.run returned non-table")
-    return
-  end
-  -- rg / grep both exit 1 when no matches are found — that's not an
-  -- error from the agent's perspective. Distinguish by stderr length.
-  if out.code ~= 0 and out.code ~= 1 then
-    emit_err(firing_id, string.format(
-      "search_text: %s exited %d: %s",
-      backend, out.code, tostring(out.stderr or "")))
-    return
-  end
-  local stdout = tostring(out.stdout or "")
-  if #stdout == 0 then
-    emit_ok(firing_id, "(no matches)")
-    return
-  end
-  -- Truncate to cap lines defensively (rg's --max-count is per-file,
-  -- not total), and keep search output below the generic spill threshold.
-  -- The grep fallback can return an arbitrarily large matching line.
-  local MAX_OUTPUT_BYTES = 24 * 1024
-  local MAX_LINE_BYTES = 4 * 1024
-  local function bounded_line(line)
-    if #line <= MAX_LINE_BYTES then return line end
-    local cut = MAX_LINE_BYTES
-    while cut > 0 do
-      local byte = line:byte(cut + 1)
-      if byte == nil or byte < 0x80 or byte >= 0xC0 then break end
-      cut = cut - 1
-    end
-    return line:sub(1, cut) .. string.format(
-      "[... search_text line truncated: %d bytes omitted]", #line - cut)
-  end
-
-  local truncated = {}
-  local n = 0
-  local total_bytes = 0
-  for line in stdout:gmatch("[^\n]+") do
-    n = n + 1
-    if n > cap then
-      truncated[#truncated + 1] = "[...truncated, raise max_results]"
-      break
-    end
-    line = bounded_line(line)
-    if total_bytes + #line + 1 > MAX_OUTPUT_BYTES then
-      truncated[#truncated + 1] = "[... search_text output truncated at 24 KiB limit]"
-      break
-    end
-    total_bytes = total_bytes + #line + 1
-    truncated[#truncated + 1] = line
-  end
-  emit_ok(firing_id, table.concat(truncated, "\n"))
-end
-
-local function tool_python_read(firing_id, _args)
-  emit_err(firing_id,
-    "python-read: sandboxed Python analysis is not available in this MVP. " ..
-    "Use Bash/read tools for simple inspection; do not route raw Python, " ..
-    "uv, pip, or pytest through Bash for analysis.")
-end
-
-local function read_one_instruction(raw_name)
-  local name = raw_name:gsub("%.md$", "")
-  local path = INSTRUCTIONS_DIR .. "/" .. name .. ".md"
-  local f, err = io.open(path, "r")
-  if not f then
-    return nil, tostring(err or "file not found: " .. path)
-  end
-  local content = f:read("*a")
-  f:close()
-  if not content or #content == 0 then
-    return nil, "empty file at " .. path
-  end
-  return content, nil
-end
-
-local function tool_instructions(firing_id, args)
-  local name = args and args.name
-  if type(name) == "string" and #name > 0 then
-    local content, err = read_one_instruction(name)
-    if not content then
-      emit_err(firing_id, "instructions: " .. err)
-      return
-    end
-    emit_ok(firing_id, content)
-    return
-  end
-  if type(name) == "table" and #name > 0 then
-    local parts = {}
-    for _, n in ipairs(name) do
-      if type(n) == "string" and #n > 0 then
-        local content, err = read_one_instruction(n)
-        if content then
-          parts[#parts + 1] = "--- instruction: " .. n:gsub("%.md$", "") .. " ---\n" .. content
-        else
-          parts[#parts + 1] = "--- instruction: " .. n:gsub("%.md$", "") .. " ---\n[error: " .. err .. "]"
-        end
-      end
-    end
-    if #parts == 0 then
-      emit_err(firing_id, "instructions: name array contained no valid entries")
-      return
-    end
-    emit_ok(firing_id, table.concat(parts, "\n\n"))
-    return
-  end
-  emit_err(firing_id, "instructions: args.name must be a non-empty string or array of strings")
-end
-
 local function tool_discover_instruction_files(firing_id, args)
   args = args or {}
   local path = type(args.path) == "string" and args.path or "."
@@ -301,9 +61,7 @@ local function tool_discover_instruction_files(firing_id, args)
   emit_ok(firing_id, instruction_files.format_discovery(result))
 end
 
--- `skill` — sibling of `instructions`: reads a workflow skill body by name
--- from `<config>/skills/<name>/skill.md`. Same context-I/O shape; named so the
--- transcript reads "skill: <name>" instead of a truncated read_file path.
+-- Load an ordinary workflow skill from the config-owned skills directory.
 local SKILLS_DIR = (rawget(_G, "NEFOR_CONFIG_DIR") or ".") .. "/skills"
 
 local function read_one_skill(raw_name)
@@ -349,102 +107,12 @@ local function tool_skill(firing_id, args)
 end
 
 local BASE_HANDLERS = {
-  list_dir                   = tool_list_dir,
-  search_text                = tool_search_text,
-  ["python-read"]            = tool_python_read,
-  instructions               = tool_instructions,
   discover_instruction_files = tool_discover_instruction_files,
   skill                      = tool_skill,
 }
 
 local function base_schemas()
   return {
-    {
-      name = "list_dir",
-      display = display("list directory", field("path", "args", "path", "path"), {}, "content", nil, { field("entries", "result", "$", "text", { max_lines = 80, max_bytes = 6400 }) }),
-      description =
-        "List the immediate children of a directory. Returns one entry " ..
-        "per line, prefixed with `(d)` for directories and `(f)` for " ..
-        "files. Read-only.",
-      parameters = {
-        type = "object",
-        properties = {
-          path = { type = "string",
-                   description = "Directory path. Use '.' for the workspace root." },
-        },
-        required = { "path" },
-      },
-      context = {
-        folders = {
-          { from = "directory", arg = "path" },
-        },
-      },
-    },
-    {
-      name = "search_text",
-      display = display("search text", field("pattern", "args", "pattern", "scalar"), { field("in", "args", "path", "path", { omit = "missing" }) }, "content", nil, { field("matches", "result", "$", "text", { max_lines = 80, max_bytes = 8000 }) }),
-      description =
-        "Search for a regex pattern in files under a path (recursively). " ..
-        "Returns matching lines as `path:line:match`. Uses ripgrep when " ..
-        "available, POSIX grep -rn otherwise. Read-only.",
-      parameters = {
-        type = "object",
-        properties = {
-          pattern = { type = "string",
-                      description = "Regex pattern (ERE / rg syntax)." },
-          path = { type = "string",
-                   description = "Search root (file or directory). Defaults to '.'." },
-          max_results = { type = "integer",
-                          description = "Cap on returned lines (default 200, max 2000)." },
-        },
-        required = { "pattern" },
-      },
-      context = {
-        folders = {
-          { from = "path_or_file", arg = "path", default = "." },
-        },
-      },
-    },
-    {
-      name = "python-read",
-      display = display("analyze workspace", field("task", "args", "task", "scalar"), {}, "content", nil, { field("analysis", "result", "$", "text", { max_lines = 80, max_bytes = 8000 }) }),
-      description =
-        "Run complex read-only Python analysis over workspace files. " ..
-        "Prefer Bash/read tools for simple inspection. Do not use raw " ..
-        "Python, uv, pip, or pytest through Bash for analysis. MVP " ..
-        "restrictions: read workspace, write scratch only, no network, " ..
-        "subprocesses, dynamic code, or arbitrary imports.",
-      parameters = {
-        type = "object",
-        properties = {
-          task = { type = "string",
-                   description = "Read-only analysis request to perform." },
-        },
-        required = { "task" },
-      },
-    },
-    {
-      name = "instructions",
-      display = display("load instructions", field("source", "args", "name", "list"), {}, "receipt", "instructions loaded", { field("status", "result", "$", "status", { sensitive = "omit" }) }),
-      description =
-        "Read one or more instruction files by name. When the " ..
-        "system prompt says to read instructions (e.g. 'instruction:dev-mode.md'), " ..
-        "call this tool with that name. Pass an array to load multiple " ..
-        "instructions in one call. The .md extension is optional.",
-      parameters = {
-        type = "object",
-        properties = {
-          name = {
-            oneOf = {
-              { type = "string" },
-              { type = "array", items = { type = "string" } },
-            },
-            description = "Instruction name or array of names, e.g. 'dev-mode' or ['dev-mode', 'dev-philosophy', 'workspace-routing'].",
-          },
-        },
-        required = { "name" },
-      },
-    },
     {
       name = "discover_instruction_files",
       display = display("discover instructions", field("path", "args", "path", "path", { omit = "missing" }), { field("scope", "args", "scope", "scalar", { omit = "missing" }), field("unread only", "args", "unread_only", "scalar", { omit = "missing" }) }, "content", nil, { field("status", "result", "$", "text", { max_lines = 80, max_bytes = 6400 }) }),
@@ -510,7 +178,7 @@ local function wrap_extra(handler)
   end
 end
 
--- build{ include = { "list_dir", ... }, extra_tools = { { schema, handler } } }
+-- build{ include = { "skill", ... }, extra_tools = { { schema, handler } } }
 --   -> actor spec.
 --
 -- Base tools are OPT-IN: only the names listed in `include` are registered and
@@ -538,8 +206,7 @@ local function build(opts)
     local schema = base_by_name[name]
     if not schema then
       error("read-only-tools.build: unknown base tool '" .. tostring(name) ..
-        "' in include (known: list_dir, search_text, python-read, " ..
-        "instructions, discover_instruction_files, skill)")
+        "' in include (known: discover_instruction_files, skill)")
     end
     if handlers[name] then
       error("read-only-tools.build: base tool '" .. name .. "' listed twice in include")

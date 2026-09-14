@@ -314,8 +314,7 @@ lead_workflow.configure {
 actor.spawn(lead_workflow)
 
 -- read-only-tools advertises the composition-selected Lua read tools.
--- basic-tools is the canonical shipped search_text owner. Same ordering
--- reason as lead-workflow: register before
+-- Same ordering as lead-workflow: register before
 -- tool-gate spawn so the gate's first hello triggers our advertise.
 actor.spawn(require("read-only-tools"))
 
@@ -349,15 +348,15 @@ local composition_readiness = {
     },
     required_provider = function() return agentic_loop.model_snapshot().provider end,
     required_tools = {
-      "read_file", "read_image", "write_file", "search_text", "process.exec", "shell.script",
-      "git_worktree_create", "git_worktree_open", "list_dir", "python-read",
-      "instructions", "discover_instruction_files", "mag-status", "mag-await",
+      "read_file", "read_image", "write_file", "process.exec", "shell.script",
+      "git_worktree_create", "git_worktree_open",
+      "discover_instruction_files", "mag-status", "mag-await",
       "mag-terminate", "write-review", "mag-write-file", "mag-preview", "mag-apply",
     },
     tool_sources = {
-      ["basic-tools"] = { "read_file", "read_image", "write_file", "search_text", "process.exec", "shell.script" },
+      ["basic-tools"] = { "read_file", "read_image", "write_file", "process.exec", "shell.script" },
       ["git-worktree"] = { "git_worktree_create", "git_worktree_open" },
-      ["read-only-tools"] = { "list_dir", "python-read", "instructions", "discover_instruction_files" },
+      ["read-only-tools"] = { "discover_instruction_files" },
       ["lead-workflow"] = { "mag-status", "mag-await", "mag-terminate", "write-review", "mag-write-file", "mag-preview", "mag-apply" },
     },
     timeout_ms = tonumber(os.getenv("NEFOR_STARTUP_TIMEOUT_MS")) or 10000,

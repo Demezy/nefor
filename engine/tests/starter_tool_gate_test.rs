@@ -140,10 +140,7 @@ fn large_output_writes_full_contents_to_file_and_returns_summary() {
         "dump file contents must match original payload byte-for-byte"
     );
 
-    // Summary contains the "written to <path>" framing + a preview
-    // (up to PREVIEW_BYTES = 4 KiB) drawn from the head of the
-    // payload + the grep/head suggestion that tells the model how to
-    // extract more.
+    // The summary locates the full output and previews its first 4 KiB.
     assert!(
         summary.contains("Output written to"),
         "summary missing written-to header: {summary}"
@@ -151,10 +148,6 @@ fn large_output_writes_full_contents_to_file_and_returns_summary() {
     assert!(
         summary.contains(&path),
         "summary must name the on-disk path: {summary}"
-    );
-    assert!(
-        summary.contains("grep"),
-        "summary must point at grep as extraction tool: {summary}"
     );
     // First 4 KiB of "ABCDE\n" repeats start with "ABCDE" — preview is
     // contiguous so it must contain that prefix.
@@ -347,8 +340,6 @@ fn tool_gate_wrapper_swaps_huge_tool_result_output_to_summary() {
             { type = "event", from = "tool-gate",
               body = { kind = "tool.result", id = "call-big", output = big, name = "read_file" } },
             { type = "event", from = "tool-gate",
-              body = { kind = "tool.result", id = "call-instructions", output = big, name = "instructions" } },
-            { type = "event", from = "tool-gate",
               body = { kind = "tool.result", id = "call-small", output = "ok", name = "read_file" } },
         })
         "#,
@@ -367,8 +358,8 @@ fn tool_gate_wrapper_swaps_huge_tool_result_output_to_summary() {
         .collect();
     assert_eq!(
         payloads.len(),
-        3,
-        "expected 3 publishes, got {}: {payloads:?}",
+        2,
+        "expected 2 publishes, got {}: {payloads:?}",
         payloads.len()
     );
 
@@ -405,32 +396,11 @@ fn tool_gate_wrapper_swaps_huge_tool_result_output_to_summary() {
         big_size
     );
 
-    // The canonical instructions result is the sole oversized-output
-    // exemption: its complete payload remains inline and no dump is created.
-    let instructions = payloads
-        .iter()
-        .find(|p| p.contains("\"id\":\"call-instructions\""))
-        .expect("instructions payload missing");
-    assert!(
-        (instructions.len() as i64) > big_size,
-        "instructions output must remain fully inline ({} bytes vs {} payload bytes)",
-        instructions.len(),
-        big_size
-    );
-    assert!(
-        instructions.contains(&"PAYLOAD-LINE\\n".repeat(5000)),
-        "instructions payload must preserve the full output"
-    );
-
     // The on-disk file landed with the FULL original bytes, ready
     // for the model to grep on a subsequent turn.
     let scope_dir = tempdir.path().join("tool-results").join("_unscoped");
     let dump_path = scope_dir.join("call-big.txt");
     assert!(dump_path.exists(), "dump file missing at {dump_path:?}");
-    assert!(
-        !scope_dir.join("call-instructions.txt").exists(),
-        "oversized instructions output must not create a dump"
-    );
     let on_disk = std::fs::read_to_string(&dump_path).expect("read dump");
     assert_eq!(
         on_disk,
@@ -830,22 +800,6 @@ fn tool_gate_wrapper_emits_instruction_reminder_on_outbound_folder_touching_invo
         agents_payload.contains(&dir_str),
         "AGENTS.md envelope must reference the dir that triggered it: {agents_payload}"
     );
-}
-
-// ----------------------------------------------------------------
-// examples/nefor-agent/read-only-tools.lua — canonical inventory
-// ----------------------------------------------------------------
-
-#[test]
-fn starter_read_only_tools_does_not_advertise_basic_tools_search_text() {
-    let source = std::fs::read_to_string(starter_dir().join("read-only-tools/init.lua"))
-        .expect("read starter read-only composition");
-    let include = source
-        .split_once("include = {")
-        .and_then(|(_, rest)| rest.split_once('}'))
-        .map(|(include, _)| include)
-        .expect("include block");
-    assert!(!include.contains("search_text"));
 }
 
 #[test]

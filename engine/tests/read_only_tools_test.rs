@@ -28,6 +28,32 @@ fn read_only_tools_include_seam() {
     let lua = Lua::new();
     install_stub_nefor(&lua).expect("install nefor stub");
     set_package_path(&lua).expect("set package.path");
+    let fixture = tempfile::tempdir().expect("tool fixture");
+    let skill_dir = fixture.path().join("skills/example");
+    let workspace = fixture.path().join("workspace");
+    std::fs::create_dir_all(&skill_dir).expect("skill directory");
+    std::fs::create_dir_all(workspace.join("nested")).expect("workspace directory");
+    std::fs::write(skill_dir.join("skill.md"), "Ordinary workflow skill.\n")
+        .expect("skill fixture");
+    std::fs::write(workspace.join("AGENTS.md"), "Root repository guidance.\n")
+        .expect("root instruction fixture");
+    std::fs::write(
+        workspace.join("nested/CLAUDE.md"),
+        "Nested repository guidance.\n",
+    )
+    .expect("nested instruction fixture");
+    lua.globals()
+        .set(
+            "NEFOR_CONFIG_DIR",
+            fixture.path().to_string_lossy().as_ref(),
+        )
+        .expect("config root");
+    lua.globals()
+        .set(
+            "READ_ONLY_TEST_WORKSPACE",
+            workspace.to_string_lossy().as_ref(),
+        )
+        .expect("workspace root");
 
     let test_path = repo_root().join("tests/lua/read-only-tools/build_test.lua");
     let src = std::fs::read_to_string(&test_path)
@@ -62,8 +88,6 @@ fn set_package_path(lua: &Lua) -> mlua::Result<()> {
     let root = repo_root();
     let starter = root.join("examples/nefor-agent").display().to_string();
     let lua_root = root.join("lua").display().to_string();
-    // read-only-tools requires tool-gate.tool_output_dump, which lives in the
-    // tool-gate plugin's lua tree.
     let tool_gate = root.join("plugins/tool-gate/lua").display().to_string();
     let script = format!(
         r#"

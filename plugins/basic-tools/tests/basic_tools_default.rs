@@ -406,345 +406,6 @@ mod tools {
         }
     }
 
-    pub mod search_text {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/tools/search_text.rs"
-        ));
-
-        #[cfg(test)]
-        mod tests {
-            use super::*;
-            use std::fs;
-            use tempfile::TempDir;
-
-            fn make_test_dir() -> TempDir {
-                let dir = TempDir::new().unwrap();
-                fs::write(
-                    dir.path().join("hello.txt"),
-                    "Hello World\nhello rust\nGoodbye\n",
-                )
-                .unwrap();
-                fs::write(
-                    dir.path().join("code.rs"),
-                    "fn main() {\n    println!(\"hello\");\n}\n",
-                )
-                .unwrap();
-                fs::write(dir.path().join("data.py"), "x = 1\ny = 2\nhello = 3\n").unwrap();
-                dir
-            }
-
-            #[tokio::test]
-            async fn basic_search() {
-                let dir = make_test_dir();
-                let path = dir.path().to_str().unwrap();
-                let out = run(&json!({"pattern": "hello", "path": path}))
-                    .await
-                    .unwrap();
-                assert!(out.contains("hello"));
-                assert!(!out.contains("(no matches)"));
-            }
-
-            #[tokio::test]
-            async fn case_insensitive_search() {
-                let dir = make_test_dir();
-                let path = dir.path().to_str().unwrap();
-                let out = run(&json!({
-                    "pattern": "hello",
-                    "path": path,
-                    "case_insensitive": true
-                }))
-                .await
-                .unwrap();
-                assert!(out.contains("Hello World"));
-                assert!(out.contains("hello"));
-            }
-
-            #[tokio::test]
-            async fn fixed_string_search() {
-                let dir = make_test_dir();
-                let path = dir.path().to_str().unwrap();
-                // "." in regex matches any char; fixed_string treats it literally
-                let out = run(&json!({
-                    "pattern": "println!",
-                    "path": path,
-                    "fixed_string": true
-                }))
-                .await
-                .unwrap();
-                assert!(out.contains("println!"));
-            }
-
-            #[tokio::test]
-            async fn file_type_filter() {
-                let dir = make_test_dir();
-                let path = dir.path().to_str().unwrap();
-                let out = run(&json!({
-                    "pattern": "hello",
-                    "path": path,
-                    "file_type": "rust"
-                }))
-                .await
-                .unwrap();
-                assert!(out.contains("code.rs"));
-                assert!(!out.contains("hello.txt"));
-                assert!(!out.contains("data.py"));
-            }
-
-            #[tokio::test]
-            async fn glob_filter() {
-                let dir = make_test_dir();
-                let path = dir.path().to_str().unwrap();
-                let out = run(&json!({
-                    "pattern": "hello",
-                    "path": path,
-                    "glob": "*.txt"
-                }))
-                .await
-                .unwrap();
-                assert!(out.contains("hello.txt"));
-                assert!(!out.contains("code.rs"));
-            }
-
-            #[tokio::test]
-            async fn exclude_glob() {
-                let dir = make_test_dir();
-                let path = dir.path().to_str().unwrap();
-                let out = run(&json!({
-                    "pattern": "hello",
-                    "path": path,
-                    "exclude_glob": "*.py"
-                }))
-                .await
-                .unwrap();
-                assert!(!out.contains("data.py"));
-                assert!(out.contains("hello"));
-            }
-
-            #[tokio::test]
-            async fn files_only_mode() {
-                let dir = make_test_dir();
-                let path = dir.path().to_str().unwrap();
-                let out = run(&json!({
-                    "pattern": "hello",
-                    "path": path,
-                    "files_only": true
-                }))
-                .await
-                .unwrap();
-                // Should contain file paths, not line contents
-                let lines: Vec<&str> = out.lines().collect();
-                for line in &lines {
-                    assert!(
-                        !line.contains(':'),
-                        "files_only should not have :line:content — got: {line}"
-                    );
-                }
-            }
-
-            #[tokio::test]
-            async fn max_results_caps_output() {
-                let dir = make_test_dir();
-                let path = dir.path().to_str().unwrap();
-                let out = run(&json!({
-                    "pattern": ".",
-                    "path": path,
-                    "max_results": 2
-                }))
-                .await
-                .unwrap();
-                let match_lines: Vec<&str> =
-                    out.lines().filter(|l| !l.starts_with("[...")).collect();
-                assert!(match_lines.len() <= 2);
-                assert!(out.contains("[...truncated"));
-            }
-
-            #[tokio::test]
-            async fn huge_matching_line_is_previewed() {
-                let dir = TempDir::new().unwrap();
-                let huge_line =
-                    format!("prefix-needle-{}\n", "x".repeat(MAX_RESULT_LINE_BYTES * 4));
-                fs::write(dir.path().join("session.jsonl"), huge_line).unwrap();
-
-                let out = run(&json!({
-                    "pattern": "needle",
-                    "path": dir.path().to_str().unwrap()
-                }))
-                .await
-                .unwrap();
-
-                assert!(
-                    out.len() < MAX_RESULT_LINE_BYTES * 2,
-                    "search_text should not return the whole huge matching line; got {} bytes",
-                    out.len()
-                );
-                assert!(out.contains("prefix-needle-"));
-                assert!(out.contains("bytes omitted"));
-                assert!(out.contains("byte "));
-            }
-
-            #[tokio::test]
-            async fn huge_one_line_json_reports_each_match_with_bounded_excerpts() {
-                let dir = TempDir::new().unwrap();
-                let huge_line = format!(
-                    "{{\"head\":\"{}\",\"first\":\"needle-one\",\"middle\":\"{}\",\"second\":\"needle-two\",\"tail\":\"{}\"}}",
-                    "a".repeat(1024 * 1024),
-                    "b".repeat(1024 * 1024),
-                    "c".repeat(1024 * 1024)
-                );
-                fs::write(dir.path().join("huge.json"), huge_line).unwrap();
-
-                let out = run(&json!({
-                    "pattern": "needle-(one|two)",
-                    "path": dir.path().to_str().unwrap()
-                }))
-                .await
-                .unwrap();
-
-                assert!(out.contains("needle-one"));
-                assert!(out.contains("needle-two"));
-                assert_eq!(out.matches(":byte ").count(), 2);
-                assert!(out.len() < 12 * 1024);
-            }
-
-            #[tokio::test]
-            async fn huge_line_preview_preserves_unicode_at_excerpt_boundaries() {
-                let dir = TempDir::new().unwrap();
-                let huge_line = format!("{}needle{}", "界".repeat(2000), "€".repeat(2000));
-                fs::write(dir.path().join("unicode.json"), huge_line).unwrap();
-
-                let out = run(&json!({
-                    "pattern": "needle",
-                    "path": dir.path().to_str().unwrap()
-                }))
-                .await
-                .unwrap();
-
-                assert!(out.contains("界"));
-                assert!(out.contains("€"));
-                assert!(!out.contains('\u{fffd}'));
-            }
-
-            #[tokio::test]
-            async fn total_output_is_bounded_below_spill_threshold() {
-                let dir = TempDir::new().unwrap();
-                let mut huge_line = String::new();
-                for i in 0..100 {
-                    huge_line.push_str(&format!(
-                        "{}needle-{i}{}",
-                        "x".repeat(5000),
-                        "y".repeat(5000)
-                    ));
-                }
-                fs::write(dir.path().join("spill.txt"), huge_line).unwrap();
-
-                let out = run(&json!({
-                    "pattern": "needle-[0-9]+",
-                    "path": dir.path().to_str().unwrap(),
-                    "max_results": 200
-                }))
-                .await
-                .unwrap();
-
-                assert!(
-                    out.len() < 32 * 1024,
-                    "bounded search output must not spill again"
-                );
-                assert!(out.contains("truncated"));
-            }
-
-            #[tokio::test]
-            async fn ordinary_small_lines_keep_the_existing_shape() {
-                let dir = TempDir::new().unwrap();
-                let path = dir.path().join("normal.txt");
-                fs::write(&path, "alpha needle omega\n").unwrap();
-
-                let out = run(&json!({ "pattern": "needle", "path": path }))
-                    .await
-                    .unwrap();
-                assert_eq!(out, format!("{}:1:alpha needle omega", path.display()));
-                assert!(!out.contains(":byte "));
-            }
-
-            #[tokio::test]
-            async fn no_matches_returns_marker() {
-                let dir = make_test_dir();
-                let path = dir.path().to_str().unwrap();
-                let out = run(&json!({"pattern": "zzzznotfound", "path": path}))
-                    .await
-                    .unwrap();
-                assert_eq!(out, "(no matches)");
-            }
-
-            #[tokio::test]
-            async fn context_lines() {
-                let dir = make_test_dir();
-                let path = dir.path().to_str().unwrap();
-                let out = run(&json!({
-                    "pattern": "hello rust",
-                    "path": path,
-                    "context_lines": 1
-                }))
-                .await
-                .unwrap();
-                // Should include surrounding lines from hello.txt
-                assert!(out.contains("Hello World") || out.contains("Goodbye"));
-            }
-
-            #[tokio::test]
-            async fn single_file_search() {
-                let dir = make_test_dir();
-                let file_path = dir.path().join("hello.txt");
-                let path = file_path.to_str().unwrap();
-                let out = run(&json!({"pattern": "hello", "path": path}))
-                    .await
-                    .unwrap();
-                assert!(out.contains("hello"));
-                assert!(!out.contains("code.rs"));
-            }
-
-            #[tokio::test]
-            async fn rejects_empty_pattern() {
-                let err = run(&json!({"pattern": ""})).await.unwrap_err();
-                assert!(matches!(err, ToolError::BadArgs { .. }));
-            }
-
-            #[tokio::test]
-            async fn rejects_missing_pattern() {
-                let err = run(&json!({})).await.unwrap_err();
-                assert!(matches!(err, ToolError::BadArgs { .. }));
-            }
-
-            #[tokio::test]
-            async fn rejects_invalid_regex() {
-                let err = run(&json!({"pattern": "[invalid"})).await.unwrap_err();
-                assert!(matches!(err, ToolError::BadArgs { .. }));
-            }
-
-            #[tokio::test]
-            async fn cwd_resolves_relative_path() {
-                let dir = make_test_dir();
-                let cwd = dir.path().to_str().unwrap();
-                let out = run(&json!({
-                    "pattern": "hello",
-                    "path": ".",
-                    "cwd": cwd
-                }))
-                .await
-                .unwrap();
-                assert!(out.contains("hello"));
-            }
-
-            #[test]
-            fn schema_requires_pattern_only() {
-                let s = schema();
-                let req = s.get("required").and_then(Value::as_array).unwrap();
-                let names: Vec<&str> = req.iter().filter_map(Value::as_str).collect();
-                assert_eq!(names, vec!["pattern"]);
-            }
-        }
-    }
-
     pub mod shell_script {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -902,20 +563,6 @@ mod tools {
         use super::*;
 
         #[test]
-        fn canonical_inventory_has_unique_names_and_owns_search_text() {
-            let names = TOOLS.iter().map(|tool| tool.name).collect::<Vec<_>>();
-            let unique = names.iter().copied().collect::<HashSet<_>>();
-            assert_eq!(names.len(), unique.len());
-            assert_eq!(
-                names
-                    .iter()
-                    .filter(|name| **name == search_text::NAME)
-                    .count(),
-                1
-            );
-        }
-
-        #[test]
         fn actual_advertised_inventory_has_complete_display_coverage() {
             let expected = [
                 read_file::NAME,
@@ -923,7 +570,6 @@ mod tools {
                 write_file::NAME,
                 process_exec::NAME,
                 shell_script::NAME,
-                search_text::NAME,
             ]
             .into_iter()
             .collect::<HashSet<_>>();
@@ -942,13 +588,12 @@ mod tools {
 
         #[test]
         fn module_owned_display_functions_compile() {
-            let displays: [fn() -> Value; 6] = [
+            let displays: [fn() -> Value; 5] = [
                 read_file::display,
                 read_image::display,
                 write_file::display,
                 process_exec::display,
                 shell_script::display,
-                search_text::display,
             ];
             assert_eq!(displays.len(), TOOLS.len());
             assert!(displays.into_iter().all(|display| display().is_object()));
@@ -1082,6 +727,35 @@ mod tests {
         );
         assert_eq!(body.get("id").and_then(Value::as_str), Some("call-7"));
         assert_eq!(body.get("output").and_then(Value::as_str), Some("abc"));
+    }
+
+    #[tokio::test]
+    async fn removed_tools_are_neither_advertised_nor_dispatchable() {
+        let removed = ["list_dir", "search_text", "python-read", "instructions"];
+        for advertisement in [tool_register_body(), tools_advertise_body("tool-gate")] {
+            let advertised = advertisement["tools"].as_array().expect("tools");
+            for name in removed {
+                assert!(advertised.iter().all(|tool| tool["name"] != name));
+            }
+        }
+        let (tx, mut rx) = mpsc::channel::<PluginOutgoing>(8);
+        for name in removed {
+            let body = json!({
+                "kind": "basic-tools.tool.invoke", "id": name, "name": name, "args": {}
+            })
+            .as_object()
+            .expect("invocation")
+            .clone();
+            dispatch_event(&tx, &body).await.expect("dispatch returns");
+            assert!(
+                matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "unowned tool must not dispatch: {name}"
+            );
+            assert!(
+                run_tool(name, &json!({})).await.is_err(),
+                "removed tool has no implementation: {name}"
+            );
+        }
     }
 
     // Invoke with a non-existent path produces a `tool.result { error }`.
