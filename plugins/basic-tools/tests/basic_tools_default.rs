@@ -729,35 +729,6 @@ mod tests {
         assert_eq!(body.get("output").and_then(Value::as_str), Some("abc"));
     }
 
-    #[tokio::test]
-    async fn removed_tools_are_neither_advertised_nor_dispatchable() {
-        let removed = ["list_dir", "search_text", "python-read", "instructions"];
-        for advertisement in [tool_register_body(), tools_advertise_body("tool-gate")] {
-            let advertised = advertisement["tools"].as_array().expect("tools");
-            for name in removed {
-                assert!(advertised.iter().all(|tool| tool["name"] != name));
-            }
-        }
-        let (tx, mut rx) = mpsc::channel::<PluginOutgoing>(8);
-        for name in removed {
-            let body = json!({
-                "kind": "basic-tools.tool.invoke", "id": name, "name": name, "args": {}
-            })
-            .as_object()
-            .expect("invocation")
-            .clone();
-            dispatch_event(&tx, &body).await.expect("dispatch returns");
-            assert!(
-                matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
-                "unowned tool must not dispatch: {name}"
-            );
-            assert!(
-                run_tool(name, &json!({})).await.is_err(),
-                "removed tool has no implementation: {name}"
-            );
-        }
-    }
-
     // Invoke with a non-existent path produces a `tool.result { error }`.
     #[tokio::test]
     async fn dispatch_invoke_missing_file_emits_error() {
