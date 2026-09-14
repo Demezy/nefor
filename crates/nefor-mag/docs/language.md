@@ -240,9 +240,12 @@ indefinitely. The current API has no `bash`, `BashOptions`,
 ## Runtime expansion
 
 Most workflows should be fully static. When runtime data determines cardinality,
-use the node-oriented `DynamicList`/`nefor.dynamic.traverse-template` boundary. It authors
-an immutable `InstantiateDeltaTemplate` operation subscribed to a typed output.
-Fixed worker lists use `nefor.node.sequence`.
+a producer exposes the indexed-items-plus-completion `DynamicList` protocol.
+Consumers select an explicit boundary: `DynamicEach` for one activation per
+item, or `DynamicAll` for one ordered-list activation after completion.
+`nefor.dynamic.traverse-template` authors an immutable
+`InstantiateDeltaTemplate` operation behind the Each boundary. Fixed worker
+lists use `nefor.node.sequence`.
 
 Version 1 evaluates only the closed Trigger, Capture, Field,
 IntToDecimalString, and ConcatStrings expression forms while materializing a

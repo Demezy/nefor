@@ -58,7 +58,10 @@ function M.construct(id, params, emit)
         value = { kind = "unexpected_adt_constructor", actor = id,
           constructor = value.constructor } }
     end
-    emit({ kind = wire, from = id, value = value.value })
+    local output = { kind = wire, from = id, value = value.value }
+    if message.semantic_value ~= nil then output.semantic_value = message.semantic_value end
+    if message.dynamic ~= nil then output.dynamic = message.dynamic end
+    emit(output)
     return { status = "ok" }
   end
   emit({ kind = kinds.ready, from = id })

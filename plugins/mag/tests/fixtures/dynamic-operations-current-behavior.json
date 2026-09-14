@@ -2,8 +2,8 @@
   "schema_version": 1,
   "identity": {
     "source": "examples/nefor-agent/agentic-loop/dynamic-tasks.mag",
-    "source_sha256": "030c809b20aaea2ac0e96b0aa8285a4a973e5f70d2af722f9b70782b0bf97efc",
-    "compiled_artifact_hash": "sha256:4570b7c5f25a8ad0dfdfc718d23033e400557145e11a916cf5ea893be1efbabc"
+    "source_sha256": "23969967b25a6524971e40f3d4382754460dae64eaae3685fca6d7bea253d092",
+    "compiled_artifact_hash": "sha256:cc64b8754f0684c0549451bb9d1eb27be41c6cde2db7b19e1227f3325f19e176"
   },
   "item_delta_zero": {
     "actors": [
@@ -79,7 +79,7 @@
       },
       {
         "from": "expand.result.0",
-        "from_wire": "nefor.dynamic.Indexed",
+        "from_wire": "nefor.dynamic.Event",
         "to": "expand.output",
         "to_wire": "nefor.dynamic.Collect",
         "product_position": -1
@@ -223,6 +223,8 @@
       "mag.actor_spawned",
       "mag.actor_spawned",
       "mag.actor_spawned",
+      "mag.actor_spawned",
+      "mag.actor_spawned",
       "conversation.provider.invoke.request",
       "mag.modification_applied",
       "mag.nodes_declared",
@@ -320,7 +322,7 @@
       },
       {
         "from": "expand.result.1",
-        "from_wire": "nefor.dynamic.Indexed",
+        "from_wire": "nefor.dynamic.Event",
         "to": "expand.output",
         "to_wire": "nefor.dynamic.Collect",
         "product_position": -1

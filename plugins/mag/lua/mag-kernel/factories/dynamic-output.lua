@@ -69,11 +69,16 @@ function M.construct(id, _, emit)
     end
     if value.index ~= nil then
       if type(value.index) ~= "number" or value.index < 0 or value.index % 1 ~= 0
-          or value.value == nil or values[value.index] ~= nil then
+          or value.value == nil or values[value.index] ~= nil
+          or (count_value ~= nil and value.index >= count_value) then
         return failure("dynamic_output_invalid_item", value)
       end
+      local semantic_envelope = message.semantic_value
+      local semantic_indexed = type(semantic_envelope) == "table"
+        and semantic_envelope.value or nil
       values[value.index] = value.value
-      semantic_values[value.index] = value.value
+      semantic_values[value.index] = type(semantic_indexed) == "table"
+        and semantic_indexed.value or value.value
       received = received + 1
     elseif value.count ~= nil then
       if count_value ~= nil or type(value.count) ~= "number" or value.count < 0

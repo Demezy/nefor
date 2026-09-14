@@ -36,8 +36,13 @@ function M.construct(id, params, emit)
     local indexed_value = {
       collection = params.collection, index = params.index, value = value,
     }
+    local semantic_indexed_value = {
+      collection = params.collection, index = params.index,
+      value = message.semantic_value or value,
+    }
     emit({ kind = OUTPUT, from = id,
-      value = { constructor = "Item", value = indexed_value } })
+      value = { constructor = "Item", value = indexed_value },
+      semantic_value = { constructor = "Item", value = semantic_indexed_value } })
     return { status = "ok" }
   end
   emit({ kind = kinds.ready, from = id })

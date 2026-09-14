@@ -524,7 +524,8 @@
       collector-output)))
 
 ;; The supplied compile-time List fixes both producer count and result order.
-;; The output is therefore an ordinary fixed List, not DynamicList.
+;; The output is therefore an ordinary fixed List, not the DynamicList
+;; producer protocol or either DynamicEach/DynamicAll consumer effect.
 (let sequence
   (fn [I O] [[id String] [nodes (List (nefor.graph.Node I O))]]
     -> (nefor.graph.Node I (List O))

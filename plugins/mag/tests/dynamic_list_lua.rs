@@ -21,11 +21,12 @@ fn harness() -> Lua {
 }
 
 #[test]
-fn dynamic_input_requires_an_ordered_complete_stream() {
+fn dynamic_each_requires_an_ordered_complete_stream() {
     harness()
         .load(
             r#"
-            local factory = require("factories.dynamic-input")
+            local factory = require("factories.dynamic-each")
+            assert(factory.declaration.semantic.input.name == "nefor.dynamic.DynamicEach")
             local emitted = {}
             local actor = assert(factory.construct("input", {},
               function(message) emitted[#emitted + 1] = message end))
@@ -53,7 +54,7 @@ fn dynamic_input_requires_an_ordered_complete_stream() {
               value = "late", dynamic = { kind = "item", collection = "x", index = 1 }
             }}}})
             assert(failure.status == "failed")
-            assert(failure.value.kind == "dynamic_input_noncontiguous_item")
+            assert(failure.value.kind == "dynamic_each_noncontiguous_item")
             "#,
         )
         .exec()
@@ -66,13 +67,19 @@ fn dynamic_output_restores_source_order_and_supports_empty_collections() {
         .load(
             r#"
             local factory = require("factories.dynamic-output")
+            assert(factory.declaration.semantic.output.name == "nefor.dynamic.DynamicList")
             local emitted = {}
             local actor = assert(factory.construct("output", {},
               function(message) emitted[#emitted + 1] = message end))
 
-            actor.deliver({ messages = {{ message = { value = { constructor = "Item", value = {
-              collection = "c", index = 1, value = "second"
-            }}}}}})
+            actor.deliver({ messages = {{ message = {
+              value = { constructor = "Item", value = {
+                collection = "c", index = 1, value = "second"
+              }},
+              semantic_value = { constructor = "Item", value = {
+                collection = "c", index = 1, value = "semantic-second"
+              }},
+            }}}})
             actor.deliver({ messages = {{ message = { value = { constructor = "Complete", value = {
               collection = "c", count = 2
             }}}}}})
@@ -84,7 +91,22 @@ fn dynamic_output_restores_source_order_and_supports_empty_collections() {
             assert(#emitted == 4) -- ready, two ordered items, completion
             assert(emitted[2].value == "first" and emitted[2].dynamic.index == 0)
             assert(emitted[3].value == "second" and emitted[3].dynamic.index == 1)
+            assert(emitted[3].semantic_value == "semantic-second")
             assert(emitted[4].dynamic.kind == "complete" and emitted[4].dynamic.count == 2)
+
+            local bounded = assert(factory.construct("bounded", {}, function() end))
+            assert(bounded.deliver({ messages = {{ message = {
+              value = { constructor = "Complete", value = {
+                collection = "bounded", count = 1
+              }}
+            }}}}) == nil)
+            local out_of_range = bounded.deliver({ messages = {{ message = {
+              value = { constructor = "Item", value = {
+                collection = "bounded", index = 1, value = "late"
+              }}
+            }}}})
+            assert(out_of_range.status == "failed")
+            assert(out_of_range.value.kind == "dynamic_output_invalid_item")
 
             local empty_out = {}
             local empty = assert(factory.construct("empty", {},
@@ -112,12 +134,14 @@ fn dynamic_index_preserves_occurrence_identity() {
             local actor = assert(factory.construct("index", { collection = "c", index = 4 },
               function(message) emitted[#emitted + 1] = message end))
             local done = actor.deliver({ messages = {{ message = {
-              value = { answer = 42 }, semantic_value = { answer = 42 }
+              value = { answer = 42 }, semantic_value = { answer = "canonical" }
             }}}})
             assert(done.status == "ok")
             assert(emitted[2].value.constructor == "Item")
             assert(emitted[2].value.value.collection == "c" and emitted[2].value.value.index == 4)
             assert(emitted[2].value.value.value.answer == 42)
+            assert(emitted[2].semantic_value.constructor == "Item")
+            assert(emitted[2].semantic_value.value.value.answer == "canonical")
 
             "#,
         )
@@ -192,11 +216,49 @@ fn strict_routing_enforces_the_whole_dynamic_protocol() {
 }
 
 #[test]
-fn dynamic_context_waits_for_completion_and_preserves_order() {
+fn adt_adapters_preserve_dynamic_protocol_metadata() {
     harness()
         .load(
             r#"
-            local factory = require("factories.dynamic-context")
+            local pack = require("factories.adt-pack")
+            local unpack = require("factories.adt-unpack")
+            local owner = { kind = "adt", name = "Result", arguments = {}, constructors = {
+              { name = "Error", payload = { kind = "primitive", name = "String" } },
+              { name = "Ok", payload = { kind = "named", name = "nefor.dynamic.DynamicList",
+                arguments = {{ kind = "primitive", name = "String" }} } },
+            }}
+            local packed = {}
+            local packer = assert(pack.construct("pack", { owner = owner, constructor = "Ok" },
+              function(message) packed[#packed + 1] = message end))
+            packer.deliver({ messages = {{ message = {
+              value = "same", semantic_value = "same",
+              dynamic = { kind = "item", collection = "c", index = 1 },
+            }}}})
+            assert(packed[2].value.constructor == "Ok")
+            assert(packed[2].semantic_value == "same")
+            assert(packed[2].dynamic.collection == "c" and packed[2].dynamic.index == 1)
+
+            local unpacked = {}
+            local unpacker = assert(unpack.construct("unpack", {
+              owner = owner, left_constructor = "Error", right_constructor = "Ok",
+            }, function(message) unpacked[#unpacked + 1] = message end))
+            unpacker.deliver({ messages = {{ message = packed[2] }}})
+            assert(unpacked[2].kind == "nefor.adt.Second")
+            assert(unpacked[2].value == "same" and unpacked[2].semantic_value == "same")
+            assert(unpacked[2].dynamic.collection == "c" and unpacked[2].dynamic.index == 1)
+            "#,
+        )
+        .exec()
+        .unwrap();
+}
+
+#[test]
+fn dynamic_all_waits_for_completion_and_preserves_order() {
+    harness()
+        .load(
+            r#"
+            local factory = require("factories.dynamic-all")
+            assert(factory.declaration.semantic.input.name == "nefor.dynamic.DynamicAll")
             assert(factory.construct("bad", {}, function() end) == nil)
             local emitted = {}
             local actor = assert(factory.construct("context", {

@@ -7,6 +7,8 @@
 (require "nefor.node")
 
 (type DynamicList [T] {})
+(type DynamicEach [T] {})
+(type DynamicAll [T] {})
 (type Indexed [T] {:collection String :index Int :value T})
 (type DynamicCount {:collection String :count Int})
 (type DynamicEvent [T]
@@ -15,10 +17,10 @@
 (type DynamicIndexParams {:collection String :index Int})
 (type DynamicContextParams {:item_schema TypeSchema})
 
-(let dynamic-input-factory "nefor.factory.dynamic-input")
+(let dynamic-each-factory "nefor.factory.dynamic-each")
 (let dynamic-output-factory "nefor.factory.dynamic-output")
 (let dynamic-index-factory "nefor.factory.dynamic-index")
-(let dynamic-context-factory "nefor.factory.dynamic-context")
+(let dynamic-all-factory "nefor.factory.dynamic-all")
 
 (type ValueRef [T] {:id String
                     :type (TypeTag T)
@@ -179,11 +181,11 @@
 
 (let context
   (fn [T] [[id String] [item-type (TypeTag T)]]
-    -> (nefor.graph.Node (DynamicList T) nefor.contracts.ProviderInput)
-    (let input (nefor.graph.port id (type-tag (DynamicList T)) "nefor.dynamic.Input"))
+    -> (nefor.graph.Node (DynamicAll T) nefor.contracts.ProviderInput)
+    (let input (nefor.graph.port id (type-tag (DynamicAll T)) "nefor.dynamic.Input"))
     (let output (nefor.graph.port id (type-tag nefor.contracts.ProviderInput) "generic-provider.ProviderOut"))
     (nefor.graph.node id "ordinary"
-      [(nefor.graph.actor id dynamic-context-factory [(type-evidence item-type)]
+      [(nefor.graph.actor id dynamic-all-factory [(type-evidence item-type)]
          (as DynamicContextParams {:item_schema (type-schema item-type)})
          (nefor.graph.store-port input) [(nefor.graph.store-port output)])]
       [] [] input output)))
@@ -191,15 +193,15 @@
 (let traverse-template
   (fn [T O] [[id String] [worker (TemplateNode Unit O)]
              [input-type (TypeTag T)] [output-type (TypeTag O)]]
-    -> (nefor.graph.Node (DynamicList T) (DynamicList O))
+    -> (nefor.graph.Node (DynamicEach T) (DynamicList O))
     (let input-id (str id ".input"))
     (let output-id (str id ".output"))
-    (let input (nefor.graph.port input-id (type-tag (DynamicList T)) "nefor.dynamic.Input"))
+    (let input (nefor.graph.port input-id (type-tag (DynamicEach T)) "nefor.dynamic.Input"))
     (let indexed (nefor.graph.port input-id (type-tag (Indexed T)) "nefor.dynamic.Indexed"))
     (let completed (nefor.graph.port input-id (type-tag DynamicCount) "nefor.dynamic.Complete"))
     (let collect (nefor.graph.port output-id (type-tag (DynamicEvent O)) "nefor.dynamic.Collect"))
     (let output (nefor.graph.port output-id (type-tag (DynamicList O)) "nefor.dynamic.Output"))
-    (let input-actor (nefor.graph.actor input-id dynamic-input-factory [(type-evidence input-type)]
+    (let input-actor (nefor.graph.actor input-id dynamic-each-factory [(type-evidence input-type)]
       (as DynamicParams {}) (nefor.graph.store-port input)
       [(nefor.graph.store-port indexed) (nefor.graph.store-port completed)]))
     (let output-actor (nefor.graph.actor output-id dynamic-output-factory

@@ -330,8 +330,34 @@ impl ConcreteType {
         if let Self::Sum { arms } = actual {
             return arms.iter().any(|arm| self.accepts_edge_source(arm));
         }
-        self.accepts(actual)
-            || matches!(self, Self::Product { items } if items.iter().any(|item| item.accepts(actual)))
+        self.accepts_dynamic_source(actual)
+            || self.accepts(actual)
+            || matches!(self, Self::Product { items } if items.iter().any(|item| item.accepts_edge_source(actual)))
+    }
+
+    fn accepts_dynamic_source(&self, actual: &Self) -> bool {
+        let (
+            Self::Named {
+                name: target_name,
+                arguments: target_arguments,
+                ..
+            },
+            Self::Named {
+                name: source_name,
+                arguments: source_arguments,
+                ..
+            },
+        ) = (self, actual)
+        else {
+            return false;
+        };
+        matches!(
+            target_name.as_str(),
+            "nefor.dynamic.DynamicEach" | "nefor.dynamic.DynamicAll"
+        ) && source_name == "nefor.dynamic.DynamicList"
+            && target_arguments.len() == 1
+            && source_arguments.len() == 1
+            && target_arguments[0].accepts(&source_arguments[0])
     }
 
     /// Whether incoming edge types completely supply this input. Ordinary
@@ -808,6 +834,51 @@ mod tests {
         assert!(output.output_is_covered_by(std::slice::from_ref(&output)));
         assert!(!output.output_is_covered_by(&[x]));
         assert!(!output.output_is_covered_by(&[]));
+    }
+
+    #[test]
+    fn dynamic_consumers_accept_only_matching_dynamic_list_sources() {
+        let marker = |name: &str, item: ConcreteType| ConcreteType::Named {
+            name: name.into(),
+            arguments: vec![item],
+            body: Box::new(ConcreteType::Record {
+                fields: BTreeMap::new(),
+            }),
+        };
+        let list = marker("nefor.dynamic.DynamicList", ConcreteType::String);
+        let each = marker("nefor.dynamic.DynamicEach", ConcreteType::String);
+        let all = marker("nefor.dynamic.DynamicAll", ConcreteType::String);
+        let wrong = marker("nefor.dynamic.DynamicList", ConcreteType::Int);
+
+        assert!(each.accepts_edge_source(&list));
+        assert!(all.accepts_edge_source(&list));
+        assert!(!list.accepts_edge_source(&each));
+        assert!(!list.accepts_edge_source(&all));
+        assert!(!each.accepts_edge_source(&all));
+        assert!(!all.accepts_edge_source(&each));
+        assert!(!each.accepts_edge_source(&wrong));
+        assert!(!all.accepts_edge_source(&wrong));
+        assert!(!each.accepts(&list));
+    }
+
+    #[test]
+    fn dynamic_consumers_select_matching_dynamic_list_sum_arms() {
+        let marker = |name: &str, item: ConcreteType| ConcreteType::Named {
+            name: name.into(),
+            arguments: vec![item],
+            body: Box::new(ConcreteType::Record {
+                fields: BTreeMap::new(),
+            }),
+        };
+        let each = marker("nefor.dynamic.DynamicEach", ConcreteType::String);
+        let source = ConcreteType::Sum {
+            arms: vec![
+                ConcreteType::Bool,
+                marker("nefor.dynamic.DynamicList", ConcreteType::String),
+            ],
+        };
+
+        assert!(each.accepts_edge_source(&source));
     }
 
     #[test]

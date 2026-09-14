@@ -139,9 +139,9 @@ pub mod kernel {
                 "nefor.factory.worktree-create",
                 "nefor.factory.shell-script",
                 "nefor.factory.discard",
-                "nefor.factory.dynamic-input",
+                "nefor.factory.dynamic-each",
                 "nefor.factory.dynamic-output",
-                "nefor.factory.dynamic-context",
+                "nefor.factory.dynamic-all",
             ] {
                 assert!(
                     actors.iter().any(|actor| actor["factory"] == factory),

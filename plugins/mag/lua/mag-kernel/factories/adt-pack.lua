@@ -37,8 +37,11 @@ function M.construct(id, params, emit)
     local message = one.message or {}
     local value = message.value
     if value == nil then value = message end
-    emit({ kind = "nefor.adt.Value", from = id,
-      value = { constructor = constructor, value = value } })
+    local output = { kind = "nefor.adt.Value", from = id,
+      value = { constructor = constructor, value = value } }
+    if message.semantic_value ~= nil then output.semantic_value = message.semantic_value end
+    if message.dynamic ~= nil then output.dynamic = message.dynamic end
+    emit(output)
     return { status = "ok" }
   end
   emit({ kind = kinds.ready, from = id })

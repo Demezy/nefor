@@ -85,11 +85,10 @@ fn assert_typed_result(result: &Map<String, Value>) {
         .pointer_str("/result/semantic_type_id")
         .expect("terminal result carries semantic type identity");
     assert!(semantic.starts_with("sha256:"), "{result:?}");
-    assert_eq!(
-        result.pointer_str("/result/constructor_id"),
-        Some(semantic),
-        "{result:?}"
-    );
+    let constructor = result
+        .pointer_str("/result/constructor_id")
+        .expect("terminal result carries constructor identity");
+    assert!(constructor.starts_with("sha256:"), "{result:?}");
     assert!(
         result
             .get("result")
@@ -639,7 +638,7 @@ fn dynamic_behavior_fixture() -> Value {
 
 fn assert_dynamic_program_envelope(artifact: &Value) {
     assert_eq!(artifact["format"], "nefor.mag");
-    assert_eq!(artifact["version"], 1);
+    assert_eq!(artifact["version"], 2);
     assert_eq!(artifact["kind"], "program");
     let program = artifact["program"].as_object().expect("program payload");
     let operations = program["operations"]
@@ -658,19 +657,14 @@ fn assert_dynamic_program_envelope(artifact: &Value) {
         .expect("flat expressions");
     let shapes = expressions
         .iter()
-        .filter_map(Value::as_object)
-        .map(|value| {
-            if value.contains_key("capture") {
-                "capture"
-            } else if value.contains_key("record") {
-                "field"
-            } else if value.contains_key("values") {
-                "concat"
-            } else if value.contains_key("value") {
-                "int-to-decimal-string"
-            } else {
-                "trigger"
-            }
+        .filter_map(|expression| expression.get("constructor").and_then(Value::as_str))
+        .map(|constructor| match constructor {
+            "Trigger" => "trigger",
+            "Capture" => "capture",
+            "Field" => "field",
+            "IntToDecimalString" => "int-to-decimal-string",
+            "ConcatStrings" => "concat",
+            other => panic!("unknown dynamic expression constructor {other}"),
         })
         .collect::<Vec<_>>();
     for required in [
@@ -685,12 +679,16 @@ fn assert_dynamic_program_envelope(artifact: &Value) {
             "missing {required} expression: {shapes:?}"
         );
     }
-    let ids = expressions
+    let payloads = expressions
+        .iter()
+        .map(|expression| expression.get("value").expect("expression payload"))
+        .collect::<Vec<_>>();
+    let ids = payloads
         .iter()
         .map(|expression| expression["id"].as_str().expect("expression id"))
         .collect::<Vec<_>>();
     assert_eq!(ids[0], "trigger");
-    for (index, expression) in expressions.iter().enumerate() {
+    for (index, expression) in payloads.iter().enumerate() {
         let references = expression
             .get("record")
             .and_then(Value::as_str)
@@ -1108,10 +1106,10 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
             .flatten()
         })
         .expect("ordered worker results are canonical summarizer input");
-    // The dynamic item type is a sum, so each ordered value retains its
-    // constructor evidence instead of erasing WorkerResult vs AgentError.
-    assert!(ordered[0]["type"].as_str().is_some());
-    assert!(ordered[1]["type"].as_str().is_some());
+    // The dynamic item type is a nominal ADT, so each ordered value retains
+    // its constructor evidence instead of erasing WorkerResult vs AgentError.
+    assert_eq!(ordered[0]["constructor"], "Ok");
+    assert_eq!(ordered[1]["constructor"], "Ok");
     assert_eq!(ordered[0]["value"]["task"], "same");
     assert_eq!(ordered[1]["value"]["task"], "same");
     assert_eq!(
@@ -1143,7 +1141,7 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
     );
     assert_typed_result(&result);
     assert_eq!(
-        result["result"]["value"]["content"],
+        result["result"]["value"]["value"]["content"],
         fixture["scenarios"]["multiple"]["terminal_content"]
     );
     assert_materialized_item(&observed_events, &fixture["item_delta_zero"], 0);
@@ -1256,7 +1254,7 @@ async fn dynamic_tasks_zero_uses_empty_collection_identity_and_reaches_summarize
     );
     assert_typed_result(&result);
     assert_eq!(
-        result["result"]["value"]["content"],
+        result["result"]["value"]["value"]["content"],
         fixture["scenarios"]["zero"]["terminal_content"]
     );
     shutdown(stdin, child).await;
@@ -1323,7 +1321,7 @@ async fn dynamic_tasks_one_runs_one_real_worker_and_static_summarizer() {
     );
     assert_typed_result(&result);
     assert_eq!(
-        result["result"]["value"]["content"],
+        result["result"]["value"]["value"]["content"],
         fixture["scenarios"]["one"]["terminal_content"]
     );
     shutdown(stdin, child).await;
@@ -1473,7 +1471,7 @@ async fn retained_dynamic_program_survives_source_disposal_and_process_restart()
         assert_eq!(result["status"], "completed");
         assert_typed_result(result);
         assert_eq!(
-            result["result"]["value"]["content"],
+            result["result"]["value"]["value"]["content"],
             format!("summary-{run}")
         );
     }
@@ -1532,14 +1530,15 @@ async fn dynamic_tasks_invalid_planner_spawns_nothing_and_returns_typed_error() 
     );
     assert_typed_result(&result);
     assert_eq!(
-        result["result"]["value"]["last_output"]["text"], "not json",
+        result["result"]["value"]["value"]["last_output"]["text"], "not json",
         "{result:?}"
     );
-    assert!(result["result"]["value"]["reason"]["type"]
-        .as_str()
-        .is_some_and(|tag| tag.starts_with("sha256:")));
-    assert!(result["result"]["value"]["reason"]["value"]["violations"].is_array());
-    assert!(result["result"]["value"]["reason"]["value"]
+    assert_eq!(
+        result["result"]["value"]["value"]["reason"]["constructor"],
+        "OutputValidationError"
+    );
+    assert!(result["result"]["value"]["value"]["reason"]["value"]["violations"].is_array());
+    assert!(result["result"]["value"]["value"]["reason"]["value"]
         .get("attempts")
         .is_none());
     shutdown(stdin, child).await;

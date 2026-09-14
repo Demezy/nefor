@@ -5,12 +5,12 @@ local INPUT = "nefor.dynamic.Input"
 local INDEXED = "nefor.dynamic.Indexed"
 local COMPLETE = "nefor.dynamic.Complete"
 local item = { kind = "variable", name = "T" }
-local dynamic = { kind = "named", name = "nefor.dynamic.DynamicList", arguments = { item } }
+local dynamic = { kind = "named", name = "nefor.dynamic.DynamicEach", arguments = { item } }
 local indexed = { kind = "named", name = "nefor.dynamic.Indexed", arguments = { item } }
 local count = { kind = "named", name = "nefor.dynamic.DynamicCount", arguments = {} }
 
 M.declaration = {
-  name = "dynamic-input",
+  name = "dynamic-each",
   type_variables = { "T" },
   semantic = {
     input = dynamic,
@@ -41,15 +41,15 @@ function M.construct(id, _, emit)
     local message = (((activation or {}).messages or {})[1] or {}).message or {}
     local protocol = message.dynamic
     if finished or type(protocol) ~= "table" or type(protocol.collection) ~= "string" then
-      return failure("dynamic_input_invalid_protocol", protocol)
+      return failure("dynamic_each_invalid_protocol", protocol)
     end
     if active == nil then active = protocol.collection end
     if protocol.collection ~= active then
-      return failure("dynamic_input_collection_changed", protocol)
+      return failure("dynamic_each_collection_changed", protocol)
     end
     if protocol.kind == "item" then
       if protocol.index ~= next_index or message.value == nil then
-        return failure("dynamic_input_noncontiguous_item", protocol)
+        return failure("dynamic_each_noncontiguous_item", protocol)
       end
       emit({ kind = INDEXED, from = id, value = {
         collection = active, index = next_index, value = message.value,
@@ -62,21 +62,21 @@ function M.construct(id, _, emit)
     end
     if protocol.kind == "complete" then
       if protocol.count ~= next_index then
-        return failure("dynamic_input_wrong_final_count", protocol)
+        return failure("dynamic_each_wrong_final_count", protocol)
       end
       emit({ kind = COMPLETE, from = id,
         value = { collection = active, count = next_index } })
       finished = true
       return { status = "ok" }
     end
-    return failure("dynamic_input_unknown_event", protocol)
+    return failure("dynamic_each_unknown_event", protocol)
   end
 
   function instance.handle_kill() finished = true end
   function instance.handle_drain()
     if not finished then
       emit({ kind = kinds.failed, from = id, failure = kinds.Failed,
-        value = { kind = "dynamic_input_drained_incomplete", actor = id } })
+        value = { kind = "dynamic_each_drained_incomplete", actor = id } })
     end
     finished = true
   end
