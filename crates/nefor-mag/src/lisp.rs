@@ -88,12 +88,16 @@ fn lower_type_declaration(items: &[ast::Expr]) -> authored::Form {
                 })
                 .collect::<Result<Vec<_>, _>>();
             match params {
-                Ok(params) => (params, lower_type(body)),
+                Ok(params) => (params, lower_declaration_body(body)),
                 Err(error) => return authored::Form::Invalid(error),
             }
         }
-        [_, body] => (vec![], lower_type(body)),
-        [_] => (vec![], authored::Type::Record(vec![])),
+        [_, body] => (vec![], lower_declaration_body(body)),
+        [_] => {
+            return authored::Form::Invalid(AuthoringError::Type(
+                "type declaration requires a body".into(),
+            ))
+        }
         _ => unreachable!(),
     };
     authored::Form::Type(authored::TypeDeclaration {
@@ -101,6 +105,38 @@ fn lower_type_declaration(items: &[ast::Expr]) -> authored::Form {
         params,
         body,
     })
+}
+
+fn lower_declaration_body(expression: &ast::Expr) -> authored::TypeDeclarationBody {
+    let ast::Expr::List(items) = expression else {
+        return authored::TypeDeclarationBody::Nominal(lower_type(expression));
+    };
+    if items.first().and_then(ast::Expr::as_symbol) != Some("adt") {
+        return authored::TypeDeclarationBody::Nominal(lower_type(expression));
+    }
+    let mut constructors = Vec::with_capacity(items.len().saturating_sub(1));
+    for constructor in &items[1..] {
+        let ast::Expr::Vector(parts) = constructor else {
+            return authored::TypeDeclarationBody::Nominal(authored::Type::Invalid(
+                "ADT constructor must be [Name PayloadType]".into(),
+            ));
+        };
+        let [name, payload] = parts.as_slice() else {
+            return authored::TypeDeclarationBody::Nominal(authored::Type::Invalid(
+                "ADT constructor must be [Name PayloadType]".into(),
+            ));
+        };
+        let Some(name) = name.as_symbol() else {
+            return authored::TypeDeclarationBody::Nominal(authored::Type::Invalid(
+                "ADT constructor name must be a symbol".into(),
+            ));
+        };
+        constructors.push(authored::ConstructorDeclaration {
+            name: name.to_owned(),
+            payload: lower_type(payload),
+        });
+    }
+    authored::TypeDeclarationBody::Adt(constructors)
 }
 
 pub fn lower_block_item(expression: &ast::Expr) -> authored::BlockItem {
@@ -159,6 +195,7 @@ fn lower_list(items: &[ast::Expr]) -> authored::Expr {
         )),
         Some("if") => lower_if(items),
         Some("match") => lower_match(items),
+        Some("construct") => lower_construct(items),
         Some("as") => lower_ascribe(items),
         Some("type-tag") => lower_type_tag(items),
         Some("fn") => lower_function(items),
@@ -180,6 +217,24 @@ fn lower_if(items: &[ast::Expr]) -> authored::Expr {
     }
 }
 
+fn lower_construct(items: &[ast::Expr]) -> authored::Expr {
+    let [_, owner, constructor, payload] = items else {
+        return authored::Expr::Invalid(AuthoringError::Type(
+            "construct expects an ADT type, constructor, and payload".into(),
+        ));
+    };
+    let Some(constructor) = constructor.as_symbol() else {
+        return authored::Expr::Invalid(AuthoringError::Type(
+            "construct constructor must be a symbol".into(),
+        ));
+    };
+    authored::Expr::Construct {
+        owner: lower_type(owner),
+        constructor: constructor.to_owned(),
+        payload: Box::new(lower_expr(payload)),
+    }
+}
+
 fn lower_match(items: &[ast::Expr]) -> authored::Expr {
     if items.len() < 3 {
         return authored::Expr::Invalid(AuthoringError::Type(
@@ -198,13 +253,18 @@ fn lower_match(items: &[ast::Expr]) -> authored::Expr {
                 "match arm must be [Constructor binding expression]".into(),
             ));
         };
+        let Some(constructor) = constructor.as_symbol() else {
+            return authored::Expr::Invalid(AuthoringError::Type(
+                "match constructor must be a symbol".into(),
+            ));
+        };
         let Some(binding) = binding.as_symbol() else {
             return authored::Expr::Invalid(AuthoringError::Type(
                 "match binding must be a symbol".into(),
             ));
         };
         arms.push(authored::MatchArm {
-            constructor: lower_type(constructor),
+            constructor: constructor.to_owned(),
             binding: binding.to_owned(),
             body: Box::new(lower_expr(body)),
         });
@@ -321,13 +381,10 @@ fn lower_type(expression: &ast::Expr) -> authored::Type {
                 return authored::Type::Invalid("type application head must be a symbol".into());
             };
             match head {
-                "|" => authored::Type::Union(items[1..].iter().map(lower_type).collect()),
-                "+" => authored::Type::Product(items[1..].iter().map(lower_type).collect()),
-                "List" if items.len() == 2 => authored::Type::List(Box::new(lower_type(&items[1]))),
-                "Map" if items.len() == 3 => authored::Type::Map(
-                    Box::new(lower_type(&items[1])),
-                    Box::new(lower_type(&items[2])),
+                "|" => authored::Type::Invalid(
+                    "authored structural unions are unsupported; declare an ADT".into(),
                 ),
+                "+" => authored::Type::Product(items[1..].iter().map(lower_type).collect()),
                 "TypeTag" if items.len() == 2 => {
                     authored::Type::Tag(Box::new(lower_type(&items[1])))
                 }
@@ -366,11 +423,9 @@ mod tests {
             "test.mag",
             r#"
                 (require "support")
-                (type Choice [T] (| T (+ Int String)))
+                (type Choice [T] (adt [Selected T] [Empty Unit]))
                 (let choose (fn [T] [[value T]] -> (Choice T)
-                  (if true
-                    (as (Choice T) value)
-                    (match value [(Choice T) selected selected]))))
+                  (construct (Choice T) Selected value)))
                 (artifact {:answer (type-tag (Map String (Fn Int String)))})
             "#,
         );
@@ -381,7 +436,10 @@ mod tests {
             panic!("type declaration")
         };
         assert_eq!(declaration.params, ["T"]);
-        assert!(matches!(declaration.body, authored::Type::Union(_)));
+        assert!(matches!(
+            declaration.body,
+            authored::TypeDeclarationBody::Adt(_)
+        ));
 
         let authored::Form::Block(authored::BlockItem::Let { value, .. }) = &module.forms[2] else {
             panic!("let declaration")
@@ -391,7 +449,7 @@ mod tests {
         };
         assert!(matches!(
             function.body[0],
-            authored::BlockItem::Expr(authored::Expr::If { .. })
+            authored::BlockItem::Expr(authored::Expr::Construct { .. })
         ));
 
         let authored::Form::Block(authored::BlockItem::Expr(authored::Expr::Call { args, .. })) =

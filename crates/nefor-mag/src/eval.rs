@@ -1,7 +1,8 @@
 use crate::ast::{
-    BindingId, CheckedBlock, CheckedExpr, CheckedExprKind, FnValue, FrameId, TypeDecl, Value,
+    BindingId, CheckedBlock, CheckedExpr, CheckedExprKind, ConstructorDecl,
+    ConstructorDeclarationId, FnValue, FrameId, TypeDecl, TypeDeclBody, Value,
 };
-use crate::authored::{Form, Module, TypeDeclaration};
+use crate::authored::{Form, Module, TypeDeclaration, TypeDeclarationBody};
 use crate::env::{BindingForce, BindingHandle, Env};
 use crate::error::MagError;
 use crate::profile::Phase;
@@ -228,9 +229,42 @@ pub(crate) fn eval_program(env: &mut Env, module: &Module) -> Result<Value, MagE
 
 fn eval_type_declaration(env: &mut Env, authored: &TypeDeclaration) -> Result<Value, MagError> {
     let vars = authored.params.iter().cloned().collect();
-    let body = crate::checker::resolve_type(env, &authored.body, &vars)?;
+    let qualified = env.qualify(&authored.name);
+    let body = match &authored.body {
+        TypeDeclarationBody::Nominal(body) => {
+            TypeDeclBody::Nominal(crate::checker::resolve_type(env, body, &vars)?)
+        }
+        TypeDeclarationBody::Adt(constructors) => {
+            if constructors.is_empty() {
+                return Err(MagError::Type(format!(
+                    "ADT {} must declare at least one constructor",
+                    authored.name
+                )));
+            }
+            let mut seen = HashSet::new();
+            let constructors = constructors
+                .iter()
+                .map(|constructor| {
+                    if !seen.insert(constructor.name.clone()) {
+                        return Err(MagError::Type(format!(
+                            "duplicate constructor {} in {}",
+                            constructor.name, authored.name
+                        )));
+                    }
+                    Ok(ConstructorDecl {
+                        id: ConstructorDeclarationId {
+                            owner: qualified.clone(),
+                            name: constructor.name.clone(),
+                        },
+                        payload: crate::checker::resolve_type(env, &constructor.payload, &vars)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, MagError>>()?;
+            TypeDeclBody::Adt(constructors)
+        }
+    };
     let declaration = TypeDecl {
-        name: env.qualify(&authored.name),
+        name: qualified,
         params: authored.params.clone(),
         body,
     };
@@ -319,20 +353,35 @@ fn eval_checked_expr(env: &mut Env, expression: &CheckedExpr) -> Result<Value, M
                 eval_checked_expr(env, else_branch)
             }
         }
+        CheckedExprKind::Construct {
+            owner,
+            constructor,
+            payload,
+        } => Ok(Value::Adt {
+            owner: runtime_type(env, owner),
+            constructor: constructor.clone(),
+            payload: std::sync::Arc::new(eval_checked_expr(env, payload)?),
+        }),
         CheckedExprKind::Match { value, arms } => {
             let value = eval_checked_expr(env, value)?;
-            let constructor = selected_constructor_type(env, &value)?.ok_or_else(|| {
-                MagError::Type("match value lacks selected constructor evidence".into())
-            })?;
+            let Value::Adt {
+                constructor,
+                payload,
+                ..
+            } = raw(&value)
+            else {
+                return Err(MagError::Type("match value is not an ADT".into()));
+            };
             let arm = arms
                 .iter()
-                .find(|arm| nominal_name(&arm.constructor) == nominal_name(&constructor))
+                .find(|arm| &arm.constructor == constructor)
                 .ok_or_else(|| {
                     MagError::Type(format!(
-                        "match has no arm for selected constructor {constructor}"
+                        "match has no arm for selected constructor {}",
+                        constructor.name
                     ))
                 })?;
-            let payload = selected_constructor_value(env, &value, &constructor)?;
+            let payload = payload.as_ref().clone();
             env.push_scope();
             env.define_ready(arm.binding.id, &arm.binding.name, payload);
             let result = eval_checked_expr(env, &arm.body);
@@ -437,7 +486,10 @@ fn record_fields(env: &Env, ty: &MagType) -> Option<BTreeMap<String, MagType>> {
                 .cloned()
                 .zip(args.iter().cloned())
                 .collect();
-            let body = crate::checker::substitute(&decl.body, &substitutions);
+            let TypeDeclBody::Nominal(body) = decl.body else {
+                return None;
+            };
+            let body = crate::checker::substitute(&body, &substitutions);
             record_fields(env, &body)
         }
         _ => None,
@@ -565,91 +617,6 @@ fn explicit_constructor(
     Ok(None)
 }
 
-fn selected_constructor_value(
-    env: &Env,
-    value: &Value,
-    selected: &MagType,
-) -> Result<Value, MagError> {
-    let mut current = value;
-    while let Value::Typed(inner, evidence) = current {
-        let evidence = runtime_type(env, evidence);
-        if runtime_sum_alias(env, &evidence, &mut HashSet::new())? {
-            current = inner;
-        } else {
-            match evidence {
-                constructor @ MagType::Named(_, _)
-                    if nominal_name(&constructor) == nominal_name(selected) =>
-                {
-                    return Ok(current.clone());
-                }
-                constructor @ MagType::Named(_, _) => {
-                    return Err(MagError::Type(format!(
-                        "selected constructor evidence changed from {selected} to {constructor}"
-                    )));
-                }
-                _ => break,
-            }
-        }
-    }
-    Err(MagError::Type(
-        "match value lacks selected nominal payload".into(),
-    ))
-}
-
-fn nominal_name(ty: &MagType) -> Option<&str> {
-    match ty {
-        MagType::Named(name, _) => Some(name),
-        _ => None,
-    }
-}
-
-fn selected_constructor_type(env: &Env, value: &Value) -> Result<Option<MagType>, MagError> {
-    let mut current = value;
-    while let Value::Typed(inner, evidence) = current {
-        let evidence = runtime_type(env, evidence);
-        if runtime_sum_alias(env, &evidence, &mut HashSet::new())? {
-            current = inner;
-        } else if matches!(evidence, MagType::Named(_, _)) {
-            return Ok(Some(evidence));
-        } else {
-            return Ok(None);
-        }
-    }
-    Ok(None)
-}
-
-fn runtime_sum_alias(
-    env: &Env,
-    ty: &MagType,
-    seen: &mut HashSet<String>,
-) -> Result<bool, MagError> {
-    match ty {
-        MagType::Union(_) => Ok(true),
-        MagType::Named(name, arguments) => {
-            let key = format!("{name}<{arguments:?}>");
-            if !seen.insert(key.clone()) {
-                return Err(MagError::Type(format!(
-                    "recursive sum alias {name} is unsupported"
-                )));
-            }
-            let declaration = env
-                .type_decl(name)
-                .ok_or_else(|| MagError::Type(format!("unknown nominal type {name}")))?;
-            let substitutions = declaration
-                .params
-                .iter()
-                .cloned()
-                .zip(arguments.iter().cloned())
-                .collect();
-            let body = crate::checker::substitute(&declaration.body, &substitutions);
-            let result = runtime_sum_alias(env, &body, seen);
-            seen.remove(&key);
-            result
-        }
-        _ => Ok(false),
-    }
-}
-
 fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError> {
     env.profile_counters(|counters| {
         counters.runtime_value_validation_visits =
@@ -716,15 +683,22 @@ fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError
             }
             _ => false,
         },
-        MagType::Named(name, args) => env.type_decl(name).is_some_and(|decl| {
-            let substitutions = decl
-                .params
-                .iter()
-                .cloned()
-                .zip(args.iter().cloned())
-                .collect();
-            let body = crate::checker::substitute(&decl.body, &substitutions);
-            validate_value(env, value, &body).is_ok()
+        MagType::Named(name, args) => env.type_decl(name).is_some_and(|decl| match decl.body {
+            TypeDeclBody::Nominal(body) => {
+                let substitutions = decl
+                    .params
+                    .iter()
+                    .cloned()
+                    .zip(args.iter().cloned())
+                    .collect();
+                let body = crate::checker::substitute(&body, &substitutions);
+                validate_value(env, value, &body).is_ok()
+            }
+            TypeDeclBody::Adt(_) => matches!(
+                value,
+                Value::Adt { owner, .. } if owner == ty
+            ),
+            TypeDeclBody::Native => false,
         }),
         MagType::TypeTag(expected) => matches!(
             value,
@@ -1715,6 +1689,17 @@ fn descriptor_node_count(descriptor: &ConcreteType) -> u64 {
         ConcreteType::Named {
             arguments, body, ..
         } => arguments.iter().map(descriptor_node_count).sum::<u64>() + descriptor_node_count(body),
+        ConcreteType::Adt {
+            arguments,
+            constructors,
+            ..
+        } => {
+            arguments.iter().map(descriptor_node_count).sum::<u64>()
+                + constructors
+                    .iter()
+                    .map(|constructor| descriptor_node_count(&constructor.payload))
+                    .sum::<u64>()
+        }
         ConcreteType::List { item } => descriptor_node_count(item),
         ConcreteType::Map { key, value } => {
             descriptor_node_count(key) + descriptor_node_count(value)
@@ -1739,6 +1724,17 @@ fn descriptor_hashed_bytes(descriptor: &ConcreteType) -> u64 {
         } => {
             arguments.iter().map(descriptor_hashed_bytes).sum::<u64>()
                 + descriptor_hashed_bytes(body)
+        }
+        ConcreteType::Adt {
+            arguments,
+            constructors,
+            ..
+        } => {
+            arguments.iter().map(descriptor_hashed_bytes).sum::<u64>()
+                + constructors
+                    .iter()
+                    .map(|constructor| descriptor_hashed_bytes(&constructor.payload))
+                    .sum::<u64>()
         }
         ConcreteType::List { item } => descriptor_hashed_bytes(item),
         ConcreteType::Map { key, value } => {
@@ -1848,6 +1844,22 @@ pub(crate) fn equal(env: &Env, a: &Value, b: &Value) -> bool {
         (Value::Type(a), Value::Type(b)) => a == b,
         (Value::TypeTag(a), Value::TypeTag(b)) => a == b,
         (Value::TypeDecl(a), Value::TypeDecl(b)) => a == b,
+        (
+            Value::Adt {
+                owner: left_owner,
+                constructor: left_constructor,
+                payload: left_payload,
+            },
+            Value::Adt {
+                owner: right_owner,
+                constructor: right_constructor,
+                payload: right_payload,
+            },
+        ) => {
+            left_owner == right_owner
+                && left_constructor == right_constructor
+                && equal(env, left_payload, right_payload)
+        }
         (Value::TypeDescriptor(a), Value::TypeDescriptor(b)) => a == b,
         (Value::TypeSchema(a), Value::TypeSchema(b)) => a == b,
         (Value::SemanticTypeId(a), Value::SemanticTypeId(b)) => a == b,

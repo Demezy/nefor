@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// A stable, data-only description of the JSON-representable subset of MAG.
 /// It deliberately contains no runtime behavior and can cross the MAG/Lua
@@ -31,12 +31,30 @@ pub enum SchemaType {
     Int,
     Float,
     String,
-    List { item: Box<SchemaType> },
-    Map { value: Box<SchemaType> },
-    Record { fields: Vec<SchemaField> },
-    Union { variants: Vec<SchemaVariant> },
-    Product { components: Vec<SchemaType> },
-    Named { name: String, body: Box<SchemaType> },
+    List {
+        item: Box<SchemaType>,
+    },
+    Map {
+        value: Box<SchemaType>,
+    },
+    Record {
+        fields: Vec<SchemaField>,
+    },
+    Union {
+        variants: Vec<SchemaVariant>,
+    },
+    Adt {
+        name: String,
+        owner_id: String,
+        constructors: Vec<SchemaConstructor>,
+    },
+    Product {
+        components: Vec<SchemaType>,
+    },
+    Named {
+        name: String,
+        body: Box<SchemaType>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,6 +66,12 @@ pub struct SchemaField {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SchemaVariant {
     pub tag: String,
+    pub schema: SchemaType,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SchemaConstructor {
+    pub name: String,
     pub schema: SchemaType,
 }
 
@@ -235,7 +259,7 @@ fn validation_error(kind: &str, message: String) -> JsonValidation {
 
 fn schema_root_is_record(schema: &SchemaType) -> bool {
     match schema {
-        SchemaType::Record { .. } => true,
+        SchemaType::Record { .. } | SchemaType::Adt { .. } => true,
         SchemaType::Named { body, .. } => schema_root_is_record(body),
         _ => false,
     }
@@ -313,6 +337,23 @@ fn provider_schema_at_path(schema: &SchemaType, path: &str) -> Result<Value, Mag
                     )?,
                 },
                 "required": ["type", "value"],
+                "additionalProperties": false,
+            }))).collect::<Result<Vec<_>, MagError>>()?,
+        }),
+        SchemaType::Adt {
+            name, constructors, ..
+        } => serde_json::json!({
+            "title": name,
+            "anyOf": constructors.iter().map(|constructor| Ok(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "constructor": { "type": "string", "enum": [constructor.name.clone()] },
+                    "value": provider_schema_at_path(
+                        &constructor.schema,
+                        &format!("{path}<{}>", constructor.name),
+                    )?,
+                },
+                "required": ["constructor", "value"],
                 "additionalProperties": false,
             }))).collect::<Result<Vec<_>, MagError>>()?,
         }),
@@ -501,6 +542,34 @@ fn decode_provider_value(
             }
             Ok(Value::Object(fields))
         }
+        SchemaType::Adt { constructors, .. } => {
+            let Value::Object(mut fields) = value else {
+                return Err(provider_decode_violation(path, "ADT object", &value));
+            };
+            let name = fields
+                .get("constructor")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    provider_decode_violation(path, "ADT object", &Value::Object(fields.clone()))
+                })?
+                .to_owned();
+            if let Some(constructor) = constructors
+                .iter()
+                .find(|constructor| constructor.name == name)
+            {
+                if let Some(payload) = fields.remove("value") {
+                    fields.insert(
+                        "value".into(),
+                        decode_provider_value(
+                            &constructor.schema,
+                            payload,
+                            &field_path(path, "value"),
+                        )?,
+                    );
+                }
+            }
+            Ok(Value::Object(fields))
+        }
         _ => Ok(value),
     }
 }
@@ -563,6 +632,20 @@ fn schema_type_to_json_schema(schema: &SchemaType) -> Value {
                 "additionalProperties": false,
             })).collect::<Vec<_>>(),
         }),
+        SchemaType::Adt {
+            name, constructors, ..
+        } => serde_json::json!({
+            "title": name,
+            "oneOf": constructors.iter().map(|constructor| serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "constructor": { "const": constructor.name },
+                    "value": schema_type_to_json_schema(&constructor.schema),
+                },
+                "required": ["constructor", "value"],
+                "additionalProperties": false,
+            })).collect::<Vec<_>>(),
+        }),
         SchemaType::Product { components } => serde_json::json!({
             "type": "array",
             "prefixItems": components.iter().map(schema_type_to_json_schema).collect::<Vec<_>>(),
@@ -620,6 +703,21 @@ fn reify_concrete(ty: &crate::types::ConcreteType) -> Result<SchemaType, MagErro
                     Ok(SchemaVariant {
                         tag: arm.stable_id().to_string(),
                         schema: reify_concrete(arm)?,
+                    })
+                })
+                .collect::<Result<_, MagError>>()?,
+        },
+        ConcreteType::Adt {
+            name, constructors, ..
+        } => SchemaType::Adt {
+            name: name.clone(),
+            owner_id: ty.stable_id().to_string(),
+            constructors: constructors
+                .iter()
+                .map(|constructor| {
+                    Ok(SchemaConstructor {
+                        name: constructor.name.clone(),
+                        schema: reify_concrete(&constructor.payload)?,
                     })
                 })
                 .collect::<Result<_, MagError>>()?,
@@ -774,6 +872,74 @@ fn validate_at(schema: &SchemaType, value: &Value, path: &str, out: &mut Vec<Vio
             }
             _ => expect(false, path, "tagged sum envelope", value, out),
         },
+        SchemaType::Adt { constructors, .. } => match value {
+            Value::Object(entries) => {
+                for (key, extra) in entries {
+                    if key != "constructor" && key != "value" {
+                        out.push(Violation {
+                            path: field_path(path, key),
+                            code: "extra_field".into(),
+                            expected: "no additional field".into(),
+                            actual: json_kind(extra).into(),
+                            message: format!("field '{key}' is not declared"),
+                        });
+                    }
+                }
+                let Some(name_value) = entries.get("constructor") else {
+                    out.push(Violation {
+                        path: field_path(path, "constructor"),
+                        code: "missing_field".into(),
+                        expected: "constructor name".into(),
+                        actual: "missing".into(),
+                        message: "required field 'constructor' is missing".into(),
+                    });
+                    return;
+                };
+                let Some(name) = name_value.as_str() else {
+                    expect(
+                        false,
+                        &field_path(path, "constructor"),
+                        "constructor name",
+                        name_value,
+                        out,
+                    );
+                    return;
+                };
+                let Some(constructor) = constructors
+                    .iter()
+                    .find(|constructor| constructor.name == name)
+                else {
+                    out.push(Violation {
+                        path: field_path(path, "constructor"),
+                        code: "unknown_adt_constructor".into(),
+                        expected: constructors
+                            .iter()
+                            .map(|constructor| constructor.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" | "),
+                        actual: name.into(),
+                        message: format!("constructor '{name}' is not a member of this ADT"),
+                    });
+                    return;
+                };
+                match entries.get("value") {
+                    Some(payload) => validate_at(
+                        &constructor.schema,
+                        payload,
+                        &field_path(path, "value"),
+                        out,
+                    ),
+                    None => out.push(Violation {
+                        path: field_path(path, "value"),
+                        code: "missing_field".into(),
+                        expected: describe(&constructor.schema),
+                        actual: "missing".into(),
+                        message: "required field 'value' is missing".into(),
+                    }),
+                }
+            }
+            _ => expect(false, path, "ADT object", value, out),
+        },
         SchemaType::Product { components } => match value {
             Value::Array(values) => {
                 if values.len() != components.len() {
@@ -827,6 +993,7 @@ fn describe(schema: &SchemaType) -> String {
             .map(|variant| variant.tag.clone())
             .collect::<Vec<_>>()
             .join(" | "),
+        SchemaType::Adt { name, .. } => name.clone(),
         SchemaType::Product { components } => format!(
             "({})",
             components
@@ -950,6 +1117,61 @@ mod tests {
             .violations
             .iter()
             .any(|v| v.path == "$.choice" && v.code == "missing_field"));
+    }
+
+    #[test]
+    fn nominal_adts_require_exact_constructor_envelopes_and_decode_providers() {
+        let schema = TypeSchema {
+            version: SCHEMA_VERSION,
+            root: SchemaType::Adt {
+                name: "main.Result".into(),
+                owner_id: "sha256:owner".into(),
+                constructors: vec![
+                    SchemaConstructor {
+                        name: "Error".into(),
+                        schema: SchemaType::String,
+                    },
+                    SchemaConstructor {
+                        name: "Ok".into(),
+                        schema: SchemaType::Int,
+                    },
+                ],
+            },
+        };
+        assert!(
+            schema
+                .validate_json(r#"{"constructor":"Ok","value":42}"#)
+                .ok
+        );
+        for invalid in [
+            r#"{"constructor":"Ok"}"#,
+            r#"{"constructor":"Ok","value":42,"extra":true}"#,
+            r#"{"constructor":"Other","value":42}"#,
+            r#"{"constructor":"Ok","value":"wrong"}"#,
+        ] {
+            assert!(!schema.validate_json(invalid).ok, "{invalid}");
+        }
+        let provider = schema.to_provider_schema().unwrap();
+        assert!(!provider.wrapped);
+        assert_eq!(
+            provider.schema["anyOf"][1]["properties"]["constructor"]["enum"],
+            serde_json::json!(["Ok"])
+        );
+        let decoded = schema.validate_provider_json(r#"{"constructor":"Ok","value":42.0}"#);
+        assert!(decoded.ok, "{:?}", decoded.violations);
+        assert_eq!(
+            decoded.value.unwrap(),
+            serde_json::json!({"constructor":"Ok","value":42})
+        );
+
+        let old = TypeSchema {
+            version: 1,
+            root: SchemaType::String,
+        };
+        assert_eq!(
+            old.validate_json(r#""value""#).error.unwrap().kind,
+            "unsupported_schema_version"
+        );
     }
 
     #[test]
@@ -1287,7 +1509,7 @@ mod tests {
             crate::ast::Value::TypeDecl(crate::ast::TypeDecl {
                 name: "main.Node".into(),
                 params: vec![],
-                body: MagType::Named("main.Node".into(), vec![]),
+                body: crate::ast::TypeDeclBody::Nominal(MagType::Named("main.Node".into(), vec![])),
             }),
         );
         let error = TypeSchema::reify(&env, &MagType::Named("main.Node".into(), vec![]))

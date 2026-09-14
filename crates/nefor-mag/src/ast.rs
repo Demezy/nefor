@@ -30,6 +30,11 @@ pub enum CheckedExprKind {
         then_branch: Box<CheckedExpr>,
         else_branch: Box<CheckedExpr>,
     },
+    Construct {
+        owner: MagType,
+        constructor: ConstructorDeclarationId,
+        payload: Box<CheckedExpr>,
+    },
     Match {
         value: Box<CheckedExpr>,
         arms: Vec<CheckedMatchArm>,
@@ -48,7 +53,7 @@ pub enum CheckedExprKind {
 
 #[derive(Debug, Clone)]
 pub struct CheckedMatchArm {
-    pub constructor: MagType,
+    pub constructor: ConstructorDeclarationId,
     pub binding: CheckedParam,
     pub body: Box<CheckedExpr>,
 }
@@ -155,11 +160,30 @@ pub struct FnValue {
     pub closure: Vec<Scope>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConstructorDeclarationId {
+    pub owner: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConstructorDecl {
+    pub id: ConstructorDeclarationId,
+    pub payload: MagType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TypeDeclBody {
+    Nominal(MagType),
+    Adt(Vec<ConstructorDecl>),
+    Native,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeDecl {
     pub name: String,
     pub params: Vec<String>,
-    pub body: MagType,
+    pub body: TypeDeclBody,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +213,11 @@ pub enum Value {
     JsonValue(serde_json::Value),
     HostInputs(serde_json::Value),
     Artifact(serde_json::Value),
+    Adt {
+        owner: MagType,
+        constructor: ConstructorDeclarationId,
+        payload: Arc<Value>,
+    },
     Typed(Arc<Value>, MagType),
 }
 
@@ -224,6 +253,7 @@ impl Value {
             Self::JsonValue(_) => "json-value",
             Self::HostInputs(_) => "host-inputs",
             Self::Artifact(_) => "artifact",
+            Self::Adt { .. } => "adt",
             Self::Typed(value, _) => value.type_name(),
         }
     }

@@ -55,6 +55,22 @@ impl PartialEq for MemoArg {
             (Value::Type(left), Value::Type(right)) => left == right,
             (Value::TypeTag(left), Value::TypeTag(right)) => left == right,
             (Value::TypeDecl(left), Value::TypeDecl(right)) => left == right,
+            (
+                Value::Adt {
+                    owner: left_owner,
+                    constructor: left_constructor,
+                    payload: left,
+                },
+                Value::Adt {
+                    owner: right_owner,
+                    constructor: right_constructor,
+                    payload: right,
+                },
+            ) => {
+                left_owner == right_owner
+                    && left_constructor == right_constructor
+                    && Arc::ptr_eq(left, right)
+            }
             (Value::Typed(left, left_type), Value::Typed(right, right_type)) => {
                 left_type == right_type && Arc::ptr_eq(left, right)
             }
@@ -85,6 +101,15 @@ impl Hash for MemoArg {
             Value::Type(value) => value.hash(state),
             Value::TypeTag(value) => value.hash(state),
             Value::TypeDecl(value) => value.hash(state),
+            Value::Adt {
+                owner,
+                constructor,
+                payload,
+            } => {
+                owner.hash(state);
+                constructor.hash(state);
+                Arc::as_ptr(payload).hash(state);
+            }
             Value::Typed(value, ty) => {
                 Arc::as_ptr(value).hash(state);
                 ty.hash(state);
@@ -247,6 +272,16 @@ impl Env {
         };
         for &name in crate::checker::BUILTIN_NAMES {
             env.define(name, Value::BuiltinFn(name.into()));
+        }
+        for (name, params) in [("List", vec!["T"]), ("Map", vec!["K", "V"])] {
+            env.define(
+                name,
+                Value::TypeDecl(TypeDecl {
+                    name: format!("core.{name}"),
+                    params: params.into_iter().map(str::to_owned).collect(),
+                    body: crate::ast::TypeDeclBody::Native,
+                }),
+            );
         }
         for (name, ty) in [
             ("Artifact", crate::types::MagType::Artifact),
@@ -935,7 +970,9 @@ impl Env {
                     {
                         pending_values.extend(values.values().cloned());
                     }
-                    Value::Typed(value, _) | Value::PackedValue(value)
+                    Value::Typed(value, _)
+                    | Value::PackedValue(value)
+                    | Value::Adt { payload: value, .. }
                         if visited_values.insert(Arc::as_ptr(&value).cast::<()>()) =>
                     {
                         pending_values.push(value.as_ref().clone());

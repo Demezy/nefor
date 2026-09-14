@@ -22,6 +22,98 @@ fn workspace(name: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn nominal_adts_construct_match_and_serialize_by_constructor() {
+    let root = workspace("nominal-adts");
+    let artifact = compile(
+        r#"
+        (type Result [E A] (adt [Error E] [Ok A]))
+        (let result (construct (Result String Int) Ok 42))
+        (artifact
+          {:value result
+           :equal (= result (construct (Result String Int) Ok 42))
+           :different (= result (construct (Result String Int) Error "42"))
+           :rendered (match result
+             [Error error error]
+             [Ok answer (str answer)])})
+        "#,
+        &root,
+    )
+    .unwrap();
+
+    assert_eq!(
+        artifact,
+        json!({
+            "value": {"constructor": "Ok", "value": 42},
+            "equal": true,
+            "different": false,
+            "rendered": "42",
+        })
+    );
+}
+
+#[test]
+fn nominal_adt_descriptors_schemas_and_ids_include_owner_arguments() {
+    let root = workspace("nominal-adt-evidence");
+    let artifact = compile(
+        r#"
+        (type Result [E A] (adt [Ok A] [Error E]))
+        (artifact
+          {:text (type-evidence (type-tag (Result String Int)))
+           :bool (type-evidence (type-tag (Result Bool Int)))
+           :text_id (type-id (type-evidence (type-tag (Result String Int))))
+           :bool_id (type-id (type-evidence (type-tag (Result Bool Int))))
+           :schema (type-schema (type-tag (Result String Int)))})
+        "#,
+        &root,
+    )
+    .unwrap();
+
+    assert_eq!(artifact["text"]["kind"], "adt");
+    assert_eq!(artifact["text"]["name"], "main.Result");
+    assert_eq!(artifact["text"]["constructors"][0]["name"], "Error");
+    assert_eq!(artifact["text"]["constructors"][1]["name"], "Ok");
+    assert_ne!(artifact["text_id"], artifact["bool_id"]);
+    assert_eq!(artifact["schema"]["version"], 2);
+    assert_eq!(artifact["schema"]["root"]["kind"], "adt");
+    assert_eq!(artifact["schema"]["root"]["name"], "main.Result");
+    assert_eq!(artifact["schema"]["root"]["owner_id"], artifact["text_id"]);
+}
+
+#[test]
+fn nominal_adt_checker_enforces_ownership_exhaustiveness_and_branch_uniformity() {
+    let root = workspace("nominal-adt-errors");
+    let declarations = r#"
+      (type First (adt [Same Int] [Other String]))
+      (type Second (adt [Same Int] [Other String]))
+      (let value (construct First Same 1))
+    "#;
+    for (expression, expected) in [
+        (
+            "(match value [Same x x])",
+            "non-exhaustive match; missing Other",
+        ),
+        (
+            "(match value [Same x x] [Same y y] [Other z 0])",
+            "duplicate match arm for Same",
+        ),
+        (
+            "(match value [Same x x] [Foreign z 0])",
+            "constructor Foreign is not a member of main.First",
+        ),
+        (
+            "(if true 1 \"no\")",
+            "if branches must return one compatible type",
+        ),
+        ("[1 \"no\"]", "list elements must have one compatible type"),
+        ("(as First 1)", "value does not conform to main.First"),
+    ] {
+        let source = format!("{declarations}\n(artifact {expression})");
+        let error = compile(&source, &root).unwrap_err().to_string();
+        assert!(error.contains(expected), "{expression}: {error}");
+    }
+}
+
+#[test]
 fn artifact_is_the_only_top_level_output() {
     let root = workspace("artifact");
     let artifact = compile(r#"(artifact {:answer 42})"#, &root).unwrap();

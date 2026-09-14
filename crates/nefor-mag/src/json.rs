@@ -48,6 +48,14 @@ pub fn value_to_json(env: &Env, value: &Value) -> Result<serde_json::Value, MagE
                 .map(|value| value_to_json(env, value))
                 .collect::<Result<_, _>>()?,
         )),
+        Value::Adt {
+            constructor,
+            payload,
+            ..
+        } => Ok(serde_json::json!({
+            "constructor": constructor.name,
+            "value": value_to_json(env, payload)?,
+        })),
         Value::Map(v) => Ok(serde_json::Value::Object(
             v.iter()
                 .map(|(key, value)| Ok((key.clone(), value_to_json(env, value)?)))
@@ -124,6 +132,19 @@ pub fn concrete_type_to_json(
             "arguments": arguments.iter().map(concrete_type_to_json).collect::<Result<Vec<_>, _>>()?,
             "body": concrete_type_to_json(body)?,
         }),
+        ConcreteType::Adt {
+            name,
+            arguments,
+            constructors,
+        } => serde_json::json!({
+            "kind": "adt",
+            "name": name,
+            "arguments": arguments.iter().map(concrete_type_to_json).collect::<Result<Vec<_>, _>>()?,
+            "constructors": constructors.iter().map(|constructor| Ok(serde_json::json!({
+                "name": constructor.name,
+                "payload": concrete_type_to_json(&constructor.payload)?,
+            }))).collect::<Result<Vec<_>, MagError>>()?,
+        }),
         ConcreteType::List { item } => serde_json::json!({
             "kind": "list", "item": concrete_type_to_json(item)?
         }),
@@ -187,6 +208,44 @@ pub fn concrete_type_from_json(
                 None => ConcreteType::Unit,
             }),
         },
+        "adt" => {
+            let constructors = object
+                .get("constructors")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    MagError::Type("ADT semantic descriptor needs constructors".into())
+                })?;
+            let mut previous: Option<&str> = None;
+            let constructors = constructors
+                .iter()
+                .map(|constructor| {
+                    let constructor = constructor.as_object().ok_or_else(|| {
+                        MagError::Type("ADT constructor descriptor must be an object".into())
+                    })?;
+                    let name = string_field(constructor, "name")?;
+                    if previous.is_some_and(|previous| previous >= name) {
+                        return Err(MagError::Type(
+                            "ADT constructors must be uniquely sorted by name".into(),
+                        ));
+                    }
+                    previous = Some(name);
+                    Ok(crate::types::ConcreteConstructor {
+                        name: name.to_owned(),
+                        payload: concrete_type_from_json(constructor.get("payload").ok_or_else(
+                            || MagError::Type("ADT constructor descriptor needs payload".into()),
+                        )?)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, MagError>>()?;
+            if constructors.is_empty() {
+                return Err(MagError::Type("ADT descriptor needs constructors".into()));
+            }
+            ConcreteType::Adt {
+                name: string_field(object, "name")?.to_owned(),
+                arguments: descriptor_list(object, "arguments")?,
+                constructors,
+            }
+        }
         "list" => ConcreteType::List {
             item: Box::new(concrete_type_from_json(object.get("item").ok_or_else(
                 || MagError::Type("list semantic descriptor needs item".into()),
@@ -351,11 +410,58 @@ pub fn json_to_typed_value(
                 .cloned()
                 .zip(args.iter().cloned())
                 .collect();
-            let body = substitute(&decl.body, &substitutions);
-            Value::Typed(
-                std::sync::Arc::new(json_to_typed_value(env, value, &body)?),
-                ty.clone(),
-            )
+            match decl.body {
+                crate::ast::TypeDeclBody::Nominal(body) => Value::Typed(
+                    std::sync::Arc::new(json_to_typed_value(
+                        env,
+                        value,
+                        &substitute(&body, &substitutions),
+                    )?),
+                    ty.clone(),
+                ),
+                crate::ast::TypeDeclBody::Adt(constructors) => {
+                    let object = value
+                        .as_object()
+                        .ok_or_else(|| MagError::Type(format!("expected ADT envelope for {ty}")))?;
+                    if object.len() != 2
+                        || !object.contains_key("constructor")
+                        || !object.contains_key("value")
+                    {
+                        return Err(MagError::Type(format!(
+                            "expected exact ADT envelope {{constructor, value}} for {ty}"
+                        )));
+                    }
+                    let constructor_name = object
+                        .get("constructor")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| MagError::Type("ADT constructor must be a string".into()))?;
+                    let constructor = constructors
+                        .into_iter()
+                        .find(|constructor| constructor.id.name == constructor_name)
+                        .ok_or_else(|| {
+                            MagError::Type(format!(
+                                "constructor {constructor_name} is not a member of {ty}"
+                            ))
+                        })?;
+                    let payload_type = substitute(&constructor.payload, &substitutions);
+                    Value::Adt {
+                        owner: ty.clone(),
+                        constructor: constructor.id,
+                        payload: std::sync::Arc::new(json_to_typed_value(
+                            env,
+                            object
+                                .get("value")
+                                .ok_or_else(|| MagError::Type("ADT envelope needs value".into()))?,
+                            &payload_type,
+                        )?),
+                    }
+                }
+                crate::ast::TypeDeclBody::Native => {
+                    return Err(MagError::Type(format!(
+                        "native type {name} cannot be decoded as a nominal value"
+                    )))
+                }
+            }
         }
         MagType::List(item) => Value::Vector(std::sync::Arc::new(
             value

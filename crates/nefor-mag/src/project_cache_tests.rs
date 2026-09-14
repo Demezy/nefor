@@ -25,7 +25,7 @@ impl Fixture {
         };
         this.write(
             "main.mag",
-            "(require \"a\")\n(artifact [a.value (read \"note.txt\") (read-json \"data.json\")])",
+            "(require \"a\")\n(artifact {:value a.value :note (read \"note.txt\") :data (read-json \"data.json\")})",
         );
         this.write("a.mag", "(require \"b\")\n(let value b.value)");
         this.write("b.mag", "(let value 1)");
@@ -357,7 +357,10 @@ fn concurrent_identical_publications_leave_one_complete_record() {
             .map(|_| scope.spawn(|| f.run(b"A").bytes))
             .collect::<Vec<_>>();
         for h in handles {
-            assert_eq!(h.join().unwrap(), b"[1,\"first\",{\"a\":1}]\n");
+            assert_eq!(
+                h.join().unwrap(),
+                b"{\"data\":{\"a\":1},\"note\":\"first\",\"value\":1}\n"
+            );
         }
     });
     assert_eq!(f.records().len(), 1);

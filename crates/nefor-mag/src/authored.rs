@@ -20,7 +20,19 @@ pub struct Require {
 pub struct TypeDeclaration {
     pub name: String,
     pub params: Vec<String>,
-    pub body: Type,
+    pub body: TypeDeclarationBody,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeDeclarationBody {
+    Nominal(Type),
+    Adt(Vec<ConstructorDeclaration>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstructorDeclaration {
+    pub name: String,
+    pub payload: Type,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +58,11 @@ pub enum Expr {
         then_branch: Box<Expr>,
         else_branch: Box<Expr>,
     },
+    Construct {
+        owner: Type,
+        constructor: String,
+        payload: Box<Expr>,
+    },
     Match {
         value: Box<Expr>,
         arms: Vec<MatchArm>,
@@ -65,7 +82,7 @@ pub enum Expr {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
-    pub constructor: Type,
+    pub constructor: String,
     pub binding: String,
     pub body: Box<Expr>,
 }
@@ -88,10 +105,7 @@ pub struct Parameter {
 pub enum Type {
     Name(String),
     Record(Vec<(String, Type)>),
-    Union(Vec<Type>),
     Product(Vec<Type>),
-    List(Box<Type>),
-    Map(Box<Type>, Box<Type>),
     Tag(Box<Type>),
     Function {
         params: Vec<Type>,

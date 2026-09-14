@@ -48,6 +48,11 @@ pub enum ConcreteType {
         arguments: Vec<ConcreteType>,
         body: Box<ConcreteType>,
     },
+    Adt {
+        name: String,
+        arguments: Vec<ConcreteType>,
+        constructors: Vec<ConcreteConstructor>,
+    },
     List {
         item: Box<ConcreteType>,
     },
@@ -67,7 +72,16 @@ pub enum ConcreteType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ConcreteConstructor {
+    pub name: String,
+    pub payload: ConcreteType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SemanticTypeId(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SemanticConstructorId(String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputAssignmentError {
@@ -92,6 +106,12 @@ impl fmt::Display for InputAssignmentError {
 }
 
 impl SemanticTypeId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl SemanticConstructorId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -122,6 +142,9 @@ impl ConcreteType {
             Self::String => MagType::String,
             Self::Named {
                 name, arguments, ..
+            }
+            | Self::Adt {
+                name, arguments, ..
             } => MagType::Named(
                 name.clone(),
                 arguments.iter().map(Self::to_mag_type).collect(),
@@ -144,11 +167,41 @@ impl ConcreteType {
     }
 
     pub fn stable_id(&self) -> SemanticTypeId {
-        // serde_json follows enum field order and BTreeMap key order, making
-        // these canonical bytes independent of allocation and compilation.
-        let bytes = serde_json::to_vec(self)
+        let descriptor = crate::json::concrete_type_to_json(self)
             .unwrap_or_else(|_| unreachable!("ConcreteType serialization is infallible"));
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "domain": "mag.type.v2",
+            "version": 2,
+            "descriptor": descriptor,
+        }))
+        .unwrap_or_else(|_| unreachable!("semantic descriptor serialization is infallible"));
         SemanticTypeId(format!("sha256:{:x}", Sha256::digest(bytes)))
+    }
+
+    pub fn constructor_id(&self, name: &str) -> Result<SemanticConstructorId, MagError> {
+        let Self::Adt { constructors, .. } = self else {
+            return Err(MagError::Type(
+                "constructor identity requires an ADT owner".into(),
+            ));
+        };
+        if !constructors
+            .iter()
+            .any(|constructor| constructor.name == name)
+        {
+            return Err(MagError::Type(format!(
+                "constructor {name} is not a member of this ADT"
+            )));
+        }
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "domain": "mag.constructor.v2",
+            "owner": self.stable_id().as_str(),
+            "name": name,
+        }))
+        .unwrap_or_else(|_| unreachable!("constructor identity serialization is infallible"));
+        Ok(SemanticConstructorId(format!(
+            "sha256:{:x}",
+            Sha256::digest(bytes)
+        )))
     }
 
     pub fn declarations(&self) -> Result<BTreeMap<String, ConcreteType>, MagError> {
@@ -179,6 +232,18 @@ impl ConcreteType {
                     argument.collect_declarations(declarations)?;
                 }
                 body.collect_declarations(declarations)?;
+            }
+            Self::Adt {
+                arguments,
+                constructors,
+                ..
+            } => {
+                for argument in arguments {
+                    argument.collect_declarations(declarations)?;
+                }
+                for constructor in constructors {
+                    constructor.payload.collect_declarations(declarations)?;
+                }
             }
             Self::List { item } => item.collect_declarations(declarations)?,
             Self::Map { key, value } => {
@@ -430,22 +495,11 @@ fn resolve(
                 .map(|ty| resolve(env, ty, resolving))
                 .collect::<Result<_, _>>()?,
         },
-        MagType::Union(items) => {
-            let mut arms = BTreeSet::new();
-            for item in items {
-                match resolve(env, item, resolving)? {
-                    ConcreteType::Sum { arms: nested } => arms.extend(nested),
-                    arm => {
-                        arms.insert(arm);
-                    }
-                }
-            }
-            let arms = arms.into_iter().collect::<Vec<_>>();
-            match arms.as_slice() {
-                [] => return Err(MagError::Type("a sum must have at least one arm".into())),
-                [only] => only.clone(),
-                _ => ConcreteType::Sum { arms },
-            }
+        MagType::Union(_) => {
+            return Err(MagError::Type(
+                "structural unions cannot enter concrete semantic descriptors; declare an ADT"
+                    .into(),
+            ))
         }
         MagType::Named(name, args) => {
             let decl = env
@@ -474,22 +528,48 @@ fn resolve(
                 .cloned()
                 .zip(args.iter().cloned())
                 .collect();
-            let body = resolve(
-                env,
-                &crate::checker::substitute(&decl.body, &substitutions),
-                resolving,
-            )?;
-            resolving.remove(&key);
-            // A named declaration whose instantiated body unfolds to a sum is
-            // an alias. Every other declaration remains a nominal constructor.
-            match body {
-                ConcreteType::Sum { .. } => body,
-                body => ConcreteType::Named {
+            let concrete = match decl.body {
+                crate::ast::TypeDeclBody::Nominal(body) => ConcreteType::Named {
                     name: name.clone(),
                     arguments,
-                    body: Box::new(body),
+                    body: Box::new(resolve(
+                        env,
+                        &crate::checker::substitute(&body, &substitutions),
+                        resolving,
+                    )?),
                 },
-            }
+                crate::ast::TypeDeclBody::Adt(mut constructors) => {
+                    constructors.sort_by(|left, right| left.id.name.cmp(&right.id.name));
+                    ConcreteType::Adt {
+                        name: name.clone(),
+                        arguments,
+                        constructors: constructors
+                            .into_iter()
+                            .map(|constructor| {
+                                Ok(ConcreteConstructor {
+                                    name: constructor.id.name,
+                                    payload: resolve(
+                                        env,
+                                        &crate::checker::substitute(
+                                            &constructor.payload,
+                                            &substitutions,
+                                        ),
+                                        resolving,
+                                    )?,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, MagError>>()?,
+                    }
+                }
+                crate::ast::TypeDeclBody::Native => {
+                    return Err(MagError::Type(format!(
+                        "native type {} did not lower to its concrete representation",
+                        decl.name
+                    )))
+                }
+            };
+            resolving.remove(&key);
+            concrete
         }
         MagType::Var(name) => {
             return Err(MagError::Type(format!(
@@ -624,53 +704,11 @@ mod tests {
                 Value::TypeDecl(TypeDecl {
                     name: format!("main.{local}"),
                     params: vec![],
-                    body,
+                    body: crate::ast::TypeDeclBody::Nominal(body),
                 }),
             );
         }
         env
-    }
-
-    #[test]
-    fn sums_are_associative_idempotent_and_canonically_ordered() {
-        let env = env_with_types();
-        let x = MagType::Named("main.X".into(), vec![]);
-        let y = MagType::Named("main.Y".into(), vec![]);
-        let z = MagType::Named("main.Z".into(), vec![]);
-        let left = MagType::Union(vec![
-            x.clone(),
-            MagType::Union(vec![y.clone(), z.clone(), x.clone()]),
-        ]);
-        let right = MagType::Union(vec![z, y, x]);
-        assert_eq!(
-            ConcreteType::resolve(&env, &left).unwrap(),
-            ConcreteType::resolve(&env, &right).unwrap()
-        );
-    }
-
-    #[test]
-    fn sum_aliases_erase_to_distinct_nominal_leaf_constructors() {
-        let env = env_with_types();
-        let descriptor =
-            ConcreteType::resolve(&env, &MagType::Named("main.B".into(), vec![])).unwrap();
-        let ConcreteType::Sum { arms } = descriptor else {
-            panic!("B must unfold to a sum")
-        };
-        assert_eq!(arms.len(), 3);
-        let names = arms
-            .iter()
-            .map(|arm| match arm {
-                ConcreteType::Named { name, .. } => name.as_str(),
-                _ => panic!("sum arm must remain nominal"),
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(names, BTreeSet::from(["main.X", "main.Y", "main.Z"]));
-        assert_ne!(
-            arms.iter()
-                .find(|arm| matches!(arm, ConcreteType::Named { name, .. } if name == "main.X")),
-            arms.iter()
-                .find(|arm| matches!(arm, ConcreteType::Named { name, .. } if name == "main.Y"))
-        );
     }
 
     #[test]
@@ -770,31 +808,47 @@ mod tests {
     #[test]
     fn stable_ids_match_across_independent_environments() {
         let first =
-            ConcreteType::resolve(&env_with_types(), &MagType::Named("main.B".into(), vec![]))
+            ConcreteType::resolve(&env_with_types(), &MagType::Named("main.X".into(), vec![]))
                 .unwrap();
         let second =
-            ConcreteType::resolve(&env_with_types(), &MagType::Named("main.B".into(), vec![]))
+            ConcreteType::resolve(&env_with_types(), &MagType::Named("main.X".into(), vec![]))
                 .unwrap();
         assert_eq!(first.stable_id(), second.stable_id());
         assert!(first.stable_id().as_str().starts_with("sha256:"));
     }
 
     #[test]
-    fn descriptor_tables_include_stable_sum_constructor_declarations() {
-        let descriptor =
-            ConcreteType::resolve(&env_with_types(), &MagType::Named("main.B".into(), vec![]))
-                .unwrap();
-        let ConcreteType::Sum { arms } = &descriptor else {
-            panic!("B must unfold to a sum")
+    fn adt_and_constructor_ids_are_nominal_and_instantiation_sensitive() {
+        let payload = ConcreteConstructor {
+            name: "Ok".into(),
+            payload: ConcreteType::Int,
         };
-        let declarations = descriptor.declarations().unwrap();
-        assert_eq!(
-            declarations.get(descriptor.stable_id().as_str()),
-            Some(&descriptor)
+        let first = ConcreteType::Adt {
+            name: "main.Result".into(),
+            arguments: vec![ConcreteType::String, ConcreteType::Int],
+            constructors: vec![payload.clone()],
+        };
+        let phantom = ConcreteType::Adt {
+            name: "main.Result".into(),
+            arguments: vec![ConcreteType::Bool, ConcreteType::Int],
+            constructors: vec![payload.clone()],
+        };
+        let other = ConcreteType::Adt {
+            name: "main.Other".into(),
+            arguments: vec![ConcreteType::String, ConcreteType::Int],
+            constructors: vec![payload],
+        };
+
+        assert_ne!(first.stable_id(), phantom.stable_id());
+        assert_ne!(first.stable_id(), other.stable_id());
+        assert_ne!(
+            first.constructor_id("Ok").unwrap(),
+            phantom.constructor_id("Ok").unwrap()
         );
-        for arm in arms {
-            assert_eq!(declarations.get(arm.stable_id().as_str()), Some(arm));
-        }
+        assert_ne!(
+            first.constructor_id("Ok").unwrap(),
+            other.constructor_id("Ok").unwrap()
+        );
     }
 
     #[test]
