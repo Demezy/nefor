@@ -107,16 +107,22 @@ impl ReasoningDetails {
     pub fn as_slice(&self) -> &[Value] {
         &self.0
     }
+
+    pub fn into_chunks(self) -> Vec<Value> {
+        self.0
+    }
 }
 
 /// Provider-native assistant reasoning that must be replayed on continuation.
 /// The variants are mutually exclusive on the outgoing wire: structured
-/// details take precedence over DeepSeek's plaintext `reasoning_content`.
+/// details take precedence over the plaintext `reasoning_content` and
+/// `reasoning` aliases.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ReasoningContinuation {
     Details { reasoning_details: ReasoningDetails },
     Content { reasoning_content: String },
+    Reasoning { reasoning: String },
 }
 
 impl ReasoningContinuation {
@@ -132,6 +138,15 @@ impl ReasoningContinuation {
             .filter(|content| !content.is_empty())
             .map(|content| Self::Content {
                 reasoning_content: content.to_owned(),
+            })
+            .or_else(|| {
+                object
+                    .get("reasoning")
+                    .and_then(Value::as_str)
+                    .filter(|reasoning| !reasoning.is_empty())
+                    .map(|reasoning| Self::Reasoning {
+                        reasoning: reasoning.to_owned(),
+                    })
             }))
     }
 
@@ -151,6 +166,11 @@ impl ReasoningContinuation {
                     "reasoning_content".into(),
                     Value::String(reasoning_content.clone()),
                 );
+                Value::Object(artifact)
+            }
+            Self::Reasoning { reasoning } => {
+                let mut artifact = Map::new();
+                artifact.insert("reasoning".into(), Value::String(reasoning.clone()));
                 Value::Object(artifact)
             }
         }

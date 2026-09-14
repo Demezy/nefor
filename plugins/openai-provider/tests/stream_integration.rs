@@ -1834,6 +1834,12 @@ async fn mixed_frames_preserve_content_reasoning_tools_finish_and_usage() {
     assert_eq!(reasoning, ["thought"]);
     assert_eq!(outcome.full_text, "answer");
     assert_eq!(outcome.reasoning_text, "thought");
+    assert_eq!(
+        outcome.reasoning_continuation,
+        Some(ReasoningContinuation::Reasoning {
+            reasoning: "thought".into(),
+        })
+    );
     assert_eq!(outcome.finish_reason.as_deref(), Some("tool_calls"));
     assert_eq!(outcome.usage.expect("usage").total_tokens, Some(5));
     assert_eq!(outcome.tool_calls.len(), 1);
@@ -1886,6 +1892,65 @@ async fn streamed_reasoning_details_preserve_every_chunk_and_unknown_field() {
 }
 
 #[tokio::test]
+async fn clean_eof_does_not_complete_partial_native_reasoning() {
+    for native in [
+        serde_json::json!({"reasoning":"unfinished thought"}),
+        serde_json::json!({"reasoning_content":"unfinished thought"}),
+        serde_json::json!({"reasoning_details":[{"type":"reasoning.encrypted","data":"partial"}]}),
+    ] {
+        let body = format!(
+            "data: {}\n\ndata: {{\"choices\":[{{\"delta\":{{\"content\":\"partial answer\"}}}}]}}\n\n",
+            serde_json::json!({"choices":[{"delta":native}]}),
+        );
+        let (result, deltas, _) = run_scripted_stream(body).await;
+        assert_eq!(
+            deltas,
+            ["partial answer"],
+            "displayed text remains partial output"
+        );
+        assert!(matches!(result, Err(StreamError::Body(message))
+            if message == "native reasoning stream ended before finish_reason"));
+    }
+}
+
+#[tokio::test]
+async fn native_reasoning_with_finish_reason_survives_clean_eof_without_done() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"complete thought\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+    )
+    .to_owned();
+    let (result, _, _) = run_scripted_stream(body).await;
+    let outcome = result.expect("semantic completion is sufficient");
+    assert_eq!(
+        outcome.reasoning_continuation,
+        Some(ReasoningContinuation::Content {
+            reasoning_content: "complete thought".into(),
+        })
+    );
+}
+
+#[tokio::test]
+async fn structured_reasoning_takes_precedence_over_both_plaintext_aliases() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning\":\"raw\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\" content\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"data\":\"sealed\"}]}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"reasoning\":\" after details\"},\"finish_reason\":\"stop\"}]}\n\n",
+    ).to_owned();
+    let (result, _, _) = run_scripted_stream(body).await;
+    let outcome = result.expect("completed reasoning");
+    assert_eq!(outcome.reasoning_text, "raw content after details");
+    assert_eq!(
+        outcome
+            .reasoning_continuation
+            .expect("native details")
+            .artifact(),
+        serde_json::json!({"reasoning_details":[{"type":"reasoning.encrypted","data":"sealed"}]})
+    );
+}
+
+#[tokio::test]
 async fn pairwise_mixed_frames_reach_downstream_accumulators() {
     let frames = [
         (
@@ -1901,7 +1966,7 @@ async fn pairwise_mixed_frames_reach_downstream_accumulators() {
             "tool_finish",
         ),
         (
-            r#"{"choices":[{"delta":{"reasoning":"r","tool_calls":[{"index":0,"id":"x","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning":"r","tool_calls":[{"index":0,"id":"x","type":"function","function":{"name":"f","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#,
             "reasoning_tool",
         ),
         (

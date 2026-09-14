@@ -450,13 +450,24 @@ async fn dispatch_event(
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned);
             let mut history = Vec::new();
-            let parsing_model = model.as_deref().or(config.model.as_deref());
+            let model = match model.or(chats.default_model().await) {
+                Some(model) => model,
+                None => {
+                    send_event(
+                        out_tx,
+                        chat_error_body(config, &chat_id, &ChatsError::NoModelConfigured),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
             if let Some(items) = body.get("history").and_then(Value::as_array) {
                 for item in items {
                     let parsed = match parse_provider_message(
                         Some(item),
                         &config.provider_name,
-                        parsing_model,
+                        &config.base_url,
+                        Some(&model),
                     ) {
                         Ok(m) => m,
                         Err(msg) => {
@@ -494,7 +505,7 @@ async fn dispatch_event(
             match chats
                 .restore(ChatRestore {
                     id: chat_id.clone(),
-                    model,
+                    model: Some(model),
                     tools_enabled,
                     tool_allowlist,
                     reasoning_effort,
@@ -523,11 +534,18 @@ async fn dispatch_event(
                     return Ok(());
                 }
             };
-            let active_model = chats.model(&chat_id).await.ok();
+            let active_model = match chats.model(&chat_id).await {
+                Ok(model) => model,
+                Err(error) => {
+                    send_event(out_tx, chat_error_body(config, &chat_id, &error)).await?;
+                    return Ok(());
+                }
+            };
             let parsed = match parse_provider_message(
                 body.get("message"),
                 &config.provider_name,
-                active_model.as_deref(),
+                &config.base_url,
+                Some(&active_model),
             ) {
                 Ok(m) => m,
                 Err(msg) => {
@@ -546,7 +564,10 @@ async fn dispatch_event(
                     .unwrap_or_default(),
                 "chat.append",
             );
-            if let Err(e) = chats.append(&chat_id, parsed.message).await {
+            if let Err(e) = chats
+                .append_for_model(&chat_id, &active_model, parsed.message)
+                .await
+            {
                 send_event(out_tx, chat_error_body(config, &chat_id, &e)).await?;
             } else {
                 // Surface tool-call parse failures as synthetic tool
@@ -953,6 +974,7 @@ async fn dispatch_completion_request(
                 match parse_provider_message(
                     Some(item),
                     &config.provider_name,
+                    &config.base_url,
                     requested_model.as_deref(),
                 ) {
                     Ok(parsed) if parsed.tool_call_failures.is_empty() => {
@@ -1520,7 +1542,10 @@ fn spawn_turn(
 
         loop {
             iterations += 1;
-            let history = match chats.request_history_snapshot(&chat_id).await {
+            let history = match chats
+                .request_history_snapshot_for_model(&chat_id, &active_model)
+                .await
+            {
                 Ok(h) => h,
                 Err(e) => {
                     tracing::warn!(chat_id = %chat_id, error = %e, "chat vanished mid-turn");
@@ -1720,7 +1745,9 @@ fn spawn_turn(
                             )
                         }
                         .with_reasoning(outcome.reasoning_continuation.clone());
-                        let _ = chats.append(&chat_id, assistant).await;
+                        let _ = chats
+                            .append_for_model(&chat_id, &active_model, assistant)
+                            .await;
 
                         // Stage 1+ (chat.complete API): defer the tool
                         // loop to the caller. reasoner-graph dispatches
@@ -1833,7 +1860,9 @@ fn spawn_turn(
                     if !outcome.full_text.is_empty() {
                         let assistant = Message::assistant(outcome.full_text.clone())
                             .with_reasoning(outcome.reasoning_continuation.clone());
-                        let _ = chats.append(&chat_id, assistant).await;
+                        let _ = chats
+                            .append_for_model(&chat_id, &active_model, assistant)
+                            .await;
                     }
                     final_text = outcome.full_text;
                     final_reasoning = outcome.reasoning_text;
@@ -2273,12 +2302,14 @@ struct ParsedMessage {
 fn provider_message_reasoning(
     message: &Map<String, Value>,
     provider: &str,
+    base_url: &str,
     model: Option<&str>,
 ) -> Result<Option<ReasoningContinuation>, String> {
     let Some(context) = message.get("provider_context").and_then(Value::as_object) else {
         return Ok(None);
     };
     if context.get("provider").and_then(Value::as_str) != Some(provider)
+        || context.get("base_url").and_then(Value::as_str) != Some(base_url)
         || context.get("format").and_then(Value::as_str) != Some(REASONING_CONTEXT_FORMAT)
     {
         return Ok(None);
@@ -2299,6 +2330,7 @@ fn provider_message_reasoning(
 fn parse_provider_message(
     value: Option<&Value>,
     provider: &str,
+    base_url: &str,
     model: Option<&str>,
 ) -> Result<ParsedMessage, String> {
     let obj = value
@@ -2362,7 +2394,7 @@ fn parse_provider_message(
                     "assistant message must have non-empty `content` or `tool_calls`".to_owned(),
                 );
             }
-            let reasoning = provider_message_reasoning(obj, provider, model)?;
+            let reasoning = provider_message_reasoning(obj, provider, base_url, model)?;
             Ok(ParsedMessage {
                 message: Message::Assistant {
                     content,
@@ -2770,6 +2802,7 @@ fn reasoning_provider_context(
     let reasoning = reasoning?;
     Some(serde_json::json!({
         "provider": config.provider_name,
+        "base_url": config.base_url,
         "model": model,
         "format": REASONING_CONTEXT_FORMAT,
         "artifact": reasoning.artifact(),

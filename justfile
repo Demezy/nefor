@@ -93,6 +93,7 @@ test-engine target *args:
 # Provider/API translation tests; may need local socket binding permissions.
 test-provider:
     cargo test -p openai-provider --lib
+    cargo test -p openai-provider --test openai_provider_default
     cargo test -p openai-provider --features full-tests --test stream_integration
     cargo test -p openai-provider --features full-tests --test completion_dispatch
     cargo test -p chatgpt-provider --features full-tests

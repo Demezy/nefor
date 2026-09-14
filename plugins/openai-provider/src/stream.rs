@@ -715,6 +715,13 @@ where
     ) {
         return Err(StreamAttemptFailure::new(error, &outcome, &tool_calls));
     }
+    if outcome.reasoning_continuation.is_some() && !stream_semantically_complete(&outcome) {
+        return Err(StreamAttemptFailure::new(
+            StreamError::Body("native reasoning stream ended before finish_reason".to_owned()),
+            &outcome,
+            &tool_calls,
+        ));
+    }
     outcome.tool_calls = match tool_calls.finalize() {
         Ok(tool_calls) => tool_calls,
         Err(error) => {
@@ -998,6 +1005,20 @@ where
         SseEvent::Refusal(message) => return Err(StreamError::Refusal(message)),
         SseEvent::ReasoningDelta(text) => {
             outcome.reasoning_text.push_str(&text);
+            match &mut outcome.reasoning_continuation {
+                Some(ReasoningContinuation::Details { .. }) => {}
+                Some(ReasoningContinuation::Content { reasoning_content })
+                | Some(ReasoningContinuation::Reasoning {
+                    reasoning: reasoning_content,
+                }) => {
+                    reasoning_content.push_str(&text);
+                }
+                None => {
+                    outcome.reasoning_continuation = Some(ReasoningContinuation::Reasoning {
+                        reasoning: text.clone(),
+                    });
+                }
+            }
             on_reasoning(ReasoningEvent::Delta(&text));
         }
         SseEvent::ReasoningContentDelta(text) => {
@@ -1007,7 +1028,10 @@ where
                 Some(ReasoningContinuation::Details { .. })
             ) {
                 let mut accumulated = match outcome.reasoning_continuation.take() {
-                    Some(ReasoningContinuation::Content { reasoning_content }) => reasoning_content,
+                    Some(ReasoningContinuation::Content { reasoning_content })
+                    | Some(ReasoningContinuation::Reasoning {
+                        reasoning: reasoning_content,
+                    }) => reasoning_content,
                     _ => String::new(),
                 };
                 accumulated.push_str(&text);
@@ -1020,7 +1044,7 @@ where
         SseEvent::ReasoningDetails(details) => {
             let mut accumulated = match outcome.reasoning_continuation.take() {
                 Some(ReasoningContinuation::Details { reasoning_details }) => {
-                    reasoning_details.as_slice().to_vec()
+                    reasoning_details.into_chunks()
                 }
                 _ => Vec::new(),
             };

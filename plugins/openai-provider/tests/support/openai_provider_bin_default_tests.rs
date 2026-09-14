@@ -1070,6 +1070,68 @@
     }
 
     #[tokio::test]
+    async fn chat_restore_uses_the_selected_default_for_reasoning_ownership() {
+        let (auth, tx, mut rx) = auth_test_rig(None);
+        let chats = fresh_chats("initial-model");
+        let catalog = Arc::new(ToolCatalog::new());
+        let broker = Arc::new(ToolBroker::new());
+        let mut config = cfg("ollama");
+        config.model = Some("initial-model".into());
+        let client = reqwest::Client::new();
+        let sender = from_plugin("reasoner-graph");
+        let switch = make_event_body(
+            "ollama.model.set",
+            &[("model", Value::String("selected-model".into()))],
+        );
+        dispatch_event(
+            &chats, &auth, &catalog, &broker, &config, &client, &tx, &sender, &switch,
+        )
+        .await
+        .expect("switch default model");
+        let assistant = |model: &str| serde_json::json!({
+            "role":"assistant", "content":model,
+            "provider_context":{
+                "provider":"ollama", "base_url":config.base_url,
+                "model":model, "format":REASONING_CONTEXT_FORMAT,
+                "artifact":{"reasoning_content":format!("{model} thought")}
+            }
+        });
+        let restore = make_event_body(
+            "ollama.chat.restore",
+            &[
+                ("chat_id", Value::String("restored".into())),
+                ("history", serde_json::json!([
+                    {"role":"user", "content":"prior input"},
+                    assistant("initial-model"), assistant("selected-model")
+                ])),
+            ],
+        );
+        dispatch_event(
+            &chats, &auth, &catalog, &broker, &config, &client, &tx, &sender, &restore,
+        )
+        .await
+        .expect("restore");
+        let emitted = drain(&mut rx).await;
+        assert_eq!(
+            emitted.last().expect("restore reply")["kind"],
+            "ollama.chat.appended"
+        );
+        let chat_id = ChatId::new("restored");
+        assert_eq!(chats.model(&chat_id).await.expect("model"), "selected-model");
+        let history = chats.request_history_snapshot(&chat_id).await.expect("history");
+        assert!(
+            history[1].reasoning().is_none(),
+            "the startup model cannot lend its artifact"
+        );
+        assert_eq!(
+            history[2].reasoning(),
+            Some(&ReasoningContinuation::Content {
+                reasoning_content: "selected-model thought".into(),
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn chat_append_rejects_malformed_native_tool_arguments() {
         let (auth, tx, mut rx) = auth_test_rig(None);
         let chats = fresh_chats("m");
@@ -1425,7 +1487,7 @@
     #[test]
     fn parse_provider_message_accepts_role_content_object() {
         let v = serde_json::json!({"role": "user", "content": "hi"});
-        let parsed = parse_provider_message(Some(&v)).expect("ok");
+        let parsed = parse_provider_message(Some(&v), "fixture", "https://fixture.invalid", Some("fixture-model")).expect("ok");
         assert_eq!(parsed.message.role(), "user");
         assert_eq!(parsed.message.content(), Some("hi"));
         assert!(parsed.tool_call_failures.is_empty());
@@ -1434,7 +1496,7 @@
     #[test]
     fn parse_provider_message_rejects_empty_user_content() {
         let v = serde_json::json!({"role": "user", "content": ""});
-        let err = match parse_provider_message(Some(&v)) {
+        let err = match parse_provider_message(Some(&v), "fixture", "https://fixture.invalid", Some("fixture-model")) {
             Ok(_) => panic!("empty content should fail"),
             Err(err) => err,
         };
@@ -1444,7 +1506,7 @@
     #[test]
     fn parse_provider_message_rejects_assistant_without_content_or_tools() {
         let v = serde_json::json!({"role": "assistant", "content": ""});
-        let err = match parse_provider_message(Some(&v)) {
+        let err = match parse_provider_message(Some(&v), "fixture", "https://fixture.invalid", Some("fixture-model")) {
             Ok(_) => panic!("empty assistant should fail"),
             Err(err) => err,
         };
@@ -1465,7 +1527,7 @@
                 "function": {"name": "read_file", "arguments": "{\"path\":\"/x\"}"}
             }]
         });
-        let parsed = parse_provider_message(Some(&v)).expect("ok");
+        let parsed = parse_provider_message(Some(&v), "fixture", "https://fixture.invalid", Some("fixture-model")).expect("ok");
         assert_eq!(parsed.message.role(), "assistant");
         assert!(parsed.message.content().is_none());
         assert_eq!(parsed.message.tool_calls().len(), 1);
@@ -1490,7 +1552,7 @@
                 }
             ]
         });
-        let parsed = parse_provider_message(Some(&v)).expect("ok");
+        let parsed = parse_provider_message(Some(&v), "fixture", "https://fixture.invalid", Some("fixture-model")).expect("ok");
         assert_eq!(parsed.message.tool_calls().len(), 1);
         assert_eq!(parsed.message.tool_calls()[0].id, "call_good");
         assert_eq!(parsed.tool_call_failures.len(), 1);
@@ -1505,7 +1567,7 @@
             "content": "hi",
             "tool_calls": [{"no_id": true}]
         });
-        let parsed = parse_provider_message(Some(&v)).expect("ok");
+        let parsed = parse_provider_message(Some(&v), "fixture", "https://fixture.invalid", Some("fixture-model")).expect("ok");
         assert!(parsed.message.tool_calls().is_empty());
         assert_eq!(parsed.tool_call_failures.len(), 1);
         assert!(parsed.tool_call_failures[0].id.is_none());
@@ -1522,6 +1584,7 @@
             None,
             "qwen",
             "",
+            None,
         );
         let output = body["output"].as_object().expect("output");
         assert!(output.get("usage").is_none());
@@ -1547,6 +1610,7 @@
             Some((10, 5)),
             "qwen",
             "",
+            None,
         );
         assert_eq!(
             b.get("kind").and_then(Value::as_str),

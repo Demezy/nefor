@@ -213,6 +213,23 @@ enum TurnState {
     InFlight(TurnToken),
 }
 
+#[derive(Clone)]
+struct HistoryEntry {
+    model: String,
+    message: Message,
+}
+
+impl HistoryEntry {
+    fn for_model(&self, model: &str) -> Message {
+        let message = self.message.clone();
+        if self.model == model {
+            message
+        } else {
+            message.with_reasoning(None)
+        }
+    }
+}
+
 /// Chat state stored under a `ChatId`.
 struct ChatState {
     model: String,
@@ -220,7 +237,7 @@ struct ChatState {
     /// history so reset/compaction can replace history without losing
     /// the chat's behavioral contract.
     system: Option<String>,
-    history: Arc<Vec<Message>>,
+    history: Arc<Vec<HistoryEntry>>,
     turn: TurnState,
     stats: ChatStats,
     /// Per-chat tool surface control. Three states:
@@ -244,6 +261,16 @@ struct ChatState {
 }
 
 impl ChatState {
+    fn request_history(&self, model: &str) -> Arc<Vec<Message>> {
+        let mut messages =
+            Vec::with_capacity(self.history.len() + usize::from(self.system.is_some()));
+        if let Some(system) = &self.system {
+            messages.push(Message::system(system.clone()));
+        }
+        messages.extend(self.history.iter().map(|entry| entry.for_model(model)));
+        Arc::new(messages)
+    }
+
     fn new(model: String) -> Self {
         Self {
             model,
@@ -395,7 +422,15 @@ impl Chats {
             chat.tool_allowlist = Some(Vec::new());
         }
         chat.reasoning_effort = restore.reasoning_effort;
-        chat.history = Arc::new(repair_tool_call_history(restore.history));
+        chat.history = Arc::new(
+            repair_tool_call_history(restore.history)
+                .into_iter()
+                .map(|message| HistoryEntry {
+                    model: chat.model.clone(),
+                    message,
+                })
+                .collect(),
+        );
         chat.restored = true;
 
         let mut g = self.inner.lock().await;
@@ -525,7 +560,14 @@ impl Chats {
     pub async fn history_snapshot(&self, id: &ChatId) -> Result<Arc<Vec<Message>>, ChatsError> {
         let g = self.inner.lock().await;
         g.get(id)
-            .map(|c| Arc::clone(&c.history))
+            .map(|c| {
+                Arc::new(
+                    c.history
+                        .iter()
+                        .map(|entry| entry.message.clone())
+                        .collect(),
+                )
+            })
             .ok_or_else(|| ChatsError::NotFound(id.clone()))
     }
 
@@ -538,18 +580,34 @@ impl Chats {
     ) -> Result<Arc<Vec<Message>>, ChatsError> {
         let g = self.inner.lock().await;
         let chat = g.get(id).ok_or_else(|| ChatsError::NotFound(id.clone()))?;
-        match &chat.system {
-            Some(system) => {
-                let mut messages = Vec::with_capacity(chat.history.len() + 1);
-                messages.push(Message::system(system.clone()));
-                messages.extend(chat.history.iter().cloned());
-                Ok(Arc::new(messages))
-            }
-            None => Ok(Arc::clone(&chat.history)),
-        }
+        Ok(chat.request_history(&chat.model))
+    }
+
+    /// An in-flight turn keeps its original model even after `model.set`.
+    /// Filter only the request view so each model can recover its own artifacts.
+    pub async fn request_history_snapshot_for_model(
+        &self,
+        id: &ChatId,
+        model: &str,
+    ) -> Result<Arc<Vec<Message>>, ChatsError> {
+        let g = self.inner.lock().await;
+        let chat = g.get(id).ok_or_else(|| ChatsError::NotFound(id.clone()))?;
+        Ok(chat.request_history(model))
     }
 
     pub async fn append(&self, id: &ChatId, message: Message) -> Result<(), ChatsError> {
+        let model = self.model(id).await?;
+        self.append_for_model(id, &model, message).await
+    }
+
+    /// Capture the continuation's model before starting work; the selected
+    /// chat model may change before the assistant response is appended.
+    pub async fn append_for_model(
+        &self,
+        id: &ChatId,
+        model: &str,
+        message: Message,
+    ) -> Result<(), ChatsError> {
         let mut g = self.inner.lock().await;
         let chat = g
             .get_mut(id)
@@ -564,7 +622,10 @@ impl Chats {
                 return Ok(());
             }
         }
-        Arc::make_mut(&mut chat.history).push(message);
+        Arc::make_mut(&mut chat.history).push(HistoryEntry {
+            model: model.to_owned(),
+            message,
+        });
         chat.restored = false;
         Ok(())
     }
@@ -757,10 +818,10 @@ impl Chats {
     }
 }
 
-fn has_unanswered_tool_call(history: &[Message], tool_call_id: &str) -> bool {
+fn has_unanswered_tool_call(history: &[HistoryEntry], tool_call_id: &str) -> bool {
     let mut seen_call = false;
-    for message in history {
-        match message {
+    for entry in history {
+        match &entry.message {
             Message::Assistant { tool_calls, .. }
                 if tool_calls.iter().any(|tc| tc.id == tool_call_id) =>
             {
@@ -826,7 +887,7 @@ fn close_pending_tool_calls(repaired: &mut Vec<Message>, pending: &mut Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::openai::{ToolCall, ToolCallFunction};
+    use crate::openai::{ReasoningContinuation, ReasoningDetails, ToolCall, ToolCallFunction};
 
     #[tokio::test]
     async fn completion_runs_hold_cancelled_ids_until_owned_cleanup() {
@@ -925,6 +986,110 @@ mod tests {
         assert_eq!(after_reset.len(), 1);
         assert_eq!(after_reset[0].role(), "system");
         assert_eq!(after_reset[0].content(), Some("stay terse"));
+    }
+
+    #[tokio::test]
+    async fn in_flight_model_switch_preserves_each_native_continuation_owner() {
+        let chats = Chats::with_default_model(Some("model-a".into()));
+        let id = ChatId::new("native-switch");
+        chats
+            .create(id.clone(), None, None, None, None, Some("system".into()))
+            .await
+            .expect("create");
+        chats.push_user(&id, "inspect".into()).await.expect("user");
+        let active_model = chats.model(&id).await.expect("turn model");
+        let _turn = chats.begin_turn(&id).await.expect("begin turn");
+        let native = ReasoningContinuation::Details {
+            reasoning_details: ReasoningDetails::from_value(&serde_json::json!([
+                {"type":"reasoning.encrypted","data":"sealed","future":true}
+            ]))
+            .expect("details")
+            .expect("nonempty"),
+        };
+        let calls = vec![ToolCall {
+            id: "call-1".into(),
+            kind: "function".into(),
+            function: ToolCallFunction {
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            },
+        }];
+        chats
+            .append_for_model(
+                &id,
+                &active_model,
+                Message::assistant_tool_calls(calls.clone()).with_reasoning(Some(native.clone())),
+            )
+            .await
+            .expect("tool-call assistant");
+        chats
+            .push_tool_result(&id, "call-1".into(), "contents".into())
+            .await
+            .expect("tool result");
+
+        chats
+            .set_chat_model(&id, "model-b".into())
+            .await
+            .expect("switch");
+        let original_turn = chats
+            .request_history_snapshot_for_model(&id, &active_model)
+            .await
+            .expect("original tool loop");
+        assert_eq!(original_turn[2].reasoning(), Some(&native));
+        chats
+            .append_for_model(
+                &id,
+                &active_model,
+                Message::assistant("late A answer").with_reasoning(Some(
+                    ReasoningContinuation::Content {
+                        reasoning_content: "A thought".into(),
+                    },
+                )),
+            )
+            .await
+            .expect("A finishes after switch");
+        chats.end_turn(&id).await;
+
+        let next_turn = chats
+            .request_history_snapshot(&id)
+            .await
+            .expect("B history");
+        assert_eq!(next_turn[0].content(), Some("system"));
+        assert_eq!(next_turn[2].tool_calls(), calls);
+        assert_eq!(next_turn[3].tool_call_id(), Some("call-1"));
+        assert_eq!(next_turn[4].content(), Some("late A answer"));
+        assert!(next_turn
+            .iter()
+            .all(|message| message.reasoning().is_none()));
+        chats
+            .append_for_model(
+                &id,
+                "model-b",
+                Message::assistant("B answer").with_reasoning(Some(
+                    ReasoningContinuation::Content {
+                        reasoning_content: "B thought".into(),
+                    },
+                )),
+            )
+            .await
+            .expect("B answer");
+        chats
+            .set_chat_model(&id, active_model)
+            .await
+            .expect("switch back");
+        let resumed = chats
+            .request_history_snapshot(&id)
+            .await
+            .expect("A history");
+        assert_eq!(resumed[2].reasoning(), Some(&native));
+        assert!(resumed[4].reasoning().is_some());
+        assert_eq!(resumed[5].content(), Some("B answer"));
+        assert!(resumed[5].reasoning().is_none());
+        assert_eq!(
+            original_turn.len(),
+            4,
+            "the earlier request stays immutable"
+        );
     }
 
     #[tokio::test]
