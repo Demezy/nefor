@@ -33,6 +33,43 @@ fn artifact_is_the_only_top_level_output() {
 }
 
 #[test]
+fn lisp_form_diagnostics_survive_authored_lowering() {
+    let root = workspace("lisp-form-diagnostics");
+
+    assert!(matches!(
+        compile("(require)", &root),
+        Err(nefor_mag::error::MagError::Arity {
+            expected: 1,
+            got: 0
+        })
+    ));
+    assert_eq!(
+        compile("(artifact (let x 1))", &root)
+            .unwrap_err()
+            .to_string(),
+        "type error: let is only valid directly in a source or function block"
+    );
+    assert_eq!(
+        compile("(artifact (fn [] Int 1))", &root)
+            .unwrap_err()
+            .to_string(),
+        "type error: typed fn signature required"
+    );
+    assert_eq!(
+        compile("(artifact (match nil [Int value]))", &root)
+            .unwrap_err()
+            .to_string(),
+        "type error: match arm must be [Constructor binding expression]"
+    );
+    assert_eq!(
+        compile("(artifact (type-tag []))", &root)
+            .unwrap_err()
+            .to_string(),
+        "type error: invalid type expression"
+    );
+}
+
+#[test]
 fn packed_values_have_an_explicit_compiler_owned_envelope() {
     let root = workspace("packed-value-envelope");
     let artifact = compile(

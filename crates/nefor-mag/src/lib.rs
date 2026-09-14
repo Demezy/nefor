@@ -1,4 +1,5 @@
 pub mod ast;
+pub(crate) mod authored;
 mod checker;
 pub mod diagnostic;
 pub mod env;
@@ -6,6 +7,7 @@ pub mod error;
 pub mod eval;
 pub mod json;
 pub mod lexer;
+mod lisp;
 pub mod observation;
 pub mod parser;
 pub mod profile;
@@ -182,17 +184,11 @@ pub(crate) fn compile_cold(
         options.limits,
     );
     env.define("inputs", Value::HostInputs(inputs));
-    let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryLex));
     let source_snapshot = diagnostic::SourceSnapshot::named("<memory>", source);
-    let tokens = lexer::tokenize_source(&source_snapshot)?;
-    drop(phase);
-
-    let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryParse));
-    let exprs = parser::parse_source(&tokens, &source_snapshot)?;
-    drop(phase);
+    let module = lisp::compile_source(&source_snapshot, profiler, lisp::SourceRole::Entry)?;
 
     let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryEvaluate));
-    let value = eval::eval_program(&mut env, &exprs)?;
+    let value = eval::eval_program(&mut env, &module)?;
     drop(phase);
 
     let phase = profiler.map(|profiler| profiler.start_phase(Phase::ArtifactConversion));
@@ -381,17 +377,11 @@ pub(crate) fn compile_file_cold_observing(
         &source,
     );
     env.define("inputs", Value::HostInputs(inputs));
-    let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryLex));
     let source_snapshot = diagnostic::SourceSnapshot::file(&path, &source);
-    let tokens = lexer::tokenize_source(&source_snapshot)?;
-    drop(phase);
-
-    let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryParse));
-    let exprs = parser::parse_source(&tokens, &source_snapshot)?;
-    drop(phase);
+    let module = lisp::compile_source(&source_snapshot, profiler, lisp::SourceRole::Entry)?;
 
     let phase = profiler.map(|profiler| profiler.start_phase(Phase::EntryEvaluate));
-    let value = eval::eval_program(&mut env, &exprs)?;
+    let value = eval::eval_program(&mut env, &module)?;
     drop(phase);
 
     let phase = profiler.map(|profiler| profiler.start_phase(Phase::ArtifactConversion));

@@ -1,6 +1,7 @@
 use crate::ast::{
-    BindingId, CheckedBlock, CheckedExpr, CheckedExprKind, Expr, FnValue, FrameId, TypeDecl, Value,
+    BindingId, CheckedBlock, CheckedExpr, CheckedExprKind, FnValue, FrameId, TypeDecl, Value,
 };
+use crate::authored::{Form, Module, TypeDeclaration};
 use crate::env::{BindingForce, BindingHandle, Env};
 use crate::error::MagError;
 use crate::profile::Phase;
@@ -185,22 +186,31 @@ pub mod fuel {
     }
 }
 
-pub fn eval_program(env: &mut Env, exprs: &[Expr]) -> Result<Value, MagError> {
+pub(crate) fn eval_program(env: &mut Env, module: &Module) -> Result<Value, MagError> {
     let _fuel = fuel::ensure(env.compiler_limits());
-    let mut declarations = vec![false; exprs.len()];
-    for (index, expr) in exprs.iter().enumerate() {
-        let Expr::List(items) = expr else { continue };
-        if matches!(items.first(), Some(Expr::Symbol(head)) if matches!(head.as_str(), "require" | "type"))
-        {
-            eval_expr(env, expr)?;
-            declarations[index] = true;
+    let mut source = Vec::new();
+    for form in &module.forms {
+        let _declaration_depth = if matches!(form, Form::Block(_)) {
+            None
+        } else {
+            let depth = fuel::enter_expr()?;
+            fuel::step()?;
+            env.profile_counters(|counters| {
+                counters.evaluator_steps = counters.evaluator_steps.saturating_add(1);
+            });
+            Some(depth)
+        };
+        match form {
+            Form::Require(require) => {
+                eval_require(env, &require.module)?;
+            }
+            Form::Type(declaration) => {
+                eval_type_declaration(env, declaration)?;
+            }
+            Form::Block(item) => source.push(item.clone()),
+            Form::Invalid(error) => return Err(error.clone().into_mag_error()),
         }
     }
-    let source = exprs
-        .iter()
-        .zip(&declarations)
-        .filter_map(|(expr, declaration)| (!declaration).then_some(expr.clone()))
-        .collect::<Vec<_>>();
     let checking_phase = env.profile_phase(Phase::Checking);
     let checked = crate::checker::compile_block(env, &source)?;
     drop(checking_phase);
@@ -214,6 +224,19 @@ pub fn eval_program(env: &mut Env, exprs: &[Expr]) -> Result<Value, MagError> {
         }
     }
     evaluated
+}
+
+fn eval_type_declaration(env: &mut Env, authored: &TypeDeclaration) -> Result<Value, MagError> {
+    let vars = authored.params.iter().cloned().collect();
+    let body = crate::checker::resolve_type(env, &authored.body, &vars)?;
+    let declaration = TypeDecl {
+        name: env.qualify(&authored.name),
+        params: authored.params.clone(),
+        body,
+    };
+    let value = Value::TypeDecl(declaration);
+    env.define(&authored.name, value.clone());
+    Ok(value)
 }
 
 fn eval_checked_block(env: &mut Env, block: &CheckedBlock) -> Result<Value, MagError> {
@@ -345,8 +368,7 @@ fn eval_checked_expr(env: &mut Env, expression: &CheckedExpr) -> Result<Value, M
                 .map(|parameter| parameter.ty.clone())
                 .collect(),
             return_type: function.result.clone(),
-            body: vec![],
-            checked: Some(function.clone()),
+            checked: function.clone(),
             closure: env.snapshot(),
         }))),
         CheckedExprKind::Ascribe { target, value } => {
@@ -401,388 +423,6 @@ fn binding_initialization_error(name: &str, error: MagError) -> MagError {
         MagError::Type(message) => MagError::Type(format!("initializing {name}: {message}")),
         MagError::Eval(message) => MagError::Eval(format!("initializing {name}: {message}")),
         other => other,
-    }
-}
-
-fn eval_expr(env: &mut Env, expr: &Expr) -> Result<Value, MagError> {
-    let _depth = fuel::enter_expr()?;
-    fuel::step()?;
-    env.profile_counters(|counters| {
-        counters.evaluator_steps = counters.evaluator_steps.saturating_add(1);
-    });
-    match expr {
-        Expr::Str(v) => Ok(Value::Str(v.clone())),
-        Expr::Int(v) => Ok(Value::Int(*v)),
-        Expr::Float(v) => Ok(Value::Float(*v)),
-        Expr::Bool(v) => Ok(Value::Bool(*v)),
-        Expr::Nil => Ok(Value::Unit),
-        Expr::Keyword(v) => Ok(Value::Keyword(v.clone())),
-        Expr::Symbol(v) => env.lookup(v),
-        Expr::Vector(xs) => Ok(Value::Vector(std::sync::Arc::new(
-            xs.iter()
-                .map(|x| eval_expr(env, x))
-                .collect::<Result<_, _>>()?,
-        ))),
-        Expr::Map(xs) => eval_map(env, xs),
-        Expr::List(xs) => eval_list(env, xs),
-    }
-}
-
-fn eval_map(env: &mut Env, pairs: &[(Expr, Expr)]) -> Result<Value, MagError> {
-    let mut map = BTreeMap::new();
-    for (k, v) in pairs {
-        let key = match k {
-            Expr::Keyword(s) | Expr::Str(s) | Expr::Symbol(s) => s.clone(),
-            _ => value_string(&eval_expr(env, k)?),
-        };
-        map.insert(key, eval_expr(env, v)?);
-    }
-    Ok(Value::Map(std::sync::Arc::new(map)))
-}
-
-fn eval_list(env: &mut Env, items: &[Expr]) -> Result<Value, MagError> {
-    if items.is_empty() {
-        return Ok(Value::Unit);
-    }
-    if let Some(result) = maybe_require(env, items) {
-        return result;
-    }
-    if let Expr::Symbol(head) = &items[0] {
-        match head.as_str() {
-            "fn" => return eval_fn_form(env, &items[1..]),
-            "let" => {
-                return Err(MagError::Eval(
-                    "let is only valid directly in a source or function block".into(),
-                ))
-            }
-            "if" => return eval_if(env, &items[1..]),
-            "type" => return eval_type_decl(env, &items[1..]),
-            "as" => return eval_as(env, &items[1..]),
-            "type-tag" => return eval_type_tag(env, &items[1..]),
-            "|" | "+" => {
-                return Ok(Value::Type(parse_type(
-                    env,
-                    &Expr::List(items.to_vec()),
-                    &HashSet::new(),
-                )?))
-            }
-            _ => {}
-        }
-    }
-    let args = items[1..]
-        .iter()
-        .map(|x| eval_expr(env, x))
-        .collect::<Result<Vec<_>, _>>()?;
-    let f = if let Expr::Symbol(name) = &items[0] {
-        let candidates = env.lookup_candidates(name);
-        if candidates.len() <= 1 {
-            candidates
-                .into_iter()
-                .next()
-                .ok_or_else(|| MagError::Unresolved(name.clone()))?
-        } else {
-            let mut matching = candidates
-                .into_iter()
-                .filter(|candidate| match candidate {
-                    Value::Fn(function) => crate::checker::check_call(env, function, &args).is_ok(),
-                    _ => false,
-                })
-                .collect::<Vec<_>>();
-            if matching.len() > 1 {
-                let concrete = matching
-                    .iter()
-                    .filter(|candidate| matches!(candidate, Value::Fn(function) if function.type_params.is_empty()))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if concrete.len() == 1 {
-                    matching = concrete;
-                }
-            }
-            match matching.as_slice() {
-                [function] => function.clone(),
-                [] => return Err(MagError::Type(format!("no overload {name} matches call"))),
-                _ => {
-                    return Err(MagError::Type(format!(
-                        "ambiguous overload {name} for call"
-                    )))
-                }
-            }
-        }
-    } else {
-        eval_expr(env, &items[0])?
-    };
-    apply(env, &f, &args)
-}
-
-fn eval_fn_form(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
-    eval_fn_form_with_binding(env, args, None)
-}
-
-fn eval_fn_form_with_binding(
-    env: &mut Env,
-    args: &[Expr],
-    binding: Option<&str>,
-) -> Result<Value, MagError> {
-    let value = eval_fn_form_with_binding_unchecked(env, args, binding)?;
-    let Value::Fn(function) = &value else {
-        unreachable!()
-    };
-    let checking_phase = env.profile_phase(Phase::Checking);
-    crate::checker::check_function_with_binding(
-        env,
-        binding,
-        &function.params,
-        &function.param_types,
-        &function.return_type,
-        &function.body,
-    )?;
-    drop(checking_phase);
-    Ok(value)
-}
-
-fn eval_fn_form_with_binding_unchecked(
-    env: &mut Env,
-    args: &[Expr],
-    binding: Option<&str>,
-) -> Result<Value, MagError> {
-    if args.len() < 4 {
-        return Err(MagError::Eval("fn syntax is (fn [[name Type] ...] -> Return body...) or (fn [T ...] [[name Type] ...] -> Return body...)".into()));
-    }
-    let empty = Expr::Vector(vec![]);
-    let (type_expr, param_expr, arrow, return_expr, body) =
-        if matches!(args.get(1), Some(Expr::Vector(_))) {
-            (&args[0], &args[1], &args[2], &args[3], &args[4..])
-        } else {
-            (&empty, &args[0], &args[1], &args[2], &args[3..])
-        };
-    if !matches!(arrow,Expr::Symbol(s) if s=="->") {
-        return Err(MagError::Eval(
-            "fn signature requires -> before its return type".into(),
-        ));
-    }
-    let type_params = match type_expr {
-        Expr::Vector(xs) => xs
-            .iter()
-            .map(|x| {
-                x.as_symbol()
-                    .map(str::to_owned)
-                    .ok_or_else(|| MagError::Type("fn generic parameters must be symbols".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        _ => unreachable!(),
-    };
-    let vars = type_params.iter().cloned().collect::<HashSet<_>>();
-    let pairs = match param_expr {
-        Expr::Vector(xs) => xs,
-        _ => return Err(MagError::Type("fn parameters must be a vector".into())),
-    };
-    let mut params = vec![];
-    let mut param_types = vec![];
-    for pair in pairs {
-        match pair {
-            Expr::Vector(items) if items.len() == 2 => {
-                params.push(
-                    items[0]
-                        .as_symbol()
-                        .ok_or_else(|| MagError::Type("fn parameter name must be a symbol".into()))?
-                        .to_string(),
-                );
-                param_types.push(parse_type(env, &items[1], &vars)?);
-            }
-            _ => {
-                return Err(MagError::Type(
-                    "fn parameters must be [name Type] pairs".into(),
-                ))
-            }
-        }
-    }
-    let return_type = parse_type(env, return_expr, &vars)?;
-    Ok(Value::Fn(std::sync::Arc::new(FnValue {
-        name: binding.map(str::to_owned),
-        type_params,
-        params,
-        param_types,
-        return_type,
-        body: body.to_vec(),
-        checked: None,
-        closure: env.snapshot(),
-    })))
-}
-
-fn eval_as(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
-    arity(args, 2)?;
-    let ty = parse_type(env, &args[0], &HashSet::new())?;
-    let value = match &args[1] {
-        Expr::Symbol(name) if env.lookup_candidates(name).len() > 1 => {
-            env.lookup_by_type(name, &ty)?
-        }
-        expr => eval_expr(env, expr)?,
-    };
-    checked_typed_value(env, value, ty)
-}
-
-fn eval_type_tag(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
-    arity(args, 1)?;
-    let ty = parse_type(env, &args[0], &HashSet::new())?;
-    Ok(Value::TypeTag(crate::types::ConcreteType::resolve(
-        env, &ty,
-    )?))
-}
-
-fn eval_if(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
-    if !(2..=3).contains(&args.len()) {
-        return Err(MagError::Eval(
-            "if requires condition, then, and optional else".into(),
-        ));
-    }
-    if truthy(&eval_expr(env, &args[0])?) {
-        eval_expr(env, &args[1])
-    } else if args.len() == 3 {
-        eval_expr(env, &args[2])
-    } else {
-        Ok(Value::Unit)
-    }
-}
-
-fn eval_type_decl(env: &mut Env, args: &[Expr]) -> Result<Value, MagError> {
-    if args.is_empty() || args.len() > 3 {
-        return Err(MagError::Eval(
-            "type requires a name, optional generic parameters, and a body".into(),
-        ));
-    }
-    let local = args[0]
-        .as_symbol()
-        .ok_or_else(|| MagError::Eval("type name must be a symbol".into()))?;
-    let (params, body_expr) = match args {
-        [_, Expr::Vector(ps), body] => (
-            ps.iter()
-                .map(|p| {
-                    p.as_symbol()
-                        .map(str::to_owned)
-                        .ok_or_else(|| MagError::Type("generic parameters must be symbols".into()))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-            Some(body),
-        ),
-        [_, body] => (vec![], Some(body)),
-        [_] => (vec![], None),
-        _ => unreachable!(),
-    };
-    let vars = params.iter().cloned().collect();
-    let body = body_expr
-        .map(|x| parse_type(env, x, &vars))
-        .transpose()?
-        .unwrap_or_else(|| MagType::Record(BTreeMap::new()));
-    let decl = TypeDecl {
-        name: env.qualify(local),
-        params,
-        body,
-    };
-    let value = Value::TypeDecl(decl.clone());
-    env.define(local, value.clone());
-    Ok(value)
-}
-
-pub(crate) fn parse_type(
-    env: &Env,
-    expr: &Expr,
-    vars: &HashSet<String>,
-) -> Result<MagType, MagError> {
-    match expr {
-        Expr::Symbol(name) if vars.contains(name) => Ok(MagType::Var(name.clone())),
-        Expr::Symbol(name) => {
-            let candidates = env.lookup_candidates(name);
-            let types = candidates
-                .iter()
-                .filter_map(|value| match value {
-                    Value::Type(ty) => Some(ty.clone()),
-                    Value::TypeDecl(decl) => Some(MagType::Named(decl.name.clone(), vec![])),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            match types.as_slice() {
-                [ty] => Ok(ty.clone()),
-                [] if candidates.is_empty() => Err(MagError::Unresolved(name.clone())),
-                [] => Err(MagError::Type(format!("{name} is not a type"))),
-                _ => Err(MagError::Type(format!("ambiguous type name {name}"))),
-            }
-        }
-        Expr::Map(fields) => {
-            let mut out = BTreeMap::new();
-            for (k, v) in fields {
-                let name = match k {
-                    Expr::Keyword(s) | Expr::Symbol(s) | Expr::Str(s) => s.clone(),
-                    _ => {
-                        return Err(MagError::Type(
-                            "record field names must be symbols or keywords".into(),
-                        ))
-                    }
-                };
-                out.insert(name, parse_type(env, v, vars)?);
-            }
-            Ok(MagType::Record(out))
-        }
-        Expr::List(xs) if !xs.is_empty() => {
-            let head = xs[0]
-                .as_symbol()
-                .ok_or_else(|| MagError::Type("type application head must be a symbol".into()))?;
-            match head {
-                "|" => Ok(MagType::Union(
-                    xs[1..]
-                        .iter()
-                        .map(|x| parse_type(env, x, vars))
-                        .collect::<Result<_, _>>()?,
-                )),
-                "+" => Ok(MagType::Product(
-                    xs[1..]
-                        .iter()
-                        .map(|x| parse_type(env, x, vars))
-                        .collect::<Result<_, _>>()?,
-                )),
-                "List" if xs.len() == 2 => {
-                    Ok(MagType::List(Box::new(parse_type(env, &xs[1], vars)?)))
-                }
-                "Map" if xs.len() == 3 => Ok(MagType::Map(
-                    Box::new(parse_type(env, &xs[1], vars)?),
-                    Box::new(parse_type(env, &xs[2], vars)?),
-                )),
-                "TypeTag" if xs.len() == 2 => {
-                    Ok(MagType::TypeTag(Box::new(parse_type(env, &xs[1], vars)?)))
-                }
-                "Fn" if xs.len() >= 2 => {
-                    let types = xs[1..]
-                        .iter()
-                        .map(|x| parse_type(env, x, vars))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let (result, params) = types
-                        .split_last()
-                        .ok_or_else(|| MagError::Type("Fn requires a return type".into()))?;
-                    Ok(MagType::Function(params.to_vec(), Box::new(result.clone())))
-                }
-                _ => {
-                    let decl = match env.lookup(head)? {
-                        Value::TypeDecl(d) => d,
-                        _ => return Err(MagError::Type(format!("{head} is not a declared type"))),
-                    };
-                    if decl.params.len() != xs.len() - 1 {
-                        return Err(MagError::Type(format!(
-                            "{} expects {} type arguments, got {}",
-                            decl.name,
-                            decl.params.len(),
-                            xs.len() - 1
-                        )));
-                    }
-                    Ok(MagType::Named(
-                        decl.name.clone(),
-                        xs[1..]
-                            .iter()
-                            .map(|x| parse_type(env, x, vars))
-                            .collect::<Result<_, _>>()?,
-                    ))
-                }
-            }
-        }
-        _ => Err(MagError::Type("invalid type expression".into())),
     }
 }
 
@@ -1182,21 +822,10 @@ fn apply_with_signature(
                 env.define(&name, Value::Type(ty));
             }
             let evaluated = (|| {
-                let out = if let Some(checked) = &fun.checked {
-                    for (parameter, value) in checked.params.iter().zip(args) {
-                        env.define_ready(parameter.id, &parameter.name, value.clone());
-                    }
-                    eval_checked_block(&mut env, &checked.body)?
-                } else {
-                    for (p, v) in fun.params.iter().zip(args) {
-                        env.define_binding(p, v.clone())?;
-                    }
-                    let mut result = Value::Unit;
-                    for expression in &fun.body {
-                        result = eval_expr(&mut env, expression)?;
-                    }
-                    result
-                };
+                for (parameter, value) in fun.checked.params.iter().zip(args) {
+                    env.define_ready(parameter.id, &parameter.name, value.clone());
+                }
+                let out = eval_checked_block(&mut env, &fun.checked.body)?;
                 validate_value(caller, &out, &expected_return).map_err(|error| {
                     match &fun.name {
                         Some(name) => MagError::Type(format!("returning from {name}: {error}")),
@@ -2277,16 +1906,16 @@ fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
         &content,
     );
     drop(read_phase);
-    let lex_phase = env.profile_phase(Phase::ModuleLex);
     let source_snapshot = crate::diagnostic::SourceSnapshot::file(&path, &content);
-    let tokens = crate::lexer::tokenize_source(&source_snapshot)?;
-    drop(lex_phase);
-    let parse_phase = env.profile_phase(Phase::ModuleParse);
-    let exprs = crate::parser::parse_source(&tokens, &source_snapshot)?;
-    drop(parse_phase);
+    let profiler = env.profiler();
+    let authored = crate::lisp::compile_source(
+        &source_snapshot,
+        profiler.as_ref(),
+        crate::lisp::SourceRole::Module,
+    )?;
     let mut module = env.module_env(name);
     let eval_phase = env.profile_phase(Phase::ModuleEvaluate);
-    let result = eval_program(&mut module, &exprs);
+    let result = eval_program(&mut module, &authored);
     drop(eval_phase);
     match result {
         Ok(_) => {
@@ -2307,45 +1936,41 @@ fn module_value_map(defs: &BTreeMap<String, Vec<Value>>) -> BTreeMap<String, Val
         .collect()
 }
 
-// `require` needs its raw module name rather than an evaluated module symbol.
-fn maybe_require(env: &mut Env, items: &[Expr]) -> Option<Result<Value, MagError>> {
-    if matches!(items.first(),Some(Expr::Symbol(s)) if s=="require") {
-        Some(if items.len() != 2 {
-            Err(MagError::Arity {
-                expected: 1,
-                got: items.len() - 1,
-            })
-        } else {
-            match &items[1] {
-                Expr::Str(s) => eval_require(env, s),
-                _ => Err(MagError::Eval("require expects a module string".into())),
-            }
-        })
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn constant_function(env: &Env, name: &str, closure: Vec<(String, Value)>) -> Value {
+    fn constant_function(
+        env: &Env,
+        name: &str,
+        closure: Vec<(String, Value)>,
+    ) -> Result<Value, MagError> {
         let mut captured = env.child_for_call();
         for (name, value) in closure {
             captured.define(&name, value);
         }
+        let body = vec![crate::authored::BlockItem::Expr(
+            crate::authored::Expr::Name(name.into()),
+        )];
+        let checked = crate::checker::compile_resolved_function(
+            &captured,
+            None,
+            &[],
+            &[],
+            &[],
+            &MagType::Int,
+            &body,
+        )?;
         let closure = captured.snapshot();
-        Value::Fn(std::sync::Arc::new(FnValue {
+        Ok(Value::Fn(std::sync::Arc::new(FnValue {
             name: None,
             type_params: vec![],
             params: vec![],
             param_types: vec![],
             return_type: MagType::Int,
-            body: vec![Expr::Symbol(name.into())],
-            checked: None,
+            checked: std::sync::Arc::new(checked),
             closure,
-        }))
+        })))
     }
 
     fn typed_int(value: Value) -> i64 {
@@ -2395,7 +2020,8 @@ mod tests {
     fn lexical_closure_overrides_colliding_caller_binding() {
         let mut caller = Env::new();
         caller.define("value", Value::Int(99));
-        let function = constant_function(&caller, "value", vec![("value".into(), Value::Int(1))]);
+        let function =
+            constant_function(&caller, "value", vec![("value".into(), Value::Int(1))]).unwrap();
         let _fuel = fuel::install(100);
 
         assert_eq!(typed_int(apply(&caller, &function, &[]).unwrap()), 1);
@@ -2405,19 +2031,15 @@ mod tests {
     fn caller_only_late_binding_is_invisible() {
         let mut caller = Env::new();
         caller.define("late", Value::Int(42));
-        let function = constant_function(&caller, "late", vec![]);
-        let _fuel = fuel::install(100);
+        let result = constant_function(&caller, "late", vec![]);
 
-        assert!(matches!(
-            apply(&caller, &function, &[]),
-            Err(MagError::Unresolved(name)) if name == "late"
-        ));
+        assert!(matches!(result, Err(MagError::Unresolved(name)) if name == "late"));
     }
 
     #[test]
-    fn unchecked_same_type_closure_duplicates_are_ambiguous() {
+    fn checked_same_type_closure_duplicates_are_ambiguous() {
         let caller = Env::new();
-        let function = constant_function(
+        let result = constant_function(
             &caller,
             "value",
             vec![
@@ -2425,9 +2047,8 @@ mod tests {
                 ("value".into(), Value::Int(2)),
             ],
         );
-        let _fuel = fuel::install(100);
 
-        assert!(apply(&caller, &function, &[])
+        assert!(result
             .unwrap_err()
             .to_string()
             .contains("ambiguous overload value"));
@@ -2435,14 +2056,31 @@ mod tests {
 
     #[test]
     fn value_parameters_override_same_named_generic_bindings() {
+        let env = Env::new();
+        let type_params = vec!["T".into()];
+        let params = vec!["T".into()];
+        let param_types = vec![MagType::Var("T".into())];
+        let result = MagType::Var("T".into());
+        let body = vec![crate::authored::BlockItem::Expr(
+            crate::authored::Expr::Name("T".into()),
+        )];
+        let checked = crate::checker::compile_resolved_function(
+            &env,
+            None,
+            &type_params,
+            &params,
+            &param_types,
+            &result,
+            &body,
+        )
+        .unwrap();
         let function = Value::Fn(std::sync::Arc::new(FnValue {
             name: None,
-            type_params: vec!["T".into()],
-            params: vec!["T".into()],
-            param_types: vec![MagType::Var("T".into())],
-            return_type: MagType::Var("T".into()),
-            body: vec![Expr::Symbol("T".into())],
-            checked: None,
+            type_params,
+            params,
+            param_types,
+            return_type: result,
+            checked: std::sync::Arc::new(checked),
             closure: vec![],
         }));
         let _fuel = fuel::install(100);
@@ -2460,7 +2098,8 @@ mod tests {
             &first_caller,
             "value",
             vec![("value".into(), Value::Int(1))],
-        );
+        )
+        .unwrap();
         first_caller.define("value", Value::Int(99));
         let mut second_caller = first_caller.child_for_call();
         second_caller.define("value", Value::Int(100));
@@ -2478,10 +2117,12 @@ mod tests {
               (map (fn [[item Int]] -> Int item) items)))
             (artifact {})
         "#;
-        let expressions = crate::parser::parse(&crate::lexer::tokenize(source).unwrap()).unwrap();
+        let source = crate::diagnostic::SourceSnapshot::named("test.mag", source);
+        let module =
+            crate::lisp::compile_source(&source, None, crate::lisp::SourceRole::Entry).unwrap();
         let mut env = Env::new();
         let _fuel = fuel::install(1_000);
-        eval_program(&mut env, &expressions).unwrap();
+        eval_program(&mut env, &module).unwrap();
         let argument = env.lookup("values").unwrap().clone();
 
         let first = apply_named(&env, "copy", argument.clone()).unwrap();

@@ -151,8 +151,7 @@ pub struct FnValue {
     pub params: Vec<String>,
     pub param_types: Vec<MagType>,
     pub return_type: MagType,
-    pub body: Vec<Expr>,
-    pub checked: Option<Arc<CheckedFn>>,
+    pub checked: Arc<CheckedFn>,
     pub closure: Vec<Scope>,
 }
 

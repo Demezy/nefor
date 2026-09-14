@@ -1,0 +1,122 @@
+#[derive(Debug, Clone, PartialEq)]
+pub struct Module {
+    pub forms: Vec<Form>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Form {
+    Require(Require),
+    Type(TypeDeclaration),
+    Block(BlockItem),
+    Invalid(AuthoringError),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Require {
+    pub module: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeDeclaration {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlockItem {
+    Let { name: String, value: Expr },
+    Expr(Expr),
+    Invalid(AuthoringError),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    Unit,
+    Str(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Keyword(String),
+    Name(String),
+    Vector(Vec<Expr>),
+    Record(Vec<(String, Expr)>),
+    If {
+        condition: Box<Expr>,
+        then_branch: Box<Expr>,
+        else_branch: Box<Expr>,
+    },
+    Match {
+        value: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    Function(Function),
+    Ascribe {
+        target: Type,
+        value: Box<Expr>,
+    },
+    TypeTag(Type),
+    Invalid(AuthoringError),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchArm {
+    pub constructor: Type,
+    pub binding: String,
+    pub body: Box<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Function {
+    pub type_params: Vec<String>,
+    pub params: Vec<Parameter>,
+    pub result: Type,
+    pub body: Vec<BlockItem>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Parameter {
+    pub name: String,
+    pub ty: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Type {
+    Name(String),
+    Record(Vec<(String, Type)>),
+    Union(Vec<Type>),
+    Product(Vec<Type>),
+    List(Box<Type>),
+    Map(Box<Type>, Box<Type>),
+    Tag(Box<Type>),
+    Function {
+        params: Vec<Type>,
+        result: Box<Type>,
+    },
+    Apply {
+        constructor: String,
+        arguments: Vec<Type>,
+    },
+    Invalid(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AuthoringError {
+    Type(String),
+    Eval(String),
+    Arity { expected: usize, got: usize },
+}
+
+impl AuthoringError {
+    pub fn into_mag_error(self) -> crate::error::MagError {
+        match self {
+            Self::Type(message) => crate::error::MagError::Type(message),
+            Self::Eval(message) => crate::error::MagError::Eval(message),
+            Self::Arity { expected, got } => crate::error::MagError::Arity { expected, got },
+        }
+    }
+}

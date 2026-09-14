@@ -1214,6 +1214,10 @@ impl Env {
         self.profiler.is_some()
     }
 
+    pub(crate) fn profiler(&self) -> Option<CompileProfiler> {
+        self.profiler.clone()
+    }
+
     pub(crate) fn profile_phase(&self, phase: Phase) -> Option<ProfileTimer> {
         self.profiler
             .as_ref()
@@ -1232,8 +1236,17 @@ mod frame_arena_tests {
             params: vec![],
             param_types: vec![],
             return_type: crate::types::MagType::Unit,
-            body: vec![],
-            checked: None,
+            checked: Arc::new(crate::ast::CheckedFn {
+                name: None,
+                type_params: vec![],
+                params: vec![],
+                result: crate::types::MagType::Unit,
+                body: Arc::new(crate::ast::CheckedBlock {
+                    frame_layout: vec![],
+                    bindings: vec![],
+                    expressions: vec![],
+                }),
+            }),
             closure: captures,
         }))
     }

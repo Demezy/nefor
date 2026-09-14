@@ -31,6 +31,23 @@ does not alter successful artifacts or the CLI's artifact stdout.
 table of the program currently being compiled. It is deterministic per-program
 work accounting, not a hit from a future cache shared across compilations.
 
+## Compiler pipeline
+
+MAG keeps surface syntax separate from language semantics:
+
+```text
+Lisp tokens and reader tree -> authored module IR -> checked IR -> evaluation
+```
+
+The Lisp frontend owns special-form recognition, function and match layout,
+record-key normalization, and authored type grammar. The authored IR retains
+unresolved names and explicit declarations, block items, expressions, and type
+forms; environment-dependent type, binding, overload, and generic resolution
+remain in the checker. Entry programs and recursively required modules use the
+same frontend compilation path. Evaluation executes ordered authored
+`require`/`type` declarations and syntax-independent checked expressions, while
+the existing lexer/parser remain the sole owners of Lisp syntax diagnostics.
+
 ## Explicit project builds for embedders
 
 `project_config::prepare(project_root, extra_roots)` loads exactly
