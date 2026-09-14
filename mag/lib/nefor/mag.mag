@@ -10,11 +10,18 @@
 (type Field {:id String :result_type SemanticTypeId :record String :field String})
 (type IntToDecimalString {:id String :result_type SemanticTypeId :value String})
 (type ConcatStrings {:id String :result_type SemanticTypeId :values (List String)})
-(type Expression (| Trigger Capture Field IntToDecimalString ConcatStrings))
+(type Expression
+  (adt [Trigger Trigger]
+       [Capture Capture]
+       [Field Field]
+       [IntToDecimalString IntToDecimalString]
+       [ConcatStrings ConcatStrings]))
 
 (type LocalActorRef {:slot String})
 (type ExistingActorRef {:id String})
-(type ActorRef (| LocalActorRef ExistingActorRef))
+(type ActorRef
+  (adt [LocalActorRef LocalActorRef]
+       [ExistingActorRef ExistingActorRef]))
 (type TemplatePort {:actor ActorRef
                     :type TypeDescriptor
                     :type_id SemanticTypeId
@@ -38,7 +45,9 @@
                        :content PackedValue})
 (type FixedPathSegment {:value String})
 (type BoundPathSegment {:value String})
-(type PathSegment (| FixedPathSegment BoundPathSegment))
+(type PathSegment
+  (adt [FixedPathSegment FixedPathSegment]
+       [BoundPathSegment BoundPathSegment]))
 (type TemplateLogicalNode {:path (List PathSegment) :members (List LocalActorRef)})
 (type DeltaTemplate {:types (Map String TypeDescriptor)
                      :actors (List TemplateActor)
@@ -47,8 +56,6 @@
                      :nodes (List TemplateLogicalNode)
                      :actor_reference_relocations (List ActorReferenceRelocation)})
 
-;; Version 1 deliberately has one operation. A future version may introduce a
-;; tagged operation sum without making this schema generic today.
 (type InstantiateDeltaTemplate {:id String
                                 :on_actor String
                                 :on_wire String
@@ -76,10 +83,10 @@
   (fn [Initial] [[initial Initial] [operations (List ProgramOperation)]]
     -> (ProgramEnvelope Initial)
     (as (ProgramEnvelope Initial)
-      {:format "nefor.mag" :version 1 :kind "program"
+      {:format "nefor.mag" :version 2 :kind "program"
        :program (as (Program Initial)
          {:initial initial :operations operations})})))
 (let delta-envelope
   (fn [D] [[delta D]] -> (DeltaEnvelope D)
     (as (DeltaEnvelope D)
-      {:format "nefor.mag" :version 1 :kind "delta" :delta delta})))
+      {:format "nefor.mag" :version 2 :kind "delta" :delta delta})))

@@ -81,12 +81,7 @@ M.declaration = {
 -- declared tag (a type fact), extract the turn content per input, and preserve
 -- the firing machine's product order. Pure: strings and structured values pass
 -- through verbatim for the provider layer to serialize.
-local function selected_content(content, schema, arrival)
-  if type(schema) == "table" and type(schema.root) == "table"
-      and schema.root.kind == "union" and type(arrival) == "table"
-      and type(arrival.constructor_id) == "string" then
-    return { type = arrival.constructor_id, value = content }
-  end
+local function selected_content(content)
   return content
 end
 

@@ -10,11 +10,11 @@ local count = { kind = "named", name = "nefor.dynamic.DynamicCount", arguments =
 
 M.declaration = {
   name = "dynamic-output",
-  type_variables = { "T" },
+  type_variables = { "T", "R" },
   semantic = {
-    input = { kind = "union", items = { indexed, count } },
+    input = { kind = "variable", name = "R" },
     output = dynamic,
-    inputs = { { wire = INPUT, type = { kind = "union", items = { indexed, count } } } },
+    inputs = { { wire = INPUT, type = { kind = "variable", name = "R" } } },
     outputs = { { wire = OUTPUT, type = dynamic } },
   },
   params = {},
@@ -56,9 +56,11 @@ function M.construct(id, _, emit)
 
   function instance.deliver(activation)
     local message = (((activation or {}).messages or {})[1] or {}).message or {}
-    local value = message.value
-    local semantic = message.semantic_value
-    if finished or type(value) ~= "table" or type(value.collection) ~= "string" then
+    local envelope = message.value
+    local value = type(envelope) == "table" and envelope.value or nil
+    local constructor = type(envelope) == "table" and envelope.constructor or nil
+    if finished or (constructor ~= "Item" and constructor ~= "Complete")
+        or type(value) ~= "table" or type(value.collection) ~= "string" then
       return failure("dynamic_output_invalid_value", value)
     end
     if collection == nil then collection = value.collection end
@@ -71,8 +73,7 @@ function M.construct(id, _, emit)
         return failure("dynamic_output_invalid_item", value)
       end
       values[value.index] = value.value
-      semantic_values[value.index] = type(semantic) == "table"
-        and semantic.value or value.value
+      semantic_values[value.index] = value.value
       received = received + 1
     elseif value.count ~= nil then
       if count_value ~= nil or type(value.count) ~= "number" or value.count < 0

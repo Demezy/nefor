@@ -70,15 +70,15 @@ fn dynamic_output_restores_source_order_and_supports_empty_collections() {
             local actor = assert(factory.construct("output", {},
               function(message) emitted[#emitted + 1] = message end))
 
-            actor.deliver({ messages = {{ message = { value = {
+            actor.deliver({ messages = {{ message = { value = { constructor = "Item", value = {
               collection = "c", index = 1, value = "second"
-            }}}}})
-            actor.deliver({ messages = {{ message = { value = {
+            }}}}}})
+            actor.deliver({ messages = {{ message = { value = { constructor = "Complete", value = {
               collection = "c", count = 2
-            }}}}})
-            local done = actor.deliver({ messages = {{ message = { value = {
+            }}}}}})
+            local done = actor.deliver({ messages = {{ message = { value = { constructor = "Item", value = {
               collection = "c", index = 0, value = "first"
-            }}}}})
+            }}}}}})
 
             assert(done.status == "ok")
             assert(#emitted == 4) -- ready, two ordered items, completion
@@ -89,9 +89,9 @@ fn dynamic_output_restores_source_order_and_supports_empty_collections() {
             local empty_out = {}
             local empty = assert(factory.construct("empty", {},
               function(message) empty_out[#empty_out + 1] = message end))
-            local empty_done = empty.deliver({ messages = {{ message = { value = {
+            local empty_done = empty.deliver({ messages = {{ message = { value = { constructor = "Complete", value = {
               collection = "none", count = 0
-            }}}}})
+            }}}}}})
             assert(empty_done.status == "ok")
             assert(#empty_out == 2)
             assert(empty_out[2].dynamic.kind == "complete" and empty_out[2].dynamic.count == 0)
@@ -115,22 +115,10 @@ fn dynamic_index_preserves_occurrence_identity() {
               value = { answer = 42 }, semantic_value = { answer = 42 }
             }}}})
             assert(done.status == "ok")
-            assert(emitted[2].value.collection == "c" and emitted[2].value.index == 4)
-            assert(emitted[2].value.value.answer == 42)
-            assert(emitted[2].semantic_value.value.answer == 42)
+            assert(emitted[2].value.constructor == "Item")
+            assert(emitted[2].value.value.collection == "c" and emitted[2].value.value.index == 4)
+            assert(emitted[2].value.value.value.answer == 42)
 
-            local sum_out = {}
-            local sum = assert(factory.construct("sum", { collection = "s", index = 0 },
-              function(message) sum_out[#sum_out + 1] = message end))
-            sum.deliver({ messages = {{
-              message = { value = { answer = 7 } },
-              arrival = {
-                declared_type = { kind = "union", items = {} },
-                constructor_id = "result-tag",
-              },
-            }} })
-            assert(sum_out[2].semantic_value.value.type == "result-tag")
-            assert(sum_out[2].semantic_value.value.value.answer == 7)
             "#,
         )
         .exec()
@@ -212,7 +200,7 @@ fn dynamic_context_waits_for_completion_and_preserves_order() {
             assert(factory.construct("bad", {}, function() end) == nil)
             local emitted = {}
             local actor = assert(factory.construct("context", {
-              item_schema = { version = 1, root = { kind = "record", fields = {
+              item_schema = { version = 2, root = { kind = "record", fields = {
                 { name = "finding", schema = { kind = "string" } }
               }}},
             }, function(message) emitted[#emitted + 1] = message end))
@@ -240,7 +228,7 @@ fn dynamic_context_waits_for_completion_and_preserves_order() {
 
             local empty_out = {}
             local empty = assert(factory.construct("empty", {
-              item_schema = { version = 1, root = { kind = "string" } },
+              item_schema = { version = 2, root = { kind = "string" } },
             }, function(message) empty_out[#empty_out + 1] = message end))
             local empty_done = empty.deliver({ messages = {{ message = {
               dynamic = { kind = "complete", collection = "empty", count = 0 },

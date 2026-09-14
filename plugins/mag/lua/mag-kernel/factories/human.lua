@@ -68,17 +68,12 @@ end
 
 M.declaration = {
   name = "human",
+  type_variables = { "R" },
   semantic = {
     input={kind="named",name="nefor.contracts.TextAnswer",arguments={}},
-    output={kind="union",items={
-      {kind="named",name="nefor.contracts.Approved",arguments={}},
-      {kind="named",name="nefor.contracts.Rejected",arguments={}},
-    }},
+    output={kind="variable",name="R"},
     inputs={{wire="generic-provider.TextAnswer",type={kind="named",name="nefor.contracts.TextAnswer",arguments={}}}},
-    outputs={
-      {wire="human.Approved",type={kind="named",name="nefor.contracts.Approved",arguments={}}},
-      {wire="human.Rejected",type={kind="named",name="nefor.contracts.Rejected",arguments={}}},
-    },
+    outputs={{wire="human.Decision",type={kind="variable",name="R"}}},
   },
 
   params = {
@@ -89,10 +84,7 @@ M.declaration = {
     subject = "generic-provider.TextAnswer",
   },
 
-  outputs = {
-    "human.Approved",
-    "human.Rejected",
-  },
+  outputs = { "human.Decision" },
 
   signals = {
     "drain",
@@ -132,15 +124,15 @@ function M.construct(id, params, emit, deps)
       pending = nil
       if message.approved then
         emit(sign({
-          kind = "human.Approved",
-          value = { content = message.content or "" },
+          kind = "human.Decision",
+          value = { constructor = "Approved", value = { content = message.content or "" } },
           subject = subject,
           content = message.content,
         }))
       else
         emit(sign({
-          kind = "human.Rejected",
-          value = { reason = message.reason or "" },
+          kind = "human.Decision",
+          value = { constructor = "Rejected", value = { reason = message.reason or "" } },
           subject = subject,
           reason = message.reason,
         }))

@@ -1,3 +1,4 @@
+(require "core.types")
 (require "nefor.graph")
 (require "nefor.mag")
 (require "nefor.contracts")
@@ -35,7 +36,7 @@
 (type ResolvedModel {:provider String
                      :model String
                      :reasoning-effort OptionalReasoningEffort})
-(type AuthoredModel (| ResolvedModel ModelProfile))
+(type AuthoredModel (adt [ResolvedModel ResolvedModel] [ModelProfile ModelProfile]))
 (type LlmParams {:model String
                  :provider String
                  :reasoning_effort OptionalReasoningEffort
@@ -56,21 +57,10 @@
                               :error_type SemanticTypeId
                               :provider_error_type SemanticTypeId
                               :validation_error_type SemanticTypeId
-                              :max_corrections Int})
-(type DynamicStructuredOutputParams {:model String
-                                     :provider String
-                                     :reasoning_effort OptionalReasoningEffort
-                                     :model_profile OptionalModelProfile
-                                     :system String
-                                     :tools (List String)
-                                     :schema TypeSchema
-                                     :output_type SemanticTypeId
-                                     :error_type SemanticTypeId
-                                     :provider_error_type SemanticTypeId
-                                     :validation_error_type SemanticTypeId
-                                     :max_corrections Int
-                                     :dynamic_item_type SemanticTypeId
-                                     :dynamic_item_descriptor TypeDescriptor})
+                              :max_corrections Int
+                              :dynamic Bool
+                              :dynamic_item_type SemanticTypeId
+                              :dynamic_item_descriptor TypeDescriptor})
 (type RunToolParams {:model String
                      :provider String
                      :model_profile OptionalModelProfile
@@ -105,7 +95,7 @@
                 [output-type (TypeTag O)] [schema TypeSchema]
                 [dynamic Bool] [dynamic-item-type SemanticTypeId]
                 [dynamic-item-descriptor TypeDescriptor]]
-  -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
+  -> (nefor.graph.Node I (core.types.Result nefor.contracts.AgentError O))
   (let id (get config "id"))
   (let authored-model (resolve-model (get config "model")))
   (let resolved-model
@@ -143,7 +133,7 @@
                      (type-tag nefor.contracts.ToolCalls)
                      "generic-tool.ToolCalls"))
   (let result (nefor.graph.port llm-id
-                 (type-tag (| O nefor.contracts.AgentError))
+                 (type-tag (core.types.Result nefor.contracts.AgentError O))
                  "nefor.agent.Result"))
   (let run-in (nefor.graph.port run-tool-id
                  (type-tag nefor.contracts.ToolCalls)
@@ -157,7 +147,7 @@
   (let result-out (nefor.graph.port tool-result-id
                      (type-tag nefor.contracts.ProviderInput)
                      "generic-provider.ProviderOut"))
-  (as (nefor.graph.Node I (| O nefor.contracts.AgentError)) {:id id :role "ordinary" :actors
+  (as (nefor.graph.Node I (core.types.Result nefor.contracts.AgentError O)) {:id id :role "ordinary" :actors
        [(nefor.graph.actor entry-id adapter-factory [(type-evidence input-type)]
          (as AdapterParams
            {:seed "provider-in" :schema (type-schema input-type)})
@@ -167,7 +157,7 @@
              (= (type-id (type-evidence output-type))
                 (type-id (type-evidence (type-tag nefor.contracts.TextAnswer))))
              false)
-         (nefor.graph.actor llm-id llm-factory []
+         (nefor.graph.actor llm-id llm-factory [(type-evidence (type-tag (core.types.Result nefor.contracts.AgentError O)))]
            (as LlmParams {:model (get resolved-model "model")
             :provider (get resolved-model "provider")
             :reasoning_effort (get resolved-model "reasoning-effort")
@@ -183,9 +173,10 @@
            [(nefor.graph.store-port tool-calls)
             (nefor.graph.store-port result)])
          (nefor.graph.actor llm-id structured-output-factory
-           [(type-evidence output-type)]
+           [(type-evidence output-type)
+            (type-evidence (type-tag (core.types.Result nefor.contracts.AgentError O)))]
            (if dynamic
-             (as DynamicStructuredOutputParams
+             (as StructuredOutputParams
                {:model (get resolved-model "model")
                 :provider (get resolved-model "provider")
                 :reasoning_effort (get resolved-model "reasoning-effort")
@@ -193,6 +184,7 @@
                 :system (get config "system")
                 :tools (or (get config "tools") (as (List String) []))
                 :schema schema
+                :dynamic dynamic
                 :output_type (type-id (type-evidence output-type))
                 :error_type
                   (type-id (type-evidence (type-tag nefor.contracts.AgentError)))
@@ -219,7 +211,10 @@
             :validation_error_type
               (type-id
                 (type-evidence (type-tag nefor.contracts.OutputValidationError)))
-            :max_corrections (get config "max-corrections")}))
+            :max_corrections (get config "max-corrections")
+            :dynamic dynamic
+            :dynamic_item_type dynamic-item-type
+            :dynamic_item_descriptor dynamic-item-descriptor}))
            (nefor.graph.store-port llm-in)
            [(nefor.graph.store-port tool-calls)
             (nefor.graph.store-port result)]))
@@ -255,7 +250,7 @@
 (let agent (fn [M I O] [[resolve-model (Fn M AuthoredModel)]
                 [config (AgentConfig M)] [input-type (TypeTag I)]
                 [output-type (TypeTag O)]]
-  -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
+  -> (nefor.graph.Node I (core.types.Result nefor.contracts.AgentError O))
   (agent-with-schema resolve-model config input-type output-type
     (type-schema output-type) false
     (type-id (type-evidence output-type)) (type-evidence output-type))))
@@ -263,10 +258,10 @@
 (let resolved-agent (fn [M I O] [[resolve-model (Fn M ResolvedModel)]
                          [config (AgentConfig M)] [input-type (TypeTag I)]
                          [output-type (TypeTag O)]]
-  -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
+  -> (nefor.graph.Node I (core.types.Result nefor.contracts.AgentError O))
   (agent-with-schema
     (fn [[model M]] -> AuthoredModel
-      (as AuthoredModel (resolve-model model)))
+      (construct AuthoredModel ResolvedModel (resolve-model model)))
     config input-type output-type
     (type-schema output-type) false
     (type-id (type-evidence output-type)) (type-evidence output-type))))
@@ -275,7 +270,7 @@
                         [config (AgentConfig M)] [input-type (TypeTag I)]
                         [item-type (TypeTag O)]]
   -> (nefor.graph.Node I
-       (| (nefor.dynamic.DynamicList O) nefor.contracts.AgentError))
+       (core.types.Result nefor.contracts.AgentError (nefor.dynamic.DynamicList O)))
   (agent-with-schema resolve-model config input-type
     (type-tag (nefor.dynamic.DynamicList O))
     (type-schema (type-tag (List O))) true
@@ -286,10 +281,10 @@
                 [config (AgentConfig M)] [input-type (TypeTag I)]
                 [item-type (TypeTag O)]]
     -> (nefor.graph.Node I
-         (| (nefor.dynamic.DynamicList O) nefor.contracts.AgentError))
+         (core.types.Result nefor.contracts.AgentError (nefor.dynamic.DynamicList O)))
     (agent-with-schema
       (fn [[model M]] -> AuthoredModel
-        (as AuthoredModel (resolve-model model)))
+        (construct AuthoredModel ResolvedModel (resolve-model model)))
       config input-type
       (type-tag (nefor.dynamic.DynamicList O))
       (type-schema (type-tag (List O))) true
@@ -302,78 +297,40 @@
 (let read-only-tools nefor.toolsets.read-only)
 (let general-tools nefor.toolsets.general)
 
-(let result-arm (fn [I O T]
-  [[fragment (nefor.graph.Node I (| O nefor.contracts.AgentError))]
-   [type (TypeTag T)]] -> (nefor.graph.Port T)
-  (let result (get fragment "output"))
-  (nefor.graph.port (get result "actor") type (get result "wire"))))
-
 (let retry-gate (fn [T] [[config RetryGateConfig] [type (TypeTag T)]]
-  -> (nefor.graph.Node T
-       (| (nefor.contracts.Continue T) (nefor.contracts.Exhausted T)))
+  -> (nefor.graph.Node T (nefor.contracts.RetryDecision T))
   (let id (get config "id"))
   (let actor-id (str id ".retry-gate"))
-  (let result-id (str id ".result"))
   (let input (nefor.graph.port actor-id type "nefor.retry.Input"))
-  (let continued (nefor.graph.port actor-id
-                    (type-tag (nefor.contracts.Continue T))
-                    "nefor.retry.Continue"))
-  (let exhausted (nefor.graph.port actor-id
-                    (type-tag (nefor.contracts.Exhausted T))
-                    "nefor.retry.Exhausted"))
-  (let result
-    (nefor.graph.identity result-id
-      (type-tag
-        (| (nefor.contracts.Continue T) (nefor.contracts.Exhausted T)))))
+  (let result (nefor.graph.port actor-id
+                (type-tag (nefor.contracts.RetryDecision T))
+                "nefor.retry.Result"))
   (nefor.graph.node-with-operations-and-nodes id "ordinary"
     [(nefor.graph.actor actor-id retry-gate-factory
-       [(type-evidence type)]
+       [(type-evidence type)
+        (type-evidence (type-tag (nefor.contracts.RetryDecision T)))]
        (as RetryGateParams {:max_retries (get config "max-retries")})
-       (nefor.graph.store-port input)
-       [(nefor.graph.store-port continued)
-        (nefor.graph.store-port exhausted)])
-     (first (get result "actors"))]
-    [(nefor.graph.stored-route continued (get result "input"))
-     (nefor.graph.stored-route exhausted (get result "input"))]
-    (as (List nefor.graph.Message) [])
-    (as (List nefor.mag.ProgramOperation) [])
-    [(nefor.graph.logical-node [id] [])
-     (nefor.graph.logical-node [id "gate"] [actor-id])
-     (nefor.graph.logical-node [id "result"] [result-id])]
-    input
-    (get result "output"))))
+       (nefor.graph.store-port input) [(nefor.graph.store-port result)])]
+    [] [] []
+    [(nefor.graph.logical-node [id] [actor-id])]
+    input result)))
 
 (let approval-gate (fn [[config ApprovalConfig]]
   -> (nefor.graph.Node nefor.contracts.TextAnswer
-       (| nefor.contracts.Approved nefor.contracts.Rejected))
+       nefor.contracts.ApprovalDecision)
   (let id (get config "id"))
   (let actor-id (str id ".human"))
-  (let result-id (str id ".result"))
   (let input (nefor.graph.port actor-id
                 (type-tag nefor.contracts.TextAnswer)
                 "generic-provider.TextAnswer"))
-  (let approved (nefor.graph.port actor-id
-                   (type-tag nefor.contracts.Approved)
-                   "human.Approved"))
-  (let rejected (nefor.graph.port actor-id
-                   (type-tag nefor.contracts.Rejected)
-                   "human.Rejected"))
-  (let result
-    (nefor.graph.identity result-id
-      (type-tag (| nefor.contracts.Approved nefor.contracts.Rejected))))
+  (let result (nefor.graph.port actor-id
+                 (type-tag nefor.contracts.ApprovalDecision)
+                 "human.Decision"))
   (nefor.graph.node-with-operations-and-nodes id "ordinary"
-    [(nefor.graph.actor actor-id human-factory []
+    [(nefor.graph.actor actor-id human-factory
+       [(type-evidence (type-tag nefor.contracts.ApprovalDecision))]
        (as HumanParams {:prompt (get config "prompt")})
-       (nefor.graph.store-port input)
-       [(nefor.graph.store-port approved)
-        (nefor.graph.store-port rejected)])
-     (first (get result "actors"))]
-    [(nefor.graph.stored-route approved (get result "input"))
-     (nefor.graph.stored-route rejected (get result "input"))]
-    (as (List nefor.graph.Message) [])
-    (as (List nefor.mag.ProgramOperation) [])
-    [(nefor.graph.logical-node [id] [])
-     (nefor.graph.logical-node [id "human"] [actor-id])
-     (nefor.graph.logical-node [id "result"] [result-id])]
-    input
-    (get result "output"))))
+       (nefor.graph.store-port input) [(nefor.graph.store-port result)])]
+    [] [] []
+    [(nefor.graph.logical-node [id] [actor-id])]
+    input result)))

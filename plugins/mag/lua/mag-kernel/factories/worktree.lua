@@ -25,7 +25,7 @@ local function declaration(config)
       inputs={{wire="mag.Unit",type={kind="primitive",name="Unit"}}},
       outputs={
         {wire=READY,type=WORKTREE_TYPE},
-        {wire=FAILED,type=ERROR_TYPE},
+        {wire=FAILED,type=ERROR_TYPE,required=false},
       },
     },
     params = params,

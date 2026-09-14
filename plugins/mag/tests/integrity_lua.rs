@@ -92,18 +92,18 @@ fn synchronous_initial_output_drains_declarative_operations_before_start_returns
         local E={kind="named",name="nefor.mag.ExistingActorRef"}
         local F={kind="named",name="nefor.mag.FixedPathSegment"}
         local B={kind="named",name="nefor.mag.BoundPathSegment"}
-        local LOCAL="sha256:ac9051a4394ae17aaa7569c33a5454b584abcaf9bc37e2c7e456d899ca7a396c"
-        local EXISTING="sha256:092a40e12abe40aacd2004b531482f8a5585c503f46d46c2c7077a7ab65997a9"
-        local FIXED="sha256:af48b5f5e4d43945f29b0e8707634d80d8337c6937b8eb235f1a95c52cd91017"
-        local BOUND="sha256:21b86a109b971ade6464aa5b3a8bd650f14f122254af6c1c33f301e9dd57003a"
+        local LOCAL="type:LocalActorRef"
+        local EXISTING="type:ExistingActorRef"
+        local FIXED="type:FixedPathSegment"
+        local BOUND="type:BoundPathSegment"
         local template_types={String=S,[LOCAL]=L,[EXISTING]=E,[FIXED]=F,[BOUND]=B}
-        local function local_ref(slot) return {type=LOCAL,value={slot=slot}} end
-        local function existing_ref(id) return {type=EXISTING,value={id=id}} end
-        local function bound(value) return {type=BOUND,value={value=value}} end
+        local function local_ref(slot) return {constructor="LocalActorRef",value={slot=slot}} end
+        local function existing_ref(id) return {constructor="ExistingActorRef",value={id=id}} end
+        local function bound(value) return {constructor="BoundPathSegment",value={value=value}} end
         local function port(actor,wire) return {actor=actor,wire=wire,type=S,type_id="String"} end
         local operation={
           id="spawn",on_actor="source",on_wire="stub.Out",trigger_type=S,trigger_type_id="String",
-          captures={},expressions={{id="trigger",result_type="String"}},
+          captures={},expressions={{constructor="Trigger",value={id="trigger",result_type="String"}}},
           template={types=template_types,actors={{slot="spawned",id="trigger",factory="nefor.factory.stub",
             type_arguments={},params={value="child"},input={actor=local_ref("spawned"),type=S,type_id="String",wire="stub.In"},
             outputs={{actor=local_ref("spawned"),type=S,type_id="String",wire="stub.Out"}},parameter_bindings={}}},
@@ -114,8 +114,8 @@ fn synchronous_initial_output_drains_declarative_operations_before_start_returns
         local second=require("plain-data").copy(operation)
         second.id="spawn-again"
         second.captures.suffix={semantic_type=S,semantic_type_id="String",value="-again"}
-        second.expressions[2]={id="suffix",result_type="String",capture="suffix"}
-        second.expressions[3]={id="second-id",result_type="String",values={"trigger","suffix"}}
+        second.expressions[2]={constructor="Capture",value={id="suffix",result_type="String",capture="suffix"}}
+        second.expressions[3]={constructor="ConcatStrings",value={id="second-id",result_type="String",values={"trigger","suffix"}}}
         second.template.actors[1].id="second-id"
         second.template.nodes[1].path={bound("second-id")}
         assert(kernel.begin_run({run_id="sync-op",run_name="sync-op",session_id="s"}).ok)

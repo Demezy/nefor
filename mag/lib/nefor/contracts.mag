@@ -14,6 +14,7 @@
 (type ToolResult {:content String})
 (type Approved {:content String})
 (type Rejected {:reason String})
+(type ApprovalDecision (adt [Approved Approved] [Rejected Rejected]))
 (type Text {:content String})
 (type OutputViolation {:path String
                        :code String
@@ -24,7 +25,9 @@
 (type ProviderError {:message String
                      :detail OptionalIdentifier})
 (type OutputValidationError {:violations (List OutputViolation)})
-(type AgentErrorReason (| ProviderError OutputValidationError))
+(type AgentErrorReason
+  (adt [ProviderError ProviderError]
+       [OutputValidationError OutputValidationError]))
 (type AgentError {:last_output JsonValue
                   :reason AgentErrorReason})
 
@@ -32,11 +35,14 @@
 (type Timeout {:present Bool :milliseconds Int})
 (type ProcessExited {:code Int})
 (type ProcessSignaled {:signal Int})
-(type ProcessTermination (| ProcessExited ProcessSignaled))
+(type ProcessTermination
+  (adt [ProcessExited ProcessExited]
+       [ProcessSignaled ProcessSignaled]))
 (type ProcessResult {:stdout String
                      :stderr String
                      :termination ProcessTermination})
 (type ProcessFailure {:operation String :error String})
+(type RetryDecision [T] (adt [Continue T] [Exhausted T]))
 
 (let no-identifier (fn [] -> OptionalIdentifier
   (as OptionalIdentifier {:present false :value ""})))
@@ -50,6 +56,3 @@
   (as Timeout {:present false :milliseconds 0})))
 (let timeout-ms (fn [[milliseconds Int]] -> Timeout
   (as Timeout {:present true :milliseconds milliseconds})))
-
-(type Continue [T] {:value T})
-(type Exhausted [T] {:value T})

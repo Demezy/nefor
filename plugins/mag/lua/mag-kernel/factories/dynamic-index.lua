@@ -2,18 +2,18 @@ local kinds = require("kinds")
 
 local M = {}
 local INPUT = "nefor.dynamic.IndexInput"
-local OUTPUT = "nefor.dynamic.Indexed"
+local OUTPUT = "nefor.dynamic.Event"
 local item = { kind = "variable", name = "T" }
 local indexed = { kind = "named", name = "nefor.dynamic.Indexed", arguments = { item } }
 
 M.declaration = {
   name = "dynamic-index",
-  type_variables = { "T" },
+  type_variables = { "T", "R" },
   semantic = {
     input = item,
-    output = indexed,
+    output = { kind = "variable", name = "R" },
     inputs = { { wire = INPUT, type = item } },
-    outputs = { { wire = OUTPUT, type = indexed } },
+    outputs = { { wire = "nefor.dynamic.Event", type = { kind = "variable", name = "R" } } },
   },
   params = { collection = "string", index = "number" },
   template = { relocations = {} },
@@ -33,19 +33,11 @@ function M.construct(id, params, emit)
     local message = envelope.message or {}
     local value = message.value
     if value == nil then value = message end
-    local semantic = message.semantic_value or value
-    local arrival = envelope.arrival
-    if type(arrival) == "table" and type(arrival.declared_type) == "table"
-        and arrival.declared_type.kind == "union"
-        and type(arrival.constructor_id) == "string" then
-      semantic = { type = arrival.constructor_id, value = semantic }
-    end
-    emit({ kind = OUTPUT, from = id, value = {
+    local indexed_value = {
       collection = params.collection, index = params.index, value = value,
-    }, semantic_value = {
-      collection = params.collection, index = params.index,
-      value = semantic,
-    } })
+    }
+    emit({ kind = OUTPUT, from = id,
+      value = { constructor = "Item", value = indexed_value } })
     return { status = "ok" }
   end
   emit({ kind = kinds.ready, from = id })

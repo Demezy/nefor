@@ -474,7 +474,8 @@ async fn load_text_answer_program(
     source_dir: &Path,
 ) -> Value {
     let source = r#"
-(require "nefor.actors")
+(require "core.types")
+    (require "nefor.actors")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
@@ -494,7 +495,7 @@ async fn load_text_answer_program(
                (type-tag nefor.contracts.Task)
                (type-tag nefor.contracts.TextAnswer)))
 (let output (nefor.graph.output "result"
-               (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+               (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))
 (let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
                  (nefor.graph.add-edges graph
                    [(nefor.graph.edge start answer)

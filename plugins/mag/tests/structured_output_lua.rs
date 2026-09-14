@@ -107,7 +107,7 @@ fn structured_output_retries_and_preserves_tool_rounds() {
         end
         local function emit(message) emitted[#emitted + 1] = message end
         local schema = {
-          version = 1,
+          version = 2,
           root = { kind = "record", fields = {
             { name = "task", schema = { kind = "string" } }
           }}
@@ -171,8 +171,8 @@ fn structured_output_retries_and_preserves_tool_rounds() {
 
         actor.deliver({ kind = "reply", result = { text = [[{"task":"build"}]] } })
         assert(emitted[#emitted - 1].kind == "nefor.agent.Result")
-        assert(emitted[#emitted - 1].semantic_type_id == "output-type-tag")
-        assert(emitted[#emitted - 1].value.task == "build")
+        assert(emitted[#emitted - 1].value.constructor == "Ok")
+        assert(emitted[#emitted - 1].value.value.task == "build")
       "#,
     )
     .exec()
@@ -189,7 +189,7 @@ fn exhausted_corrections_emit_agent_error_without_attempt_count() {
         local facts = {}
         local actor = assert(factory.construct("typed", {
           provider = "mock-provider",
-          schema = { version = 1, root = { kind = "string" } },
+          schema = { version = 2, root = { kind = "string" } },
           max_corrections = 2,
           output_type = "output-type-tag",
           error_type = "agent-error-tag",
@@ -205,11 +205,11 @@ fn exhausted_corrections_emit_agent_error_without_attempt_count() {
         actor.deliver({ kind = "reply", result = { text = "null" } })
         local terminal = emitted[#emitted - 1]
         assert(terminal.kind == "nefor.agent.Result")
-        assert(terminal.semantic_type_id == "agent-error-tag")
-        assert(terminal.value.reason.type == "validation-error-tag")
-        assert(terminal.value.reason.value.violations[1].path == "$")
-        assert(terminal.value.reason.value.attempts == nil)
-        assert(terminal.value.last_output.text == "null")
+        assert(terminal.value.constructor == "Error")
+        assert(terminal.value.value.reason.constructor == "OutputValidationError")
+        assert(terminal.value.value.reason.value.violations[1].path == "$")
+        assert(terminal.value.value.reason.value.attempts == nil)
+        assert(terminal.value.value.last_output.text == "null")
       "#,
     )
     .exec()
@@ -225,7 +225,7 @@ fn zero_corrections_rejects_the_initial_invalid_candidate() {
         local emitted = {}
         local actor = assert(factory.construct("no-retry", {
           provider = "mock-provider",
-          schema = { version = 1, root = { kind = "string" } },
+          schema = { version = 2, root = { kind = "string" } },
           max_corrections = 0,
           output_type = "output-type-tag",
           error_type = "agent-error-tag",
@@ -239,9 +239,9 @@ fn zero_corrections_rejects_the_initial_invalid_candidate() {
         actor.deliver({ kind = "reply", result = { text = "1", raw = "candidate" } })
         local terminal = emitted[#emitted - 1]
         assert(terminal.kind == "nefor.agent.Result")
-        assert(terminal.semantic_type_id == "agent-error-tag")
-        assert(terminal.value.last_output.raw == "candidate")
-        assert(terminal.value.reason.value.violations[1].code == "invalid_provider_envelope")
+        assert(terminal.value.constructor == "Error")
+        assert(terminal.value.value.last_output.raw == "candidate")
+        assert(terminal.value.value.reason.value.violations[1].code == "invalid_provider_envelope")
         for _, message in ipairs(emitted) do
           assert(not (message.kind == "capability.invoke" and message.ref == "no-retry@r2"))
         end
@@ -269,7 +269,7 @@ fn wrapped_retry_requests_provider_envelope_and_named_union_routes_constructor()
         end
         local actor = assert(factory.construct("named-union", {
           provider = "mock-provider",
-          schema = { version = 1, root = { kind = "named", name = "Choice", body = {
+          schema = { version = 2, root = { kind = "named", name = "Choice", body = {
             kind = "union", variants = {
               { tag = "left-tag", schema = { kind = "named", name = "Left",
                 body = { kind = "record", fields = {{ name = "answer", schema = { kind = "int" } }} }
@@ -295,8 +295,8 @@ fn wrapped_retry_requests_provider_envelope_and_named_union_routes_constructor()
         assert(prompt:find([[{"value": <corrected value>}]], 1, true), prompt)
         actor.deliver({ kind = "reply", result = { text = [[{"value":{"type":"left-tag","value":{"answer":42}}}]] } })
         local terminal = emitted[#emitted - 1]
-        assert(terminal.semantic_type_id == "left-tag")
-        assert(terminal.value.answer == 42)
+        assert(terminal.value.constructor == "Ok")
+        assert(terminal.value.value.value.answer == 42)
       "#,
     )
     .exec()
@@ -312,7 +312,7 @@ fn tagged_result_preserves_the_selected_constructor_without_a_selector() {
         local emitted = {}
         local actor = assert(factory.construct("tagged", {
           provider = "mock-provider",
-          schema = { version = 1, root = { kind = "union", variants = {
+          schema = { version = 2, root = { kind = "union", variants = {
             { tag = "left-tag", schema = { kind = "named", name = "Left",
               body = { kind = "record", fields = {
                 { name = "answer", schema = { kind = "int" } }
@@ -335,8 +335,8 @@ fn tagged_result_preserves_the_selected_constructor_without_a_selector() {
           result = { text = [[{"value":{"type":"left-tag","value":{"answer":42}}}]] } })
         local terminal = emitted[#emitted - 1]
         assert(terminal.kind == "nefor.agent.Result")
-        assert(terminal.semantic_type_id == "left-tag")
-        assert(terminal.value.answer == 42)
+        assert(terminal.value.constructor == "Ok")
+        assert(terminal.value.value.value.answer == 42)
         assert(terminal.variant == nil)
       "#,
     )
@@ -353,7 +353,7 @@ fn ordinary_string_output_accepts_the_empty_string() {
         local emitted = {}
         local actor = assert(factory.construct("empty-string", {
           provider = "mock-provider",
-          schema = { version = 1, root = { kind = "string" } },
+          schema = { version = 2, root = { kind = "string" } },
           max_corrections = 0,
           output_type = "output-type-tag",
           error_type = "agent-error-tag",
@@ -367,8 +367,8 @@ fn ordinary_string_output_accepts_the_empty_string() {
         actor.deliver({ kind = "reply", result = { text = [[{"value":""}]] } })
         local terminal = emitted[#emitted - 1]
         assert(terminal.kind == "nefor.agent.Result")
-        assert(terminal.semantic_type_id == "output-type-tag")
-        assert(terminal.value == "")
+        assert(terminal.value.constructor == "Ok")
+        assert(terminal.value.value == "")
       "#,
     )
     .exec()
@@ -385,7 +385,7 @@ fn provider_failures_and_retry_signals_preserve_boundary_lifecycle() {
           local emitted = {}
           local actor = assert(factory.construct(id, {
             provider = "mock-provider",
-            schema = { version = 1, root = { kind = "string" } },
+            schema = { version = 2, root = { kind = "string" } },
             max_corrections = 1,
             output_type = "output-type-tag",
             error_type = "agent-error-tag",
@@ -403,17 +403,17 @@ fn provider_failures_and_retry_signals_preserve_boundary_lifecycle() {
         correlation.deliver({ kind = "reply", error = "provider unavailable" })
         local correlation_error = correlation_out[#correlation_out - 1]
         assert(correlation_error.kind == "nefor.agent.Result")
-        assert(correlation_error.semantic_type_id == "agent-error-tag")
-        assert(correlation_error.value.reason.type == "provider-error-tag")
-        assert(correlation_error.value.reason.value.message == "provider unavailable")
-        assert(correlation_error.value.reason.value.detail.present == false)
-        assert(nefor.json.encode(correlation_error.value.last_output) == "null")
+        assert(correlation_error.value.constructor == "Error")
+        assert(correlation_error.value.value.reason.constructor == "ProviderError")
+        assert(correlation_error.value.value.reason.value.message == "provider unavailable")
+        assert(correlation_error.value.value.reason.value.detail.present == false)
+        assert(nefor.json.encode(correlation_error.value.value.last_output) == "null")
 
         local detailed, detailed_out = new_actor("detailed")
         detailed.deliver({ kind = "reply", error = {
           message = "provider message", detail = "provider-owned detail"
         }})
-        local detailed_error = detailed_out[#detailed_out - 1].value.reason.value
+        local detailed_error = detailed_out[#detailed_out - 1].value.value.reason.value
         assert(detailed_error.message == "provider message")
         assert(detailed_error.detail.present == true)
         assert(detailed_error.detail.value == "provider-owned detail")
@@ -422,7 +422,7 @@ fn provider_failures_and_retry_signals_preserve_boundary_lifecycle() {
         in_band.deliver({ kind = "reply", result = {
           finish_reason = "error", error = "upstream refused"
         }})
-        assert(in_band_out[#in_band_out - 1].value.reason.value.message == "upstream refused")
+        assert(in_band_out[#in_band_out - 1].value.value.reason.value.message == "upstream refused")
 
         for _, bad_detail in ipairs({ "", false, { nested = "not a message" } }) do
           local malformed, malformed_out = new_actor("malformed-detail")
@@ -430,7 +430,7 @@ fn provider_failures_and_retry_signals_preserve_boundary_lifecycle() {
             finish_reason = "error", error = bad_detail
           }})
           assert(malformed_out[#malformed_out - 1].kind == "nefor.agent.Result")
-          assert(malformed_out[#malformed_out - 1].value.reason.value.message
+          assert(malformed_out[#malformed_out - 1].value.value.reason.value.message
             == 'provider returned finish_reason "error" with no detail')
         end
 
@@ -445,8 +445,8 @@ fn provider_failures_and_retry_signals_preserve_boundary_lifecycle() {
         retained.deliver({ kind = "reply", result = { text = "1", marker = "first" } })
         retained.deliver({ kind = "reply", error = "correction transport failed" })
         local retained_error = retained_out[#retained_out - 1]
-        assert(retained_error.value.reason.value.message == "correction transport failed")
-        assert(retained_error.value.last_output.marker == "first")
+        assert(retained_error.value.value.reason.value.message == "correction transport failed")
+        assert(retained_error.value.value.last_output.marker == "first")
 
         local after_tool, after_tool_out = new_actor("after-tool")
         after_tool.deliver({ kind = "reply", result = { marker = "tool-round", tool_calls = {{
@@ -457,7 +457,7 @@ fn provider_failures_and_retry_signals_preserve_boundary_lifecycle() {
         }}}})
         after_tool.deliver({ kind = "reply", error = "post-tool provider failure" })
         local tool_error = after_tool_out[#after_tool_out - 1]
-        assert(tool_error.value.last_output.marker == "tool-round")
+        assert(tool_error.value.value.last_output.marker == "tool-round")
 
         local drained, drained_out = new_actor("drained")
         drained.deliver({ kind = "reply", result = { text = "1" } })
@@ -479,7 +479,7 @@ fn fresh_activation_resets_attempts_but_tool_continuation_does_not() {
         local emitted = {}
         local actor = assert(factory.construct("repeat", {
           provider = "mock-provider",
-          schema = { version = 1, root = { kind = "string" } },
+          schema = { version = 2, root = { kind = "string" } },
           max_corrections = 2,
           output_type = "output-type-tag",
           error_type = "agent-error-tag",
@@ -495,7 +495,7 @@ fn fresh_activation_resets_attempts_but_tool_continuation_does_not() {
 
         activate("first")
         actor.deliver({ kind = "reply", result = { text = [[{"value":"ok"}]] } })
-        assert(emitted[#emitted - 1].semantic_type_id == "output-type-tag")
+        assert(emitted[#emitted - 1].value.constructor == "Ok")
 
         activate("second")
         actor.deliver({ kind = "reply", result = { text = "1" } })
@@ -506,8 +506,8 @@ fn fresh_activation_resets_attempts_but_tool_continuation_does_not() {
         actor.deliver({ kind = "reply", result = { text = "false" } })
         actor.deliver({ kind = "reply", result = { text = "null" } })
         local terminal = emitted[#emitted - 1]
-        assert(terminal.semantic_type_id == "agent-error-tag")
-        assert(terminal.value.reason.value.violations ~= nil)
+        assert(terminal.value.constructor == "Error")
+        assert(terminal.value.value.reason.value.violations ~= nil)
       "#,
     )
     .exec()
@@ -523,7 +523,7 @@ fn dynamic_structured_output_emits_indexed_items_and_explicit_completion() {
         local emitted = {}
         local actor = assert(factory.construct("planner", {
           provider = "mock-provider",
-          schema = { version = 1, root = { kind = "list", item = {
+          schema = { version = 2, root = { kind = "list", item = {
             kind = "record", fields = {{ name = "task", schema = { kind = "string" } }}
           }}},
           max_corrections = 0,
@@ -531,6 +531,7 @@ fn dynamic_structured_output_emits_indexed_items_and_explicit_completion() {
           error_type = "agent-error-tag",
           provider_error_type = "provider-error-tag",
           validation_error_type = "validation-error-tag",
+          dynamic = true,
           dynamic_item_type = "task-tag",
           dynamic_item_descriptor = { kind = "record", fields = {
             { name = "task", type = { kind = "primitive", name = "String" } }
@@ -550,22 +551,22 @@ fn dynamic_structured_output_emits_indexed_items_and_explicit_completion() {
         local second = emitted[#emitted - 2]
         local complete = emitted[#emitted - 1]
         assert(first.kind == "nefor.agent.Result")
-        assert(first.semantic_type_id == "dynamic-list-tag")
-        assert(first.value.task == "first")
+        assert(first.value.constructor == "Ok")
+        assert(first.value.value.task == "first")
         assert(first.dynamic.kind == "item" and first.dynamic.index == 0)
-        assert(second.value.task == "second" and second.dynamic.index == 1)
+        assert(second.value.value.task == "second" and second.dynamic.index == 1)
         assert(complete.dynamic.kind == "complete" and complete.dynamic.count == 2)
         assert(first.dynamic.collection == second.dynamic.collection)
         assert(second.dynamic.collection == complete.dynamic.collection)
         assert(emitted[#emitted].kind == "mag.complete")
 
         local malformed = factory.construct("malformed", {
-          schema = { version = 1, root = { kind = "list", item = { kind = "string" } } },
+          schema = { version = 2, root = { kind = "list", item = { kind = "string" } } },
           max_corrections = 0,
           output_type = "dynamic-list-tag", error_type = "agent-error-tag",
           provider_error_type = "provider-error-tag",
           validation_error_type = "validation-error-tag",
-          dynamic_item_type = "item-tag"
+          dynamic = true, dynamic_item_type = "item-tag"
         }, function() end, { conversation = { emit = function() end } })
         assert(malformed == nil)
         "#,

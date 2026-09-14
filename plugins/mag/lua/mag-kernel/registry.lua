@@ -529,8 +529,10 @@ function registry:validate_modification(modification, resolve, existing_specs)
             if endpoint.wire==input.wire then expected_input=type_node.substitute(endpoint.type,bindings) end
           end
           local expected_outputs={}
+          local optional_outputs={}
           for _,endpoint in ipairs(decl.semantic.outputs) do
             expected_outputs[endpoint.wire]=type_node.substitute(endpoint.type,bindings)
+            optional_outputs[endpoint.wire]=endpoint.required==false
           end
           if not expected_input or not type_node.equal(input.type,expected_input) then
             table.insert(errors,string.format("actor %q: semantic input wire has the wrong type",tostring(spec.id)))
@@ -543,11 +545,8 @@ function registry:validate_modification(modification, resolve, existing_specs)
             else actual[output.wire]=output.type end
           end
           for wire,expected in pairs(expected_outputs) do
-            local required=type_node.equal(expected,semantic_output)
-            if semantic_output.kind=="union" then
-              for _,arm in ipairs(semantic_output.items) do if type_node.equal(expected,arm) then required=true end end
-            end
-            if (required and not actual[wire]) or (actual[wire] and not compatible_output_type(expected,actual[wire])) then
+            if (not actual[wire] and not optional_outputs[wire])
+                or (actual[wire] and not compatible_output_type(expected,actual[wire])) then
               table.insert(errors,string.format("actor %q: semantic output for wire %q is missing or has the wrong type",tostring(spec.id),wire))
             end
             actual[wire]=nil

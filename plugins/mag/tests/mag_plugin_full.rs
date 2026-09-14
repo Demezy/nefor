@@ -251,6 +251,7 @@ pub mod kernel {
         fn compile_reuses_shared_nodes_across_a_multi_agent_graph() {
             let host = shipped_host();
             let source = r#"
+    (require "core.types")
     (require "nefor.actors")
     (require "nefor.artifact")
     (require "nefor.contracts")
@@ -264,7 +265,7 @@ pub mod kernel {
 
     (let make-agent (fn [I O] [[id String] [input-type (TypeTag I)]
                                 [output-type (TypeTag O)]]
-      -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
+      -> (nefor.graph.Node I (core.types.Result nefor.contracts.AgentError O))
       (nefor.actors.resolved-agent exact-model
         (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel)
           {:id id :model resolved
@@ -285,12 +286,12 @@ pub mod kernel {
     (let right (make-agent "right" (type-tag nefor.contracts.Task)
                   (type-tag nefor.contracts.TextAnswer)))
     (let synthesis (make-agent "synthesis"
-                      (type-tag (+ (| nefor.contracts.TextAnswer nefor.contracts.AgentError)
-                                   (| nefor.contracts.TextAnswer nefor.contracts.AgentError)
-                                   (| nefor.contracts.TextAnswer nefor.contracts.AgentError)))
+                      (type-tag (+ (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer)
+                                   (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer)
+                                   (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer)))
                       (type-tag nefor.contracts.TextAnswer)))
     (let result (nefor.graph.output "result"
-                   (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+                   (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))
     (let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
                      (nefor.graph.add-edges graph
                        [(nefor.graph.edge left-task left)
@@ -315,6 +316,7 @@ pub mod kernel {
         fn run_model_snapshot_overrides_llm_factories_without_mutating_specs() {
             let host = shipped_host();
             let direct = r#"
+    (require "core.types")
     (require "nefor.actors")
     (require "nefor.agents")
     (require "nefor.artifact")
@@ -328,7 +330,7 @@ pub mod kernel {
     (let worker (nefor.agents.with-resolved-tools exact-model resolved "worker" "" []
       (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer) 2))
     (let result (nefor.graph.output "result"
-      (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+      (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))
     (nefor.artifact.compile (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
         [(nefor.graph.edge start worker) (nefor.graph.edge worker result)])))
@@ -343,8 +345,8 @@ pub mod kernel {
                     "(type-tag Answer) 2))",
                 )
                 .replace(
-                    "(type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))",
-                    "(type-tag (| Answer nefor.contracts.AgentError))",
+                    "(type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))",
+                    "(type-tag (core.types.Result nefor.contracts.AgentError Answer))",
                 );
             for (run_id, source, factory) in [
                 ("snapshot-direct", direct.to_owned(), "nefor.factory.llm"),
@@ -555,29 +557,28 @@ pub mod kernel {
         fn authored_model_profiles_resolve_from_the_owned_run_snapshot() {
             let host = shipped_host();
             let direct = r#"
+    (require "core.types")
     (require "nefor.actors")
     (require "nefor.agents")
     (require "nefor.artifact")
     (require "nefor.contracts")
     (require "nefor.graph")
-    (type Current {})
-    (type Fast {})
-    (type Model (| Current Fast))
-    (let fast (as Model (as Fast {})))
+    (type Model (adt [Current Unit] [Fast Unit]))
+    (let fast (construct Model Fast nil))
     (let resolve-model (fn [[model Model]] -> nefor.actors.AuthoredModel
       (match model
         [Current value
-          (as nefor.actors.AuthoredModel
+          (construct nefor.actors.AuthoredModel ResolvedModel
             (as nefor.actors.ResolvedModel
               {:provider "authored-provider" :model "authored-model"
                :reasoning-effort nefor.actors.no-reasoning-effort}))]
         [Fast value
-          (as nefor.actors.AuthoredModel (nefor.actors.model-profile "fast"))])))
+          (construct nefor.actors.AuthoredModel ModelProfile (nefor.actors.model-profile "fast"))])))
     (let start (nefor.actors.task-source "task" "answer"))
     (let worker (nefor.agents.with-tools resolve-model fast "worker" "" []
       (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer) 2))
     (let result (nefor.graph.output "result"
-      (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+      (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))
     (nefor.artifact.compile (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
         [(nefor.graph.edge start worker) (nefor.graph.edge worker result)])))
@@ -592,8 +593,8 @@ pub mod kernel {
                     "(type-tag Answer) 2))",
                 )
                 .replace(
-                    "(type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))",
-                    "(type-tag (| Answer nefor.contracts.AgentError))",
+                    "(type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))",
+                    "(type-tag (core.types.Result nefor.contracts.AgentError Answer))",
                 );
             for (run_id, source, factory) in [
                 ("profile-direct", direct.to_owned(), "nefor.factory.llm"),
@@ -772,6 +773,7 @@ pub mod kernel {
         fn task_source_preserves_task_type_and_value_at_runtime() {
             let host = shipped_host();
             let source = r#"
+    (require "core.types")
     (require "nefor.actors")
     (require "nefor.artifact")
     (require "nefor.contracts")
@@ -817,6 +819,7 @@ pub mod kernel {
         fn fixed_sequence_of_task_sources_bootstraps_once_at_its_outer_unit_boundary() {
             let host = shipped_host();
             let source = r#"
+    (require "core.types")
     (require "nefor.actors")
     (require "nefor.artifact")
     (require "nefor.graph")
@@ -904,17 +907,6 @@ pub mod kernel {
                     "sequence.input",
                 ),
                 (
-                    "unit-root-text-dependency",
-                    r#"
-(let text (as (| Unit nefor.contracts.Text)
-  (as nefor.contracts.Text {:content "stdin"})))
-(let start (nefor.graph.source "start"
-  (type-tag (| Unit nefor.contracts.Text)) text))
-(let command (nefor.shell.script "command" params))
-(let operation (nefor.node.>>> start command))"#,
-                    "start",
-                ),
-                (
                     "unit-root-dependent",
                     r#"
 (let operation (nefor.node.*> "ordered"
@@ -952,8 +944,7 @@ pub mod kernel {
 (let command (nefor.shell.script "command"
   (as nefor.shell.ShellScriptParams
     {:script "cat" :cwd "." :timeout (nefor.contracts.no-timeout)})))
-(let text (as (| Unit nefor.contracts.Text)
-  (as nefor.contracts.Text {:content "explicit"})))
+(let text nil)
 (nefor.artifact.delta
   (nefor.graph.delta-message (nefor.graph.node-delta command)
     (get command "input") text))"#;
@@ -968,18 +959,15 @@ pub mod kernel {
             let modification = crate::artifact_delta(&artifact).expect("normalize delta envelope");
             let messages = modification["messages"].as_array().unwrap();
             assert_eq!(messages.len(), 1);
-            assert_eq!(
-                messages[0]["content"]["value"]["value"]["content"],
-                "explicit"
-            );
-            assert_eq!(messages[0]["semantic_type"]["name"], "nefor.contracts.Text");
+            assert_eq!(messages[0]["content"]["value"], JsonValue::Null);
+            assert_eq!(messages[0]["semantic_type"]["name"], "Unit");
 
             let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             for (name, definitions, expected) in [
                 ("text", "(let operation (nefor.graph.identity \"missing\" (type-tag nefor.contracts.Text)))", ["root validation failed", "nefor.contracts.Text"]),
                 ("product", "(let operation (nefor.graph.identity \"missing\" (type-tag (+ Unit Unit))))", ["root validation failed", "product"]),
                 ("singleton-product", "(let operation (nefor.graph.identity \"missing\" (type-tag (+ Unit))))", ["root validation failed", "product"]),
-                ("non-unit-sum", "(let operation (nefor.graph.identity \"missing\" (type-tag (| nefor.contracts.Text nefor.contracts.Task))))", ["root validation failed", "union"]),
+                ("non-unit", "(let operation (nefor.graph.identity \"missing\" (type-tag nefor.contracts.Text)))", ["root validation failed", "Text"]),
                 ("internal", r#"
 (let command (nefor.shell.run "command" params))
 (let hidden (nefor.graph.identity "hidden" (type-tag Unit)))
@@ -1014,10 +1002,10 @@ pub mod kernel {
                 (
                     "invalid-uncovered-sum-arm.mag",
                     [
-                        "output coverage failed",
+                        "input coverage failed",
                         "start.nefor.graph.Value",
                         "left.test.Value",
-                        "available_handlers",
+                        "incoming_sources",
                     ],
                 ),
             ] {
@@ -1336,9 +1324,10 @@ pub mod kernel {
             let value = completion.result.expect("typed result");
             assert_eq!(value["value"]["stdout"], "output");
             assert_eq!(value["value"]["stderr"], "warning");
-            assert!(value["value"]["termination"]["type"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("sha256:")));
+            assert_eq!(
+                value["value"]["termination"]["constructor"],
+                "ProcessExited"
+            );
             assert_eq!(value["value"]["termination"]["value"]["code"], 9);
 
             let expression = r#"(nefor.process.exec "signaled"
@@ -1373,9 +1362,7 @@ pub mod kernel {
                 .expect("signal termination completes normally");
             let value = completion.result.expect("typed result");
             let signaled = &value["value"]["termination"];
-            assert!(signaled["type"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("sha256:")));
+            assert_eq!(signaled["constructor"], "ProcessSignaled");
             assert_eq!(signaled["value"]["signal"], 15);
         }
 
@@ -1555,7 +1542,8 @@ pub mod kernel {
             assert_eq!(result["kind"], "nefor.graph.Value");
             assert_eq!(result["value"][0]["content"], "left");
             assert_eq!(result["value"][1]["content"], "right");
-            assert_eq!(result["semantic_type_id"], result["constructor_id"]);
+            assert!(result["semantic_type_id"].as_str().is_some());
+            assert!(result["constructor_id"].is_null());
         }
 
         #[test]
@@ -1598,22 +1586,24 @@ pub mod kernel {
             let result = completion.result.expect("typed product result");
             assert_eq!(result["value"][0]["content"], "first");
             assert_eq!(result["value"][1]["count"], 2);
-            assert_eq!(result["semantic_type_id"], result["constructor_id"]);
+            assert!(result["semantic_type_id"].as_str().is_some());
+            assert!(result["constructor_id"].is_null());
         }
 
         #[test]
-        fn sum_arrival_routes_only_to_compatible_branches_and_keeps_constructor_id() {
+        fn adt_arrival_routes_only_to_its_explicit_branch_and_keeps_constructor_id() {
             let host = shipped_host();
             let modification = compile_mag_source(
                 &host,
                 "direct-sum-routing",
                 r#"
+    (require "core.types")
     (require "nefor.artifact")
     (require "nefor.graph")
+    (require "nefor.node")
 
     (type Left {:value String})
     (type Right {:value Int})
-    (type Choice (| Left Right))
 
     (let branch (fn [T] [[id String] [type (TypeTag T)]] -> (nefor.graph.Node T T)
       (let input (nefor.graph.port id type "stub.In"))
@@ -1627,18 +1617,19 @@ pub mod kernel {
           (as (List nefor.graph.StoredRoute) [])
           (as (List nefor.graph.Message) []) input output)))
 
-    (let start (nefor.graph.source "start" (type-tag Choice)
-                  (as Choice (as Left {:value "chosen"}))))
+    (let start (nefor.graph.source "start" (type-tag (core.types.Either Left Right))
+                  (construct (core.types.Either Left Right) Left
+                    (as Left {:value "chosen"}))))
     (let left (branch "left" (type-tag Left)))
     (let right (branch "right" (type-tag Right)))
-    (let result (nefor.graph.output "result" (type-tag Choice)))
+    (let selected (nefor.node.choose "selected" left right))
+    (let result (nefor.graph.output "result"
+                   (type-tag (core.types.Either Left Right))))
     (nefor.artifact.compile
         (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
           (nefor.graph.add-edges graph
-            [(nefor.graph.edge start left)
-             (nefor.graph.edge start right)
-             (nefor.graph.edge left result)
-             (nefor.graph.edge right result)])))
+            [(nefor.graph.edge start selected)
+             (nefor.graph.edge selected result)])))
                 "#,
             );
             let begun = host
@@ -1670,11 +1661,72 @@ pub mod kernel {
                 "sum graph did not complete: {emits:?}"
             );
             let completion = completion.expect("checked above");
-            let result = completion.result.expect("typed sum result");
-            assert_eq!(result["semantic_type_id"], result["constructor_id"]);
-            assert!(result["semantic_type_id"]
+            let result = completion.result.expect("typed ADT result");
+            assert_eq!(result["value"]["constructor"], "Left");
+            assert_eq!(result["value"]["value"]["value"], "chosen");
+            assert_ne!(result["semantic_type_id"], result["constructor_id"]);
+            assert!(result["constructor_id"]
                 .as_str()
                 .is_some_and(|id| id.starts_with("sha256:")));
+        }
+
+        #[test]
+        fn result_bind_routes_ok_and_reconstructs_error_without_erasure() {
+            let host = shipped_host();
+            for (run_id, constructor, payload, expected) in [
+                (
+                    "result-bind-ok",
+                    "Ok",
+                    r#""accepted""#,
+                    serde_json::json!({
+                        "constructor":"Ok", "value":"accepted"
+                    }),
+                ),
+                (
+                    "result-bind-error",
+                    "Error",
+                    r#"(as Failure {:message "rejected"})"#,
+                    serde_json::json!({"constructor":"Error","value":{"message":"rejected"}}),
+                ),
+            ] {
+                let source = format!(
+                    r#"
+(require "core.types")
+(require "nefor.artifact")
+(require "nefor.graph")
+(require "nefor.node")
+(type Failure {{:message String}})
+(let start (nefor.graph.source "start" (type-tag (core.types.Result Failure String))
+  (construct (core.types.Result Failure String) {constructor} {payload})))
+(let continuation
+  (nefor.node.lift-result "continued" (type-tag Failure)
+    (nefor.graph.identity "right" (type-tag String))))
+(let bound (nefor.node.>=> start continuation))
+(let result (nefor.graph.output-for "result" bound))
+(nefor.artifact.compile
+  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
+    (nefor.graph.add-edges graph [(nefor.graph.edge bound result)])))
+"#
+                );
+                let modification = compile_mag_source(&host, run_id, &source);
+                assert!(host.begin_run(run_id, run_id, None).expect("begin").ok);
+                host.drain_emits().expect("drain begin");
+                let outcome = host.start(run_id, &modification).expect("start");
+                assert!(outcome.ok, "{run_id}: {:?}", outcome.error);
+                let emits = host.drain_emits().expect("drain");
+                let completion = host
+                    .take_run_complete(run_id)
+                    .expect("take")
+                    .expect("complete");
+                assert_eq!(completion.result.expect("result")["value"], expected);
+                let right_ran = emits
+                    .iter()
+                    .any(|event| event["kind"] == "mag.actor_ready" && event["id"] == "right");
+                assert_eq!(right_ran, constructor == "Ok");
+                host.end_run(run_id, TeardownReason::RunComplete)
+                    .expect("end");
+                host.drain_emits().expect("drain end");
+            }
         }
 
         #[test]
@@ -1834,7 +1886,7 @@ mod tests {
         let body = serde_json::json!({
             "run_id": "unsupported-schema",
             "session_id": "session-1",
-            "artifact": {"format":"nefor.mag","version":1,"kind":"program","program":{
+            "artifact": {"format":"nefor.mag","version":2,"kind":"program","program":{
                 "initial": {
                     "actors": [{
                         "id": "answer",
@@ -1889,7 +1941,7 @@ mod tests {
         let body = serde_json::json!({
             "run_id": "synchronous-duration",
             "session_id": "session-1",
-            "artifact": {"format":"nefor.mag","version":1,"kind":"program","program":{
+            "artifact": {"format":"nefor.mag","version":2,"kind":"program","program":{
                 "initial": {
                     "actors": [{
                         "id": "sync",
@@ -1948,7 +2000,8 @@ mod tests {
         fs::write(
             root.join("main.mag"),
             r#"
-(require "nefor.actors")
+(require "core.types")
+    (require "nefor.actors")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
@@ -1963,10 +2016,10 @@ mod tests {
          :da-policy (nefor.contracts.no-da-policy)
          :max-corrections 0})
         (type-tag nefor.contracts.Task)
-        (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+        (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))
 (let result (nefor.graph.output "result"
-        (type-tag (| (| nefor.contracts.TextAnswer nefor.contracts.AgentError)
-                     nefor.contracts.AgentError))))
+        (type-tag (core.types.Result nefor.contracts.AgentError
+                    (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer)))))
 (nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
@@ -2041,13 +2094,19 @@ mod tests {
         let tool_calls = named("nefor.contracts.ToolCalls");
         let text_answer = named("nefor.contracts.TextAnswer");
         let agent_error = named("nefor.contracts.AgentError");
-        let result =
-            serde_json::json!({"kind":"union","items":[text_answer.clone(),agent_error.clone()]});
+        let result = serde_json::json!({
+            "kind":"adt", "name":"core.types.Result",
+            "arguments":[agent_error.clone(), text_answer.clone()],
+            "constructors":[
+                {"name":"Error","payload":agent_error.clone()},
+                {"name":"Ok","payload":text_answer.clone()}
+            ]
+        });
         let modification = serde_json::json!({
             "actors": [{
                 "id": "answer",
                 "factory": "llm",
-                "type_arguments": [],
+                "type_arguments": [result.clone()],
                 "input": {"wire":"generic-provider.ProviderOut","type":provider_input},
                 "outputs": [
                     {"wire":"generic-tool.ToolCalls","type":tool_calls},
@@ -2221,7 +2280,8 @@ mod tests {
         assert!(wire.contains("rust language"));
 
         let result = terminal_result.expect("durable terminal result");
-        assert_eq!(result["value"], "semantic-only");
+        assert_eq!(result["value"]["constructor"], "Ok");
+        assert_eq!(result["value"]["value"], "semantic-only");
         assert_eq!(result["result"]["text_answer"], "semantic-only");
         assert!(result["result"].get("tool_calls").is_none());
     }

@@ -7,24 +7,15 @@ local RESULT = "nefor.agent.Result"
 
 M.declaration = {
   name = "structured-output",
-  type_variables = { "T" },
+  type_variables = { "T", "R" },
   semantic = {
     input={kind="named",name="nefor.contracts.ProviderInput",arguments={}},
-    output={kind="union",items={
-      {kind="named",name="nefor.contracts.ToolCalls",arguments={}},
-      {kind="union",items={
-        {kind="variable",name="T"},
-        {kind="named",name="nefor.contracts.AgentError",arguments={}},
-      }},
-    }},
+    output={kind="variable",name="R"},
     inputs = {{ wire="generic-provider.ProviderOut", type={kind="named",
       name="nefor.contracts.ProviderInput",arguments={}} }},
     outputs = {
       {wire="generic-tool.ToolCalls",type={kind="named",name="nefor.contracts.ToolCalls",arguments={}}},
-      {wire=RESULT,type={kind="union",items={
-        {kind="variable",name="T"},
-        {kind="named",name="nefor.contracts.AgentError",arguments={}},
-      }}},
+      {wire=RESULT,type={kind="variable",name="R"}},
     },
   },
   params = {
@@ -84,12 +75,6 @@ local function correction(validation, provider_schema)
     .. "Use valid JSON escaping: encode newlines as \\n and all control characters with JSON escapes."
 end
 
-local function root_union(schema)
-  local root = schema and schema.root
-  while type(root) == "table" and root.kind == "named" do root = root.body end
-  return type(root) == "table" and root.kind == "union"
-end
-
 local function output_violations(validation, message)
   local violations = validation.violations
   if type(violations) ~= "table" or next(violations) == nil then
@@ -138,12 +123,13 @@ function M.construct(id, params, emit, deps)
       "structured-output '%s': compiler result constructor ids are required",
       tostring(id))
   end
-  if (params.dynamic_item_type == nil) ~= (params.dynamic_item_descriptor == nil) then
+  params.dynamic = params.dynamic == true
+  if params.dynamic and ((params.dynamic_item_type == nil) ~= (params.dynamic_item_descriptor == nil)) then
     return nil, string.format(
       "structured-output '%s': dynamic item type and descriptor must be supplied together",
       tostring(id))
   end
-  if params.dynamic_item_type ~= nil and
+  if params.dynamic and
       (type(params.dynamic_item_type) ~= "string"
         or type(params.dynamic_item_descriptor) ~= "table") then
     return nil, string.format(
@@ -156,49 +142,43 @@ function M.construct(id, params, emit, deps)
   local provider_params = {}
   for key, value in pairs(params) do provider_params[key] = value end
   provider_params.schema = provider_schema.schema
-  local function finish_result(state, type_id, value)
-    local message = { kind=RESULT, semantic_type_id=type_id, value=value }
-    state:finish(message, {
+  local function finish_result(state, value)
+    local result_value = { constructor = "Ok", value = value }
+    state:finish({ kind=RESULT, value=result_value }, {
       result = last_output,
-      value = value,
-      semantic_type_id = type_id,
+      value = result_value,
     })
   end
   local function finish_dynamic(state, values)
     dynamic_sequence = dynamic_sequence + 1
     local collection = id .. "@" .. tostring(dynamic_sequence)
     local messages = {}
-    local item_descriptor = params.dynamic_item_descriptor
     for index, item in ipairs(values) do
       local semantic_value = item
       local value = item
-      if type(item_descriptor) == "table" and item_descriptor.kind == "union"
-          and type(item) == "table" and item.type ~= nil and item.value ~= nil then
-        value = item.value
-      end
+
       messages[#messages + 1] = {
         kind = RESULT,
-        semantic_type_id = params.output_type,
-        value = value,
+        value = { constructor = "Ok", value = value },
         semantic_value = semantic_value,
         dynamic = { kind = "item", collection = collection, index = index - 1 },
       }
     end
     messages[#messages + 1] = {
       kind = RESULT,
-      semantic_type_id = params.output_type,
+      value = { constructor = "Ok", value = nefor.json.decode("null") },
       dynamic = { kind = "complete", collection = collection, count = #values },
     }
     state:finish_many(messages, {
       result = last_output,
-      semantic_type_id = params.output_type,
+      value = { constructor = "Ok", value = nefor.json.decode("null") },
       dynamic_count = #values,
     })
   end
   local function finish_error(state, reason_type, reason)
-    finish_result(state, params.error_type, {
-      last_output=last_output, reason={type=reason_type,value=reason},
-    })
+    state:finish({ kind=RESULT, value={ constructor="Error", value={
+      last_output=last_output, reason={constructor=reason_type,value=reason},
+    } } }, { error = reason })
   end
   return boundary.construct(id, provider_params, emit, {
     conversation = deps.conversation,
@@ -220,9 +200,9 @@ function M.construct(id, params, emit, deps)
       end
       if validation.ok then
         local value = validation.value
-        if params.dynamic_item_type ~= nil then
+        if params.dynamic then
           if type(value) ~= "table" then
-            finish_error(state, params.validation_error_type, { violations = {{
+            finish_error(state, "OutputValidationError", { violations = {{
               path = "$", code = "invalid_dynamic_list", expected = "list",
               actual = type(value), message = "dynamic structured output must be a list",
             }} })
@@ -232,17 +212,13 @@ function M.construct(id, params, emit, deps)
           finish_dynamic(state, value)
           return
         end
-        local selected = params.output_type
-        if root_union(params.schema) then
-          selected = value.type
-          value = value.value
-        end
+
         local content = type(value) == "table" and value.content or nil
         state:append({
           role = "assistant",
           content = type(content) == "string" and content or text,
         })
-        finish_result(state, selected, value)
+        finish_result(state, value)
         return
       end
       -- A rejected candidate and its correction prompt are model context, not
@@ -262,7 +238,7 @@ function M.construct(id, params, emit, deps)
           violations = violations })
       end
       if corrections >= params.max_corrections then
-        finish_error(state, params.validation_error_type, { violations=violations })
+        finish_error(state, "OutputValidationError", { violations=violations })
         return
       end
       corrections = corrections + 1
@@ -277,7 +253,7 @@ function M.construct(id, params, emit, deps)
       last_output = result
     end,
     on_error = function(state, detail)
-      finish_error(state, params.provider_error_type, provider_error(detail))
+      finish_error(state, "ProviderError", provider_error(detail))
     end,
   })
 end

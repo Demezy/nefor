@@ -53,12 +53,7 @@ function M.construct(id, params, emit)
       if value == nil then value = payload end
       values[position] = value
       local semantic = payload.semantic_value or value
-      local arrival = message.arrival
-      local declared = arrival and arrival.declared_type
-      local component = declared and declared.items and declared.items[position]
-      if type(component) == "table" and component.kind == "union" then
-        semantic = { type = arrival.constructor_id, value = value }
-      end
+
       semantic_values[position] = semantic
     end
     if values[1] == nil or values[2] == nil then

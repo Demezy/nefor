@@ -1,3 +1,4 @@
+(require "core.types")
 (require "nefor.graph")
 (require "nefor.mag")
 
@@ -266,105 +267,164 @@
       splitter-input
       output-port)))
 
-;; A typed view of one arm of a node's sum boundary. It denotes the same
-;; runtime actor and wire; the route validator proves that the selected arm is
-;; actually covered when the composed graph is compiled.
-(let arm
-  (fn [I A B T]
-    [[value (nefor.graph.Node I (| A B))] [type (TypeTag T)]]
-    -> (nefor.graph.Port T)
-    (let output (get value "output"))
-    (nefor.graph.port
-      (get output "actor") type (get output "wire"))))
+;; Nominal branches are explicit runtime operations. `choose` unpacks Either,
+;; runs each payload branch, and lifts each result back into the output Either.
+;; No route treats an ADT constructor as a transparent structural row.
+(let adt-unpack-factory "nefor.factory.adt-unpack")
+(let adt-pack-factory "nefor.factory.adt-pack")
+(type AdtUnpackParams {:owner TypeDescriptor
+                       :left_constructor String
+                       :right_constructor String})
+(type AdtPackParams {:owner TypeDescriptor :constructor String})
 
-;; Route either input arm through its corresponding node and preserve the
-;; resulting sum. MAG's idempotent sums make (| C C) normalize to C, so this
-;; one operation also covers two branches converging on the same result type.
+(let pack-adt
+  (fn [T O] [[id String] [input-type (TypeTag T)] [owner-type (TypeTag O)]
+             [constructor String]] -> (nefor.graph.Node T O)
+    (let input (nefor.graph.port id input-type "nefor.adt.Payload"))
+    (let output (nefor.graph.port id owner-type "nefor.adt.Value"))
+    (nefor.graph.node id "ordinary"
+      [(nefor.graph.actor id adt-pack-factory
+         [(type-evidence input-type) (type-evidence owner-type)]
+         (as AdtPackParams
+           {:owner (type-evidence owner-type) :constructor constructor})
+         (nefor.graph.store-port input) [(nefor.graph.store-port output)])]
+      [] [] input output)))
+
 (let choose
   (fn [A B C D]
     [[id String]
      [left (nefor.graph.Node A C)]
      [right (nefor.graph.Node B D)]]
-    -> (nefor.graph.Node (| A B) (| C D))
-    (let input
-      (nefor.graph.identity (str id ".input") (type-tag (| A B))))
+    -> (nefor.graph.Node (core.types.Either A B) (core.types.Either C D))
+    (let split-id (str id ".split"))
+    (let split-input
+      (nefor.graph.port split-id (type-tag (core.types.Either A B)) "nefor.adt.Value"))
+    (let split-left
+      (nefor.graph.port split-id (type-tag A) "nefor.adt.First"))
+    (let split-right
+      (nefor.graph.port split-id (type-tag B) "nefor.adt.Second"))
+    (let split
+      (nefor.graph.actor split-id adt-unpack-factory
+        [(type-evidence (type-tag (core.types.Either A B)))
+         (type-evidence (type-tag A)) (type-evidence (type-tag B))]
+        (as AdtUnpackParams
+          {:owner (type-evidence (type-tag (core.types.Either A B)))
+           :left_constructor "Left" :right_constructor "Right"})
+        (nefor.graph.store-port split-input)
+        [(nefor.graph.store-port split-left) (nefor.graph.store-port split-right)]))
+    (let lift-left
+      (pack-adt (str id ".left") (type-tag C)
+        (type-tag (core.types.Either C D)) "Left"))
+    (let lift-right
+      (pack-adt (str id ".right") (type-tag D)
+        (type-tag (core.types.Either C D)) "Right"))
     (let output
-      (nefor.graph.identity (str id ".output") (type-tag (| C D))))
-    (let left-input
-      (nefor.graph.port
-        (get (get input "output") "actor")
-        (type-tag A)
-        (get (get input "output") "wire")))
-    (let right-input
-      (nefor.graph.port
-        (get (get input "output") "actor")
-        (type-tag B)
-        (get (get input "output") "wire")))
+      (nefor.graph.identity (str id ".output")
+        (type-tag (core.types.Either C D))))
     (nefor.graph.node-with-operations-and-nodes id "ordinary"
-      (concat
-        (get input "actors")
-        (concat
-          (get left "actors")
-          (concat (get right "actors") (get output "actors"))))
-      (concat
-        (concat
-          (get input "routes")
-          (concat
-            (get left "routes")
-            (concat (get right "routes") (get output "routes"))))
-        [(nefor.graph.stored-route left-input (get left "input"))
-         (nefor.graph.stored-route right-input (get right "input"))
-         (nefor.graph.stored-route (get left "output") (get output "input"))
-         (nefor.graph.stored-route (get right "output") (get output "input"))])
-      (concat
-        (get input "messages")
-        (concat
-          (get left "messages")
-          (concat (get right "messages") (get output "messages"))))
-      (concat
-        (get input "operations")
-        (concat
-          (get left "operations")
-          (concat (get right "operations") (get output "operations"))))
+      (concat [split]
+        (concat (get left "actors")
+          (concat (get right "actors")
+            (concat (get lift-left "actors")
+              (concat (get lift-right "actors") (get output "actors"))))))
+      (concat (get left "routes")
+        (concat (get right "routes")
+          (concat (get lift-left "routes")
+            (concat (get lift-right "routes")
+              (concat (get output "routes")
+                [(nefor.graph.stored-route split-left (get left "input"))
+                 (nefor.graph.stored-route split-right (get right "input"))
+                 (nefor.graph.stored-route (get left "output") (get lift-left "input"))
+                 (nefor.graph.stored-route (get right "output") (get lift-right "input"))
+                 (nefor.graph.stored-route (get lift-left "output") (get output "input"))
+                 (nefor.graph.stored-route (get lift-right "output") (get output "input"))])))))
+      (concat (get left "messages")
+        (concat (get right "messages")
+          (concat (get lift-left "messages")
+            (concat (get lift-right "messages") (get output "messages")))))
+      (concat (get left "operations")
+        (concat (get right "operations")
+          (concat (get lift-left "operations")
+            (concat (get lift-right "operations") (get output "operations")))))
       (compound-nodes id
-        (concat (get input "actors") (get output "actors"))
+        (concat [split]
+          (concat (get lift-left "actors")
+            (concat (get lift-right "actors") (get output "actors"))))
         (concat (get left "nodes") (get right "nodes")))
-      (get input "input")
-      (get output "output"))))
+      split-input (get output "output"))))
 
-;; Compose a fallible node with its successful continuation. The error arm is
-;; an ordinary value and passes through unchanged; if the continuation is also
-;; fallible, idempotent sums collapse the repeated error type. This is Kleisli
-;; composition for `A | E` expressed entirely through typed node primitives.
-(let >=>
-  (fn [I A E B]
-    [[left (nefor.graph.Node I (| A E))]
-     [right (nefor.graph.Node A B)]]
-    -> (nefor.graph.Node I (| B E))
-    (let id
-      (composite-id (get left "id") ">=>" (get right "id")))
-    (let preserve-error
-      (nefor.graph.identity (str id ".error") (type-tag E)))
-    (let continue-or-error
-      (choose (str id ".choose") right preserve-error))
-    (let composed (>>> left continue-or-error))
-    ;; The error adapter and choose boundary are transparent implementation
-    ;; actors. Attribute them to the continuation's first logical node so all
-    ;; lifecycle state remains inspectable without inventing another wrapper.
-    (let choose-root (first (get continue-or-error "nodes")))
-    (let internal-members
-      (concat (get choose-root "members")
-        (nefor.graph.actor-ids (get preserve-error "actors"))))
+;; Lift a successful node into Result. This explicit operation is required
+;; before binding deterministic continuations with `>=>`.
+(let lift-result
+  (fn [I E O] [[id String] [error-type (TypeTag E)]
+               [value (nefor.graph.Node I O)]]
+    -> (nefor.graph.Node I (core.types.Result E O))
+    (let lift
+      (pack-adt (str id ".ok") (type-tag O)
+        (type-tag (core.types.Result E O)) "Ok"))
+    (let composed (>>> value lift))
     (nefor.graph.node-with-operations-and-nodes id (get composed "role")
-      (get composed "actors")
-      (get composed "routes")
-      (get composed "messages")
+      (get composed "actors") (get composed "routes") (get composed "messages")
       (get composed "operations")
-      (concat (get left "nodes")
-        (nefor.graph.attach-logical-members (get right "nodes") internal-members))
-      (get composed "input")
-      (get composed "output"))))
+      (compound-nodes id (get lift "actors") (get value "nodes"))
+      (get composed "input") (get composed "output"))))
 
+;; Kleisli composition for nominal Result. Error is repacked unchanged; only
+;; Ok is unpacked into the continuation, whose Result output remains intact.
+(let >=>
+  (fn [I E A B]
+    [[left (nefor.graph.Node I (core.types.Result E A))]
+     [right (nefor.graph.Node A (core.types.Result E B))]]
+    -> (nefor.graph.Node I (core.types.Result E B))
+    (let id (composite-id (get left "id") ">=>" (get right "id")))
+    (let split-id (str id ".split"))
+    (let split-input
+      (nefor.graph.port split-id (type-tag (core.types.Result E A)) "nefor.adt.Value"))
+    (let failed
+      (nefor.graph.port split-id (type-tag E) "nefor.adt.First"))
+    (let succeeded
+      (nefor.graph.port split-id (type-tag A) "nefor.adt.Second"))
+    (let split
+      (nefor.graph.actor split-id adt-unpack-factory
+        [(type-evidence (type-tag (core.types.Result E A)))
+         (type-evidence (type-tag E)) (type-evidence (type-tag A))]
+        (as AdtUnpackParams
+          {:owner (type-evidence (type-tag (core.types.Result E A)))
+           :left_constructor "Error" :right_constructor "Ok"})
+        (nefor.graph.store-port split-input)
+        [(nefor.graph.store-port failed) (nefor.graph.store-port succeeded)]))
+    (let preserve-error
+      (pack-adt (str id ".error") (type-tag E)
+        (type-tag (core.types.Result E B)) "Error"))
+    (let output
+      (nefor.graph.identity (str id ".output")
+        (type-tag (core.types.Result E B))))
+    (nefor.graph.node-with-operations-and-nodes id (get left "role")
+      (concat (get left "actors")
+        (concat [split]
+          (concat (get right "actors")
+            (concat (get preserve-error "actors") (get output "actors")))))
+      (concat (get left "routes")
+        (concat (get right "routes")
+          (concat (get preserve-error "routes")
+            (concat (get output "routes")
+              [(nefor.graph.stored-route (get left "output") split-input)
+               (nefor.graph.stored-route succeeded (get right "input"))
+               (nefor.graph.stored-route failed (get preserve-error "input"))
+               (nefor.graph.stored-route (get right "output") (get output "input"))
+               (nefor.graph.stored-route (get preserve-error "output") (get output "input"))]))))
+      (concat (get left "messages")
+        (concat (get right "messages")
+          (concat (get preserve-error "messages") (get output "messages"))))
+      (concat (get left "operations")
+        (concat (get right "operations")
+          (concat (get preserve-error "operations") (get output "operations"))))
+      (concat (get left "nodes")
+        (nefor.graph.attach-logical-members (get right "nodes")
+          (concat [split-id]
+            (concat (nefor.graph.actor-ids (get preserve-error "actors"))
+              (nefor.graph.actor-ids (get output "actors"))))))
+      (get left "input") (get output "output"))))
 (let sequence-empty
   (fn [I O] [[id String]] -> (nefor.graph.Node I (List O))
     (let actor-id (str id ".empty"))

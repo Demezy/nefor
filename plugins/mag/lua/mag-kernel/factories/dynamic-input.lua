@@ -14,7 +14,7 @@ M.declaration = {
   type_variables = { "T" },
   semantic = {
     input = dynamic,
-    output = { kind = "union", items = { indexed, count } },
+    output = { kind = "primitive", name = "JsonValue" },
     inputs = { { wire = INPUT, type = dynamic } },
     outputs = {
       { wire = INDEXED, type = indexed },

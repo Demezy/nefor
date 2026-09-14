@@ -3,9 +3,10 @@ local M = {}
 local PRIMITIVES = { JsonValue=true, Unit=true, Bool=true, Int=true, Float=true, String=true }
 local KEYS = {
   primitive={kind=true,name=true}, variable={kind=true,name=true},
-  named={kind=true,name=true,arguments=true,body=true}, list={kind=true,item=true},
-  map={kind=true,key=true,value=true}, record={kind=true,fields=true},
-  union={kind=true,items=true}, product={kind=true,items=true},
+  named={kind=true,name=true,arguments=true,body=true},
+  adt={kind=true,name=true,arguments=true,constructors=true},
+  list={kind=true,item=true}, map={kind=true,key=true,value=true},
+  record={kind=true,fields=true}, product={kind=true,items=true},
 }
 
 local function dense_array(value)
@@ -39,7 +40,7 @@ local function validate(node, variables, path)
     if type(node.name)~="string" or not variables or not variables[node.name] then
       return nil,path.." has an unresolved variable"
     end
-  elseif node.kind=="named" then
+  elseif node.kind=="named" or node.kind=="adt" then
     if type(node.name)~="string" or node.name=="" or not node.name:find("%.") then
       return nil,path.." nominal name must be qualified"
     end
@@ -47,8 +48,23 @@ local function validate(node, variables, path)
     for index,argument in ipairs(node.arguments) do
       local ok,err=validate(argument,variables,path..".arguments["..index.."]"); if not ok then return nil,err end
     end
-    if node.body~=nil then
+    if node.kind=="named" and node.body~=nil then
       local ok,err=validate(node.body,variables,path..".body"); if not ok then return nil,err end
+    elseif node.kind=="adt" then
+      if not dense_array(node.constructors) or #node.constructors==0 then
+        return nil,path..".constructors must be a non-empty dense list"
+      end
+      local previous=nil
+      for index,constructor in ipairs(node.constructors) do
+        if type(constructor)~="table" or not exact_keys(constructor,{name=true,payload=true})
+            or type(constructor.name)~="string" or constructor.name==""
+            or (previous and constructor.name<=previous) then
+          return nil,path..".constructors must have unique sorted {name,payload} entries"
+        end
+        previous=constructor.name
+        local ok,err=validate(constructor.payload,variables,path..".constructors["..index.."].payload")
+        if not ok then return nil,err end
+      end
     end
   elseif node.kind=="list" then
     local ok,err=validate(node.item,variables,path..".item"); if not ok then return nil,err end
@@ -84,34 +100,8 @@ end
 function M.equal(left,right)
   if type(left)~=type(right) then return false end
   if type(left)~="table" then return left==right end
-  if left.kind=="named" and right.kind=="named" then
-    -- Runtime declarations name nominal constructors without embedding their
-    -- MAG bodies. Compiler evidence carries the body so Rust can verify the
-    -- complete descriptor; declaration conformance remains nominal here.
+  if (left.kind=="named" and right.kind=="named") or (left.kind=="adt" and right.kind=="adt") then
     return left.name==right.name and M.equal(left.arguments,right.arguments)
-  end
-  if left.kind=="union" or right.kind=="union" then
-    if left.kind~="union" or right.kind~="union" then return false end
-    local function flatten(node,out)
-      if node.kind=="union" then
-        for _,item in ipairs(node.items) do flatten(item,out) end
-      else
-        out[#out+1]=node
-      end
-    end
-    local left_items,right_items={},{}
-    flatten(left,left_items); flatten(right,right_items)
-    local function contains(items,candidate)
-      for _,item in ipairs(items) do if M.equal(item,candidate) then return true end end
-      return false
-    end
-    for _,item in ipairs(left_items) do
-      if not contains(right_items,item) then return false end
-    end
-    for _,item in ipairs(right_items) do
-      if not contains(left_items,item) then return false end
-    end
-    return true
   end
   for key,value in pairs(left) do if not M.equal(value,right[key]) then return false end end
   for key in pairs(right) do if left[key]==nil then return false end end
@@ -127,6 +117,8 @@ function M.substitute(node,bindings)
       else copy[key]={}; for index,item in ipairs(value) do
         if node.kind=="record" and key=="fields" then
           copy[key][index]={name=item.name,type=M.substitute(item.type,bindings)}
+        elseif node.kind=="adt" and key=="constructors" then
+          copy[key][index]={name=item.name,payload=M.substitute(item.payload,bindings)}
         else copy[key][index]=M.substitute(item,bindings) end
       end end
     else copy[key]=value end

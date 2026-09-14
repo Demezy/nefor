@@ -359,7 +359,7 @@ function M:on_emit(id, message, generation)
     local dynamic_complete = type(dynamic_protocol) == "table"
       and dynamic_protocol.kind == "complete"
     if boundary and boundary.actor == id and boundary.wire == kind
-        and (dynamic_item_type(arrival.type) == nil or dynamic_complete) then
+        and (dynamic_protocol == nil or dynamic_complete) then
       local host = nefor and nefor.semantic_type
       if type(boundary.type_id) == "string" and type(boundary.type) == "table" and
           (type(host) ~= "table" or type(host.accepts) ~= "function"
@@ -426,35 +426,30 @@ function M:factory_arrival(id, wire, payload)
   end
   local actual_type = endpoint.type
   local actual_type_id = endpoint.type_id
-  local constructor_id = endpoint.type_id
+  local constructor_id = nil
   local semantic_value = payload.semantic_value
   if semantic_value == nil then semantic_value = payload.value end
   local routed_value = payload.value
-  if endpoint.type.kind == "union" then
+  local constructor_payload = nil
+  if endpoint.type.kind == "adt" then
     local wrapped = type(payload.value) == "table" and payload.value or nil
-    local selected = payload.semantic_type_id or (wrapped and wrapped.type or nil)
+    local constructor = wrapped and wrapped.constructor or nil
     local host = nefor and nefor.semantic_type
-    if type(selected) ~= "string" or type(host) ~= "table" or type(host.id) ~= "function" then
+    if type(constructor) ~= "string" or type(host) ~= "table"
+        or type(host.constructor) ~= "function" then
       return nil, string.format(
-        "actor '%s' emitted a sum without a trusted constructor identity", tostring(id))
+        "actor '%s' emitted an ADT without a canonical constructor", tostring(id))
     end
-    actual_type = nil
-    for _, arm in ipairs(endpoint.type.items or {}) do
-      if host.id(arm) == selected then actual_type = arm break end
-    end
-    if not actual_type then
+    local ok, selected = pcall(host.constructor, endpoint.type, constructor)
+    if not ok or type(selected) ~= "table" then
       return nil, string.format(
-        "actor '%s' emitted constructor '%s' outside its declared sum",
-        tostring(id), tostring(selected))
+        "actor '%s' emitted constructor '%s' outside its declared ADT",
+        tostring(id), tostring(constructor))
     end
-    actual_type_id = selected
-    constructor_id = selected
-    if payload.semantic_value == nil and wrapped and wrapped.type == selected then
-      semantic_value = wrapped.value
-      routed_value = wrapped.value
-    end
+    constructor_id = selected.id
+    constructor_payload = selected.payload
   end
-  local dynamic_item = dynamic_item_type(actual_type)
+  local dynamic_item = dynamic_item_type(constructor_payload or actual_type)
   if actor.semantic_strict then
     local host = nefor and nefor.semantic_type
     if dynamic_item ~= nil then
@@ -473,9 +468,11 @@ function M:factory_arrival(id, wire, payload)
             "actor '%s' emitted an invalid DynamicList item on '%s'",
             tostring(id), tostring(wire))
         end
-        local semantic_value = payload.semantic_value
-        if semantic_value == nil then semantic_value = payload.value end
-        local validation = host.validate_value(dynamic_item, semantic_value)
+        local item_value = payload.semantic_value
+        if item_value == nil then
+          item_value = type(payload.value) == "table" and payload.value.value or payload.value
+        end
+        local validation = host.validate_value(dynamic_item, item_value)
         if not validation.ok then
           return nil, string.format(
             "actor '%s' emitted a malformed DynamicList item on '%s'",
@@ -705,13 +702,13 @@ function M:deliver_initial(dest_id, from, message)
     self.events({ kind = EVT_RUN_FAILED, from = dest_id, failure = "typed-input", error = detail })
     return
   end
-  if type(dest.input.type) == "table" and dest.input.type.kind == "union"
+  local constructor_id = nil
+  if type(descriptor) == "table" and descriptor.kind == "adt"
       and type(content) == "table" and type(content.value) == "table"
-      and content.value.type == type_id and content.value.value ~= nil then
-    local normalized = {}
-    for key, value in pairs(content) do normalized[key] = value end
-    normalized.value = content.value.value
-    content = normalized
+      and type(content.value.constructor) == "string"
+      and type(host) == "table" and type(host.constructor) == "function" then
+    local ok, constructor = pcall(host.constructor, descriptor, content.value.constructor)
+    if ok and type(constructor) == "table" then constructor_id = constructor.id end
   end
   self:deliver(dest_id, typed_value.initial({
     arrival_id = self:next_arrival_id(),
@@ -720,7 +717,7 @@ function M:deliver_initial(dest_id, from, message)
     type = descriptor,
     declared_type_id = dest.input.type_id,
     declared_type = dest.input.type,
-    constructor_id = type_id,
+    constructor_id = constructor_id,
     protocol_wire = (content and content.kind) or dest.input.wire,
     product_position = -1,
     payload = content,
@@ -838,8 +835,8 @@ function M:machines_for(id)
       local semantic = actor.input and actor.input.type_id and
         {
           input_type_id = actor.input.type_id,
-          kind = actor.input.type and actor.input.type.kind == "product" and "product"
-            or (actor.input.type and actor.input.type.kind == "union" and "union" or "single"),
+          kind = actor.input.type and actor.input.type.kind == "product"
+            and "product" or "single",
         } or nil
       if semantic and actor.input.type and actor.input.type.kind == "product" then
         slots = self:derive_slots(id)

@@ -385,7 +385,7 @@ mod tests {
             "expressions":[], "template":{}
         });
         let envelope = serde_json::json!({
-            "format": "nefor.mag", "version": 1, "kind": "program",
+            "format": "nefor.mag", "version": 2, "kind": "program",
             "program": {"initial": initial, "operations": [operation.clone()]}
         });
         let decoded = artifact_program(&envelope).unwrap();
@@ -393,9 +393,9 @@ mod tests {
         assert_eq!(decoded.operations, vec![operation]);
         for invalid in [
             serde_json::json!({"format":"other","version":1,"kind":"program","program":{"initial":{},"operations":[]}}),
-            serde_json::json!({"format":"nefor.mag","version":2,"kind":"program","program":{"initial":{},"operations":[]}}),
-            serde_json::json!({"format":"nefor.mag","version":1,"kind":"delta","delta":{}}),
-            serde_json::json!({"format":"nefor.mag","version":1,"kind":"program","program":{"initial":{},"operations":[1]}}),
+            serde_json::json!({"format":"nefor.mag","version":1,"kind":"program","program":{"initial":{},"operations":[]}}),
+            serde_json::json!({"format":"nefor.mag","version":2,"kind":"delta","delta":{}}),
+            serde_json::json!({"format":"nefor.mag","version":2,"kind":"program","program":{"initial":{},"operations":[1]}}),
         ] {
             assert!(
                 artifact_modification(&invalid).is_err(),
@@ -413,11 +413,11 @@ mod tests {
             "types": {}, "actors": [], "messages": [], "nodes": [], "kills": []
         });
         let program = serde_json::json!({
-            "format":"nefor.mag", "version":1, "kind":"program",
+            "format":"nefor.mag", "version":2, "kind":"program",
             "program":{"initial":initial, "operations":[]}
         });
         let delta_envelope = serde_json::json!({
-            "format":"nefor.mag", "version":1, "kind":"delta", "delta":delta
+            "format":"nefor.mag", "version":2, "kind":"delta", "delta":delta
         });
         let mut mixed_program = program.clone();
         mixed_program["delta"] = delta_envelope["delta"].clone();
@@ -790,7 +790,7 @@ mod tests {
                 "params": {"$mag": "packed-value", "value": {}}}],
             "messages": [], "nodes": [], "kills": [], "result": {}
         });
-        let envelope = serde_json::json!({"format":"nefor.mag","version":1,"kind":"program",
+        let envelope = serde_json::json!({"format":"nefor.mag","version":2,"kind":"program",
             "program":{"initial":artifact,"operations":[]}});
         let modification = artifact_modification(&envelope).expect("valid artifact");
         assert_eq!(modification["actors"][0]["factory"], "nefor.factory.llm");
@@ -813,7 +813,7 @@ mod tests {
                 "wire": "generic-provider.TextAnswer"
             }}
         });
-        let envelope = serde_json::json!({"format":"nefor.mag","version":1,"kind":"program",
+        let envelope = serde_json::json!({"format":"nefor.mag","version":2,"kind":"program",
             "program":{"initial":artifact,"operations":[]}});
         let modification = artifact_modification(&envelope).expect("valid artifact");
         assert_eq!(modification["result"]["from"]["actor"], "answer");
@@ -966,12 +966,12 @@ mod tests {
     fn delta_envelope_is_required_and_wrong_variants_are_rejected() {
         let delta = serde_json::json!({"types": {}, "actors": [], "messages": [], "kills": [], "nodes": []});
         let envelope = serde_json::json!({
-            "format": "nefor.mag", "version": 1, "kind": "delta", "delta": delta
+            "format": "nefor.mag", "version": 2, "kind": "delta", "delta": delta
         });
         assert_eq!(artifact_delta(&envelope).unwrap(), delta);
         for invalid in [
             delta,
-            serde_json::json!({"format":"nefor.mag","version":1,"kind":"program","program":{"initial":{},"operations":[]}}),
+            serde_json::json!({"format":"nefor.mag","version":2,"kind":"program","program":{"initial":{},"operations":[]}}),
             serde_json::json!({"format":"other","version":1,"kind":"delta","delta":{}}),
         ] {
             assert!(artifact_delta(&invalid).is_err(), "accepted {invalid}");
@@ -1006,7 +1006,7 @@ mod tests {
             })
         };
         let artifact = serde_json::json!({
-            "format": "nefor.mag", "version": 1, "kind": "program", "program": {
+            "format": "nefor.mag", "version": 2, "kind": "program", "program": {
                 "initial": {
                     "types": {},
                     "actors": [{"id": "initial", "factory": "stub", "params": packed(authored.clone())}],
@@ -1056,7 +1056,7 @@ mod tests {
     #[test]
     fn template_actor_overlays_use_collision_free_addresses_and_preserve_artifact() {
         let artifact = serde_json::json!({
-            "format":"nefor.mag", "version":1, "kind":"program", "program":{
+            "format":"nefor.mag", "version":2, "kind":"program", "program":{
                 "initial":{"types":{},"actors":[{"id":"same","factory":"llm","params":{
                     "$mag":"packed-value","value":{"model":"authored"}
                 }}],"messages":[],"nodes":[],"kills":[],"result":{}},
@@ -1144,7 +1144,7 @@ mod project_build_tests {
         let cache = tempfile::tempdir().unwrap();
         std::fs::write(project.path().join("mag.toml"), "version = 1\n").unwrap();
         // An empty delta is accepted without starting any actors.
-        let artifact = json!({"format":"nefor.mag", "version":1, "kind":"delta",
+        let artifact = json!({"format":"nefor.mag", "version":2, "kind":"delta",
             "delta":{"types":{},"actors":[],"messages":[],"nodes":[],"kills":[]}});
         // Use read-json so the artifact and deeply nested extension are ordinary observed data.
         std::fs::write(
@@ -1207,7 +1207,7 @@ async fn project_build_deep_program_hit_rechecks_current_kernel() {
         .map(|i| format!("(let n{i} {{:a n{}}})\n", i - 1))
         .collect::<String>();
     let nested = "n140";
-    let source = format!("(artifact {{:format \"nefor.mag\" :version 1 :kind \"program\" :program {{:initial {{:types {{:deep {nested}}} :actors [] :messages [] :nodes [] :kills [] :result {{}}}} :operations []}}}})");
+    let source = format!("(artifact {{:format \"nefor.mag\" :version 2 :kind \"program\" :program {{:initial {{:types {{:deep {nested}}} :actors [] :messages [] :nodes [] :kills [] :result {{}}}} :operations []}}}})");
     std::fs::write(
         project.path().join("main.mag"),
         format!("(let n0 0)\n{bindings}{source}"),

@@ -1,3 +1,4 @@
+(require "core.types")
 ;; Shipped typed-agent example: the terminal value is either TaskDescription
 ;; or AgentError after the configured correction budget is exhausted.
 (require "agents")
@@ -20,7 +21,7 @@
         (type-tag TaskDescription)
         2))
 (let result (nefor.graph.output "typed-task-output"
-               (type-tag (| TaskDescription nefor.contracts.AgentError))))
+               (type-tag (core.types.Result nefor.contracts.AgentError TaskDescription))))
 (nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph

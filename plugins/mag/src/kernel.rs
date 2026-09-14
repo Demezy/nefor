@@ -664,6 +664,34 @@ fn install_semantic_type(lua: &Lua, nefor_tbl: &Table) -> Result<(), MagError> {
     })?;
     semantic_type.set("id", id)?;
 
+    let constructor = lua.create_function(|lua, (descriptor, name): (Value, String)| {
+        let descriptor: JsonValue = lua.from_value(descriptor)?;
+        let descriptor = nefor_mag::json::concrete_type_from_json(&descriptor)
+            .map_err(|error| mlua::Error::runtime(error.to_string()))?;
+        let nefor_mag::types::ConcreteType::Adt { constructors, .. } = &descriptor else {
+            return Err(mlua::Error::runtime(
+                "constructor lookup requires an ADT owner",
+            ));
+        };
+        let payload = constructors
+            .iter()
+            .find(|candidate| candidate.name == name)
+            .map(|candidate| &candidate.payload)
+            .ok_or_else(|| {
+                mlua::Error::runtime(format!("constructor {name:?} is not owned by this ADT"))
+            })?;
+        let result = serde_json::json!({
+            "id": descriptor.constructor_id(&name)
+                .map_err(|error| mlua::Error::runtime(error.to_string()))?
+                .as_str(),
+            "payload": nefor_mag::json::concrete_type_to_json(payload)
+                .map_err(|error| mlua::Error::runtime(error.to_string()))?,
+            "payload_id": payload.stable_id().as_str(),
+        });
+        lua.to_value(&result)
+    })?;
+    semantic_type.set("constructor", constructor)?;
+
     let validate_declarations = lua.create_function(|lua, declarations: Value| {
         let declarations: JsonValue = lua.from_value(declarations)?;
         let declarations = declarations

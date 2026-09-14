@@ -1,30 +1,22 @@
 local kinds = require("kinds")
 
 local M = {}
-local CONTINUE = "nefor.retry.Continue"
-local EXHAUSTED = "nefor.retry.Exhausted"
-local variable = { kind = "variable", name = "T" }
-local function branch(name)
-  return { kind = "named", name = name, arguments = { variable } }
-end
+local RESULT = "nefor.retry.Result"
+local value = { kind = "variable", name = "T" }
+local decision = { kind = "variable", name = "R" }
 
 M.declaration = {
   name = "retry-gate",
-  type_variables = { "T" },
+  type_variables = { "T", "R" },
   semantic = {
-    input = variable,
-    output = { kind = "union", items = {
-      branch("nefor.contracts.Continue"), branch("nefor.contracts.Exhausted"),
-    } },
-    inputs = { { wire = "nefor.retry.Input", type = variable } },
-    outputs = {
-      { wire = CONTINUE, type = branch("nefor.contracts.Continue") },
-      { wire = EXHAUSTED, type = branch("nefor.contracts.Exhausted") },
-    },
+    input = value,
+    output = decision,
+    inputs = {{ wire = "nefor.retry.Input", type = value }},
+    outputs = {{ wire = RESULT, type = decision }},
   },
   params = { max_retries = "int" },
   inputs = { value = "nefor.retry.Input" },
-  outputs = { CONTINUE, EXHAUSTED },
+  outputs = { RESULT },
   signals = {},
 }
 
@@ -48,15 +40,11 @@ function M.construct(id, params, emit, deps)
       return { status = "ok" }
     end
 
-    local output = attempts < maximum and CONTINUE or EXHAUSTED
+    local constructor = attempts < maximum and "Continue" or "Exhausted"
     attempts = attempts + 1
-    if output == EXHAUSTED then exhausted = true end
-    emit({
-      kind = output,
-      from = id,
-      value = message.value,
-      semantic_value = { value = message.value },
-    })
+    if constructor == "Exhausted" then exhausted = true end
+    emit({ kind = RESULT, from = id,
+      value = { constructor = constructor, value = message.value } })
     return { status = "ok" }
   end
 

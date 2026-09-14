@@ -1,3 +1,4 @@
+(require "core.types")
 ;; Each user message executes one short-lived lead constellation over the
 ;; persistent canonical chat history. Model selection is resolved by the
 ;; config-owned agents module; the runtime composes ambient system context.
@@ -26,7 +27,7 @@
         (type-tag nefor.contracts.TextAnswer)
         2))
 (let result (nefor.graph.output "lead-output"
-               (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+               (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))
 (let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
                  (nefor.graph.add-edges graph
                    [(nefor.graph.edge start lead)

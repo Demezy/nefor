@@ -8,10 +8,7 @@ local INPUTS = { "nefor.process.Input" }
 
 local RESULT_TYPE = { kind="named", name="nefor.contracts.ProcessResult", arguments={} }
 local FAILURE_TYPE = { kind="named", name="nefor.contracts.ProcessFailure", arguments={} }
-local INPUT_TYPE = {kind="union",items={
-  {kind="primitive",name="Unit"},
-  {kind="named",name="nefor.contracts.Text",arguments={}},
-}}
+local INPUT_TYPE = {kind="primitive",name="Unit"}
 
 local function timeout_ms(timeout, actor)
   if type(timeout) ~= "table" or type(timeout.present) ~= "boolean"
@@ -36,15 +33,7 @@ local function validate_common(params, actor)
   end
   local _, err = timeout_ms(params.timeout, actor)
   if err then return nil, err end
-  if type(params.exited_type) ~= "string" or params.exited_type == ""
-      or type(params.signaled_type) ~= "string" or params.signaled_type == "" then
-    return nil, actor .. " requires compiler-issued process termination constructor ids"
-  end
-  return {
-    timeout = params.timeout,
-    exited_type = params.exited_type,
-    signaled_type = params.signaled_type,
-  }
+  return { timeout = params.timeout }
 end
 
 local function validate_exec(params)
@@ -60,8 +49,6 @@ local function validate_exec(params)
   end
   return {
     request = { argv = params.argv, cwd = params.cwd, timeout = common.timeout },
-    exited_type = common.exited_type,
-    signaled_type = common.signaled_type,
   }
 end
 
@@ -73,8 +60,6 @@ local function validate_script(params)
   end
   return {
     request = { script = params.script, cwd = params.cwd, timeout = common.timeout },
-    exited_type = common.exited_type,
-    signaled_type = common.signaled_type,
   }
 end
 
@@ -89,7 +74,7 @@ local function declaration(name, identity, params_type)
       },
       outputs = {
         {wire=RESULT_WIRE,type=RESULT_TYPE},
-        {wire=FAILURE_WIRE,type=FAILURE_TYPE},
+        {wire=FAILURE_WIRE,type=FAILURE_TYPE,required=false},
       },
     },
     params = params_type,
@@ -161,15 +146,9 @@ local function factory(config)
       end
       local typed_termination
       if termination_kind == "code" then
-        typed_termination = {
-          type = config_args.exited_type,
-          value = { code = termination_value },
-        }
+        typed_termination = { constructor = "ProcessExited", value = { code = termination_value } }
       else
-        typed_termination = {
-          type = config_args.signaled_type,
-          value = { signal = termination_value },
-        }
+        typed_termination = { constructor = "ProcessSignaled", value = { signal = termination_value } }
       end
       emit(sign({ kind = RESULT_WIRE, value = {
         stdout = result.stdout, stderr = result.stderr,

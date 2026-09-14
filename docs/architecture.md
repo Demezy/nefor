@@ -13,7 +13,7 @@ At the MAG protocol boundary, `mag.execute` accepts only a versioned program
 envelope and `mag.apply` accepts only a versioned delta envelope. Programs may
 carry the single closed `InstantiateDeltaTemplate` operation with its five
 expression forms; raw modifications, a general runtime expression language,
-and post-compilation function application are not part of version 1.
+and post-compilation function application are not part of version 2.
 
 ## The decoupling rule
 

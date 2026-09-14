@@ -15,9 +15,8 @@
     (let checked (nefor.graph.validate graph
       (host-input "factory_contracts" (type-tag (List nefor.graph.FactoryContract)))))
     (match checked
-      [(core.validated.Valid nefor.graph.Graph) valid
-        (emit-program (get valid "value"))]
-      [(core.validated.Invalid String) invalid (fail invalid)])))
+      [Valid valid (emit-program valid)]
+      [Invalid invalid (fail (get invalid "errors"))])))
 
 (let delta (fn [[change nefor.graph.Delta]] -> Artifact
   (artifact

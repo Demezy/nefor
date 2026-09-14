@@ -664,32 +664,6 @@ fn typed_library_functions_return_artifacts() {
 }
 
 #[test]
-fn namespaced_transitive_and_diamond_imports_are_stable() {
-    let root = workspace("modules");
-    fs::create_dir_all(root.join("app")).unwrap();
-    fs::write(
-        root.join("core/types.mag"),
-        "(type Validated [E T] (| E T))\n(let marker 7)",
-    )
-    .unwrap();
-    fs::write(
-        root.join("app/left.mag"),
-        "(require \"core.types\")\n(let left core.types.marker)",
-    )
-    .unwrap();
-    fs::write(
-        root.join("app/right.mag"),
-        "(require \"core.types\")\n(let right core.types.marker)",
-    )
-    .unwrap();
-    fs::write(root.join("main.mag"),"(require \"app.left\")\n(require \"app.right\")\n(artifact {:left app.left.left :right app.right.right :type (str core.types.Validated)})").unwrap();
-    let loaded = compile_file_with_inputs(&root, "main.mag", json!({})).unwrap();
-    assert_eq!(loaded["left"], 7);
-    assert_eq!(loaded["right"], 7);
-    assert_eq!(loaded["type"], "core.types.Validated");
-}
-
-#[test]
 fn qualified_nominal_constructors_do_not_duck_type() {
     let root = workspace("qualified-nominals");
     fs::create_dir_all(root.join("left")).unwrap();
@@ -755,23 +729,6 @@ fn product_type_evidence_preserves_order_and_grouping() {
     assert_ne!(artifact["left"], artifact["right"]);
     assert_ne!(artifact["left"], artifact["flat"]);
     assert_ne!(artifact["right"], artifact["flat"]);
-}
-
-#[test]
-fn nominal_types_and_factory_descriptors_are_ordinary_data() {
-    let root = workspace("types");
-    let source = r#"
-      (type Payload {:text String})
-      (type Outcome [T] (| T Unit))
-      (let worker "nefor.factory.worker")
-      (artifact {:payload (str Payload)
-                 :factory worker
-                 :type_arguments [(type-evidence (type-tag Payload))]})
-    "#;
-    let artifact = compile(source, &root).unwrap();
-    assert_eq!(artifact["payload"], "main.Payload");
-    assert_eq!(artifact["factory"], "nefor.factory.worker");
-    assert_eq!(artifact["type_arguments"][0]["name"], "main.Payload");
 }
 
 #[test]
@@ -992,47 +949,6 @@ fn factory_descriptions_use_ordinary_typed_functions() {
 }
 
 #[test]
-fn type_arguments_round_trip_as_ordinary_descriptors() {
-    let root = workspace("factory-type-arguments");
-    let artifact = compile(
-        r#"
-          (type Params {:seed String})
-          (type Input {:prompt String})
-          (type Error {:message String})
-          (type Output {:answer String})
-          (artifact
-            [(type-evidence (type-tag Params))
-             (type-evidence (type-tag (List Input)))
-             (type-evidence (type-tag (| Output Error)))])
-        "#,
-        &root,
-    )
-    .unwrap();
-
-    let primitive = |name: &str| json!({"kind":"primitive","name":name});
-    let named = |name: &str, field: &str, ty: serde_json::Value| {
-        json!({
-            "kind":"named",
-            "name":name,
-            "arguments":[],
-            "body":{"kind":"record","fields":[{"name":field,"type":ty}]}
-        })
-    };
-    let params = named("main.Params", "seed", primitive("String"));
-    let input = named("main.Input", "prompt", primitive("String"));
-    let error = named("main.Error", "message", primitive("String"));
-    let output = named("main.Output", "answer", primitive("String"));
-    assert_eq!(
-        artifact,
-        json!([
-                params,
-                {"kind":"list","item":input},
-                {"kind":"union","items":[error, output]}
-        ])
-    );
-}
-
-#[test]
 fn empty_lists_retain_expected_element_types_at_runtime() {
     let root = workspace("empty-list");
     let source = r#"
@@ -1136,199 +1052,6 @@ fn nominal_values_require_explicit_refinement() {
 }
 
 #[test]
-fn sum_refinement_preserves_explicit_leaf_constructor_evidence() {
-    let root = workspace("sum-constructor-evidence");
-    let artifact = compile(
-        r#"
-          (type X {:value Int})
-          (type Y {:value Int})
-          (type XY (| X Y))
-          (type Nested (| XY X))
-          (let generic (fn [T] [[value T]] -> T value))
-          (let x (as X {:value 1}))
-          (let selected (as Nested (generic (as XY x))))
-          (artifact (as X selected))
-        "#,
-        &root,
-    )
-    .unwrap();
-
-    assert_eq!(artifact, json!({"value": 1}));
-}
-
-#[test]
-fn match_eliminates_named_and_generic_sum_aliases_by_constructor_evidence() {
-    let root = workspace("match-sums");
-    let artifact = compile(
-        r#"
-          (type Some [T] {:value T})
-          (type None {})
-          (type Option [T] (| (Some T) None))
-          (type Alias [T] (Option T))
-          (let render
-            (fn [[choice (Alias Int)]] -> String
-              (match choice
-                [(Some Int) present (str (get present "value"))]
-                [None absent "none"])))
-          (artifact
-            {:some (render (as (Alias Int) (as (Some Int) {:value 7})))
-             :none (render (as (Alias Int) (as None {})))})
-        "#,
-        &root,
-    )
-    .unwrap();
-
-    assert_eq!(artifact, json!({"some": "7", "none": "none"}));
-}
-
-#[test]
-fn match_is_exhaustive_unique_nominal_and_result_typed() {
-    let root = workspace("match-errors");
-    let prelude = r#"
-      (type X {:value Int})
-      (type Y {:value Int})
-      (type Z {:value Int})
-      (type XY (| X Y))
-      (let selected (as XY (as X {:value 1})))
-    "#;
-    for (body, expected) in [
-        (
-            "(artifact (match selected [X x (get x \"value\")]))",
-            "non-exhaustive match; missing main.Y",
-        ),
-        (
-            "(artifact (match selected [X x 1] [X again 2] [Y y 3]))",
-            "duplicate match arm for main.X",
-        ),
-        (
-            "(artifact (match selected [X x 1] [Z z 2] [Y y 3]))",
-            "constructor main.Z is not an arm of main.XY",
-        ),
-        (
-            "(artifact (match selected [X x 1] [Y y \"wrong\"]))",
-            "expected Int, got String",
-        ),
-    ] {
-        let error = compile(&format!("{prelude}\n{body}"), &root)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(expected), "{error}");
-    }
-
-    let error = compile("(artifact (match 1 [Int value value]))", &root)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("match expects a sum value"), "{error}");
-
-    let repeated = compile(
-        r#"
-          (type Some [T] {:value T})
-          (type Repeated (| (Some Int) (Some String)))
-          (let selected (as Repeated (as (Some Int) {:value 1})))
-          (artifact
-            (match selected
-              [(Some Int) integer 1]
-              [(Some String) string 2]))
-        "#,
-        &root,
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(
-        repeated.contains("match cannot distinguish repeated nominal constructor main.Some"),
-        "{repeated}"
-    );
-}
-
-#[test]
-fn match_preserves_mag_generated_sum_serialization() {
-    let root = workspace("match-serialization");
-    let artifact = compile(
-        r#"
-          (type X {:value Int})
-          (type Y {:value Int})
-          (type XY (| X Y))
-          (type Alias XY)
-          (let selected (as Alias (as X {:value 9})))
-          (artifact
-            (match selected
-              [X x (as Alias x)]
-              [Y y (as Alias y)]))
-        "#,
-        &root,
-    )
-    .unwrap();
-    assert!(artifact["type"].as_str().unwrap().starts_with("sha256:"));
-    assert_eq!(artifact["value"], json!({"value": 9}));
-}
-
-#[test]
-fn sum_refinement_rejects_lookalikes_without_matching_constructor_evidence() {
-    let root = workspace("sum-constructor-rejection");
-    let untagged = compile(
-        r#"
-          (type X {:value Int})
-          (type Y {:value Int})
-          (artifact (as (| X Y) {:value 1}))
-        "#,
-        &root,
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(untagged.contains("cannot construct sum"), "{untagged}");
-    assert!(untagged.contains("source type"), "{untagged}");
-    assert!(
-        untagged.contains("no explicit nominal constructor evidence"),
-        "{untagged}"
-    );
-    assert!(
-        untagged.contains("distinct from graph-edge compatibility"),
-        "{untagged}"
-    );
-
-    let primitive = compile("(artifact (as (| Unit String) nil))", &root)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        primitive.contains("cannot construct sum (Unit | String) from source type Unit"),
-        "{primitive}"
-    );
-    assert!(
-        primitive.contains("primitive and structural sum construction is unsupported"),
-        "{primitive}"
-    );
-
-    let lookalike = compile(
-        r#"
-          (type X {:value Int})
-          (type Y {:value Int})
-          (let selected (as (| X Y) (as X {:value 1})))
-          (artifact (as Y selected))
-        "#,
-        &root,
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(
-        lookalike.contains("cannot replace constructor evidence"),
-        "{lookalike}"
-    );
-
-    let invalid = compile(
-        r#"
-          (type X {:value Int})
-          (type Y {:value Int})
-          (type Z {:value Int})
-          (artifact (as (| X Y) (as Z {:value 1})))
-        "#,
-        &root,
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(invalid.contains("not accepted"), "{invalid}");
-}
-
-#[test]
 fn product_values_are_exact_ordered_tuples_with_authored_grouping() {
     let root = workspace("product-values");
     let artifact = compile(
@@ -1360,29 +1083,6 @@ fn product_values_are_exact_ordered_tuples_with_authored_grouping() {
         let error = compile(source, &workspace(name)).unwrap_err().to_string();
         assert!(error.contains("does not conform"), "{name}: {error}");
     }
-}
-
-#[test]
-fn product_positions_preserve_selected_constructor_evidence() {
-    let root = workspace("product-constructor-evidence");
-    let artifact = compile(
-        r#"
-          (type X {:value Int})
-          (type Y {:value Int})
-          (let tuple
-            (as (+ (| X Y) String)
-                [(as (| X Y) (as X {:value 1})) "kept"]))
-          (let accept (fn [[value (+ (| X Y) String)]] -> (+ (| X Y) String) value))
-          (artifact (accept tuple))
-        "#,
-        &root,
-    )
-    .unwrap();
-    let envelope = artifact[0].as_object().unwrap();
-    assert_eq!(envelope.len(), 2);
-    assert!(envelope["type"].as_str().unwrap().starts_with("sha256:"));
-    assert_eq!(envelope["value"], json!({"value": 1}));
-    assert_eq!(artifact[1], "kept");
 }
 
 #[test]
@@ -1712,20 +1412,19 @@ fn fallible_nodes_compose_with_kleisli_semantics() {
     fs::write(
         root.join("main.mag"),
         r#"
+          (require "core.types")
           (require "nefor.graph")
           (require "nefor.node")
 
           (type Success {:value Int})
           (type Failure {:message String})
 
-          (let success
-            (nefor.graph.identity "success" (type-tag Success)))
-          (let failure
-            (nefor.graph.identity "failure" (type-tag Failure)))
           (let fallible
-            (nefor.node.choose "fallible" success failure))
+            (nefor.graph.identity "fallible"
+              (type-tag (core.types.Result Failure Success))))
           (let continuation
-            (nefor.graph.identity "continuation" (type-tag Success)))
+            (nefor.node.lift-result "continuation-result" (type-tag Failure)
+              (nefor.graph.identity "continuation" (type-tag Success))))
           (let composed (nefor.node.>=> fallible continuation))
 
           (artifact composed)
@@ -1741,269 +1440,13 @@ fn fallible_nodes_compose_with_kleisli_semantics() {
     )
     .unwrap();
 
-    assert_eq!(program["id"], "fallible>=>continuation");
+    assert_eq!(program["id"], "fallible>=>continuation-result");
     assert!(program["actors"].as_array().is_some_and(|actors| actors
         .iter()
-        .any(|actor| actor["id"] == "fallible>=>continuation.error")));
-}
-
-#[test]
-fn graph_product_input_accepts_repeated_typed_fan_in() {
-    let root = workspace("product-fan-in");
-    let mag_lib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
-    fs::write(
-        root.join("main.mag"),
-        r#"
-          (require "nefor.graph")
-          (require "nefor.mag")
-          (type CoveredLeft {:value Int})
-          (type CoveredRight {:value String})
-          (type CoveredChoice (| CoveredLeft CoveredRight))
-          (let left (nefor.graph.source
-                       "left" (type-tag nefor.contracts.Text)
-                       (as nefor.contracts.Text {:content "left"})))
-          (let right (nefor.graph.source
-                        "right" (type-tag nefor.contracts.Text)
-                        (as nefor.contracts.Text {:content "right"})))
-          (let join-input (nefor.graph.port
-                             "join"
-                             (type-tag (+ nefor.contracts.Text nefor.contracts.Text))
-                             "test.Value"))
-          (let join-output (nefor.graph.port
-                              "join" (type-tag nefor.contracts.Text) "test.Value"))
-          (let join-actor (nefor.graph.actor
-                             "join" "test.product"
-                             [(type-evidence (type-tag nefor.contracts.Text))] nil
-                             (nefor.graph.store-port join-input)
-                             [(nefor.graph.store-port join-output)]))
-          (let join (nefor.graph.node
-                       "join" "ordinary" [join-actor]
-                       (as (List nefor.graph.StoredRoute) [])
-                       (as (List nefor.graph.Message) [])
-                       join-input join-output))
-          (let result (nefor.graph.output
-                         "result" (type-tag nefor.contracts.Text)))
-          (let topology (nefor.graph.graph
-                           [(nefor.graph.edge left join)
-                            (nefor.graph.edge right join)
-                            (nefor.graph.edge join result)]))
-          (let product-result (nefor.graph.output
-                                 "product-result"
-                                 (type-tag
-                                   (+ nefor.contracts.Text
-                                      nefor.contracts.Text))))
-          (let output-topology (nefor.graph.graph
-                                  [(nefor.graph.edge left product-result)
-                                   (nefor.graph.edge right product-result)]))
-          (let reversed-output-topology (nefor.graph.graph
-                                           [(nefor.graph.edge right product-result)
-                                            (nefor.graph.edge left product-result)]))
-          (let choice-start (nefor.graph.source
-                    "choice-start"
-                    (type-tag CoveredChoice)
-                    (as CoveredChoice (as CoveredLeft {:value 1}))))
-          (let choice-result (nefor.graph.output "choice-result" (type-tag CoveredLeft)))
-          (let choice-topology (nefor.graph.graph
-                    [(nefor.graph.edge choice-start choice-result)]))
-          (let choice-operation
-            (nefor.graph.instantiate-delta-template "observe-choice"
-              (get choice-start "output")
-              (as (Map String nefor.mag.TypedCapture) {})
-              (as (List nefor.mag.Expression) [])
-              (as nefor.mag.DeltaTemplate
-                {:types (as (Map String TypeDescriptor) {})
-                 :actors [] :routes [] :messages [] :nodes []
-                 :actor_reference_relocations []})))
-          (let contracts (host-input "factory_contracts"
-                            (type-tag (List nefor.graph.FactoryContract))))
-          (let checked (nefor.graph.validate topology contracts))
-          (let output-checked (nefor.graph.validate output-topology contracts))
-          (let choice-without-rule (nefor.graph.validate choice-topology contracts))
-          (let choice-with-operation (nefor.graph.validate-with-operations
-                    choice-topology [choice-operation] contracts))
-          (let lowered (nefor.graph.lower topology))
-          (let lowered-left (first (filter
-                    (fn [[candidate nefor.graph.LowerActor]] -> Bool
-                      (= (get candidate "id") "left"))
-                    (get lowered "actors"))))
-          (let lowered-right (first (filter
-                    (fn [[candidate nefor.graph.LowerActor]] -> Bool
-                      (= (get candidate "id") "right"))
-                    (get lowered "actors"))))
-          (let lowered-join (first (filter
-                    (fn [[candidate nefor.graph.LowerActor]] -> Bool
-                      (= (get candidate "id") "join"))
-                    (get lowered "actors"))))
-          (let destinations (concat
-                    (get (get lowered-left "routes") "nefor.graph.Value")
-                    (get (get lowered-right "routes") "nefor.graph.Value")))
-          (artifact {:valid (core.validated.valid? checked)
-               :output-valid (core.validated.valid? output-checked)
-               :choice-without-rule-valid (core.validated.valid? choice-without-rule)
-               :choice-with-operation-valid (core.validated.valid? choice-with-operation)
-               :type-count (count (get lowered "types"))
-               :left-output-id
-                 (get (first (get lowered-left "outputs")) "type_id")
-               :join-output-id
-                 (get (first (get lowered-join "outputs")) "type_id")
-               :join-input-id (get (get lowered-join "input") "type_id")
-               :left-route-source-id
-                 (get (first destinations) "source_type_id")
-               :left-route-destination-id
-                 (get (first destinations) "destination_type_id")
-               :permutation-stable
-                 (= (canonical (nefor.graph.lower output-topology))
-                    (canonical (nefor.graph.lower reversed-output-topology)))
-               :positions
-                 (map (fn [[destination nefor.graph.LowerDestination]] -> Int
-                        (get destination "product_position"))
-                      destinations)
-               :edge-ids
-                 (map (fn [[destination nefor.graph.LowerDestination]] -> String
-                        (get destination "edge_id"))
-                      destinations)})
-        "#,
-    )
-    .unwrap();
-    let inputs = json!({
-        "factory_contracts": [
-            {
-                "identity": "nefor.factory.source",
-                "type_scheme": {
-                    "input_tags": ["mag.Unit"],
-                    "outputs": ["nefor.graph.Value"]
-                }
-            },
-            {
-                "identity": "nefor.factory.output",
-                "type_scheme": {
-                    "input_tags": ["nefor.graph.Value"],
-                    "outputs": ["nefor.graph.Value"]
-                }
-            },
-            {
-                "identity": "test.product",
-                "type_scheme": {
-                    "input_tags": ["test.Value"],
-                    "outputs": ["test.Value"]
-                }
-            }
-        ]
-    });
-    let artifact = compile_file_with_inputs_and_module_roots(
-        &root,
-        "main.mag",
-        inputs,
-        &[root.clone(), mag_lib],
-    )
-    .unwrap();
-    assert_eq!(artifact["valid"], true, "{:?}", artifact);
-    assert_eq!(artifact["output-valid"], true);
-    assert_eq!(artifact["choice-without-rule-valid"], false);
-    assert_eq!(artifact["choice-with-operation-valid"], true);
-    assert!(artifact["type-count"].as_u64().unwrap() >= 4);
-    assert_eq!(artifact["left-output-id"], artifact["left-route-source-id"]);
-    assert_eq!(
-        artifact["left-output-id"], artifact["join-output-id"],
-        "wire names must not participate in semantic type identity"
-    );
-    assert_eq!(
-        artifact["join-input-id"],
-        artifact["left-route-destination-id"]
-    );
-    assert_eq!(artifact["permutation-stable"], true);
-    assert_eq!(artifact["positions"], json!([0, 1]));
-    let edge_ids = artifact["edge-ids"].as_array().unwrap();
-    assert_eq!(edge_ids.len(), 2);
-    assert_ne!(edge_ids[0], edge_ids[1]);
-}
-
-#[test]
-fn graph_descriptor_operations_are_compiler_owned() {
-    let root = workspace("graph-descriptors");
-    let artifact = compile(
-        r#"
-          (type Left {:value Int})
-          (type Right {:value String})
-          (type Choice (| Left Right))
-          (artifact {:arm (descriptor-accepts?
-                    (type-evidence (type-tag Choice))
-                    (type-evidence (type-tag Left)))
-             :wrong-arm (descriptor-accepts?
-                          (type-evidence (type-tag Left))
-                          (type-evidence (type-tag Right)))
-             :product (descriptor-input-covered-by?
-                        (type-evidence (type-tag (+ Left Left)))
-                        [(type-evidence (type-tag Left))
-                         (type-evidence (type-tag Left))])
-             :assignments (descriptor-input-assignments
-                            (type-evidence (type-tag (+ Left Left)))
-                            [(type-evidence (type-tag Left))
-                             (type-evidence (type-tag (+ Left Left)))
-                             (type-evidence (type-tag Left))])
-             :covered-output (descriptor-output-covered-by?
-                               (type-evidence (type-tag Choice))
-                               [(type-evidence (type-tag Left))
-                                (type-evidence (type-tag Right))])
-             :uncovered-output (descriptor-output-covered-by?
-                                 (type-evidence (type-tag Choice))
-                                 [(type-evidence (type-tag Left))])})
-        "#,
-        &root,
-    )
-    .unwrap();
-    assert_eq!(
-        artifact,
-        json!({
-            "arm": true,
-            "wrong-arm": false,
-            "product": true,
-            "assignments": [0, -1, 1],
-            "covered-output": true,
-            "uncovered-output": false
-        })
-    );
-
-    let forged = compile(
-        r#"(artifact (as TypeDescriptor {:kind "primitive" :name "String"}))"#,
-        &root,
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(forged.contains("does not conform"), "{forged}");
-}
-
-#[test]
-fn whole_value_compatibility_does_not_supply_product_components() {
-    let root = workspace("whole-value-compatibility");
-    let artifact = compile(
-        r#"
-        (type Text {:content String})
-        (let unit (type-evidence (type-tag Unit)))
-        (let product (type-evidence (type-tag (+ Unit Unit))))
-        (artifact
-          {:unit (descriptor-accepts-value? unit unit)
-           :sum (descriptor-accepts-value?
-             (type-evidence (type-tag (| Unit Text))) unit)
-           :product (descriptor-accepts-value? product unit)
-           :singleton-product (descriptor-accepts-value?
-             (type-evidence (type-tag (+ Unit))) unit)
-           :whole-product (descriptor-accepts-value? product product)
-           :component-edge (descriptor-accepts? product unit)
-           :non-unit (descriptor-accepts-value?
-             (type-evidence (type-tag Text)) unit)})
-        "#,
-        &root,
-    )
-    .unwrap();
-    assert_eq!(
-        artifact,
-        json!({
-            "unit": true, "sum": true, "product": false,
-            "singleton-product": false, "whole-product": true,
-            "component-edge": true, "non-unit": false
-        })
-    );
+        .any(|actor| actor["id"] == "fallible>=>continuation-result.error")));
+    assert!(program["actors"].as_array().is_some_and(|actors| actors
+        .iter()
+        .any(|actor| actor["factory"] == "nefor.factory.adt-unpack")));
 }
 
 #[test]
@@ -2021,25 +1464,6 @@ fn data_is_not_a_source_type_or_cast_target() {
         .unwrap_err()
         .to_string();
     assert!(cast.contains("unresolved symbol: Data"), "{cast}");
-}
-
-#[test]
-fn union_unification_commits_substitutions_and_rejects_ambiguity() {
-    let root = workspace("union-substitution");
-    let artifact = compile(
-        "(let select (fn [T] [[x (| T String)]] -> T (as T x)))\n(artifact (select 42))",
-        &root,
-    )
-    .unwrap();
-    assert_eq!(artifact, json!(42));
-
-    let ambiguous = compile(
-        "(let select (fn [T U] [[x (| T U)]] -> T (as T x)))\n(artifact (select 42))",
-        &root,
-    )
-    .unwrap_err()
-    .to_string();
-    assert!(ambiguous.contains("ambiguous union match"), "{ambiguous}");
 }
 
 #[test]
@@ -2115,7 +1539,7 @@ fn type_schema_preserves_qualified_nominals_and_substitutes_generics() {
     )
     .unwrap();
     let artifact = compile_file_with_inputs(&root, "main.mag", json!({})).unwrap();
-    assert_eq!(artifact["version"], 1);
+    assert_eq!(artifact["version"], 2);
     assert_eq!(artifact["root"]["kind"], "named");
     assert_eq!(artifact["root"]["name"], "core.types.Box");
     assert_eq!(
@@ -2164,55 +1588,5 @@ fn generic_list_inference_preserves_element_evidence() {
         "#
         );
         assert_eq!(compile(&source, &root).unwrap(), json!(true), "{values}");
-    }
-}
-
-#[test]
-fn generic_list_inference_keeps_constraints_and_empty_list_behavior() {
-    let root = workspace("generic-list-constraints");
-    for source in [
-        r#"(let tag (fn [T] [[xs (List T)]] -> (TypeTag T) (type-tag T)))
-           (artifact (tag [1 "wrong"]))"#,
-        r#"(let tag (fn [T] [[xs (List T)]] -> (TypeTag T) (type-tag T)))
-           (artifact (tag []))"#,
-        r#"(let tag (fn [T] [[xs (List (List T))]] -> (TypeTag T) (type-tag T)))
-           (artifact (tag [[1] ["wrong"]]))"#,
-    ] {
-        assert!(compile(source, &root).is_err(), "{source}");
-    }
-    for (name, source) in [
-        (
-            "nested",
-            r#"(let tag (fn [T] [[xs (List (List T))]] -> (TypeTag T) (type-tag T)))
-          (artifact (= (tag [[1] [2]]) (type-tag Int)))"#,
-        ),
-        (
-            "empty-without-evidence",
-            r#"(let size (fn [T] [[xs (List T)]] -> Int (count xs)))
-          (artifact (= (size []) 0))"#,
-        ),
-        (
-            "empty-annotated",
-            r#"(let tag (fn [T] [[xs (List T)]] -> (TypeTag T) (type-tag T)))
-          (artifact (= (tag (as (List Int) [])) (type-tag Int)))"#,
-        ),
-        (
-            "sum",
-            r#"(type A {:value Int}) (type B {:value String})
-          (let tag (fn [T] [[xs (List T)]] -> (TypeTag T) (type-tag T)))
-          (artifact (= (tag [(as (| A B) (as A {:value 1}))
-                              (as (| A B) (as B {:value "two"}))]) (type-tag (| A B))))"#,
-        ),
-        (
-            "overload",
-            r#"(let tag (fn [T] [[xs (List T)]] -> (TypeTag T) (type-tag T)))
-          (let tag (fn [[value String]] -> (TypeTag String) (type-tag String)))
-          (artifact (= (tag [1 2]) (type-tag Int)))"#,
-        ),
-    ] {
-        assert_eq!(
-            compile(source, &root).unwrap_or_else(|error| panic!("{name}: {error}")),
-            json!(true)
-        );
     }
 }

@@ -1,15 +1,14 @@
 (type Score {:name String :accepted Bool})
 (type Accepted {:score Score})
 (type Rejected {:score Score :reason String})
-(type Decision (| Accepted Rejected))
+(type Decision (adt [Accepted Accepted] [Rejected Rejected]))
 (type Entry [K V] {:key K :value V})
 
 ;; Functions return the declared sum while selecting one concrete arm.
 (let decide (fn [[score Score]] -> Decision
   (if (get score "accepted")
-    (as Decision (as Accepted {:score score}))
-    (as Decision
-      (as Rejected {:score score :reason "score was not accepted"})))))
+    (construct Decision Accepted (as Accepted {:score score}))
+    (construct Decision Rejected (as Rejected {:score score :reason "score was not accepted"})))))
 
 ;; Entry demonstrates one reusable type with two independent parameters: this
 ;; value instantiates it as Entry String Int.

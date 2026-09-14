@@ -77,8 +77,8 @@ fn analysis_preserves_normalized_first_occurrence_and_flattening_order() {
           (let validation-message
             (fn [[checked (core.validated.Validated String nefor.graph.Graph)]] -> String
               (match checked
-                [(core.validated.Valid nefor.graph.Graph) accepted "valid"]
-                [(core.validated.Invalid String) rejected
+                [Valid accepted "valid"]
+                [Invalid rejected
                   (first (get rejected "errors"))])))
           (let start-base
             (nefor.graph.source "z-start" (type-tag nefor.contracts.Text)
@@ -345,8 +345,8 @@ fn indexed_reachability_handles_cycles_and_preserves_dead_path_diagnostics() {
           (let validation-message
             (fn [[checked (core.validated.Validated String nefor.graph.Graph)]] -> String
               (match checked
-                [(core.validated.Valid nefor.graph.Graph) accepted "valid"]
-                [(core.validated.Invalid String) rejected
+                [Valid accepted "valid"]
+                [Invalid rejected
                   (first (get rejected "errors"))])))
           (let contracts
             (host-input "factory_contracts"
@@ -443,8 +443,8 @@ fn duplicate_precedence_contract_selection_and_sequence_order_are_stable() {
           (let validation-message
             (fn [[checked (core.validated.Validated String nefor.graph.Graph)]] -> String
               (match checked
-                [(core.validated.Valid nefor.graph.Graph) accepted "valid"]
-                [(core.validated.Invalid String) rejected
+                [Valid accepted "valid"]
+                [Invalid rejected
                   (first (get rejected "errors"))])))
           (let start
             (nefor.graph.source "start" (type-tag nefor.contracts.Text)
@@ -561,7 +561,7 @@ fn nefor_artifact_emits_exact_versioned_program_and_delta_envelopes() {
         contracts(json!([])),
     );
     assert_eq!(program["format"], "nefor.mag");
-    assert_eq!(program["version"], 1);
+    assert_eq!(program["version"], 2);
     assert_eq!(program["kind"], "program");
     assert_eq!(program["program"]["operations"], json!([]));
     let initial = &program["program"]["initial"];
@@ -580,7 +580,7 @@ fn nefor_artifact_emits_exact_versioned_program_and_delta_envelopes() {
         json!({}),
     );
     assert_eq!(delta["format"], "nefor.mag");
-    assert_eq!(delta["version"], 1);
+    assert_eq!(delta["version"], 2);
     assert_eq!(delta["kind"], "delta");
     assert!(delta["delta"].get("result").is_none());
     assert!(delta["delta"].get("operations").is_none());
@@ -598,7 +598,7 @@ fn unit_sum_root_cache_preserves_actual_activation_evidence() {
       (require "nefor.graph")
       (require "nefor.artifact")
       (type Arm {:text String})
-      (let start (nefor.graph.identity "start" (type-tag (| Unit Arm))))
+      (let start (nefor.graph.identity "start" (type-tag Unit)))
       (let result (nefor.graph.output-for "result" start))
       (nefor.artifact.compile (fn [[g nefor.graph.Graph]] -> nefor.graph.Graph
         (nefor.graph.add-edges g [(nefor.graph.edge start result)])))
@@ -641,7 +641,7 @@ fn unit_sum_root_cache_preserves_actual_activation_evidence() {
         initial["types"][message["semantic_type_id"].as_str().unwrap()],
         message["semantic_type"]
     );
-    assert_eq!(initial["actors"][0]["input"]["type"]["kind"], "union");
+    assert_eq!(initial["actors"][0]["input"]["type"]["kind"], "primitive");
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -653,7 +653,7 @@ fn delta_bootstrap_uses_exact_unit_and_full_input_address() {
       (require "nefor.graph")
       (type Arm {:text String})
       (let unit (nefor.graph.identity "unit" (type-tag Unit)))
-      (let sum (nefor.graph.identity "sum" (type-tag (| Unit Arm))))
+      (let sum (nefor.graph.identity "sum" (type-tag Unit)))
       (let base (nefor.graph.merge-delta (nefor.graph.node-delta unit) (nefor.graph.node-delta sum)))
       (let actual (get unit "input"))
       (let unrelated (nefor.graph.port "unit" (type-tag Unit) "other-wire"))
@@ -665,24 +665,21 @@ fn delta_bootstrap_uses_exact_unit_and_full_input_address() {
     "#,
         json!({}),
     );
-    assert_eq!(artifact["base"]["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(artifact["base"]["messages"].as_array().unwrap().len(), 2);
     assert_eq!(artifact["base"]["messages"][0]["to"], "unit");
     assert_eq!(
         artifact["authored"]["messages"].as_array().unwrap().len(),
-        1
-    );
-    assert_eq!(
-        artifact["unrelated"]["messages"].as_array().unwrap().len(),
         2
     );
     assert_eq!(
-        artifact["unrelated"]["messages"][1]["content"]["value"]["kind"],
+        artifact["unrelated"]["messages"].as_array().unwrap().len(),
+        3
+    );
+    assert_eq!(
+        artifact["unrelated"]["messages"][2]["content"]["value"]["kind"],
         "nefor.graph.Value"
     );
-    assert!(artifact["routed"]["messages"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert_eq!(artifact["routed"]["messages"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -696,13 +693,13 @@ fn indexed_output_diagnostics_include_explicit_operations_and_each_port() {
       (type Arm {:text String})
       (type Other {:number Int})
       (let input (nefor.graph.port "worker" (type-tag Unit) "in"))
-      (let one (nefor.graph.port "worker" (type-tag (| Unit Arm Other)) "one"))
-      (let two (nefor.graph.port "worker" (type-tag (| Unit Arm Other)) "two"))
+      (let one (nefor.graph.port "worker" (type-tag Arm) "one"))
+      (let two (nefor.graph.port "worker" (type-tag Arm) "two"))
       (let worker (nefor.graph.actor "worker" "custom" [] {}
         (nefor.graph.store-port input)
         [(nefor.graph.store-port one) (nefor.graph.store-port two)]))
       (let node (nefor.graph.node "worker" "ordinary" [worker] [] [] input one))
-      (let result (nefor.graph.output "result" (type-tag Unit)))
+      (let result (nefor.graph.output "result" (type-tag Arm)))
       (let graph (nefor.graph.graph [(nefor.graph.edge node result)]))
       (let on (nefor.graph.port "worker" (type-tag Arm) "one"))
       (let operation (nefor.graph.instantiate-delta-template "explicit-arm" on
@@ -711,13 +708,13 @@ fn indexed_output_diagnostics_include_explicit_operations_and_each_port() {
           :actors [] :routes [] :messages [] :nodes [] :actor_reference_relocations []})))
       (let validation (nefor.graph.validate-with-operations graph [operation] []))
       (artifact (match validation
-        [(core.validated.Invalid String) invalid (get invalid "errors")]
-        [(core.validated.Valid nefor.graph.Graph) valid []]))
+        [Invalid invalid (get invalid "errors")]
+        [Valid valid []]))
     "#,
         json!({}),
     );
     let errors = artifact.as_array().unwrap();
-    assert_eq!(errors.len(), 2, "{artifact}");
+    assert_eq!(errors.len(), 1, "{artifact}");
     let details: Vec<Value> = errors
         .iter()
         .map(|error| {
@@ -731,19 +728,10 @@ fn indexed_output_diagnostics_include_explicit_operations_and_each_port() {
             .unwrap()
         })
         .collect();
-    assert_eq!(details[0]["output"], "worker.one");
-    assert_eq!(details[1]["output"], "worker.two");
-    assert_eq!(details[1]["available_handlers"], json!([]));
+    assert_eq!(details[0]["output"], "worker.two");
+    assert_eq!(details[0]["available_handlers"], json!([]));
     let handlers = details[0]["available_handlers"].as_array().unwrap();
-    assert_eq!(handlers.len(), 2);
-    let route: Value = serde_json::from_str(handlers[0].as_str().unwrap()).unwrap();
-    let operation: Value = serde_json::from_str(handlers[1].as_str().unwrap()).unwrap();
-    assert_eq!(route["kind"], "route");
-    assert_eq!(route["to"], "result.nefor.graph.Value");
-    assert_eq!(operation["kind"], "operation");
-    assert_eq!(operation["id"], "explicit-arm");
-    assert_eq!(operation["type"]["name"], "main.Arm");
-    assert!(operation.get("function").is_none());
+    assert_eq!(handlers.len(), 0);
 }
 
 #[test]
@@ -805,25 +793,26 @@ fn generic_list_inference_supports_nested_sequence_with_error_union() {
     for (name, nodes) in [
         ("inline", "[runtime configs]"),
         ("bound", "workers"),
-        ("annotated", "(as (List (nefor.graph.Node nefor.contracts.Task (| nefor.contracts.TextAnswer nefor.contracts.AgentError))) [runtime configs])"),
+        ("annotated", "(as (List (nefor.graph.Node nefor.contracts.Task (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))) [runtime configs])"),
     ] {
         let source = format!(r#"
+          (require "core.types")
           (require "nefor.contracts")
           (require "nefor.graph")
           (require "nefor.node")
           (let agent-shaped
             (fn [[id String]] -> (nefor.graph.Node nefor.contracts.Task
-                                   (| nefor.contracts.TextAnswer nefor.contracts.AgentError))
+                                   (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))
               (nefor.graph.node id "test" [] [] []
                 (nefor.graph.port id (type-tag nefor.contracts.Task) "nefor.graph.Value")
-                (nefor.graph.port id (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError)) "nefor.graph.Value"))))
+                (nefor.graph.port id (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer)) "nefor.graph.Value"))))
           (let runtime (agent-shaped "runtime"))
           (let configs (agent-shaped "configs"))
           (let workers [runtime configs])
           (let task (nefor.graph.source "task" (type-tag nefor.contracts.Task) (as nefor.contracts.Task {{:prompt "Investigate"}})))
           (let work (nefor.node.>>> task (nefor.node.sequence "traces" {nodes})))
           (artifact (= (get (get work "output") "type")
-                       (type-tag (List (| nefor.contracts.TextAnswer nefor.contracts.AgentError)))))
+                       (type-tag (List (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer)))))
         "#);
         let artifact = run(&format!("generic-list-{name}"), &source, json!({}));
         assert_eq!(artifact, json!(true), "{name}");

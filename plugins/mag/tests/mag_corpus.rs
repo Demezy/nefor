@@ -409,7 +409,8 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
 
     fs::write(
         temp_root.join("task-source.mag"),
-        r#"(require "nefor.actors")
+        r#"(require "core.types")
+    (require "nefor.actors")
 (require "nefor.artifact")
 (require "nefor.contracts")
 (require "nefor.graph")
@@ -469,7 +470,8 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     fs::write(
         temp_root.join("retry-gate-graph.mag"),
         r#"(require "nefor.artifact")
-(require "nefor.actors")
+(require "core.types")
+    (require "nefor.actors")
 (require "nefor.contracts")
 (require "nefor.graph")
 (let start (nefor.graph.source "start" (type-tag nefor.contracts.Task)

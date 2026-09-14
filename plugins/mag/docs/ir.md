@@ -364,7 +364,7 @@ initial-execute rejection is itself terminal.
 
 ## Declarative operations are closed data
 
-Version 1 defines one operation: `InstantiateDeltaTemplate`. It subscribes to a
+Version 2 defines one operation: `InstantiateDeltaTemplate`. It subscribes to a
 concrete typed source output, captures immutable values, and materializes a
 structural delta template from exactly five expression forms: `Trigger`,
 `Capture`, `Field`, `IntToDecimalString`, and `ConcatStrings`.

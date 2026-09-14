@@ -1,31 +1,40 @@
 ;; Small algebraic types shared by MAG libraries. These are ordinary nominal
 ;; data types; the evaluator has no special knowledge of them.
 
-(type Some [T] {:value T})
-(type None {})
-(type Option [T] (| (Some T) None))
+(type Option [T] (adt [Some T] [None Unit]))
+(type Either [L R] (adt [Left L] [Right R]))
+(type Result [E T] (adt [Ok T] [Error E]))
 
-(type Left [L] {:value L})
-(type Right [R] {:value R})
-(type Either [L R] (| (Left L) (Right R)))
-
-(let some (fn [T] [[value T]] -> (Some T)
-  (as (Some T) {:value value})))
-(let none (fn [] -> None (as None {})))
-(let left (fn [L] [[value L]] -> (Left L)
-  (as (Left L) {:value value})))
-(let right (fn [R] [[value R]] -> (Right R)
-  (as (Right R) {:value value})))
+(let some (fn [T] [[value T]] -> (Option T)
+  (construct (Option T) Some value)))
+(let none (fn [T] [] -> (Option T)
+  (construct (Option T) None nil)))
+(let left (fn [L R] [[value L]] -> (Either L R)
+  (construct (Either L R) Left value)))
+(let right (fn [L R] [[value R]] -> (Either L R)
+  (construct (Either L R) Right value)))
+(let ok (fn [E T] [[value T]] -> (Result E T)
+  (construct (Result E T) Ok value)))
+(let error (fn [E T] [[value E]] -> (Result E T)
+  (construct (Result E T) Error value)))
 
 (let option-map (fn [T U] [[f (Fn T U)] [option (Option T)]] -> (Option U)
   (match option
-    [(Some T) present
-      (as (Option U) (as (Some U) {:value (f (get present "value"))}))]
-    [None absent (as (Option U) (as None {}))])))
+    [Some present (construct (Option U) Some (f present))]
+    [None absent (construct (Option U) None nil)])))
 
 (let either-map (fn [L T U] [[f (Fn T U)] [either (Either L T)]] -> (Either L U)
   (match either
-    [(Left L) left-value
-      (as (Either L U) (as (Left L) {:value (get left-value "value")}))]
-    [(Right T) right-value
-      (as (Either L U) (as (Right U) {:value (f (get right-value "value"))}))])))
+    [Left left-value (construct (Either L U) Left left-value)]
+    [Right right-value (construct (Either L U) Right (f right-value))])))
+
+(let result-map (fn [E T U] [[f (Fn T U)] [result (Result E T)]] -> (Result E U)
+  (match result
+    [Error failure (construct (Result E U) Error failure)]
+    [Ok value (construct (Result E U) Ok (f value))])))
+
+(let result-and-then
+  (fn [E T U] [[f (Fn T (Result E U))] [result (Result E T)]] -> (Result E U)
+    (match result
+      [Error failure (construct (Result E U) Error failure)]
+      [Ok value (f value)])))

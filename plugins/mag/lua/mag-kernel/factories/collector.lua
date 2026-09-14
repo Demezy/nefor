@@ -66,14 +66,7 @@ function M.construct(id, params, emit)
     values[index] = type(one.message) == "table" and one.message.value or nil
     if values[index] == nil then return failure("collector_missing_value", sender) end
     semantic_values[index] = values[index]
-    local arrival = one.arrival
-    if type(arrival) == "table" and type(arrival.declared_type) == "table"
-        and arrival.declared_type.kind == "union" then
-      semantic_values[index] = {
-        type = arrival.constructor_id,
-        value = values[index],
-      }
-    end
+
     received = received + 1
     if received == #expected then
       finished = true

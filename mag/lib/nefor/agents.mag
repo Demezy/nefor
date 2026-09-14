@@ -1,3 +1,4 @@
+(require "core.types")
 (require "nefor.actors")
 (require "nefor.contracts")
 (require "nefor.dynamic")
@@ -16,7 +17,7 @@
                 [input-type (TypeTag I)]
                 [output-type (TypeTag O)]
                 [max-corrections Int]]
-    -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
+    -> (nefor.graph.Node I (core.types.Result nefor.contracts.AgentError O))
     (nefor.actors.agent resolve-model
       (as (nefor.actors.AgentConfig M)
         {:id id
@@ -36,10 +37,10 @@
                 [input-type (TypeTag I)]
                 [output-type (TypeTag O)]
                 [max-corrections Int]]
-    -> (nefor.graph.Node I (| O nefor.contracts.AgentError))
+    -> (nefor.graph.Node I (core.types.Result nefor.contracts.AgentError O))
     (with-tools
       (fn [[selected M]] -> nefor.actors.AuthoredModel
-        (as nefor.actors.AuthoredModel (resolve-model selected)))
+        (construct nefor.actors.AuthoredModel ResolvedModel (resolve-model selected)))
       model id system tools input-type output-type max-corrections)))
 
 (let dynamic-with-tools
@@ -52,7 +53,7 @@
                 [item-type (TypeTag O)]
                 [max-corrections Int]]
     -> (nefor.graph.Node I
-         (| (nefor.dynamic.DynamicList O) nefor.contracts.AgentError))
+         (core.types.Result nefor.contracts.AgentError (nefor.dynamic.DynamicList O)))
     (nefor.actors.dynamic-agent resolve-model
       (as (nefor.actors.AgentConfig M)
         {:id id
@@ -73,10 +74,10 @@
                 [item-type (TypeTag O)]
                 [max-corrections Int]]
     -> (nefor.graph.Node I
-         (| (nefor.dynamic.DynamicList O) nefor.contracts.AgentError))
+         (core.types.Result nefor.contracts.AgentError (nefor.dynamic.DynamicList O)))
     (dynamic-with-tools
       (fn [[selected M]] -> nefor.actors.AuthoredModel
-        (as nefor.actors.AuthoredModel (resolve-model selected)))
+        (construct nefor.actors.AuthoredModel ResolvedModel (resolve-model selected)))
       model id system tools input-type item-type max-corrections)))
 
 ;; Build the one structural template shape currently required by runtime
@@ -114,7 +115,7 @@
      [root-id (nefor.dynamic.ValueRef String)]
      [system (nefor.dynamic.ValueRef String)]
      [tools (List String)] [output-type (TypeTag O)] [max-corrections Int]]
-    -> (nefor.dynamic.TemplateNode Unit (| O nefor.contracts.AgentError))
+    -> (nefor.dynamic.TemplateNode Unit (core.types.Result nefor.contracts.AgentError O))
     (let concrete
       (with-tools resolve-model model "template" "" tools
         (type-tag Unit) output-type max-corrections))
@@ -136,16 +137,14 @@
       [(nefor.dynamic.capture-ref (str traversal-id ".result.") (type-tag String)) suffix]))
     (let result-input (nefor.dynamic.template-port
       (nefor.dynamic.local-actor-ref "result")
-      (type-tag (| O nefor.contracts.AgentError)) "nefor.dynamic.IndexInput"))
+      (type-tag (core.types.Result nefor.contracts.AgentError O)) "nefor.dynamic.IndexInput"))
     (let result-output (nefor.dynamic.template-port
       (nefor.dynamic.local-actor-ref "result")
-      (type-tag (nefor.dynamic.Indexed (| O nefor.contracts.AgentError)))
-      "nefor.dynamic.Indexed"))
+      (type-tag (nefor.dynamic.DynamicEvent (core.types.Result nefor.contracts.AgentError O)))
+      "nefor.dynamic.Event"))
     (let collect (nefor.dynamic.template-port
       (nefor.dynamic.existing-actor-ref (str traversal-id ".output"))
-      (type-tag
-        (| (nefor.dynamic.Indexed (| O nefor.contracts.AgentError))
-           nefor.dynamic.DynamicCount))
+      (type-tag (nefor.dynamic.DynamicEvent (core.types.Result nefor.contracts.AgentError O)))
       "nefor.dynamic.Collect"))
     (let result-params
       (pack (as nefor.dynamic.DynamicIndexParams
@@ -154,7 +153,8 @@
       (as nefor.mag.TemplateActor
         {:slot "result" :id (get result-id "id")
          :factory nefor.dynamic.dynamic-index-factory
-         :type_arguments [(type-evidence (type-tag (| O nefor.contracts.AgentError)))]
+         :type_arguments [(type-evidence (type-tag (core.types.Result nefor.contracts.AgentError O)))
+                          (type-evidence (type-tag (nefor.dynamic.DynamicEvent (core.types.Result nefor.contracts.AgentError O))))]
          :params result-params :input result-input :outputs [result-output]
          :parameter_bindings
            [(as nefor.mag.ScalarParameterBinding
@@ -237,7 +237,7 @@
        (get entry-id "expressions") (get llm-id "expressions")
        (get run-tool-id "expressions") (get tool-result-id "expressions")
        (get result-id "expressions")]))
-    (as (nefor.dynamic.TemplateNode Unit (| O nefor.contracts.AgentError))
+    (as (nefor.dynamic.TemplateNode Unit (core.types.Result nefor.contracts.AgentError O))
       {:template template :input entry-in :output result-output
        :root traversal-id :id_ref worker-id
        :captures captures :expressions expressions})))

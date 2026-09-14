@@ -137,7 +137,7 @@ fn distinct_read_queries_keep_existing_memoization_keys() {
     let w = Workspace::new();
     w.write(
         "main.mag",
-        "(artifact [(read \"text\") (read \"./text\") (read-json \"text\")])",
+        "(artifact {:first (read \"text\") :second (read \"./text\") :json (read-json \"text\")})",
     );
     w.write("text", "42");
     let roots = [w.0.clone()];

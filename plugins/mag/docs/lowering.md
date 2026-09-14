@@ -23,7 +23,7 @@ namespaced modules
   -> ordinary typed actor values
   -> nefor.graph.Graph
   -> nefor.graph.validate
-  -> Nefor-owned nefor.mag v1 program or delta envelope
+  -> Nefor-owned nefor.mag v2 program or delta envelope
   -> Artifact(opaque application value)
   -> runtime binding and defensive validation
 ```
@@ -31,7 +31,7 @@ namespaced modules
 The envelope schema lives in `mag/lib/nefor/mag.mag`; core MAG remains
 schema-opaque. A program envelope contains an initial concrete modification and
 an ordered list of operations. A delta envelope contains one concrete delta.
-Version 1 defines exactly one operation, `InstantiateDeltaTemplate`, whose
+Version 2 defines exactly one operation, `InstantiateDeltaTemplate`, whose
 closed expression vocabulary is Trigger, Capture, Field, IntToDecimalString,
 and ConcatStrings. Its structural template names actor slots, local/existing
 actor references, typed ports, routes and product positions, typed messages,

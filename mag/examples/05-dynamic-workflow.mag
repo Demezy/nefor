@@ -1,3 +1,4 @@
+(require "core.types")
 (require "agents")
 (require "nefor.actors")
 (require "nefor.agents")
@@ -36,10 +37,10 @@
 (let workers
   (nefor.dynamic.traverse-template "workers" worker-template
     (type-tag WorkItem)
-    (type-tag (| WorkResult nefor.contracts.AgentError))))
+    (type-tag (core.types.Result nefor.contracts.AgentError WorkResult))))
 (let result-context
   (nefor.dynamic.context "result-context"
-    (type-tag (| WorkResult nefor.contracts.AgentError))))
+    (type-tag (core.types.Result nefor.contracts.AgentError WorkResult))))
 (let integrator
   (nefor.agents.with-tools agents.resolve-model agents.mock "integrator"
     "Integrate all ordered worker results into one summary." []
@@ -50,7 +51,8 @@
 ;; The top-level graph is still assembled entirely from ordinary nodes:
 ;; `>=>` continues successful values and preserves AgentError as data.
 (let planned (nefor.node.>>> task planner))
-(let ran (nefor.node.>=> planned workers))
+(let ran
+  (nefor.node.>=> planned (nefor.node.lift-result "workers-result" (type-tag nefor.contracts.AgentError) workers)))
 (let workflow (nefor.node.>=> ran integrate))
 (let result (nefor.graph.output-for "result" workflow))
 

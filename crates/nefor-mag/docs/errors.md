@@ -53,7 +53,7 @@ Every possible output alternative needs an ordinary route, a typed operation sub
 
 ### Sum construction
 
-Graph compatibility and value construction answer different questions. An edge carrying `Unit` can feed a `Unit | Text` input, but `(as (| Unit Text) nil)` does not manufacture a runtime sum constructor. Primitive and structural values have no explicit nominal constructor evidence. Construct a declared nominal arm first and then refine that value to the sum. The compiler reports both the source and target types; it does not currently attach a source span to this evaluation-time diagnostic.
+Graph compatibility and value construction answer different questions. Nominal ADTs never accept a payload as though it were the owner value: construct the owner explicitly with `(construct Owner Constructor payload)`. Graph branches likewise require explicit unpack and lift operations; a route cannot erase an outer constructor merely because its payload type matches the destination. The compiler reports both source and target types for invalid refinements, but does not currently attach a source span to this evaluation-time diagnostic.
 
 ### Forged values
 

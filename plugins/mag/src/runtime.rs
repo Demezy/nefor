@@ -1093,7 +1093,7 @@ fn preflight_provider_schemas(program: &DecodedProgram) -> Result<(), String> {
             })?;
         schema.to_provider_schema().map_err(|error| {
             let correction = if schema_contains_named(&schema.root, "nefor.contracts.AgentError") {
-                "nefor.actors.agent adds nefor.contracts.AgentError automatically; pass only the success output type to the agent and use (| SuccessType nefor.contracts.AgentError) only at the agent result/output boundary"
+                "nefor.actors.agent adds nefor.contracts.AgentError automatically; pass only the success output type to the agent and use (core.types.Result nefor.contracts.AgentError SuccessType) only at the agent result/output boundary"
             } else {
                 "replace the unsupported semantic field/type with a concrete strict-JSON shape before using it as structured output"
             };
@@ -1116,6 +1116,9 @@ fn schema_contains_named(schema: &nefor_mag::schema::SchemaType, expected: &str)
         SchemaType::Union { variants } => variants
             .iter()
             .any(|variant| schema_contains_named(&variant.schema, expected)),
+        SchemaType::Adt { constructors, .. } => constructors
+            .iter()
+            .any(|constructor| schema_contains_named(&constructor.schema, expected)),
         SchemaType::Product { components } => components
             .iter()
             .any(|component| schema_contains_named(component, expected)),
@@ -1781,7 +1784,7 @@ fn artifact_program(artifact: &Value) -> Result<DecodedProgram, String> {
     if object.get("format").and_then(Value::as_str) != Some("nefor.mag") {
         return Err("mag.execute artifact has an unsupported format".to_owned());
     }
-    if object.get("version").and_then(Value::as_u64) != Some(1) {
+    if object.get("version").and_then(Value::as_u64) != Some(2) {
         return Err("mag.execute artifact has an unsupported nefor.mag version".to_owned());
     }
     if object.get("kind").and_then(Value::as_str) != Some("program") {
@@ -1841,7 +1844,7 @@ fn artifact_delta(artifact: &Value) -> Result<Value, String> {
     if object.get("format").and_then(Value::as_str) != Some("nefor.mag") {
         return Err("mag.apply artifact has an unsupported format".to_owned());
     }
-    if object.get("version").and_then(Value::as_u64) != Some(1) {
+    if object.get("version").and_then(Value::as_u64) != Some(2) {
         return Err("mag.apply artifact has an unsupported nefor.mag version".to_owned());
     }
     if object.get("kind").and_then(Value::as_str) != Some("delta") {

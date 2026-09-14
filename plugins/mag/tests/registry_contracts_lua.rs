@@ -252,15 +252,13 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
       local unit_id=nefor.semantic_type.id(p("Unit"))
       local string_id=nefor.semantic_type.id(p("String"))
       local int_id=nefor.semantic_type.id(p("Int"))
-      local string_or_unit={kind="union",items={p("Unit"),p("String")}}
-      local string_or_unit_id=nefor.semantic_type.id(string_or_unit)
+
       local function typed_route(source_type,route_source,destination_type,route_destination)
         local route_source_id=nefor.semantic_type.id(route_source)
         local route_destination_id=nefor.semantic_type.id(route_destination)
         return reg:validate_modification({
           types={
             [unit_id]=p("Unit"),[string_id]=p("String"),[int_id]=p("Int"),
-            [string_or_unit_id]=string_or_unit,
           },
           actors={
             {id="source",factory="producer",type_arguments={source_type},
@@ -274,13 +272,11 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
           },
         })
       end
-      local narrowed_arm=typed_route(string_or_unit,p("String"),p("String"),p("String"))
-      assert(narrowed_arm.ok,table.concat(narrowed_arm.errors or {},"; "))
-      local widened_destination=typed_route(p("Unit"),p("Unit"),string_or_unit,string_or_unit)
-      assert(widened_destination.ok,table.concat(widened_destination.errors or {},"; "))
-      local foreign_arm=typed_route(string_or_unit,p("Int"),p("Int"),p("Int"))
-      assert(not foreign_arm.ok)
-      assert(table.concat(foreign_arm.errors or {},"; "):find("incompatible with endpoints"))
+      local exact_route=typed_route(p("String"),p("String"),p("String"),p("String"))
+      assert(exact_route.ok,table.concat(exact_route.errors or {},"; "))
+      local foreign_type=typed_route(p("String"),p("Int"),p("Int"),p("Int"))
+      assert(not foreign_type.ok)
+      assert(table.concat(foreign_type.errors or {},"; "):find("incompatible with endpoints"))
 
       local mismatched=reg:validate_modification({actors={
         {id="source",factory="producer",type_arguments={p("String")},input={type=p("Unit"),wire="Start"},
@@ -336,7 +332,7 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
       assert(table.concat(overfilled.errors,"; "):find("component multiset"))
 
       assert(reg:register({declaration={name="choice",type_variables={"A","B"},
-        semantic={input=p("Unit"),output={kind="union",items={v("A"),v("B")}},inputs={{wire="Start",type=p("Unit")}},outputs={{wire="Left",type=v("A")},{wire="Right",type=v("B")}}},params={},inputs={start="Start"},outputs={"Left","Right"}},
+        semantic={input=p("Unit"),output=p("JsonValue"),inputs={{wire="Start",type=p("Unit")}},outputs={{wire="Left",type=v("A")},{wire="Right",type=v("B")}}},params={},inputs={start="Start"},outputs={"Left","Right"}},
         construct=function() return {} end}))
       local missing_arm=reg:validate_modification({actors={{id="choice",factory="choice",
         type_arguments={p("String"),p("Int")},input={type=p("Unit"),wire="Start"},

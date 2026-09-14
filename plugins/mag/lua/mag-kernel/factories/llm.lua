@@ -7,19 +7,14 @@ local RESULT = "nefor.agent.Result"
 
 M.declaration = {
   name = "llm",
+  type_variables = { "R" },
   semantic = {
     input={kind="named",name="nefor.contracts.ProviderInput",arguments={}},
-    output={kind="union",items={
-      {kind="named",name="nefor.contracts.ToolCalls",arguments={}},
-      {kind="named",name="nefor.contracts.TextAnswer",arguments={}},
-    }},
+    output={kind="variable",name="R"},
     inputs={{wire="generic-provider.ProviderOut",type={kind="named",name="nefor.contracts.ProviderInput",arguments={}}}},
     outputs={
       {wire="generic-tool.ToolCalls",type={kind="named",name="nefor.contracts.ToolCalls",arguments={}}},
-      {wire=RESULT,type={kind="union",items={
-        {kind="named",name="nefor.contracts.TextAnswer",arguments={}},
-        {kind="named",name="nefor.contracts.AgentError",arguments={}},
-      }}},
+      {wire=RESULT,type={kind="variable",name="R"}},
     },
   },
   params = {
@@ -75,16 +70,19 @@ function M.construct(id, params, emit, deps)
     on_final = function(state, result)
       local content = boundary.answer_text(result) or ""
       record_final_message(state, content)
-      state:finish({ kind = RESULT, semantic_type_id = params.output_type,
-        value = content, result = result }, {
-          result = result, value = content, semantic_type_id = params.output_type,
+      local value = { constructor = "Ok", value = content }
+      state:finish({ kind = RESULT, value = value, result = result }, {
+          result = result, value = value,
         })
     end,
     on_error = function(state, detail)
-      state:finish({ kind = RESULT, semantic_type_id = params.error_type,
-        value = { last_output = nefor.json.decode("null"), reason = {
-          type = params.provider_error_type, value = provider_error(detail),
-        }}}, { error = detail })
+      state:finish({ kind = RESULT, value = {
+        constructor = "Error", value = {
+          last_output = nefor.json.decode("null"), reason = {
+            constructor = "ProviderError", value = provider_error(detail),
+          },
+        },
+      }}, { error = detail })
     end,
   })
 end

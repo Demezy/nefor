@@ -11,33 +11,23 @@
                          :timeout nefor.contracts.Timeout})
 (type ProcessExecActorParams {:argv (List String)
                               :cwd String
-                              :timeout nefor.contracts.Timeout
-                              :exited_type SemanticTypeId
-                              :signaled_type SemanticTypeId})
+                              :timeout nefor.contracts.Timeout})
 
 (let exec (fn [[name String] [params ProcessExecParams]]
-  -> (nefor.graph.Node (| Unit nefor.contracts.Text) nefor.contracts.ProcessResult)
+  -> (nefor.graph.Node Unit nefor.contracts.ProcessResult)
   (let input (nefor.graph.port name
-                (type-tag (| Unit nefor.contracts.Text))
+                (type-tag Unit)
                 "nefor.process.Input"))
   (let output (nefor.graph.port name
                  (type-tag nefor.contracts.ProcessResult)
                  "nefor.process.Result"))
-  (as (nefor.graph.Node (| Unit nefor.contracts.Text) nefor.contracts.ProcessResult)
+  (as (nefor.graph.Node Unit nefor.contracts.ProcessResult)
       {:id name :role "ordinary"
        :actors [(nefor.graph.actor name factory []
                    (as ProcessExecActorParams
                      {:argv (get params "argv")
                       :cwd (get params "cwd")
-                      :timeout (get params "timeout")
-                      :exited_type
-                        (type-id
-                          (type-evidence
-                            (type-tag nefor.contracts.ProcessExited)))
-                      :signaled_type
-                        (type-id
-                          (type-evidence
-                            (type-tag nefor.contracts.ProcessSignaled)))})
+                      :timeout (get params "timeout")})
                    (nefor.graph.store-port input)
                    [(nefor.graph.store-port output)])]
        :routes (as (List nefor.graph.StoredRoute) [])

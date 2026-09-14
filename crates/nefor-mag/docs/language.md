@@ -21,7 +21,7 @@ Declare nominal records and algebraic types with `type`:
 
 ```lisp
 (type Finding {:path String :summary String})
-(type Decision (| Finding nefor.contracts.AgentError))
+(type Decision (adt [Finding Finding] [AgentError nefor.contracts.AgentError]))
 (type Pair (+ Finding Finding))
 ```
 
@@ -97,8 +97,7 @@ used for different semantic types but not twice for the same type.
         (type-tag nefor.contracts.TextAnswer)
         2))
 (let result (nefor.graph.output "result"
-        (type-tag (| nefor.contracts.TextAnswer
-                     nefor.contracts.AgentError))))
+        (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))
 (nefor.artifact.compile
     (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
       (nefor.graph.add-edges graph
