@@ -255,6 +255,79 @@ end
 -- The compiled lead-turn.mag shape the mag plugin's `mag.loaded` reply
 -- carries (source → entry adapter → lead llm → output; the spawner derives
 -- its source, entry, and llm seams from this, never hardcodes them).
+local RESULT_TYPE_ID = "sha256:8d5a69448c44335912765e1c7536605597438d3549c5e491808a62d5ace716da"
+local AGENT_ERROR_TYPE_ID = "sha256:2324ecf4ddda81471726a55b775bf564c1b3c814f3db279252da16843bfed431"
+local RESULT_CONSTRUCTOR_IDS = {
+  Ok = "sha256:371afaaf318f87fa53982da5df1be44b2ae3a47a59c0ea0ef7408c060eecfc57",
+  Error = "sha256:18606e26610b182e4977008545da144e22a01cf4090804fd7a48352b68be85ed",
+}
+
+local function primitive(name)
+  return { kind = "primitive", name = name }
+end
+
+local function named(name, body)
+  return { kind = "named", name = name, arguments = {}, body = body }
+end
+
+local function output_violation_type()
+  return named("nefor.contracts.OutputViolation", { kind = "record", fields = {
+    { name = "actual", type = primitive("String") },
+    { name = "code", type = primitive("String") },
+    { name = "expected", type = primitive("String") },
+    { name = "message", type = primitive("String") },
+    { name = "path", type = primitive("String") },
+  } })
+end
+
+local function output_validation_error_type()
+  return named("nefor.contracts.OutputValidationError", { kind = "record", fields = {
+    { name = "violations", type = { kind = "list", item = output_violation_type() } },
+  } })
+end
+
+local function provider_error_type()
+  local optional_identifier = named("nefor.contracts.OptionalIdentifier", {
+    kind = "record", fields = {
+      { name = "present", type = primitive("Bool") },
+      { name = "value", type = primitive("String") },
+    },
+  })
+  return named("nefor.contracts.ProviderError", { kind = "record", fields = {
+    { name = "detail", type = optional_identifier },
+    { name = "message", type = primitive("String") },
+  } })
+end
+
+local function agent_error_type()
+  local reason = {
+    kind = "adt", name = "nefor.contracts.AgentErrorReason", arguments = {},
+    constructors = {
+      { name = "OutputValidationError", payload = output_validation_error_type() },
+      { name = "ProviderError", payload = provider_error_type() },
+    },
+  }
+  return named("nefor.contracts.AgentError", { kind = "record", fields = {
+    { name = "last_output", type = primitive("JsonValue") },
+    { name = "reason", type = reason },
+  } })
+end
+
+local function text_answer_type()
+  return named("nefor.contracts.TextAnswer", primitive("String"))
+end
+
+local function result_type()
+  return {
+    kind = "adt", name = "core.types.Result",
+    arguments = { agent_error_type(), text_answer_type() },
+    constructors = {
+      { name = "Error", payload = agent_error_type() },
+      { name = "Ok", payload = text_answer_type() },
+    },
+  }
+end
+
 local function lead_artifact()
   local task_type = {
     kind = "named",
@@ -264,6 +337,8 @@ local function lead_artifact()
   return {
     types = {
       task = task_type,
+      [RESULT_TYPE_ID] = result_type(),
+      [AGENT_ERROR_TYPE_ID] = agent_error_type(),
     },
     actors = {
       {
@@ -311,19 +386,9 @@ end
 
 local function terminal_result(constructor, value)
   return {
-    semantic_type_id = "sha256:result-owner",
-    constructor_id = "sha256:result-" .. constructor,
-    semantic_type = {
-      kind = "adt", name = "core.types.Result",
-      arguments = {
-        { kind = "named", name = "nefor.contracts.AgentError", arguments = {} },
-        { kind = "named", name = "nefor.contracts.TextAnswer", arguments = {} },
-      },
-      constructors = {
-        { name = "Error", payload = { kind = "named", name = "nefor.contracts.AgentError", arguments = {} } },
-        { name = "Ok", payload = { kind = "named", name = "nefor.contracts.TextAnswer", arguments = {} } },
-      },
-    },
+    semantic_type_id = RESULT_TYPE_ID,
+    constructor_id = RESULT_CONSTRUCTOR_IDS[constructor],
+    semantic_type = result_type(),
     value = { constructor = constructor, value = value },
   }
 end
@@ -1171,18 +1236,46 @@ do
       "typed AgentError envelope must never be appended as chat text")
   end
 
+  local malformed_cases = {
+    { label = "missing constructor identity", mutate = function(result)
+      result.constructor_id = nil
+    end },
+    { label = "wrong owner identity", mutate = function(result)
+      result.semantic_type_id = "sha256:not-the-result-owner"
+    end },
+    { label = "wrong selected constructor identity", mutate = function(result)
+      result.constructor_id = RESULT_CONSTRUCTOR_IDS.Error
+    end },
+  }
+  for index, case in ipairs(malformed_cases) do
+    fresh_loop()
+    exec = begin_bound_turn("malformed typed result", "r-malformed-result-" .. index)
+    local malformed = terminal_result("Ok", "must not be accepted")
+    case.mutate(malformed)
+    send_to_loop("mag", {
+      kind = "mag.run_result", run_id = exec.body.run_id, status = "completed",
+      result = malformed,
+    })
+    local invalid = find_kind(decode_calls(), "chat.error.append")
+    assert(invalid ~= nil, case.label .. " emits a structured error")
+    assert_eq(invalid.body.title, "Invalid agent result",
+      case.label .. " is rejected instead of projecting the payload")
+  end
+
   fresh_loop()
-  exec = begin_bound_turn("malformed typed result", "r-malformed-result")
-  local malformed = terminal_result("Ok", "must not be accepted")
-  malformed.constructor_id = nil
+  exec = begin_bound_turn("forged direct error", "r-forged-direct-error")
   send_to_loop("mag", {
     kind = "mag.run_result", run_id = exec.body.run_id, status = "completed",
-    result = malformed,
+    result = {
+      semantic_type_id = "sha256:not-agent-error",
+      semantic_type = agent_error_type(),
+      value = { last_output = nil, reason = { value = { message = "login required" } } },
+    },
   })
-  local invalid = find_kind(decode_calls(), "chat.error.append")
-  assert(invalid ~= nil, "malformed typed terminal data emits a structured error")
-  assert_eq(invalid.body.title, "Invalid agent result",
-    "malformed typed terminal data is rejected instead of recursively unwrapped")
+  local invalid_direct = find_kind(decode_calls(), "chat.error.append")
+  assert(invalid_direct ~= nil, "forged direct AgentError identity emits a structured error")
+  assert_eq(invalid_direct.body.title, "Invalid agent result",
+    "direct AgentError names cannot substitute for declared semantic identity")
 end
 
 -- (interrupt preserves context) an interrupted lead turn settles failed with

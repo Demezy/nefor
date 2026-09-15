@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
+use nefor_mag::json::concrete_type_from_json;
 use nefor_protocol::{Body, Envelope, PluginName, PluginOutgoing, SystemBody, Timestamp};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -81,21 +82,33 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
 }
 
 fn assert_typed_result(result: &Map<String, Value>) {
-    let semantic = result
-        .pointer_str("/result/semantic_type_id")
-        .expect("terminal result carries semantic type identity");
-    assert!(semantic.starts_with("sha256:"), "{result:?}");
-    let constructor = result
-        .pointer_str("/result/constructor_id")
-        .expect("terminal result carries constructor identity");
-    assert!(constructor.starts_with("sha256:"), "{result:?}");
-    assert!(
-        result
-            .get("result")
-            .and_then(|value| value.get("variant"))
-            .is_none(),
+    let terminal = result.get("result").expect("terminal result");
+    let descriptor = terminal
+        .get("semantic_type")
+        .expect("terminal result carries semantic type descriptor");
+    let semantic_type = concrete_type_from_json(descriptor).expect("valid terminal descriptor");
+    assert_eq!(descriptor["name"], "core.types.Result", "{result:?}");
+    assert_eq!(
+        descriptor["arguments"][0]["name"], "nefor.contracts.AgentError",
         "{result:?}"
     );
+    assert_eq!(
+        terminal["semantic_type_id"],
+        semantic_type.stable_id().as_str(),
+        "{result:?}"
+    );
+    let selected = terminal["value"]["constructor"]
+        .as_str()
+        .expect("terminal result selects a constructor");
+    assert_eq!(
+        terminal["constructor_id"],
+        semantic_type
+            .constructor_id(selected)
+            .expect("selected constructor belongs to Result")
+            .as_str(),
+        "{result:?}"
+    );
+    assert!(terminal.get("variant").is_none(), "{result:?}");
 }
 
 async fn spawn_mag(data_dir: &std::path::Path) -> Child {

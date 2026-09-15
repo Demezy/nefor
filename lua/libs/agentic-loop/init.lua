@@ -59,6 +59,14 @@ local model_snapshot_data = require("libs.model-snapshot")
 local mag_workspace = require("libs.mag-workspace")
 local RequestLifecycle = require("libs.agentic-loop.request-lifecycle")
 
+-- The lead program's public result is deliberately fixed to
+-- Result<AgentError, TextAnswer>; exact identities keep terminal projection nominal.
+local LEAD_RESULT_TYPE_ID = "sha256:8d5a69448c44335912765e1c7536605597438d3549c5e491808a62d5ace716da"
+local LEAD_RESULT_CONSTRUCTOR_IDS = {
+  Ok = "sha256:371afaaf318f87fa53982da5df1be44b2ae3a47a59c0ea0ef7408c060eecfc57",
+  Error = "sha256:18606e26610b182e4977008545da144e22a01cf4090804fd7a48352b68be85ed",
+}
+
 local state = {
   -- Orchestrator config — mutated by configure() / chat.model.set.
   config = {
@@ -81,6 +89,7 @@ local state = {
     artifact    = nil,   ---@type table|nil   retained compiled artifact
     hash       = nil,   ---@type string|nil
     inventory  = nil,   ---@type table|nil complete initial/template actor inventory
+    semantic_types = nil, ---@type table|nil stable id -> compiler-declared descriptor
     entry_actor = nil,  ---@type string|nil  the task message's target
     llm_actor  = nil,   ---@type string|nil  the overlay/binding target
     load_id    = nil,   ---@type string|nil  in-flight mag.load request id
@@ -399,6 +408,18 @@ local function deep_clone(value)
   return out
 end
 
+local function deep_equal(left, right)
+  if type(left) ~= type(right) then return false end
+  if type(left) ~= "table" then return left == right end
+  for key, value in pairs(left) do
+    if not deep_equal(value, right[key]) then return false end
+  end
+  for key in pairs(right) do
+    if left[key] == nil then return false end
+  end
+  return true
+end
+
 -- Derive the turn-program's seams from its compiled modification:
 --   * source actor — the initial Unit message's target and task-value owner;
 --   * entry actor — the source value's destination;
@@ -465,6 +486,7 @@ local function release_lead_program()
   p.artifact = nil
   p.hash = nil
   p.inventory = nil
+  p.semantic_types = nil
   p.source_actor = nil
   p.entry_actor = nil
   p.llm_actor = nil
@@ -501,6 +523,7 @@ local function handle_lead_program_loaded(body)
   p.artifact = deep_clone(artifact)
   p.hash = body.hash
   p.inventory = mag_workspace.actor_inventory(decoded)
+  p.semantic_types = deep_clone(decoded.modification.types or {})
   p.source_actor = seams.source_actor
   p.entry_actor = seams.entry_actor
   p.llm_actor = seams.llm_actor
@@ -1076,10 +1099,16 @@ local function handle_mag_run_started(body)
 end
 
 local function typed_semantic_name(result)
-  if type(result) ~= "table" or type(result.semantic_type_id) ~= "string" then
+  if type(result) ~= "table" or type(result.semantic_type_id) ~= "string"
+      or type(result.semantic_type) ~= "table" then
     return nil
   end
-  return type(result.semantic_type) == "table" and result.semantic_type.name or nil
+  local declared = type(state.lead_program.semantic_types) == "table"
+      and state.lead_program.semantic_types[result.semantic_type_id] or nil
+  if type(declared) ~= "table" or not deep_equal(result.semantic_type, declared) then
+    return nil
+  end
+  return result.semantic_type.name
 end
 
 local function nested_message(value)
@@ -1183,6 +1212,10 @@ local function decode_terminal_result(result)
   if type(result) ~= "table" then return { kind = "untyped", value = result } end
   local semantic_name = typed_semantic_name(result)
   if semantic_name == nil then
+    if result.semantic_type_id ~= nil or result.semantic_type ~= nil
+        or result.constructor_id ~= nil then
+      return { kind = "malformed" }
+    end
     return { kind = "untyped", value = result, result = result }
   end
   if semantic_name ~= "core.types.Result" then
@@ -1195,7 +1228,8 @@ local function decode_terminal_result(result)
   local value = result.value
   local error_name = result_argument_name(descriptor, 1)
   local success_name = result_argument_name(descriptor, 2)
-  if descriptor.kind ~= "adt" or type(result.constructor_id) ~= "string"
+  if descriptor.kind ~= "adt" or result.semantic_type_id ~= LEAD_RESULT_TYPE_ID
+      or result.constructor_id ~= LEAD_RESULT_CONSTRUCTOR_IDS[value and value.constructor]
       or type(descriptor.arguments) ~= "table" or #descriptor.arguments ~= 2
       or error_name ~= "nefor.contracts.AgentError"
       or success_name ~= "nefor.contracts.TextAnswer"

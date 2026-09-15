@@ -15,6 +15,7 @@ use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use nefor_mag::json::concrete_type_from_json;
 use nefor_protocol::{Body, Envelope, PluginName, PluginOutgoing, SystemBody, Timestamp};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -627,14 +628,31 @@ async fn run_case(kind: ProviderKind) {
     assert_eq!(result["status"], "completed");
     assert_eq!(result["result"]["value"]["constructor"], "Ok");
     assert_eq!(result["result"]["value"]["value"], "done");
-    assert!(result["result"]["semantic_type_id"]
-        .as_str()
-        .is_some_and(|id| id.starts_with("sha256:")));
-    assert!(result["result"]["constructor_id"]
-        .as_str()
-        .is_some_and(|id| id.starts_with("sha256:")));
-    assert_ne!(result["result"]["semantic_type_id"], constructor_id);
-    assert_ne!(result["result"]["constructor_id"], constructor_id);
+    let terminal = &result["result"];
+    let descriptor = &terminal["semantic_type"];
+    assert_eq!(descriptor["name"], "core.types.Result");
+    assert_eq!(
+        descriptor["arguments"][0]["name"],
+        "nefor.contracts.AgentError"
+    );
+    assert_eq!(
+        descriptor["arguments"][1]["name"],
+        "nefor.contracts.TextAnswer"
+    );
+    let semantic_type = concrete_type_from_json(descriptor).expect("valid Result descriptor");
+    assert_eq!(
+        terminal["semantic_type_id"],
+        semantic_type.stable_id().as_str()
+    );
+    assert_eq!(
+        terminal["constructor_id"],
+        semantic_type
+            .constructor_id("Ok")
+            .expect("Ok belongs to Result")
+            .as_str()
+    );
+    assert_ne!(terminal["semantic_type_id"], constructor_id);
+    assert_ne!(terminal["constructor_id"], constructor_id);
     assert!(result["result"].get("variant").is_none());
 
     server.await.expect("fake server");
