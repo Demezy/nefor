@@ -1425,17 +1425,32 @@ fn broad_frontier_graph(width: usize, depth: usize, stage: &str) -> (String, Str
     match stage {
         "analysis" => {}
         "forward-reachability" => source.push_str(&format!("let forward = nefor.graph.`forward-reachable`(analysis)\nlet forward_count = core.set.count(forward)\nlet forward_proof = if (=)(forward_count, {}) then true else fail(\"broad-frontier forward reachability changed\")\n", width * (depth + 1) + 1)),
-        "both-reachability" => source.push_str(&format!("let forward = nefor.graph.`forward-reachable`(analysis)\nlet forward_count = core.set.count(forward)\nlet forward_proof = if (=)(forward_count, {}) then true else fail(\"broad-frontier forward reachability changed\")\nlet force_reverse: fn(Bool) -> core.set.Set<String> = |proof| => nefor.graph.`reverse-reachable`(analysis, first(get(analysis, \"outputs\")))\nlet reverse = force_reverse(forward_proof)\nlet reverse_count = core.set.count(reverse)\nlet reverse_proof = if (=)(reverse_count, {}) then true else fail(\"broad-frontier reverse reachability changed\")\n", width * (depth + 1) + 1, width * (depth + 1) + 1)),
+        "both-reachability" => source.push_str(&format!("let forward = nefor.graph.`forward-reachable`(analysis)\nlet forward_count = core.set.count(forward)\nlet forward_proof = if (=)(forward_count, {}) then true else fail(\"broad-frontier forward reachability changed\")\nlet force_reverse: fn(Bool) -> Set<String> = |proof| => nefor.graph.`reverse-reachable`(analysis, first(get(analysis, \"outputs\")))\nlet reverse = force_reverse(forward_proof)\nlet reverse_count = core.set.count(reverse)\nlet reverse_proof = if (=)(reverse_count, {}) then true else fail(\"broad-frontier reverse reachability changed\")\n", width * (depth + 1) + 1, width * (depth + 1) + 1)),
         "lower" => {
-            let selected = (0..width)
-                .map(|chain| format!("(=)(get(candidate, \"id\"), \"n{chain}_{}\")", depth - 1))
+            let terminal_actor_ids = (0..width)
+                .map(|chain| format!("n{chain}_{}", depth - 1))
+                .collect::<Vec<_>>();
+            let selected = terminal_actor_ids
+                .iter()
+                .map(|actor_id| format!("(=)(get(candidate, \"id\"), \"{actor_id}\")"))
                 .reduce(|left, right| format!("or({left}, {right})"))
                 .expect("positive width");
-            let expected = (0..width).map(|position| position.to_string()).collect::<Vec<_>>().join(", ");
+            let expected_actor_ids = terminal_actor_ids
+                .iter()
+                .map(|actor_id| format!("\"{actor_id}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let expected_positions = lexical_product_positions(&terminal_actor_ids)
+                .into_iter()
+                .map(|position| position.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             source.push_str("let lowered = nefor.graph.lower(topology)\nlet forced = canonical(lowered)\n");
             source.push_str(&format!("let final_actors = filter(((|candidate| => {selected}): fn(nefor.graph.LowerActor) -> Bool), get(lowered, \"actors\"))\n"));
+            source.push_str("let final_actor_ids = map(((|candidate| => get(candidate, \"id\")): fn(nefor.graph.LowerActor) -> String), final_actors)\n");
             source.push_str("let positions = map(((|candidate| => get(first(`__map-get-or`(get(candidate, \"routes\"), \"nefor.graph.Value\", ([]: List<nefor.graph.LowerDestination>))), \"product_position\")): fn(nefor.graph.LowerActor) -> Int), final_actors)\n");
-            source.push_str(&format!("let route_order_proof = if (=)(positions, [{expected}]) then true else fail(\"broad-frontier route order or product positions changed\")\n"));
+            source.push_str(&format!("let actor_order_proof = if (=)(final_actor_ids, [{expected_actor_ids}]) then true else fail(\"broad-frontier terminal actor order changed\")\n"));
+            source.push_str(&format!("let route_order_proof = if (=)(positions, [{expected_positions}]) then actor_order_proof else fail(\"broad-frontier product positions changed\")\n"));
         }
         _ => unreachable!(),
     }

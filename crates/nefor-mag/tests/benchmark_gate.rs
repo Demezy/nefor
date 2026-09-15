@@ -18,6 +18,22 @@ fn nearest_rank_tail_is_exact_for_tiny_and_default_samples() {
 }
 
 #[test]
+fn broad_frontier_product_positions_follow_lexical_terminal_route_order() {
+    let width_four = (0..4)
+        .map(|chain| format!("n{chain}_7"))
+        .collect::<Vec<_>>();
+    assert_eq!(lexical_product_positions(&width_four), vec![0, 1, 2, 3]);
+
+    let width_sixteen = (0..16)
+        .map(|chain| format!("n{chain}_7"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lexical_product_positions(&width_sixteen),
+        vec![0, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1, 2, 3, 4, 5, 6]
+    );
+}
+
+#[test]
 fn fixture_fingerprint_separates_workload_and_implementation_roots() {
     let scratch = scratch("fingerprint-roots");
     let workload_root = scratch.join("workload-modules");

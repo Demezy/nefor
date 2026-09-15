@@ -170,12 +170,12 @@ impl ConcreteType {
     pub fn stable_id(&self) -> SemanticTypeId {
         let descriptor = crate::json::concrete_type_to_json(self)
             .unwrap_or_else(|_| unreachable!("ConcreteType serialization is infallible"));
-        let bytes = serde_json::to_vec(&serde_json::json!({
-            "domain": "mag.type.v2",
-            "version": 2,
-            "descriptor": descriptor,
-        }))
-        .unwrap_or_else(|_| unreachable!("semantic descriptor serialization is infallible"));
+        let mut identity = serde_json::Map::new();
+        identity.insert("domain".into(), "mag.type.v2".into());
+        identity.insert("version".into(), 2.into());
+        identity.insert("descriptor".into(), descriptor);
+        let bytes = serde_json::to_vec(&serde_json::Value::Object(identity))
+            .unwrap_or_else(|_| unreachable!("semantic descriptor serialization is infallible"));
         SemanticTypeId(format!("sha256:{:x}", Sha256::digest(bytes)))
     }
 
@@ -731,26 +731,40 @@ mod tests {
 
     #[test]
     fn adt_and_constructor_ids_are_nominal_and_instantiation_sensitive() {
-        let payload = ConcreteConstructor {
-            name: "Ok".into(),
-            payload: ConcreteType::Int,
-        };
+        let constructors = vec![
+            ConcreteConstructor {
+                name: "Err".into(),
+                payload: ConcreteType::String,
+            },
+            ConcreteConstructor {
+                name: "Ok".into(),
+                payload: ConcreteType::Int,
+            },
+        ];
         let first = ConcreteType::Adt {
             name: "main.Result".into(),
             arguments: vec![ConcreteType::String, ConcreteType::Int],
-            constructors: vec![payload.clone()],
+            constructors: constructors.clone(),
         };
         let phantom = ConcreteType::Adt {
             name: "main.Result".into(),
             arguments: vec![ConcreteType::Bool, ConcreteType::Int],
-            constructors: vec![payload.clone()],
+            constructors: constructors.clone(),
         };
         let other = ConcreteType::Adt {
             name: "main.Other".into(),
             arguments: vec![ConcreteType::String, ConcreteType::Int],
-            constructors: vec![payload],
+            constructors,
         };
 
+        assert_eq!(
+            first.stable_id().as_str(),
+            "sha256:b0fb26fdf5d68d7852b5cded5f51f6f226f9351809f8128112241b724dd82176"
+        );
+        assert_eq!(
+            first.constructor_id("Ok").unwrap().as_str(),
+            "sha256:5945fa2b4a925d868c3e575bbb4326689bd890a7458b8b590cf8d071aa99aa98"
+        );
         assert_ne!(first.stable_id(), phantom.stable_id());
         assert_ne!(first.stable_id(), other.stable_id());
         assert_ne!(

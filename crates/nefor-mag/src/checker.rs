@@ -1746,6 +1746,9 @@ fn resolved_binding_requirements(env: &Env, id: BindingId, resolved: &MagType) -
                 .collect();
         }
     }
+    if requirements.is_empty() {
+        return requirements;
+    }
     let Some(original) = env.binding_metadata(id).and_then(|metadata| metadata.ty) else {
         return requirements;
     };

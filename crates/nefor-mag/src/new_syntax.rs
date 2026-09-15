@@ -39,10 +39,23 @@ struct Fixity {
 
 pub(crate) fn compile_source(
     source: &SourceSnapshot,
-    _profiler: Option<&crate::profile::CompileProfiler>,
-    _role: crate::frontend::SourceRole,
+    profiler: Option<&crate::profile::CompileProfiler>,
+    role: crate::frontend::SourceRole,
 ) -> Result<authored::Module, MagError> {
+    let (lex, parse) = match role {
+        crate::frontend::SourceRole::Entry => (
+            crate::profile::Phase::EntryLex,
+            crate::profile::Phase::EntryParse,
+        ),
+        crate::frontend::SourceRole::Module => (
+            crate::profile::Phase::ModuleLex,
+            crate::profile::Phase::ModuleParse,
+        ),
+    };
+    let phase = profiler.map(|profiler| profiler.start_phase(lex));
     let tokens = Lexer::new(source).tokenize()?;
+    drop(phase);
+    let _phase = profiler.map(|profiler| profiler.start_phase(parse));
     Parser::new(source, tokens)?.parse_module()
 }
 

@@ -8,7 +8,7 @@
   },
   "steps": [
     {"kind": "wait_text", "text": "CLI_INITIAL_PROMPT_MARKER", "timeout_ms": 30000},
-    {"kind": "wait_text", "text": "secret key is now", "timeout_ms": 90000},
+    {"kind": "wait_text", "text": "secret key is now", "timeout_ms": 30000},
     {"kind": "capture"},
     {"kind": "key", "key": "CtrlC"},
     {"kind": "key", "key": "CtrlC"},

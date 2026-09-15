@@ -873,25 +873,18 @@ impl Env {
         }
     }
     pub fn type_decl(&self, canonical: &str) -> Option<TypeDecl> {
+        // Nominal resolution must not clone unrelated runtime data (especially
+        // host inventories) on every type lookup.
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         self.scopes
             .iter()
             .rev()
-            .flat_map(|scope| {
-                let Some(frame) = state.frames.get(scope) else {
-                    return Vec::new();
-                };
-                frame
-                    .slots
-                    .values()
-                    .filter_map(|slot| match slot {
-                        BindingSlot::Ready(value) => Some(value.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .find_map(|value| match value {
-                Value::TypeDecl(decl) if decl.name == canonical => Some(decl),
+            .filter_map(|scope| state.frames.get(scope))
+            .flat_map(|frame| frame.slots.values())
+            .find_map(|slot| match slot {
+                BindingSlot::Ready(Value::TypeDecl(decl)) if decl.name == canonical => {
+                    Some(decl.clone())
+                }
                 _ => None,
             })
     }
@@ -905,6 +898,11 @@ impl Env {
             source
                 .scopes
                 .iter()
+                // Captured frames are already visible; only caller-only declarations
+                // need importing into the call's lexical environment.
+                .filter(|scope| {
+                    !Arc::ptr_eq(&self.state, &source.state) || !self.scopes.contains(scope)
+                })
                 .filter_map(|scope| state.frames.get(scope))
                 .flat_map(|frame| {
                     frame
@@ -914,7 +912,9 @@ impl Env {
                             let values = ids
                                 .iter()
                                 .filter_map(|id| match frame.slots.get(id) {
-                                    Some(BindingSlot::Ready(value)) => Some(value.clone()),
+                                    Some(BindingSlot::Ready(value @ Value::TypeDecl(_))) => {
+                                        Some(value.clone())
+                                    }
                                     _ => None,
                                 })
                                 .collect::<Vec<_>>();
@@ -1329,6 +1329,63 @@ impl Env {
 
 #[cfg(test)]
 mod frame_arena_tests {
+    fn declaration(name: &str) -> super::Value {
+        super::Value::TypeDecl(super::TypeDecl {
+            name: name.into(),
+            params: vec![],
+            body: crate::ast::TypeDeclBody::Alias(crate::types::MagType::Int),
+        })
+    }
+
+    #[test]
+    fn declaration_import_only_copies_caller_only_types() {
+        let mut caller = super::Env::new();
+        caller.define("Captured", declaration("main.Captured"));
+        let mut callee = caller.clone();
+        callee.push_scope();
+        caller.push_scope();
+        caller.define("Local", declaration("main.Local"));
+        caller.define("data", super::Value::Str("not a declaration".into()));
+        callee.define_type_declarations_from(&caller);
+        callee.define_type_declarations_from(&caller);
+        assert!(callee.type_decl("main.Captured").is_some());
+        assert!(callee.type_decl("main.Local").is_some());
+        assert!(callee.lookup("data").is_err());
+        let state = callee.state.lock().unwrap();
+        let frame = &state.frames[callee.scopes.last().unwrap()];
+        assert_eq!(frame.slots.len(), 1, "captured types must not be copied");
+    }
+
+    #[test]
+    fn declaration_import_does_not_confuse_independent_frame_ids() {
+        let mut source = super::Env::new();
+        source.define("Source", declaration("main.Source"));
+        let mut target = super::Env::new();
+        assert_eq!(source.scopes, target.scopes);
+        target.define_type_declarations_from(&source);
+        assert!(target.type_decl("main.Source").is_some());
+    }
+
+    #[test]
+    fn declaration_lookup_preserves_nearest_scope_and_missing_results() {
+        let mut env = super::Env::new();
+        env.define("Outer", declaration("main.Type"));
+        env.push_scope();
+        let mut inner = match declaration("main.Type") {
+            super::Value::TypeDecl(decl) => decl,
+            _ => unreachable!(),
+        };
+        inner.body = crate::ast::TypeDeclBody::Alias(crate::types::MagType::String);
+        env.define("Inner", super::Value::TypeDecl(inner.clone()));
+        assert_eq!(env.type_decl("main.Type"), Some(inner));
+        assert!(env.type_decl("missing").is_none());
+        env.pop_scope();
+        assert_eq!(
+            env.type_decl("main.Type").unwrap().body,
+            crate::ast::TypeDeclBody::Alias(crate::types::MagType::Int)
+        );
+    }
+
     use super::*;
 
     fn closure(captures: Vec<Scope>) -> Value {

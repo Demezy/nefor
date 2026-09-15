@@ -25,7 +25,17 @@ module work, so phases may overlap and must not be summed. `total_duration_ns`
 is the complete compile/load attempt on both success and failure. A profiler
 passed to `CompilerSession::compile_with_profiler` or `compile_file_with_profiler` can be snapshotted
 after an error without changing the returned `MagError`; profiling likewise
-does not alter successful artifacts or the CLI's artifact stdout.
+does not alter successful artifacts or the CLI's artifact stdout. Both the new
+and explicit Lisp frontends record entry/module lexing and parsing; new-syntax
+parsing includes lowering into authored IR.
+
+Cold compilation must not copy dynamic values to find nominal declarations.
+Declaration lookup borrows visible frame slots and clones only the matching
+declaration. Call environments import only declarations from caller frames not
+already captured in their lexical environment. Semantic descriptor JSON is
+assembled by moving child values, rather than recursively serializing completed
+subtrees again at each parent. These are local cost reductions, not additional
+cross-compilation caches or changes to descriptor identities.
 
 `module_cache_hits` counts repeated `require` requests served by the module
 table of the program currently being compiled. It is deterministic per-program

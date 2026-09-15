@@ -50,13 +50,13 @@ fn profiled_file_compile_reports_phases_and_deterministic_work() {
     assert!(first.counters.checked_expressions > 0);
     assert!(first.counters.environment_snapshots > 0);
     assert!(first.phases.entry_read_ns > 0);
-    assert_eq!(first.phases.entry_lex_ns, 0);
-    assert_eq!(first.phases.entry_parse_ns, 0);
+    assert!(first.phases.entry_lex_ns > 0);
+    assert!(first.phases.entry_parse_ns > 0);
     assert!(first.phases.entry_evaluate_ns > 0);
     assert!(first.phases.module_resolve_ns > 0);
     assert!(first.phases.module_read_ns > 0);
-    assert_eq!(first.phases.module_lex_ns, 0);
-    assert_eq!(first.phases.module_parse_ns, 0);
+    assert!(first.phases.module_lex_ns > 0);
+    assert!(first.phases.module_parse_ns > 0);
     assert!(first.phases.module_evaluate_ns > 0);
     assert!(first.phases.checking_ns > 0);
     assert!(first.total_duration_ns > 0);
@@ -108,6 +108,20 @@ fn failed_file_compile_records_total_and_every_started_entry_phase() {
             "missing.mag",
             nefor_mag::SyntaxMode::New,
             "entry_read_ns",
+        ),
+        (
+            "new-lex",
+            Some("[λ]"),
+            "main.mag",
+            nefor_mag::SyntaxMode::New,
+            "entry_lex_ns",
+        ),
+        (
+            "new-parse",
+            Some("let = 1"),
+            "main.mag",
+            nefor_mag::SyntaxMode::New,
+            "entry_parse_ns",
         ),
         (
             "lex",
@@ -182,6 +196,13 @@ fn failed_file_compile_records_total_and_every_started_entry_phase() {
 fn failed_module_work_records_started_nested_phases() {
     let cases = [
         ("resolve", None, "support.mag", "module_resolve_ns"),
+        ("new-lex", Some("[λ]"), "support.mag", "module_lex_ns"),
+        (
+            "new-parse",
+            Some("let = 1"),
+            "support.mag",
+            "module_parse_ns",
+        ),
         ("lex", Some("[λ]"), "support.magl", "module_lex_ns"),
         (
             "parse",

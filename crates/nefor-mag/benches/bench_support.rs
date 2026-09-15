@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 pub const SCHEMA_VERSION: u8 = 6;
 pub const COMPARISON_SCHEMA_VERSION: u8 = 5;
 pub const CURRENT_MAIN_A0_WORKLOAD_CATALOG_VERSION: &str = "artifact-only-current-main-v5";
-pub const PHASE0_WORKLOAD_CATALOG_VERSION: &str = "cycle-3-a0-artifact-only-v3";
+pub const PHASE0_WORKLOAD_CATALOG_VERSION: &str = "cycle-3-a0-artifact-only-v5";
 pub const ORACLE_CATALOG_VERSION: &str = "mag-oracles-22-artifact-only-v4";
 pub const PROFILER_SCHEMA_VERSION: &str = "artifact-only-compiler-profile-v3";
 pub const STATISTICS_POLICY_VERSION: &str = "paired-nearest-rank-p90-fwer-v2";
@@ -27,7 +27,7 @@ pub const CURRENT_MAIN_A0_WORKLOAD_FINGERPRINT: &str =
 pub const CURRENT_MAIN_A0_ORACLE_FINGERPRINT: &str =
     "sha256:079162ffe8d364945623e43b61bcd4c57b3854c7659722a408e2bf8c794b8769";
 pub const PHASE0_WORKLOAD_FINGERPRINT: &str =
-    "sha256:5b92294d5f046d86c0fe6548ff0104dcf7395c3d8808ebe7ad86d6163cbb16bb";
+    "sha256:658d96fa4e028e4849c60f66b2291a2f094829dbae3b6471c7cef19fa7ac0cde";
 pub const MAX_TARGET_MEDIAN_RATIO: f64 = 0.90;
 pub const MIN_TARGET_COUNTER_REDUCTION: f64 = 0.40;
 pub const MAX_CASE_P90_RATIO: f64 = 1.10;
@@ -700,6 +700,19 @@ fn hash_part(digest: &mut Sha256, label: &str, bytes: &[u8]) {
 
 pub fn fingerprint(bytes: &[u8]) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+pub fn lexical_product_positions(actor_ids: &[String]) -> Vec<usize> {
+    let mut route_order = actor_ids.to_vec();
+    route_order.sort();
+    actor_ids
+        .iter()
+        .map(|actor_id| {
+            route_order
+                .binary_search(actor_id)
+                .expect("actor id came from the route-order set")
+        })
+        .collect()
 }
 
 pub fn catalog_fingerprint(fixtures: &[Fixture]) -> String {

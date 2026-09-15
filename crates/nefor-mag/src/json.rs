@@ -200,16 +200,35 @@ fn reject_duplicate_map_keys(env: &Env, entries: &[(Value, Value)]) -> Result<()
     Ok(())
 }
 
+fn json_object<const N: usize>(fields: [(&str, serde_json::Value); N]) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    for (name, value) in fields {
+        object.insert(name.to_owned(), value);
+    }
+    serde_json::Value::Object(object)
+}
+
 fn concrete_named_body_to_json(
     body: &crate::types::ConcreteNamedBody,
 ) -> Result<serde_json::Value, MagError> {
     match body {
-        crate::types::ConcreteNamedBody::Fields { fields } => Ok(serde_json::json!({
-            "kind": "record",
-            "fields": fields.iter().map(|(name, ty)| Ok(serde_json::json!({
-                "name": name, "type": concrete_type_to_json(ty)?
-            }))).collect::<Result<Vec<_>, MagError>>()?,
-        })),
+        crate::types::ConcreteNamedBody::Fields { fields } => Ok(json_object([
+            ("kind", "record".into()),
+            (
+                "fields",
+                serde_json::Value::Array(
+                    fields
+                        .iter()
+                        .map(|(name, ty)| {
+                            Ok(json_object([
+                                ("name", name.clone().into()),
+                                ("type", concrete_type_to_json(ty)?),
+                            ]))
+                        })
+                        .collect::<Result<_, MagError>>()?,
+                ),
+            ),
+        ])),
         crate::types::ConcreteNamedBody::Alias { ty } => concrete_type_to_json(ty),
     }
 }
@@ -218,7 +237,12 @@ pub fn concrete_type_to_json(
     ty: &crate::types::ConcreteType,
 ) -> Result<serde_json::Value, MagError> {
     use crate::types::ConcreteType;
-    let primitive = |name: &str| serde_json::json!({ "kind": "primitive", "name": name });
+    let primitive = |name: &str| {
+        json_object([
+            ("kind", "primitive".into()),
+            ("name", name.to_owned().into()),
+        ])
+    };
     Ok(match ty {
         ConcreteType::JsonValue => primitive("JsonValue"),
         ConcreteType::Unit => primitive("Unit"),
@@ -230,40 +254,76 @@ pub fn concrete_type_to_json(
             name,
             arguments,
             body,
-        } => serde_json::json!({
-            "kind": "named",
-            "name": name,
-            "arguments": arguments.iter().map(concrete_type_to_json).collect::<Result<Vec<_>, _>>()?,
-            "body": concrete_named_body_to_json(body)?,
-        }),
+        } => json_object([
+            ("kind", "named".into()),
+            ("name", name.clone().into()),
+            (
+                "arguments",
+                serde_json::Value::Array(
+                    arguments
+                        .iter()
+                        .map(concrete_type_to_json)
+                        .collect::<Result<_, _>>()?,
+                ),
+            ),
+            ("body", concrete_named_body_to_json(body)?),
+        ]),
         ConcreteType::Adt {
             name,
             arguments,
             constructors,
-        } => serde_json::json!({
-            "kind": "adt",
-            "name": name,
-            "arguments": arguments.iter().map(concrete_type_to_json).collect::<Result<Vec<_>, _>>()?,
-            "constructors": constructors.iter().map(|constructor| Ok(serde_json::json!({
-                "name": constructor.name,
-                "payload": concrete_type_to_json(&constructor.payload)?,
-            }))).collect::<Result<Vec<_>, MagError>>()?,
-        }),
-        ConcreteType::List { item } => serde_json::json!({
-            "kind": "list", "item": concrete_type_to_json(item)?
-        }),
-        ConcreteType::Set { item } => serde_json::json!({
-            "kind": "set", "item": concrete_type_to_json(item)?
-        }),
-        ConcreteType::Map { key, value } => serde_json::json!({
-            "kind": "map",
-            "key": concrete_type_to_json(key)?,
-            "value": concrete_type_to_json(value)?,
-        }),
-        ConcreteType::Product { items } => serde_json::json!({
-            "kind": "product",
-            "items": items.iter().map(concrete_type_to_json).collect::<Result<Vec<_>, _>>()?,
-        }),
+        } => json_object([
+            ("kind", "adt".into()),
+            ("name", name.clone().into()),
+            (
+                "arguments",
+                serde_json::Value::Array(
+                    arguments
+                        .iter()
+                        .map(concrete_type_to_json)
+                        .collect::<Result<_, _>>()?,
+                ),
+            ),
+            (
+                "constructors",
+                serde_json::Value::Array(
+                    constructors
+                        .iter()
+                        .map(|constructor| {
+                            Ok(json_object([
+                                ("name", constructor.name.clone().into()),
+                                ("payload", concrete_type_to_json(&constructor.payload)?),
+                            ]))
+                        })
+                        .collect::<Result<_, MagError>>()?,
+                ),
+            ),
+        ]),
+        ConcreteType::List { item } => json_object([
+            ("kind", "list".into()),
+            ("item", concrete_type_to_json(item)?),
+        ]),
+        ConcreteType::Set { item } => json_object([
+            ("kind", "set".into()),
+            ("item", concrete_type_to_json(item)?),
+        ]),
+        ConcreteType::Map { key, value } => json_object([
+            ("kind", "map".into()),
+            ("key", concrete_type_to_json(key)?),
+            ("value", concrete_type_to_json(value)?),
+        ]),
+        ConcreteType::Product { items } => json_object([
+            ("kind", "product".into()),
+            (
+                "items",
+                serde_json::Value::Array(
+                    items
+                        .iter()
+                        .map(concrete_type_to_json)
+                        .collect::<Result<_, _>>()?,
+                ),
+            ),
+        ]),
     })
 }
 
@@ -898,6 +958,29 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("standalone record semantic descriptors are unsupported"));
+    }
+
+    #[test]
+    fn semantic_descriptor_json_preserves_the_canonical_wire_order() {
+        let descriptor = ConcreteType::Named {
+            name: "main.Score".into(),
+            arguments: vec![],
+            body: ConcreteNamedBody::Fields {
+                fields: BTreeMap::from([
+                    ("accepted".into(), ConcreteType::Bool),
+                    ("label".into(), ConcreteType::String),
+                ]),
+            },
+        };
+
+        assert_eq!(
+            concrete_type_to_json(&descriptor).unwrap().to_string(),
+            r#"{"kind":"named","name":"main.Score","arguments":[],"body":{"kind":"record","fields":[{"name":"accepted","type":{"kind":"primitive","name":"Bool"}},{"name":"label","type":{"kind":"primitive","name":"String"}}]}}"#
+        );
+        assert_eq!(
+            descriptor.stable_id().as_str(),
+            "sha256:f4e5fd24f940d968e579a6b6e2470b1c03048a32293d1ba632dbf18e9e24b286"
+        );
     }
 
     #[test]
