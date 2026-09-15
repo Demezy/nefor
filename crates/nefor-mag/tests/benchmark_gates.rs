@@ -403,7 +403,7 @@ fn stage_boundary_fingerprint_excludes_stage_body_but_keeps_shared_inputs() {
         "broad-frontier",
         "analysis",
         Some(21),
-        "(artifact {:stage \"analysis\"})",
+        "artifact {stage: \"analysis\"}",
         vec![],
         json!({"shared": 1}),
         None,
@@ -416,7 +416,7 @@ fn stage_boundary_fingerprint_excludes_stage_body_but_keeps_shared_inputs() {
         "broad-frontier",
         "forward-reachability",
         Some(21),
-        "(artifact {:stage \"forward\"})",
+        "artifact {stage: \"forward\"}",
         vec![],
         json!({"shared": 1}),
         None,
@@ -518,23 +518,25 @@ fn batch_calibration_uses_baseline_and_freezes_positive_count() {
 
 #[test]
 fn forcing_dependency_proof_requires_the_actual_terminal_dependency() {
-    let forward = "(let forward (nefor.graph.forward-reachable analysis))\n(artifact {:summary summary :forced forward-proof})";
+    let forward = "let forward = nefor.graph.`forward-reachable`(analysis)\nartifact(FrontierProof {summary: summary, forced: forward_proof})";
     assert!(forcing_dependency_proof_from_sources("forward-reachability", forward, None).is_some());
     assert!(forcing_dependency_proof_from_sources(
         "forward-reachability",
-        "(let forward (nefor.graph.forward-reachable analysis))\n(artifact summary)",
-        None,
+        "let forward = nefor.graph.`forward-reachable`(analysis)\nartifact(summary)",
+        None
     )
     .is_none());
 
-    let reverse = "(let forward (nefor.graph.forward-reachable analysis))\n(let reverse (force-reverse forward-proof))\n(artifact {:summary summary :forced reverse-proof})";
+    let reverse = "let forward = nefor.graph.`forward-reachable`(analysis)\nlet reverse = force_reverse(forward_proof)\nartifact(FrontierProof {summary: summary, forced: reverse_proof})";
     assert!(forcing_dependency_proof_from_sources("both-reachability", reverse, None).is_some());
 
-    let lower = "(let lowered (nefor.graph.lower topology))\n(let forced (canonical lowered))\n(artifact {:summary summary :lowered lowered :forced forced})";
-    let graph = "(let lower-program (fn [[value Program]] -> Modification\n  (let topology (get value \"graph\"))\n  (let analysis (analyze-graph topology))";
+    let lower = "let lowered = nefor.graph.lower(topology)\nlet forced = canonical(lowered)\nartifact(LowerFrontier {summary: summary, lowered: lowered, forced: forced})";
+    let graph = "let `lower-program`: fn(Graph) -> Modification = |topology| => {\n  let analysis = `analyze-for-lowering`(topology)";
     assert!(forcing_dependency_proof_from_sources("lower", lower, Some(graph)).is_some());
-    assert!(
-        forcing_dependency_proof_from_sources("lower", lower, Some("(let lower-program nil)"))
-            .is_none()
-    );
+    assert!(forcing_dependency_proof_from_sources(
+        "lower",
+        lower,
+        Some("let `lower-program` = nil")
+    )
+    .is_none());
 }

@@ -1,24 +1,13 @@
-(require "nefor.artifact")
-(require "nefor.graph")
-(require "nefor.shell")
+import nefor.artifact.{}
+import nefor.contracts.{}
+import nefor.graph.{}
+import nefor.shell.{}
 
-;; Initial messages are boundary authority, not a capability ordinary nodes
-;; may obtain by placing a message in their record.
-(type InitialContent {:kind String})
-(let start (nefor.graph.source "start" (type-tag Unit) nil))
-(let operation (nefor.shell.script "operation" (as nefor.shell.ShellScriptParams {:script "true" :cwd "." :timeout (nefor.contracts.no-timeout)})))
-(let injected (nefor.graph.node
-                 (get operation "id")
-                 "ordinary"
-                 (get operation "actors")
-                 (get operation "routes")
-                 [(nefor.graph.message (get operation "input")
-                                       (as InitialContent {:kind "mag.Unit"}))]
-                 (get operation "input")
-                 (get operation "output")))
-(let result (nefor.graph.output-for "result" injected))
-(nefor.artifact.compile
-    (fn [[base nefor.graph.Graph]] -> nefor.graph.Graph
-      (nefor.graph.add-edges base
-        [(nefor.graph.edge start injected)
-         (nefor.graph.edge injected result)])))
+// Initial messages are boundary authority, not a capability ordinary nodes
+// may obtain by placing a message in their record.
+type InitialContent {kind: String}
+let start = nefor.graph.source("start", type_tag<Unit>(), nil)
+let operation = nefor.shell.script("operation", nefor.shell.ShellScriptParams {script: "true", cwd: ".", timeout: nefor.contracts.`no-timeout`()})
+let injected = nefor.graph.node(get(operation, "id"), "ordinary", get(operation, "actors"), get(operation, "routes"), [nefor.graph.message(get(operation, "input"), InitialContent {kind: "mag.Unit"})], get(operation, "input"), get(operation, "output"))
+let result = nefor.graph.`output-for`("result", injected)
+nefor.artifact.compile((|base| => nefor.graph.`add-edges`(base, [nefor.graph.edge(start, injected), nefor.graph.edge(injected, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)

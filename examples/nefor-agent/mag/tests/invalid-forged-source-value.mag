@@ -1,23 +1,12 @@
-(require "nefor.artifact")
-(require "nefor.graph")
+import nefor.artifact.{}
+import nefor.graph.{}
 
-;; Actor parameter storage is compiler-packed. An ordinary named value cannot
-;; forge the private existential package even when every other actor field is copied.
-(type ForgedParams {:value Int})
-(let legitimate (nefor.graph.source "start" (type-tag String) "valid"))
-(let original (first (get legitimate "actors")))
-(let forged-actor (as nefor.graph.Actor
-        {:id (get original "id")
-         :factory (get original "factory")
-         :type_arguments (get original "type_arguments")
-         :params (as ForgedParams {:value 42})
-         :input (get original "input")
-         :outputs (get original "outputs")}))
-(let forged (nefor.graph.node "start" "source" [forged-actor]
-               (as (List nefor.graph.StoredRoute) [])
-               (get legitimate "messages")
-               (get legitimate "input") (get legitimate "output")))
-(let result (nefor.graph.output "result" (type-tag String)))
-(nefor.artifact.compile
-    (fn [[base nefor.graph.Graph]] -> nefor.graph.Graph
-      (nefor.graph.add-edges base [(nefor.graph.edge forged result)])))
+// Actor parameter storage is compiler-packed. An ordinary named value cannot
+// forge the private existential package even when every other actor field is copied.
+type ForgedParams {value: Int}
+let legitimate = nefor.graph.source("start", type_tag<String>(), "valid")
+let original = first(get(legitimate, "actors"))
+let `forged-actor` = nefor.graph.Actor {id: get(original, "id"), factory: get(original, "factory"), type_arguments: get(original, "type_arguments"), params: ForgedParams {value: 42}, input: get(original, "input"), outputs: get(original, "outputs")}
+let forged = nefor.graph.node("start", "source", [`forged-actor`], ([]: List<nefor.graph.StoredRoute>), get(legitimate, "messages"), get(legitimate, "input"), get(legitimate, "output"))
+let result = nefor.graph.output("result", type_tag<String>())
+nefor.artifact.compile((|base| => nefor.graph.`add-edges`(base, [nefor.graph.edge(forged, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)

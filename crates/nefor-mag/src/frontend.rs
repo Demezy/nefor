@@ -19,6 +19,19 @@ pub(crate) enum SourceRole {
     Module,
 }
 
+pub(crate) fn syntax_for_path(path: &str) -> Result<SyntaxMode, MagError> {
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some("mag") => Ok(SyntaxMode::New),
+        Some("magl") => Ok(SyntaxMode::Lisp),
+        _ => Err(MagError::Eval(format!(
+            "MAG source path must end in .mag or .magl: {path}"
+        ))),
+    }
+}
+
 pub(crate) fn compile_source(
     syntax: SyntaxMode,
     source: &SourceSnapshot,

@@ -54,7 +54,6 @@ fn json_stderr(output: &Output) -> Value {
 fn compile_args<'a>(root: &'a Path, extra: &'a [&'a str]) -> Vec<&'a str> {
     let mut args = vec!["compile", "main.mag", "--source-dir"];
     args.push(root.to_str().expect("utf8 fixture path"));
-    args.extend_from_slice(&["--syntax", "lisp"]);
     args.extend_from_slice(extra);
     args
 }
@@ -74,6 +73,53 @@ fn mag_suffix_selects_new_syntax_and_magl_selects_lisp_without_fallback() {
     let wrong = run(&["compile", "wrong.mag", "--source-dir", root]);
     assert!(!wrong.status.success());
     assert_eq!(json_stderr(&wrong)["diagnostic"]["syntax"], "new");
+    let overridden = run(&[
+        "compile",
+        "wrong.mag",
+        "--source-dir",
+        root,
+        "--syntax",
+        "lisp",
+    ]);
+    assert_eq!(
+        json_stdout(&overridden),
+        serde_json::json!("must not fall back")
+    );
+}
+
+#[test]
+fn build_entry_syntax_override_is_cached_without_changing_import_selection() {
+    let fixture = Fixture::new("build-syntax-override");
+    fixture.write("mag.toml", "version = 1\n");
+    fixture.write(
+        "main.mag",
+        "(require \"support\")\n(artifact support.value)\n",
+    );
+    fixture.write("support.mag", "let value = \"legacy entry, new module\"\n");
+    let root = fixture.root.to_str().expect("utf8 fixture path");
+    let args = [
+        "build",
+        "main.mag",
+        "--project",
+        root,
+        "--syntax",
+        "lisp",
+        "--profile",
+    ];
+
+    let miss = run(&args);
+    assert_eq!(
+        json_stdout(&miss),
+        serde_json::json!("legacy entry, new module")
+    );
+    assert_eq!(json_stderr(&miss)["cache"]["status"], "miss");
+
+    let hit = run(&args);
+    assert_eq!(
+        json_stdout(&hit),
+        serde_json::json!("legacy entry, new module")
+    );
+    assert_eq!(json_stderr(&hit)["cache"]["status"], "hit");
 }
 
 #[test]
@@ -82,13 +128,14 @@ fn compiles_with_caller_supplied_module_root_and_host_input() {
     let modules = fixture.root.join("modules");
     fs::create_dir_all(&modules).expect("modules");
     fixture.write(
-        "modules/contracts.magl",
-        "(type Scheme {:input_tags (List String) :outputs (List String)})\n(type Contract {:identity String :type_scheme Scheme})\n(let contracts (host-input \"factory_contracts\" (type-tag (List Contract))))",
+        "modules/contracts.mag",
+        "type Scheme {input_tags: List<String>, outputs: List<String>}\ntype Contract {identity: String, type_scheme: Scheme}\nlet contracts = `host-input`(\"factory_contracts\", type_tag<List<Contract>>())",
     );
     fixture.write(
         "main.mag",
-        r#"(require "contracts")
-(artifact {:contracts contracts.contracts})"#,
+        r#"import contracts.{}
+type Result {contracts: List<contracts.Contract>}
+artifact(Result {contracts: contracts.contracts})"#,
     );
     let contracts = fixture.write(
         "contracts.json",
@@ -123,7 +170,10 @@ fn compiles_with_caller_supplied_module_root_and_host_input() {
 #[test]
 fn profile_is_opt_in_machine_readable_and_separate_from_the_artifact() {
     let fixture = Fixture::new("profile");
-    fixture.write("main.mag", "(artifact {:metadata \"application data\"})");
+    fixture.write(
+        "main.mag",
+        "type Result {metadata: String}\nartifact(Result {metadata: \"application data\"})",
+    );
 
     let ordinary = run(&compile_args(&fixture.root, &[]));
     assert_eq!(
@@ -145,24 +195,40 @@ fn profile_is_opt_in_machine_readable_and_separate_from_the_artifact() {
 
 #[test]
 fn syntax_type_and_evaluation_failures_are_structured() {
-    for (name, source, code, stage) in [
-        ("syntax", "(artifact", "syntax_parse", "parse"),
+    for (name, entry, source, code, stage, syntax) in [
+        (
+            "syntax",
+            "main.magl",
+            "(artifact",
+            "syntax_parse",
+            "parse",
+            Some("lisp"),
+        ),
         (
             "type",
-            "(artifact {:bad (+ 1 \"x\")})",
+            "main.mag",
+            "artifact(1 + \"x\")",
             "type_error",
             "typecheck",
+            None,
         ),
         (
             "evaluation",
-            "(type Failure {:kind String :message String})\n(fail (as Failure {:kind \"application\" :message \"requested failure\"}))",
+            "main.mag",
+            "type Failure {kind: String, message: String}\nfail(Failure {kind: \"application\", message: \"requested failure\"})",
             "evaluation_error",
             "evaluate",
+            None,
         ),
     ] {
         let fixture = Fixture::new(name);
-        fixture.write("main.mag", source);
-        let output = run(&compile_args(&fixture.root, &[]));
+        fixture.write(entry, source);
+        let root = fixture.root.to_str().expect("utf8 fixture path");
+        let mut args = vec!["compile", entry, "--source-dir", root];
+        if let Some(syntax) = syntax {
+            args.extend_from_slice(&["--syntax", syntax]);
+        }
+        let output = run(&args);
         assert!(!output.status.success(), "{name} unexpectedly succeeded");
         assert!(output.stdout.is_empty(), "{name} produced a result value");
         assert!(!output.stderr.is_empty(), "{name} needs human stderr");
@@ -173,7 +239,7 @@ fn syntax_type_and_evaluation_failures_are_structured() {
         if name == "syntax" {
             assert_eq!(
                 body["diagnostic"]["path"],
-                fixture.root.join("main.mag").display().to_string()
+                fixture.root.join(entry).display().to_string()
             );
             assert_eq!(body["diagnostic"]["source"], source);
             assert_eq!(body["diagnostic"]["span"]["start"], source.len());
@@ -186,7 +252,7 @@ fn syntax_type_and_evaluation_failures_are_structured() {
 #[test]
 fn profiling_does_not_change_failure_stdout_or_diagnostic() {
     let fixture = Fixture::new("profile-failure");
-    fixture.write("main.mag", "(artifact {:bad (+ 1 \"x\")})");
+    fixture.write("main.mag", "artifact(1 + \"x\")");
 
     let ordinary = run(&compile_args(&fixture.root, &[]));
     let profiled = run(&compile_args(&fixture.root, &["--profile"]));
@@ -209,7 +275,7 @@ fn profiling_does_not_change_failure_stdout_or_diagnostic() {
 fn required_module_syntax_diagnostic_owns_its_snapshot() {
     let fixture = Fixture::new("module-diagnostic");
     let module = fixture.write("bad.magl", "[λ]");
-    fixture.write("main.mag", "(require \"bad\")\n(artifact {})");
+    fixture.write("main.mag", "import bad.{}\nartifact(())");
     let output = run(&compile_args(&fixture.root, &[]));
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
@@ -231,7 +297,7 @@ fn required_module_syntax_diagnostic_owns_its_snapshot() {
 #[test]
 fn path_and_host_input_failures_are_structured() {
     let fixture = Fixture::new("paths");
-    fixture.write("main.mag", "(artifact {})");
+    fixture.write("main.mag", "artifact(())");
     let missing = fixture.root.join("missing.json");
     let input = format!("data={}", missing.display());
     let output = run(&compile_args(&fixture.root, &["--input", &input]));
@@ -247,10 +313,10 @@ fn compiler_limits_are_overridable_from_the_cli() {
     let fixture = Fixture::new("limits");
     fixture.write(
         "main.mag",
-        r#"(let identity (fn [[value Int]] -> Int value))
-(let first-value (identity 1))
-(let second-value (identity 1))
-(artifact [first-value second-value])"#,
+        r#"let identity: fn(Int) -> Int = |value| => value
+let `first-value` = identity(1)
+let `second-value` = identity(1)
+artifact([`first-value`, `second-value`])"#,
     );
 
     for (flag, value) in [
@@ -304,6 +370,11 @@ fn command_surface_has_no_execute_or_run_operation() {
     assert!(compile_help.status.success());
     let stdout = String::from_utf8_lossy(&compile_help.stdout);
     assert!(stdout.contains("artifact"), "{stdout}");
+    assert!(stdout.contains("--syntax <SYNTAX>"), "{stdout}");
+    assert!(
+        stdout.contains("imports use their .mag/.magl suffix"),
+        "{stdout}"
+    );
     assert!(!stdout.contains("resulting graph"), "{stdout}");
 }
 
@@ -320,7 +391,7 @@ fn build_at(cwd: &Path, extra: &[&str]) -> Output {
 fn project_is_explicit_or_cwd_and_never_discovered_upwards() {
     let fixture = Fixture::new("project-selection");
     fixture.write("mag.toml", "");
-    fixture.write("main.mag", "(artifact {:a 1})");
+    fixture.write("main.mag", "type Result {a: Int}\nartifact(Result {a: 1})");
     fs::create_dir(fixture.root.join("child")).unwrap();
     let output = build_at(&fixture.root, &["--no-cache"]);
     assert!(output.status.success(), "{:?}", output.stderr);
@@ -337,7 +408,7 @@ fn project_is_explicit_or_cwd_and_never_discovered_upwards() {
 #[test]
 fn project_manifest_is_strict_and_input_stage() {
     let fixture = Fixture::new("project-manifest");
-    fixture.write("main.mag", "(artifact 1)");
+    fixture.write("main.mag", "artifact(1)");
     for (manifest, code) in [
         ("version = 2", "project_version"),
         ("targets = []", "project_config"),
@@ -361,15 +432,15 @@ fn project_roots_and_host_inputs_are_anchored_to_project() {
         "mag.toml",
         &format!("version = 1\nmodule-roots = [\"lib\", {:?}]", installed),
     );
-    fixture.write("lib/value.mag", "(let number 7)");
-    fixture.write("extra/other.mag", "(let number 8)");
-    fixture.write("local.mag", "(let number 9)");
+    fixture.write("lib/value.mag", "let number = 7");
+    fixture.write("extra/other.mag", "let number = 8");
+    fixture.write("local.mag", "let number = 9");
     fixture.write(
         "main.mag",
-        r#"(require "value")
-(require "other")
-(require "local")
-(artifact [value.number other.number local.number (host-input "data" (type-tag Int))])"#,
+        r#"import value.{}
+import other.{}
+import local.{}
+artifact([value.number, other.number, local.number, `host-input`("data", type_tag<Int>())])"#,
     );
     fixture.write("data.json", "42");
     fs::create_dir(fixture.root.join("child")).unwrap();
@@ -417,7 +488,7 @@ fn project_limits_and_profile_match_cold_compile() {
     fixture.write("mag.toml", "");
     fixture.write(
         "main.mag",
-        "(let id (fn [[x Int]] -> Int x))\n(artifact [(id 1) (id 1)])",
+        "let id: fn(Int) -> Int = |x| => x\nartifact([id(1), id(1)])",
     );
     for flags in [
         vec!["--evaluation-step-limit", "1"],
@@ -447,9 +518,9 @@ fn project_build_replays_exact_bytes_with_real_executable_identity_and_zero_work
     fixture.write("mag.toml", "");
     fixture.write(
         "main.mag",
-        "(require \"value\")\n(artifact {:value value.number :text (read \"note.txt\")})",
+        "import value.{}\ntype Result {value: Int, text: String}\nartifact(Result {value: value.number, text: read(\"note.txt\")})",
     );
-    fixture.write("value.magl", "(let number 7)");
+    fixture.write("value.mag", "let number = 7");
     fixture.write("note.txt", "hello\nworld");
     let cold = run(&compile_args(&fixture.root, &[]));
     let population = build_at(&fixture.root, &["--profile"]);
@@ -468,7 +539,7 @@ fn project_build_replays_exact_bytes_with_real_executable_identity_and_zero_work
     );
     assert!(fixture
         .root
-        .join(".mag/cache/v1")
+        .join(".mag/cache/v2")
         .join(executable_hash)
         .is_dir());
     fixture.write(
@@ -512,7 +583,7 @@ fn project_build_replays_exact_bytes_with_real_executable_identity_and_zero_work
 fn project_preparation_errors_still_precede_a_seeded_cache_hit() {
     let fixture = Fixture::new("project-cache-inputs");
     fixture.write("mag.toml", "");
-    fixture.write("main.mag", "(artifact 1)");
+    fixture.write("main.mag", "artifact(1)");
     fixture.write("data.json", "{\"unused\":1}");
     let flags = ["--input", "data=data.json", "--profile"];
     assert_eq!(

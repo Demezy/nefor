@@ -82,8 +82,7 @@ pub fn compile_with_options(
     )
 }
 
-/// Compiles an in-memory entry with an explicit frontend. Existing convenience
-/// functions remain the legacy path until the shipped source migration lands.
+/// Compiles an in-memory entry with an explicit frontend.
 pub fn compile_with_syntax(
     source: &str,
     source_dir: &Path,
@@ -99,7 +98,6 @@ pub fn compile_with_syntax(
         },
         None,
         syntax,
-        SyntaxMode::New,
     )
 }
 
@@ -121,7 +119,6 @@ pub fn compile_with_inputs_and_module_roots_and_options_and_syntax(
         },
         None,
         syntax,
-        SyntaxMode::New,
     )
 }
 
@@ -214,14 +211,13 @@ pub(crate) fn compile_cold(
     request: CompileRequest<'_>,
     profiler: Option<&CompileProfiler>,
 ) -> Result<serde_json::Value, MagError> {
-    compile_cold_with_syntax(request, profiler, SyntaxMode::Lisp, SyntaxMode::Lisp)
+    compile_cold_with_syntax(request, profiler, SyntaxMode::New)
 }
 
 fn compile_cold_with_syntax(
     request: CompileRequest<'_>,
     profiler: Option<&CompileProfiler>,
     syntax: SyntaxMode,
-    module_mag_syntax: SyntaxMode,
 ) -> Result<serde_json::Value, MagError> {
     let _total = profiler.map(CompileProfiler::start_total);
     let CompileRequest {
@@ -238,7 +234,6 @@ fn compile_cold_with_syntax(
         profiler.cloned(),
         options.limits,
     );
-    env.set_default_mag_syntax(module_mag_syntax);
     env.define("inputs", Value::HostInputs(inputs));
     let source_snapshot = diagnostic::SourceSnapshot::named("<memory>", source);
     let module = frontend::compile_source(
@@ -264,8 +259,7 @@ pub fn compile_file(source_dir: &Path, entry: &str) -> Result<serde_json::Value,
 }
 
 /// Compiles a file-backed entry with an explicit entry frontend. Required
-/// `.magl` modules always use Lisp; `.mag` modules use the entry's selected mode
-/// during the staged corpus migration.
+/// modules always select their frontend from their own suffix.
 pub fn compile_file_with_syntax(
     source_dir: &Path,
     entry: &str,
@@ -302,7 +296,6 @@ pub fn compile_file_with_profiler_and_options_and_syntax(
         Some(profiler),
         None,
         syntax,
-        SyntaxMode::New,
     )
 }
 
@@ -325,7 +318,6 @@ pub fn compile_file_with_inputs_and_module_roots_and_options_and_syntax(
         None,
         None,
         syntax,
-        SyntaxMode::New,
     )
 }
 
@@ -476,13 +468,8 @@ pub(crate) fn compile_file_cold_observing(
     profiler: Option<&CompileProfiler>,
     observer: Option<observation::Observer>,
 ) -> Result<serde_json::Value, MagError> {
-    compile_file_cold_observing_with_syntax(
-        request,
-        profiler,
-        observer,
-        SyntaxMode::Lisp,
-        SyntaxMode::Lisp,
-    )
+    let syntax = frontend::syntax_for_path(request.entry)?;
+    compile_file_cold_observing_with_syntax(request, profiler, observer, syntax)
 }
 
 pub(crate) fn compile_file_cold_observing_with_syntax(
@@ -490,7 +477,6 @@ pub(crate) fn compile_file_cold_observing_with_syntax(
     profiler: Option<&CompileProfiler>,
     observer: Option<observation::Observer>,
     syntax: SyntaxMode,
-    module_mag_syntax: SyntaxMode,
 ) -> Result<serde_json::Value, MagError> {
     let _total = profiler.map(CompileProfiler::start_total);
     let FileCompileRequest {
@@ -519,7 +505,6 @@ pub(crate) fn compile_file_cold_observing_with_syntax(
         &path,
         &source,
     );
-    env.set_default_mag_syntax(module_mag_syntax);
     env.define("inputs", Value::HostInputs(inputs));
     let source_snapshot = diagnostic::SourceSnapshot::file(&path, &source);
     let module = frontend::compile_source(

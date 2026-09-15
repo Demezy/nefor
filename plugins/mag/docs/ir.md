@@ -22,10 +22,10 @@ enter a concrete type descriptor.
 
 Registry semantic endpoints are declared as `{wire, type}` pairs. Validation
 checks each instantiated pair, so matching the set of wires and the set of
-union arms independently is insufficient: swapping two union types between
+ADT constructors independently is insufficient: swapping two ADT types between
 their wires rejects before any actor is spawned. Dynamic routes additionally
 require compatibility according to the same Rust `ConcreteType` relation used
-while compiling the graph. Lua does not maintain a second union/product
+while compiling the graph. Lua does not maintain a second ADT/product
 compatibility algorithm.
 Registration first requires the semantic input/output wire sets to exactly
 match the factory's runtime shapes. Every actor carries `type_arguments`; the
@@ -228,11 +228,11 @@ An actor activates when its declared input contract is satisfied. Firing is a
 type fact, symmetric to routing: output types decide where results go, input
 types decide when the actor runs.
 
-| Input contract    | Fires                                                                            |
-| ----------------- | -------------------------------------------------------------------------------- |
-| single type `A`   | per message — every arriving `A` is one activation                               |
-| union `(A \| B)`  | on any — whichever arrives first activates alone                                 |
-| product `(A + B)` | on all — the kernel accumulates components and delivers one assembled activation |
+| Input contract       | Fires                                                                            |
+| -------------------- | -------------------------------------------------------------------------------- |
+| single type `A`      | per message — every arriving `A` is one activation                               |
+| nominal ADT `Choice` | per message — each complete owner value is one activation                        |
+| product `(A, B)`     | on all — the kernel accumulates components and delivers one assembled activation |
 
 Dataflow subsumes dependency: if `A -> B` carries data, B structurally cannot
 fire before A's output arrives. There is no separate dependency graph in the
@@ -245,17 +245,17 @@ Dependencies use the same language: "A depends on C finishing" is the edge
 `C -> A` carrying `mag.Unit` — an informationless payload whose sole purpose
 is to encode the ordering. No second vocabulary exists.
 
-The shipped shell library leans on exactly this algebra: its process actor's
-input contract is the union `(mag.Unit | mag.Text)`. A Unit firing runs the
-command with no stdin; a Text firing supplies upstream stdout. The library
-constructs the initial Unit message explicitly, so pipe semantics require no
-compiler special case.
+The shipped process and shell libraries lean on exactly this algebra: each
+actor accepts `Unit`. An unfed node receives the graph's one automatic root
+activation; placing the same node behind an incoming `Unit` route suppresses
+that bootstrap and makes it dependency-driven. No second pipe or sequencing
+rule is required.
 
 - **Slot identity is the incoming edge, not the type.** The kernel assembles
   product activations with per-slot FIFO queues, where each slot is bound to
   its sender at lowering time (messages are id-signed, routes are
   directional, so the binding is known statically). This is what makes
-  `(Unit + Unit)` from two different upstreams — or `(Findings + Findings)`
+  `(Unit, Unit)` from two different upstreams — or `(Findings, Findings)`
   from two explorers — unambiguous: two completions of the same sender fill
   one slot twice, never two slots. One activation per complete set. The slot
   queues are also the only buffering the lifecycle needs: they accept

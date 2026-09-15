@@ -6,12 +6,12 @@ the distinctions that matter.
 
 ## Fixed and dynamic multiplicity
 
-`nefor.node.sequence` accepts a compile-time `List (Node I O)` and returns
-`Node I (List O)`. The supplied node order defines result order even when
+`nefor.node.sequence` accepts a compile-time `List<Node<I, O>>` and returns
+`Node<I, List<O>>`. The supplied node order defines result order even when
 actors finish out of order. The empty list is the ordinary list identity and
 produces `[]` after its input activation.
 
-`nefor.dynamic.DynamicList O` is a distinct runtime effect. It emits indexed
+`nefor.dynamic.DynamicList<O>` is a distinct runtime effect. It emits indexed
 occurrences plus explicit completion. Consumers retain that same nominal type;
 the operation owns its interpretation. `nefor.dynamic.traverse-template`
 instantiates one closed worker template per occurrence, while
@@ -21,15 +21,15 @@ name-based compatibility privilege exists. The shipped
 `examples/nefor-agent/agentic-loop/dynamic-tasks.mag` exercises zero, invalid,
 and reverse-completion cases.
 
-## Products and sums
+## Products and ADTs
 
-A product input such as `(A + B)` fires only after every occurrence arrives.
-Slots bind to sender edges, so `(Finding + Finding)` from two producers keeps
+A product input such as `(A, B)` fires only after every occurrence arrives.
+Slots bind to sender edges, so `(Finding, Finding)` from two producers keeps
 the occurrences distinct. `fanout` and `parallel` construct common product
 shapes.
 
-A sum input such as `(A | B)` fires on either constructor. `choose` applies one
-node to each arm. When two paths carry the same payload type but different
+A nominal ADT arrives as one complete owner value. `choose` explicitly unpacks an
+`Either`, applies one node to each payload, and repacks the selected constructor. When two paths carry the same payload type but different
 meanings, distinct nominal types such as `Approved` and `NeedChanges` keep that
 reason visible to validation.
 
@@ -39,7 +39,7 @@ The kernel emits `mag.Unit` when an actor completes successfully. A Unit edge
 therefore expresses sequencing without pretending that the downstream node
 consumes the upstream result. `nefor.node.*>` is the standard keep-right
 composition: it discards the left value, waits for successful completion, and
-runs a `Node Unit O`.
+runs a `Node<Unit, O>`.
 
 ## Errors as values
 

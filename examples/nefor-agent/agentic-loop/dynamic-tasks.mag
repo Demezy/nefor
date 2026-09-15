@@ -1,64 +1,41 @@
-(require "core.types")
-(require "agents")
-(require "nefor.actors")
-(require "nefor.agents")
-(require "nefor.artifact")
-(require "nefor.contracts")
-(require "nefor.dynamic")
-(require "nefor.graph")
-(require "nefor.node")
+import core.types.{}
+import agents.{}
+import nefor.actors.{}
+import nefor.agents.{}
+import nefor.artifact.{}
+import nefor.contracts.{}
+import nefor.dynamic.{}
+import nefor.graph.{}
+import nefor.node.{}
 
-(type Task {:task String :description String :dependent_tasks (List String)})
-(type WorkerResult {:task String :description String})
-(type Summary {:content String})
+type Task {task: String, description: String, dependent_tasks: List<String>}
+type WorkerResult {task: String, description: String}
+type Summary {content: String}
 
-(let occurrence (nefor.dynamic.trigger-ref (type-tag (nefor.dynamic.Indexed Task))))
-(let occurrence-collection (nefor.dynamic.field-ref occurrence "collection" (type-tag String)))
-(let occurrence-index (nefor.dynamic.field-ref occurrence "index" (type-tag Int)))
-(let occurrence-value (nefor.dynamic.field-ref occurrence "value" (type-tag Task)))
-(let occurrence-text (nefor.dynamic.field-ref occurrence-value "description" (type-tag String)))
-(let occurrence-index-text (nefor.dynamic.int-to-decimal-string-ref occurrence-index))
-(let worker-id (nefor.dynamic.concat-strings-ref
-  [(nefor.dynamic.capture-ref "expand.worker." (type-tag String)) occurrence-index-text]))
-(let worker-root (nefor.dynamic.concat-strings-ref
-  [(nefor.dynamic.capture-ref "expand-" (type-tag String)) occurrence-index-text]))
-(let worker-system (nefor.dynamic.concat-strings-ref
-  [(nefor.dynamic.capture-ref "Complete this task: " (type-tag String)) occurrence-text]))
-(let worker-template
-  (nefor.agents.dynamic-template-with-tools agents.resolve-model agents.mock
-    "expand" occurrence-collection occurrence-index worker-id worker-root worker-system []
-    (type-tag WorkerResult) 2))
+let occurrence = nefor.dynamic.`trigger-ref`(type_tag<nefor.dynamic.Indexed<Task>>())
+let `occurrence-collection` = nefor.dynamic.`field-ref`(occurrence, "collection", type_tag<String>())
+let `occurrence-index` = nefor.dynamic.`field-ref`(occurrence, "index", type_tag<Int>())
+let `occurrence-value` = nefor.dynamic.`field-ref`(occurrence, "value", type_tag<Task>())
+let `occurrence-text` = nefor.dynamic.`field-ref`(`occurrence-value`, "description", type_tag<String>())
+let `occurrence-index-text` = nefor.dynamic.`int-to-decimal-string-ref`(`occurrence-index`)
+let `worker-id` = nefor.dynamic.`concat-strings-ref`([nefor.dynamic.`capture-ref`("expand.worker.", type_tag<String>()), `occurrence-index-text`])
+let `worker-root` = nefor.dynamic.`concat-strings-ref`([nefor.dynamic.`capture-ref`("expand-", type_tag<String>()), `occurrence-index-text`])
+let `worker-system` = nefor.dynamic.`concat-strings-ref`([nefor.dynamic.`capture-ref`("Complete this task: ", type_tag<String>()), `occurrence-text`])
+let `worker-template` = nefor.agents.`dynamic-template-with-tools`(agents.`resolve-model`, agents.mock, "expand", `occurrence-collection`, `occurrence-index`, `worker-id`, `worker-root`, `worker-system`, [], type_tag<WorkerResult>(), 2)
 
-(let start
-  (nefor.actors.task-source "task" "Plan this request"))
-(let planner
-  (nefor.agents.dynamic-with-tools agents.resolve-model agents.mock "planner"
-    "Return the ordered task plan." []
-    (type-tag nefor.contracts.Task) (type-tag Task) 2))
-(let workers
-  (nefor.dynamic.traverse-template "expand" worker-template
-    (type-tag Task)
-    (type-tag (core.types.Result nefor.contracts.AgentError WorkerResult))))
+let start = nefor.actors.`task-source`("task", "Plan this request")
+let planner = nefor.agents.`dynamic-with-tools`(agents.`resolve-model`, agents.mock, "planner", "Return the ordered task plan.", [], type_tag<nefor.contracts.Task>(), type_tag<Task>(), 2)
+let workers = nefor.dynamic.`traverse-template`("expand", `worker-template`, type_tag<Task>(), type_tag<core.types.Result<nefor.contracts.AgentError, WorkerResult>>())
 
-;; Dynamic cardinality ends at an effect-aware context node. It waits for the
-;; explicit completion event and sends one ordered provider turn downstream;
-;; no runtime-sized MAG List value is invented.
-(let summary-context
-  (nefor.dynamic.context "summary-input"
-    (type-tag (core.types.Result nefor.contracts.AgentError WorkerResult))))
-(let summarizer
-  (nefor.agents.with-tools agents.resolve-model agents.mock "summarizer"
-    "Summarize the ordered worker results." []
-    (type-tag nefor.contracts.ProviderInput) (type-tag Summary) 2))
-(let summarize
-  (nefor.node.>>> summary-context summarizer))
+// Dynamic cardinality ends at an effect-aware context node. It waits for the
+// explicit completion event and sends one ordered provider turn downstream;
+// no runtime-sized MAG List value is invented.
+let `summary-context` = nefor.dynamic.context("summary-input", type_tag<core.types.Result<nefor.contracts.AgentError, WorkerResult>>())
+let summarizer = nefor.agents.`with-tools`(agents.`resolve-model`, agents.mock, "summarizer", "Summarize the ordered worker results.", [], type_tag<nefor.contracts.ProviderInput>(), type_tag<Summary>(), 2)
+let summarize = nefor.node.`>>>`(`summary-context`, summarizer)
 
-(let planned (nefor.node.>>> start planner))
-(let ran
-  (nefor.node.>=> planned (nefor.node.lift-result "workers-result" (type-tag nefor.contracts.AgentError) workers)))
-(let workflow (nefor.node.>=> ran summarize))
-(let result (nefor.graph.output-for "result" workflow))
-
-(nefor.artifact.compile
-  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-    (nefor.graph.add-edges graph [(nefor.graph.edge workflow result)])))
+let planned = nefor.node.`>>>`(start, planner)
+let ran = nefor.node.`>=>`(planned, nefor.node.`lift-result`("workers-result", type_tag<nefor.contracts.AgentError>(), workers))
+let workflow = nefor.node.`>=>`(ran, summarize)
+let result = nefor.graph.`output-for`("result", workflow)
+nefor.artifact.compile((|graph| => nefor.graph.`add-edges`(graph, [nefor.graph.edge(workflow, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)

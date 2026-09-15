@@ -225,7 +225,6 @@ pub struct Env {
     state: Arc<Mutex<CompilationState>>,
     imports: HashSet<String>,
     profiler: Option<CompileProfiler>,
-    default_mag_syntax: crate::frontend::SyntaxMode,
 }
 
 impl Clone for Env {
@@ -245,7 +244,6 @@ impl Clone for Env {
             state: self.state.clone(),
             imports: self.imports.clone(),
             profiler: self.profiler.clone(),
-            default_mag_syntax: self.default_mag_syntax,
         }
     }
 }
@@ -297,7 +295,6 @@ impl Env {
             state,
             imports: HashSet::new(),
             profiler,
-            default_mag_syntax: crate::frontend::SyntaxMode::Lisp,
         };
         for &name in crate::checker::BUILTIN_NAMES {
             env.define(name, Value::BuiltinFn(name.into()));
@@ -398,12 +395,6 @@ impl Env {
     }
     pub fn module(&self) -> &str {
         &self.module
-    }
-    pub(crate) fn set_default_mag_syntax(&mut self, syntax: crate::frontend::SyntaxMode) {
-        self.default_mag_syntax = syntax;
-    }
-    pub(crate) fn default_mag_syntax(&self) -> crate::frontend::SyntaxMode {
-        self.default_mag_syntax
     }
     pub fn qualify(&self, local: &str) -> String {
         if self.module == "main" {
@@ -1084,7 +1075,6 @@ impl Env {
             state: self.state.clone(),
             imports: self.imports.clone(),
             profiler: self.profiler.clone(),
-            default_mag_syntax: self.default_mag_syntax,
         }
     }
     pub fn user_defs(&self) -> BTreeMap<String, Vec<Value>> {
@@ -1196,7 +1186,6 @@ impl Env {
             self.profiler.clone(),
         );
         env.observer = self.observer.clone();
-        env.default_mag_syntax = self.default_mag_syntax;
         if let Ok(inputs) = self.lookup_by_type("inputs", &crate::types::MagType::HostInputs) {
             env.define("inputs", inputs);
         }

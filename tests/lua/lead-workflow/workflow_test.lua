@@ -180,45 +180,33 @@ end
 -- modification in the mag.loaded reply — so these strings only document what
 -- the lead writes to disk.
 local READ_ONLY_MAG = [=[
-(require "agents")
-(require "nefor.agents")
-(require "nefor.artifact")
-(require "nefor.contracts")
-(require "nefor.graph")
+import core.types.{}
+import agents.{}
+import nefor.actors.{}
+import nefor.agents.{}
+import nefor.artifact.{}
+import nefor.contracts.{}
+import nefor.graph.{}
 
-(let start (nefor.actors.task-source "worker-task" "Answer the task."))
-(let worker (nefor.agents.with-tools agents.resolve-model agents.standard "worker" "Answer the task."
-  ["read_file"]
-  (type-tag nefor.contracts.Task)
-  (type-tag nefor.contracts.TextAnswer)
-  2))
-(let out (nefor.graph.output "worker-output"
-  (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
-(nefor.artifact.compile
-  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-    (nefor.graph.add-edges graph
-      [(nefor.graph.edge start worker) (nefor.graph.edge worker out)])))
+let start = nefor.actors.`task-source`("worker-task", "Answer the task.")
+let worker = nefor.agents.`with-tools`(agents.`resolve-model`, agents.standard, "worker", "Answer the task.", ["read_file"], type_tag<nefor.contracts.Task>(), type_tag<nefor.contracts.TextAnswer>(), 2)
+let out = nefor.graph.output("worker-output", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
+nefor.artifact.compile((|graph| => nefor.graph.`add-edges`(graph, [nefor.graph.edge(start, worker), nefor.graph.edge(worker, out)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
 ]=]
 
 local WRITER_MAG = [=[
-(require "agents")
-(require "nefor.agents")
-(require "nefor.artifact")
-(require "nefor.contracts")
-(require "nefor.graph")
+import core.types.{}
+import agents.{}
+import nefor.actors.{}
+import nefor.agents.{}
+import nefor.artifact.{}
+import nefor.contracts.{}
+import nefor.graph.{}
 
-(let start (nefor.actors.task-source "build-task" "Implement feature X."))
-(let build (nefor.agents.with-tools agents.resolve-model agents.fast "build" "Implement feature X."
-  ["read_file" "write_file"]
-  (type-tag nefor.contracts.Task)
-  (type-tag nefor.contracts.TextAnswer)
-  2))
-(let out (nefor.graph.output "build-output"
-  (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
-(nefor.artifact.compile
-  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-    (nefor.graph.add-edges graph
-      [(nefor.graph.edge start build) (nefor.graph.edge build out)])))
+let start = nefor.actors.`task-source`("build-task", "Implement feature X.")
+let build = nefor.agents.`with-tools`(agents.`resolve-model`, agents.standard, "build", "Implement feature X.", ["read_file", "write_file"], type_tag<nefor.contracts.Task>(), type_tag<nefor.contracts.TextAnswer>(), 2)
+let out = nefor.graph.output("build-output", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
+nefor.artifact.compile((|graph| => nefor.graph.`add-edges`(graph, [nefor.graph.edge(start, build), nefor.graph.edge(build, out)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
 ]=]
 
 -- Compact concrete-modification fixtures used inside canonical program envelopes.
@@ -1178,7 +1166,7 @@ end
 -- message instead of leaving it hanging.
 do
   fresh()
-  write_mag_file("firing-mag-write-badsrc", "broken.mag", "(graph nope)")
+  write_mag_file("firing-mag-write-badsrc", "broken.mag", "graph nope")
   _test.calls_clear()
   invoke_tool("firing-mag-compile-fail", "mag-preview", {
     file = "broken.mag",
@@ -1211,7 +1199,7 @@ for _, cache_status in ipairs({ "cold", "miss", "hit" }) do
   if cache_status ~= "cold" then
     lw.configure { project_build = { cache_dir = "/persistent/cache" } }
   end
-  write_mag_file("firing-mag-write-apply", "live-delta.mag", "(artifact nil)")
+  write_mag_file("firing-mag-write-apply", "live-delta.mag", "artifact(nil)")
   local run_id = "mag-run-live-apply"
   lw._internals.register_active_run(run_id, {}, "terminal", "dispatch-live",
     "live", sessions.current_id())
@@ -1302,7 +1290,7 @@ end
 -- reaches the kernel. Omitting run_id is the fresh-run form tested above.
 do
   fresh()
-  write_mag_file("firing-mag-write-apply-invalid", "invalid-delta.mag", "(artifact nil)")
+  write_mag_file("firing-mag-write-apply-invalid", "invalid-delta.mag", "artifact(nil)")
   local run_id = "mag-run-live-invalid-apply"
   lw._internals.register_active_run(run_id, {}, "terminal", "dispatch-live-invalid",
     "live-invalid", sessions.current_id())
@@ -1336,7 +1324,7 @@ end
 -- tool invocation hanging.
 do
   fresh()
-  write_mag_file("firing-mag-write-apply-reject", "rejected-delta.mag", "(artifact nil)")
+  write_mag_file("firing-mag-write-apply-reject", "rejected-delta.mag", "artifact(nil)")
   local run_id = "mag-run-live-rejected-apply"
   lw._internals.register_active_run(run_id, {}, "terminal", "dispatch-live-rejected",
     "live-rejected", sessions.current_id())
@@ -2608,7 +2596,7 @@ end
 -- dispatched by another actor, while its directly dispatched child is valid.
 do
   fresh()
-  write_mag_file("apply-authority-source", "authority-delta.mag", "(artifact nil)")
+  write_mag_file("apply-authority-source", "authority-delta.mag", "artifact(nil)")
   local registry = lw._internals.run_registry
   local actor = "parent.run-tool"
   local sibling_actor = "sibling.run-tool"

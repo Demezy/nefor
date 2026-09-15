@@ -55,53 +55,27 @@ local NAME = nefor.name -- "mock-plugin"
 -- mock pattern-matches sub-agent chats on their SYSTEM message (see
 -- pick_response_for).
 local CANNED_MAG_FILE = "octo-lighthouse.mag"
-local CANNED_MAG_PROGRAM = table.concat({
-  '(require "nefor.actors")',
-  '(require "nefor.artifact")',
-  '(require "nefor.contracts")',
-  '(require "nefor.graph")',
-  "",
-  "(type OctopusSummary {:content String})",
-  "(type LighthouseSummary {:content String})",
-  '(let exact-model (fn [[model nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel model))',
-  '(let resolved-model-value (as nefor.actors.ResolvedModel {:provider "mock-plugin" :model "mock-model" :reasoning-effort (nefor.actors.reasoning-effort "medium")}))',
-  "",
-  '(let start (nefor.graph.source "task"',
-  '              (type-tag nefor.contracts.Task)',
-  '              (as nefor.contracts.Task {:prompt "<initial task text>"})))',
-  '(let sx (nefor.actors.resolved-agent exact-model',
-  '           (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel)',
-  '             {:id "sx" :model resolved-model-value',
-  '              :system "Summarise octopuses in one sentence." :tools []',
-  '              :da-policy (nefor.contracts.no-da-policy)',
-  '              :max-corrections 2})',
-  '           (type-tag nefor.contracts.Task) (type-tag OctopusSummary)))',
-  '(let sy (nefor.actors.resolved-agent exact-model',
-  '           (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel)',
-  '             {:id "sy" :model resolved-model-value',
-  '              :system "Summarise lighthouses in one sentence." :tools []',
-  '              :da-policy (nefor.contracts.no-da-policy)',
-  '              :max-corrections 2})',
-  '           (type-tag (core.types.Result nefor.contracts.AgentError OctopusSummary))',
-  '           (type-tag LighthouseSummary)))',
-  '(let combine (nefor.actors.resolved-agent exact-model',
-  '                (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel)',
-  '                  {:id "combine" :model resolved-model-value',
-  '                   :system "Combine the two summaries above into one paragraph."',
-  '                   :tools [] :da-policy (nefor.contracts.no-da-policy)',
-  '                   :max-corrections 2})',
-  '                (type-tag (core.types.Result nefor.contracts.AgentError LighthouseSummary))',
-  '                (type-tag nefor.contracts.TextAnswer)))',
-  '(let result (nefor.graph.output "result"',
-  '               (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))',
-  '(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph',
-  '                 (nefor.graph.add-edges graph',
-  '                   [(nefor.graph.edge start sx)',
-  '                    (nefor.graph.edge sx sy)',
-  '                    (nefor.graph.edge sy combine)',
-  '                    (nefor.graph.edge combine result)])))',
-  '(nefor.artifact.compile topology)',
-}, "\n")
+local CANNED_MAG_PROGRAM = [=[
+import core.types.{}
+import nefor.actors.{}
+import nefor.artifact.{}
+import nefor.contracts.{}
+import nefor.graph.{}
+
+type OctopusSummary {content: String}
+type LighthouseSummary {content: String}
+
+let `exact-model`: fn(nefor.actors.ResolvedModel) -> nefor.actors.ResolvedModel = |model| => model
+let `resolved-model-value` = nefor.actors.ResolvedModel {provider: "mock-plugin", model: "mock-model", `reasoning-effort`: nefor.actors.`reasoning-effort`("medium")}
+
+let start = nefor.graph.source("task", type_tag<nefor.contracts.Task>(), nefor.contracts.Task {prompt: "<initial task text>"})
+let sx = nefor.actors.`resolved-agent`(`exact-model`, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {id: "sx", model: `resolved-model-value`, system: "Summarise octopuses in one sentence.", tools: [], `da-policy`: nefor.contracts.`no-da-policy`(), `max-corrections`: 2}, type_tag<nefor.contracts.Task>(), type_tag<OctopusSummary>())
+let sy = nefor.actors.`resolved-agent`(`exact-model`, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {id: "sy", model: `resolved-model-value`, system: "Summarise lighthouses in one sentence.", tools: [], `da-policy`: nefor.contracts.`no-da-policy`(), `max-corrections`: 2}, type_tag<core.types.Result<nefor.contracts.AgentError, OctopusSummary>>(), type_tag<LighthouseSummary>())
+let combine = nefor.actors.`resolved-agent`(`exact-model`, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {id: "combine", model: `resolved-model-value`, system: "Combine the two summaries above into one paragraph.", tools: [], `da-policy`: nefor.contracts.`no-da-policy`(), `max-corrections`: 2}, type_tag<core.types.Result<nefor.contracts.AgentError, LighthouseSummary>>(), type_tag<nefor.contracts.TextAnswer>())
+let result = nefor.graph.output("result", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
+let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.`add-edges`(graph, [nefor.graph.edge(start, sx), nefor.graph.edge(sx, sy), nefor.graph.edge(sy, combine), nefor.graph.edge(combine, result)])
+nefor.artifact.compile(topology)
+]=]
 
 -- Canned text responses keyed by pattern in the last user message.
 -- Order matters: more specific patterns must come before general ones.

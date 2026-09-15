@@ -1026,7 +1026,7 @@ fn timed_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> {
         "trivial",
         "compile",
         None,
-        "(artifact {})",
+        "type Empty {}\nartifact(Empty {})",
         core_roots.clone(),
         json!({}),
         None,
@@ -1154,14 +1154,14 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
     let inputs = json!({"factory_contracts": contracts});
     let mut out = Vec::new();
     let errors = [
-        ("dead-binding-unresolved-symbol", "(let run (fn [] -> Artifact (let dead missing) (artifact {})))\n(run)", "unresolved", "static"),
-        ("dead-function-body-return-type-error", "(let run (fn [] -> Int \"wrong\"))\n(artifact {})", "type", "static"),
-        ("dead-strict-inference-cycle", "(let a b)\n(let b a)\n(artifact {})", "type", "static"),
-        ("unused-required-module-resolution-error", "(require \"missing.module\")\n(artifact {})", "evaluation", "module"),
-        ("demanded-local-partial-builtin", "(let run (fn [] -> Artifact (let bad (remove-at [1] 9)) (artifact bad)))\n(run)", "evaluation", "demanded-runtime"),
-        ("dead-local-recursion-budget", "(let loop (fn [[n Int]] -> Int (loop n)))\n(let run (fn [] -> Artifact (let dead (loop 0)) (artifact {:ok true})))\n(run)", "budget", "dead_local_may_elide"),
-        ("demanded-local-recursion-budget", "(let loop (fn [[n Int]] -> Int (loop n)))\n(let run (fn [] -> Artifact (let dead (loop 0)) (artifact dead)))\n(run)", "budget", "demanded-runtime"),
-        ("top-level-dead-partial-builtin-remains-eager", "(let dead (remove-at [1] 9))\n(artifact {:ok true})", "evaluation", "demanded-runtime"),
+        ("dead-binding-unresolved-symbol", "type Empty {}\nlet run: fn() -> Artifact = | | => { let dead = missing\n artifact(Empty {}) }\nrun()", "unresolved", "static"),
+        ("dead-function-body-return-type-error", "type Empty {}\nlet run: fn() -> Int = | | => \"wrong\"\nartifact(Empty {})", "type", "static"),
+        ("dead-strict-inference-cycle", "type Empty {}\nlet a = b\nlet b = a\nartifact(Empty {})", "type", "static"),
+        ("unused-required-module-resolution-error", "import missing.module.{}\ntype Empty {}\nartifact(Empty {})", "evaluation", "module"),
+        ("demanded-local-partial-builtin", "let run: fn() -> Artifact = | | => { let bad = `remove-at`([1], 9)\n artifact(bad) }\nrun()", "evaluation", "demanded-runtime"),
+        ("dead-local-recursion-budget", "type Ok {ok: Bool}\nlet loop: fn(Int) -> Int = |n| => loop(n)\nlet run: fn() -> Artifact = | | => { let dead = loop(0)\n artifact(Ok {ok: true}) }\nrun()", "budget", "dead_local_may_elide"),
+        ("demanded-local-recursion-budget", "let loop: fn(Int) -> Int = |n| => loop(n)\nlet run: fn() -> Artifact = | | => { let dead = loop(0)\n artifact(dead) }\nrun()", "budget", "demanded-runtime"),
+        ("top-level-dead-partial-builtin-remains-eager", "type Ok {ok: Bool}\nlet dead = `remove-at`([1], 9)\nartifact(Ok {ok: true})", "evaluation", "demanded-runtime"),
     ];
     for (name, source, class, policy) in errors {
         let expected = (policy == "dead_local_may_elide").then(|| json!({"ok": true}));
@@ -1180,19 +1180,15 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
         ));
     }
     out.push(fixture(
-        scratch,
-        "dead-local-partial-builtin",
-        "oracle",
-        "oracle",
-        None,
-        "(let run (fn [] -> Artifact (let bad (remove-at [1] 9)) (artifact {:ok true})))\n(run)",
-        core.clone(),
-        json!({}),
-        Some("evaluation"),
-        "dead_local_may_elide",
-        Some(json!({"ok": true})),
+        scratch, "dead-local-partial-builtin", "oracle", "oracle", None,
+        "type Ok {ok: Bool}\nlet run: fn() -> Artifact = | | => { let bad = `remove-at`([1], 9)\n artifact(Ok {ok: true}) }\nrun()",
+        core.clone(), json!({}), Some("evaluation"), "dead_local_may_elide", Some(json!({"ok": true})),
     ));
-    out.push(fixture(scratch, "untaken-branch-does-not-demand-local", "oracle", "oracle", None, "(let run (fn [] -> Artifact (if false (artifact (remove-at [1] 9)) (artifact {:ok true}))))\n(run)", core.clone(), json!({}), None, "demanded-runtime", Some(json!({"ok": true}))));
+    out.push(fixture(
+        scratch, "untaken-branch-does-not-demand-local", "oracle", "oracle", None,
+        "type Ok {ok: Bool}\nlet run: fn() -> Artifact = | | => if false then artifact(`remove-at`([1], 9)) else artifact(Ok {ok: true})\nrun()",
+        core.clone(), json!({}), None, "demanded-runtime", Some(json!({"ok": true})),
+    ));
 
     let mut unused_module = fixture(
         scratch,
@@ -1200,28 +1196,22 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
         "oracle",
         "oracle",
         None,
-        "(require \"broken\")\n(artifact {})",
+        "import broken.{}\ntype Empty {}\nartifact(Empty {})",
         core.clone(),
         json!({}),
         Some("unresolved"),
         "module",
         None,
     );
-    write_module(&mut unused_module, "broken.mag", "(let broken missing)");
+    write_module(&mut unused_module, "broken.mag", "let broken = missing");
     out.push(unused_module);
 
     let mut files = fixture(
-        scratch,
-        "read-and-read-json",
-        "oracle",
-        "oracle",
-        None,
-        "(let text (read \"message.txt\"))\n(let data (read-json \"manifest.json\"))\n(artifact {:text text :items (get data \"items\")})",
-        core.clone(),
-        json!({}),
-        None,
-        "file-input",
-        Some(json!({"text":"hello\n","items":["second","first"]})),);
+        scratch, "read-and-read-json", "oracle", "oracle", None,
+        "type ReadArtifact {text: String, items: List<String>}\nlet text = read(\"message.txt\")\nlet data = `read-json`(\"manifest.json\")\nartifact(ReadArtifact {text: text, items: (get(data, \"items\"): List<String>)})",
+        core.clone(), json!({}), None, "file-input",
+        Some(json!({"text":"hello\n","items":["second","first"]})),
+    );
     write_fixture_file(&mut files, "message.txt", b"hello\n");
     write_fixture_file(
         &mut files,
@@ -1230,57 +1220,61 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
     );
     out.push(files);
 
-    out.push(fixture(scratch, "nested-host-input", "oracle", "oracle", None,
-        "(type Config {:steps (List {:enabled Bool :label String})})\n(artifact (host-input \"config\" (type-tag Config)))",
+    out.push(fixture(
+        scratch, "nested-host-input", "oracle", "oracle", None,
+        "type Step {enabled: Bool, label: String}\ntype Config {steps: List<Step>}\nartifact(`host-input`(\"config\", type_tag<Config>()))",
         core.clone(), json!({"config":{"steps":[{"enabled":true,"label":"build"}]}}), None, "host-input",
-        Some(json!({"steps":[{"enabled":true,"label":"build"}]}))));
+        Some(json!({"steps":[{"enabled":true,"label":"build"}]})),
+    ));
     out.push(fixture(
         scratch,
         "missing-host-input",
         "oracle",
         "oracle",
         None,
-        "(artifact (host-input \"count\" (type-tag Int)))",
+        "artifact(`host-input`(\"count\", type_tag<Int>()))",
         core.clone(),
         json!({}),
         Some("type"),
         "host-input",
         None,
     ));
-    out.push(fixture(scratch, "wrong-nested-host-input", "oracle", "oracle", None,
-        "(type Config {:steps (List {:enabled Bool :label String})})\n(artifact (host-input \"config\" (type-tag Config)))",
-        core.clone(), json!({"config":{"steps":[{"enabled":"yes","label":"build"}]}}), Some("type"), "host-input", None));
+    out.push(fixture(
+        scratch, "wrong-nested-host-input", "oracle", "oracle", None,
+        "type Step {enabled: Bool, label: String}\ntype Config {steps: List<Step>}\nartifact(`host-input`(\"config\", type_tag<Config>()))",
+        core.clone(), json!({"config":{"steps":[{"enabled":"yes","label":"build"}]}}), Some("type"), "host-input", None,
+    ));
 
-    out.push(fixture(scratch, "function-local-closure-capture", "oracle", "oracle", None,
-        "(let run (fn [[value Int]] -> Artifact (let captured value) (let emit (fn [[suffix String]] -> Artifact (artifact {:captured captured :suffix suffix}))) (emit \"ok\")))\n(run 6)",
-        core.clone(), json!({}), None, "closure", Some(json!({"captured":6,"suffix":"ok"}))));
-    out.push(fixture(scratch, "closures-in-strict-values", "oracle", "oracle", None,
-        "(let handlers {:even (fn [[items (List Int)]] -> Bool (if (= (count items) 0) true ((get handlers \"odd\") (remove-at items 0)))) :odd (fn [[items (List Int)]] -> Bool (if (= (count items) 0) false ((get handlers \"even\") (remove-at items 0))))})\n(artifact ((get handlers \"even\") [1 2]))",
-        core.clone(), json!({}), None, "closure", Some(json!(true))));
+    out.push(fixture(
+        scratch, "function-local-closure-capture", "oracle", "oracle", None,
+        "type ClosureArtifact {captured: Int, suffix: String}\nlet run: fn(Int) -> Artifact = |value| => { let captured = value\n let emit: fn(String) -> Artifact = |suffix| => artifact(ClosureArtifact {captured: captured, suffix: suffix})\n emit(\"ok\") }\nrun(6)",
+        core.clone(), json!({}), None, "closure", Some(json!({"captured":6,"suffix":"ok"})),
+    ));
+    out.push(fixture(
+        scratch, "closures-in-strict-values", "oracle", "oracle", None,
+        "type Handlers {even: fn(List<Int>) -> Bool, odd: fn(List<Int>) -> Bool}\nlet handlers = Handlers {even: ((|items| => if (=)(count(items), 0) then true else get(handlers, \"odd\")(`remove-at`(items, 0))): fn(List<Int>) -> Bool), odd: ((|items| => if (=)(count(items), 0) then false else get(handlers, \"even\")(`remove-at`(items, 0))): fn(List<Int>) -> Bool)}\nartifact(get(handlers, \"even\")([1, 2]))",
+        core.clone(), json!({}), None, "closure", Some(json!(true)),
+    ));
 
-    let mut nominal = fixture(scratch, "same-shaped-module-nominals", "oracle", "oracle", None,
-        "(require \"left.types\")\n(require \"right.types\")\n(let accept-left (fn [[value left.types.Payload]] -> left.types.Payload value))\n(artifact (accept-left (as right.types.Payload {:value 1})))",
-        core.clone(), json!({}), Some("type"), "nominal", None);
-    write_module(
-        &mut nominal,
-        "left/types.mag",
-        "(type Payload {:value Int})",
+    let mut nominal = fixture(
+        scratch, "same-shaped-module-nominals", "oracle", "oracle", None,
+        "import left.types.{}\nimport right.types.{}\nlet accept_left: fn(left.types.Payload) -> left.types.Payload = |value| => value\nartifact(accept_left(right.types.Payload {value: 1}))",
+        core.clone(), json!({}), Some("type"), "nominal", None,
     );
-    write_module(
-        &mut nominal,
-        "right/types.mag",
-        "(type Payload {:value Int})",
-    );
+    write_module(&mut nominal, "left/types.mag", "type Payload {value: Int}");
+    write_module(&mut nominal, "right/types.mag", "type Payload {value: Int}");
     out.push(nominal);
 
-    let mut ordering = fixture(scratch, "deterministic-derived-ordering", "oracle", "oracle", None,
-        "(require \"ordered.values\")\n(let manifest (read-json \"order.json\"))\n(artifact {:collection (map (fn [[entry {:rank String :label String}]] -> String (get entry \"label\")) (sort-by (fn [[entry {:rank String :label String}]] -> String (get entry \"rank\")) [{:rank \"2\" :label \"b\"} {:rank \"1\" :label \"a\"}])) :module ordered.values.items :file (get manifest \"items\")})",
+    let mut ordering = fixture(
+        scratch, "deterministic-derived-ordering", "oracle", "oracle", None,
+        "import ordered.values.{}\ntype Ranked {rank: String, label: String}\ntype OrderingArtifact {collection: List<String>, module: List<String>, file: List<String>}\nlet manifest = `read-json`(\"order.json\")\nlet ranked = [Ranked {rank: \"2\", label: \"b\"}, Ranked {rank: \"1\", label: \"a\"}]\nlet sorted_ranked = `sort-by`(((|entry| => get(entry, \"rank\")): fn(Ranked) -> String), ranked)\nlet collection = map(((|entry| => get(entry, \"label\")): fn(Ranked) -> String), sorted_ranked)\nartifact(OrderingArtifact {collection: collection, module: ordered.values.items, file: (get(manifest, \"items\"): List<String>)})",
         core.clone(), json!({}), None, "ordering",
-        Some(json!({"collection":["a","b"],"module":["module-z","module-a"],"file":["file-2","file-1"]})));
+        Some(json!({"collection":["a","b"],"module":["module-z","module-a"],"file":["file-2","file-1"]})),
+    );
     write_module(
         &mut ordering,
         "ordered/values.mag",
-        "(let items [\"module-z\" \"module-a\"])",
+        "let items = [\"module-z\", \"module-a\"]",
     );
     write_fixture_file(
         &mut ordering,
@@ -1291,7 +1285,12 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
 
     let type_descriptor = json!({"kind":"named","name":"main.Choice","arguments":[],"body":{"kind":"record","fields":[{"name":"label","type":{"kind":"primitive","name":"String"}}]}});
     let type_schema = json!({"version":2,"root":{"kind":"named","name":"main.Choice","body":{"kind":"record","fields":[{"name":"label","schema":{"kind":"string"}}]}}});
-    out.push(fixture(scratch, "evidence-artifact-identity", "oracle", "oracle", None, "(type Choice {:label String})\n(let value (as Choice {:label \"yes\"}))\n(artifact {:descriptor (type-evidence (type-tag Choice)) :schema (type-schema (type-tag Choice)) :semantic_id (type-id (type-evidence (type-tag Choice))) :selected value})", core.clone(), json!({}), None, "static", Some(json!({"descriptor":type_descriptor,"schema":type_schema,"semantic_id":"sha256:77a35c6433fd6f8e52945496c744554e369f633c6257a27e64e02adbe57b31a7","selected":{"label":"yes"}}))));
+    out.push(fixture(
+        scratch, "evidence-artifact-identity", "oracle", "oracle", None,
+        "type Choice {label: String}\ntype EvidenceArtifact {descriptor: TypeDescriptor, schema: TypeSchema, semantic_id: SemanticTypeId, selected: Choice}\nlet value = Choice {label: \"yes\"}\nartifact(EvidenceArtifact {descriptor: `type-evidence`(type_tag<Choice>()), schema: `type-schema`(type_tag<Choice>()), semantic_id: `type-id`(`type-evidence`(type_tag<Choice>())), selected: value})",
+        core.clone(), json!({}), None, "static",
+        Some(json!({"descriptor":type_descriptor,"schema":type_schema,"semantic_id":"sha256:77a35c6433fd6f8e52945496c744554e369f633c6257a27e64e02adbe57b31a7","selected":{"label":"yes"}})),
+    ));
 
     out.push(fixture(
         scratch,
@@ -1306,55 +1305,76 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
         "graph-validation",
         None,
     ));
-    out.push(fixture(scratch, "graph-validation-priority", "oracle", "oracle", None, "(require \"nefor.artifact\")\n(require \"nefor.graph\")\n(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph graph))\n(nefor.artifact.compile topology)", nefor, inputs, Some("evaluation"), "graph-validation", None));
+    out.push(fixture(
+        scratch, "graph-validation-priority", "oracle", "oracle", None,
+        "import nefor.artifact.{}\nimport nefor.graph.{}\nlet topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => graph\nnefor.artifact.compile(topology)",
+        nefor, inputs, Some("evaluation"), "graph-validation", None,
+    ));
     out
 }
 
 fn core_dead_locals(size: usize) -> String {
-    let mut source = String::from("(let work (fn [[x Int]] -> Int (count (map (fn [[v Int]] -> Int v) [1 2 3 4]))))\n(let run (fn [] -> Artifact\n");
+    let mut source = String::from("type Ok {ok: Bool}\nlet work: fn(Int) -> Int = |x| => count(map(((|v| => v): fn(Int) -> Int), [1, 2, 3, 4]))\nlet run: fn() -> Artifact = | | => {\n");
     for index in 0..size {
-        source.push_str(&format!("  (let dead{index} (work {index}))\n"));
+        source.push_str(&format!("  let dead{index} = work({index})\n"));
     }
-    source.push_str("  (artifact {:ok true})))\n(run)");
+    source.push_str("  artifact(Ok {ok: true})\n}\nrun()");
     source
 }
 fn core_generic_calls(size: usize) -> String {
     let values = (0..size)
-        .map(|i| format!("{{:value {i}}}"))
+        .map(|i| format!("GenericValue {{value: {i}}}"))
         .collect::<Vec<_>>()
-        .join(" ");
-    format!("(let identity (fn [T] [[value T]] -> T value))\n(let values [{values}])\n(let copied (map (fn [[value {{:value Int}}]] -> {{:value Int}} (identity value)) values))\n(artifact {{:count (count copied)}})")
+        .join(", ");
+    format!("type GenericValue {{value: Int}}\ntype CountArtifact {{count: Int}}\nlet identity<T>: fn(T) -> T = |value| => value\nlet values = [{values}]\nlet copied = map(((|value| => identity(value)): fn(GenericValue) -> GenericValue), values)\nartifact(CountArtifact {{count: count(copied)}})")
 }
 fn core_concat_growth(size: usize) -> String {
     let values = (0..size)
         .map(|i| i.to_string())
         .collect::<Vec<_>>()
-        .join(" ");
-    format!("(let values [{values}])\n(let grown (fold (fn [[out (List Int)] [value Int]] -> (List Int) (concat out [value])) (as (List Int) []) values))\n(artifact {{:count (count grown)}})")
+        .join(", ");
+    format!("type CountArtifact {{count: Int}}\nlet values = [{values}]\nlet grown = fold(((|out, value| => concat(out, [value])): fn(List<Int>, Int) -> List<Int>), ([]: List<Int>), values)\nartifact(CountArtifact {{count: count(grown)}})")
 }
 fn core_artifact_control(size: usize) -> String {
     let values = (0..size)
-        .map(|i| format!("{{:index {i} :label \"item-{i}\"}}"))
+        .map(|i| format!("Item {{index: {i}, label: \"item-{i}\"}}"))
         .collect::<Vec<_>>()
-        .join(" ");
-    format!("(artifact {{:items [{values}]}})")
+        .join(", ");
+    format!("type Item {{index: Int, label: String}}\ntype ItemsArtifact {{items: List<Item>}}\nartifact(ItemsArtifact {{items: [{values}]}})")
 }
 
 fn graph_prelude() -> String {
-    "(require \"core.validated\")\n(require \"nefor.artifact\")\n(require \"nefor.contracts\")\n(require \"nefor.graph\")\n(let contracts (host-input \"factory_contracts\" (type-tag (List nefor.graph.FactoryContract))))\n(let pass (fn [[id String]] -> (nefor.graph.Node Int Int) (let input (nefor.graph.port id (type-tag Int) \"nefor.graph.Value\")) (let output (nefor.graph.port id (type-tag Int) \"nefor.graph.Value\")) (let actor (nefor.graph.actor id \"nefor.factory.output\" [(type-evidence (type-tag Int))] (as nefor.graph.OutputParams {}) (nefor.graph.store-port input) [(nefor.graph.store-port output)])) (nefor.graph.node id \"ordinary\" [actor] (as (List nefor.graph.StoredRoute) []) (as (List nefor.graph.Message) []) input output)))\n".into()
+    r#"import core.set.{}
+import core.validated.{}
+import nefor.artifact.{}
+import nefor.contracts.{}
+import nefor.graph.{}
+type EdgeSummary {edges: Int}
+type LowerSummary {actors: Int, messages: Int, forced: Bool}
+type FrontierSummary {nodes: Int, edges: Int, roots: Int, outputs: Int}
+type FrontierProof {summary: FrontierSummary, forced: Bool}
+type LowerFrontier {summary: FrontierSummary, lowered: nefor.graph.Modification, forced: String}
+let contracts = `host-input`("factory_contracts", type_tag<List<nefor.graph.FactoryContract>>())
+let pass: fn(String) -> nefor.graph.Node<Int, Int> = |id| => {
+  let input = nefor.graph.port(id, type_tag<Int>(), "nefor.graph.Value")
+  let output = nefor.graph.port(id, type_tag<Int>(), "nefor.graph.Value")
+  let actor = nefor.graph.actor(id, "nefor.factory.output", [`type-evidence`(type_tag<Int>())], nefor.graph.OutputParams {}, nefor.graph.`store-port`(input), [nefor.graph.`store-port`(output)])
+  nefor.graph.node(id, "ordinary", [actor], ([]: List<nefor.graph.StoredRoute>), ([]: List<nefor.graph.Message>), input, output)
+}
+"#.into()
 }
 fn linear_graph(size: usize, stage: &str) -> String {
     let mut source = graph_prelude();
-    source.push_str("(let start (nefor.graph.source \"start\" (type-tag Int) 1))\n");
+    source.push_str("let start = nefor.graph.source(\"start\", type_tag<Int>(), 1)\n");
     for index in 0..size {
-        source.push_str(&format!("(let n{index} (pass \"n{index}\"))\n"));
+        source.push_str(&format!("let n{index} = pass(\"n{index}\")\n"));
     }
-    source.push_str("(let out (nefor.graph.output \"out\" (type-tag Int)))\n(let topology (nefor.graph.add-edges nefor.graph.empty-graph [");
-    source.push_str("(nefor.graph.edge start n0) ");
+    source.push_str("let out = nefor.graph.output(\"out\", type_tag<Int>())\nlet topology = nefor.graph.`add-edges`(nefor.graph.`empty-graph`, [");
+    source.push_str("nefor.graph.edge(start, n0), ");
     for index in 0..size - 1 {
-        source.push_str(&format!("(nefor.graph.edge n{index} n{}) ", index + 1));
+        source.push_str(&format!("nefor.graph.edge(n{index}, n{}), ", index + 1));
     }
-    source.push_str(&format!("(nefor.graph.edge n{} out)]))\n", size - 1));
+    source.push_str(&format!("nefor.graph.edge(n{}, out)])\n", size - 1));
     source.push_str(&stage_artifact(stage));
     source
 }
@@ -1362,15 +1382,15 @@ fn fan_in_graph(size: usize, stage: &str) -> String {
     let mut source = graph_prelude();
     for index in 0..size {
         source.push_str(&format!(
-            "(let s{index} (nefor.graph.source \"s{index}\" (type-tag Int) {index}))\n"
+            "let s{index} = nefor.graph.source(\"s{index}\", type_tag<Int>(), {index})\n"
         ));
     }
-    let types = (0..size).map(|_| "Int").collect::<Vec<_>>().join(" ");
-    source.push_str(&format!("(let out (nefor.graph.output \"out\" (type-tag (+ {types}))))\n(let topology (nefor.graph.add-edges nefor.graph.empty-graph ["));
+    let types = (0..size).map(|_| "Int").collect::<Vec<_>>().join(", ");
+    source.push_str(&format!("let out = nefor.graph.output(\"out\", type_tag<({types})>())\nlet topology = nefor.graph.`add-edges`(nefor.graph.`empty-graph`, ["));
     for index in 0..size {
-        source.push_str(&format!("(nefor.graph.edge s{index} out) "));
+        source.push_str(&format!("nefor.graph.edge(s{index}, out), "));
     }
-    source.push_str("]))\n");
+    source.push_str("])\n");
     source.push_str(&stage_artifact(stage));
     source
 }
@@ -1378,58 +1398,58 @@ fn broad_frontier_graph(width: usize, depth: usize, stage: &str) -> (String, Str
     let mut source = graph_prelude();
     for chain in 0..width {
         source.push_str(&format!(
-            "(let s{chain} (nefor.graph.source \"s{chain}\" (type-tag Int) {chain}))\n"
+            "let s{chain} = nefor.graph.source(\"s{chain}\", type_tag<Int>(), {chain})\n"
         ));
         for level in 0..depth {
             source.push_str(&format!(
-                "(let n{chain}_{level} (pass \"n{chain}_{level}\"))\n"
+                "let n{chain}_{level} = pass(\"n{chain}_{level}\")\n"
             ));
         }
     }
-    let types = (0..width).map(|_| "Int").collect::<Vec<_>>().join(" ");
-    source.push_str(&format!(
-        "(let out (nefor.graph.output \"out\" (type-tag (+ {types}))))\n(let topology (nefor.graph.add-edges nefor.graph.empty-graph ["
-    ));
+    let types = (0..width).map(|_| "Int").collect::<Vec<_>>().join(", ");
+    source.push_str(&format!("let out = nefor.graph.output(\"out\", type_tag<({types})>())\nlet topology = nefor.graph.`add-edges`(nefor.graph.`empty-graph`, ["));
     for chain in 0..width {
-        source.push_str(&format!("(nefor.graph.edge s{chain} n{chain}_0) "));
+        source.push_str(&format!("nefor.graph.edge(s{chain}, n{chain}_0), "));
         for level in 0..depth - 1 {
             source.push_str(&format!(
-                "(nefor.graph.edge n{chain}_{level} n{chain}_{}) ",
+                "nefor.graph.edge(n{chain}_{level}, n{chain}_{}), ",
                 level + 1
             ));
         }
-        source.push_str(&format!("(nefor.graph.edge n{chain}_{} out) ", depth - 1));
+        source.push_str(&format!("nefor.graph.edge(n{chain}_{}, out), ", depth - 1));
     }
-    source.push_str("]))\n");
+    source.push_str("])\n");
     let topology_fingerprint = fingerprint(source.as_bytes());
-    source.push_str("(let analysis (nefor.graph.analyze-graph topology))\n");
-    source.push_str("(let summary {:nodes (count (get analysis \"nodes\")) :edges (count (get analysis \"edges\")) :roots (count (get analysis \"roots\")) :outputs (count (get analysis \"outputs\"))})\n");
+    source.push_str("let analysis = nefor.graph.`analyze-graph`(topology)\n");
+    source.push_str("let summary = FrontierSummary {nodes: count(get(analysis, \"nodes\")), edges: count(get(analysis, \"edges\")), roots: count(get(analysis, \"roots\")), outputs: count(get(analysis, \"outputs\"))}\n");
     match stage {
         "analysis" => {}
-        "forward-reachability" => source.push_str(&format!("(let forward (nefor.graph.forward-reachable analysis))\n(let forward-count (count (keys forward)))\n(let forward-proof (if (= forward-count {}) true (fail \"broad-frontier forward reachability changed\")))\n", width * (depth + 1) + 1)),
-        "both-reachability" => source.push_str(&format!("(let forward (nefor.graph.forward-reachable analysis))\n(let forward-count (count (keys forward)))\n(let forward-proof (if (= forward-count {}) true (fail \"broad-frontier forward reachability changed\")))\n(let force-reverse (fn [[proof Bool]] -> (Map String Bool) (nefor.graph.reverse-reachable analysis (first (get analysis \"outputs\")))))\n(let reverse (force-reverse forward-proof))\n(let reverse-count (count (keys reverse)))\n(let reverse-proof (if (= reverse-count {}) true (fail \"broad-frontier reverse reachability changed\")))\n", width * (depth + 1) + 1, width * (depth + 1) + 1)),
+        "forward-reachability" => source.push_str(&format!("let forward = nefor.graph.`forward-reachable`(analysis)\nlet forward_count = core.set.count(forward)\nlet forward_proof = if (=)(forward_count, {}) then true else fail(\"broad-frontier forward reachability changed\")\n", width * (depth + 1) + 1)),
+        "both-reachability" => source.push_str(&format!("let forward = nefor.graph.`forward-reachable`(analysis)\nlet forward_count = core.set.count(forward)\nlet forward_proof = if (=)(forward_count, {}) then true else fail(\"broad-frontier forward reachability changed\")\nlet force_reverse: fn(Bool) -> core.set.Set<String> = |proof| => nefor.graph.`reverse-reachable`(analysis, first(get(analysis, \"outputs\")))\nlet reverse = force_reverse(forward_proof)\nlet reverse_count = core.set.count(reverse)\nlet reverse_proof = if (=)(reverse_count, {}) then true else fail(\"broad-frontier reverse reachability changed\")\n", width * (depth + 1) + 1, width * (depth + 1) + 1)),
         "lower" => {
             let selected = (0..width)
-                .map(|chain| format!("(= (get candidate \"id\") \"n{chain}_{}\")", depth - 1))
-                .reduce(|left, right| format!("(or {left} {right})"))
+                .map(|chain| format!("(=)(get(candidate, \"id\"), \"n{chain}_{}\")", depth - 1))
+                .reduce(|left, right| format!("or({left}, {right})"))
                 .expect("positive width");
-            let expected = (0..width).map(|position| position.to_string()).collect::<Vec<_>>().join(" ");
-            source.push_str("(let lowered (nefor.graph.lower topology))\n(let forced (canonical lowered))\n");
-            source.push_str(&format!("(let final-actors (filter (fn [[candidate nefor.graph.LowerActor]] -> Bool {selected}) (get lowered \"actors\")))\n"));
-            source.push_str("(let positions (map (fn [[candidate nefor.graph.LowerActor]] -> Int (get (first (get (get candidate \"routes\") \"nefor.graph.Value\")) \"product_position\")) final-actors))\n");
-            source.push_str(&format!("(let route-order-proof (if (= positions [{expected}]) true (fail \"broad-frontier route order or product positions changed\")))\n"));
+            let expected = (0..width).map(|position| position.to_string()).collect::<Vec<_>>().join(", ");
+            source.push_str("let lowered = nefor.graph.lower(topology)\nlet forced = canonical(lowered)\n");
+            source.push_str(&format!("let final_actors = filter(((|candidate| => {selected}): fn(nefor.graph.LowerActor) -> Bool), get(lowered, \"actors\"))\n"));
+            source.push_str("let positions = map(((|candidate| => get(first(`__map-get-or`(get(candidate, \"routes\"), \"nefor.graph.Value\", ([]: List<nefor.graph.LowerDestination>))), \"product_position\")): fn(nefor.graph.LowerActor) -> Int), final_actors)\n");
+            source.push_str(&format!("let route_order_proof = if (=)(positions, [{expected}]) then true else fail(\"broad-frontier route order or product positions changed\")\n"));
         }
         _ => unreachable!(),
     }
     match stage {
-        "analysis" => source.push_str("(artifact summary)"),
+        "analysis" => source.push_str("artifact(summary)"),
         "forward-reachability" => {
-            source.push_str("(artifact {:summary summary :forced forward-proof})")
+            source.push_str("artifact(FrontierProof {summary: summary, forced: forward_proof})")
         }
         "both-reachability" => {
-            source.push_str("(artifact {:summary summary :forced reverse-proof})")
+            source.push_str("artifact(FrontierProof {summary: summary, forced: reverse_proof})")
         }
-        "lower" => source.push_str("(artifact {:summary summary :lowered lowered :forced forced})"),
+        "lower" => source.push_str(
+            "artifact(LowerFrontier {summary: summary, lowered: lowered, forced: forced})",
+        ),
         _ => unreachable!(),
     }
     (source, topology_fingerprint)
@@ -1437,16 +1457,24 @@ fn broad_frontier_graph(width: usize, depth: usize, stage: &str) -> (String, Str
 
 fn stage_artifact(stage: &str) -> String {
     match stage {
-        "build" => "(artifact {:edges (count (get topology \"edges\"))})".into(),
-        "validate" => "(let checked (nefor.graph.validate topology contracts))\n(match checked [(core.validated.Valid nefor.graph.Graph) accepted (artifact {:edges (count (get (get accepted \"value\") \"edges\"))})] [(core.validated.Invalid String) rejected (fail (get rejected \"errors\"))])".into(),
-        "lower" => "(let lowered (nefor.graph.lower topology))\n(let forced (canonical lowered))\n(artifact {:actors (count (get lowered \"actors\")) :messages (count (get lowered \"messages\")) :forced (not (= forced \"\"))})".into(),
-        "compile" => "(let topology-fn (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph (nefor.graph.add-edges graph (get topology \"edges\"))))\n(nefor.artifact.compile topology-fn)".into(),
+        "build" => "artifact(EdgeSummary {edges: count(get(topology, \"edges\"))})".into(),
+        "validate" => "let checked = nefor.graph.validate(topology, contracts)\nmatch checked { case Valid(accepted) => artifact(EdgeSummary {edges: count(get(accepted, \"edges\"))}), case Invalid(rejected) => fail(get(rejected, \"errors\")), }".into(),
+        "lower" => "let lowered = nefor.graph.lower(topology)\nlet forced = canonical(lowered)\nartifact(LowerSummary {actors: count(get(lowered, \"actors\")), messages: count(get(lowered, \"messages\")), forced: not((=)(forced, \"\"))})".into(),
+        "compile" => "let topology_fn: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.`add-edges`(graph, get(topology, \"edges\"))\nnefor.artifact.compile(topology_fn)".into(),
         _ => unreachable!(),
     }
 }
 fn invalid_conflict_graph() -> String {
     let mut source = graph_prelude();
-    source.push_str("(let start (nefor.graph.source \"start\" (type-tag Int) 1))\n(let left (pass \"same\"))\n(let right-input (nefor.graph.port \"same\" (type-tag Int) \"nefor.graph.Value\"))\n(let right-output (nefor.graph.port \"same\" (type-tag Int) \"different\"))\n(let right-actor (nefor.graph.actor \"same\" \"nefor.factory.output\" [(type-evidence (type-tag Int))] (as nefor.graph.OutputParams {}) (nefor.graph.store-port right-input) [(nefor.graph.store-port right-output)]))\n(let right (nefor.graph.node \"same\" \"ordinary\" [right-actor] (as (List nefor.graph.StoredRoute) []) (as (List nefor.graph.Message) []) right-input right-output))\n(let out (nefor.graph.output \"out\" (type-tag Int)))\n(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph (nefor.graph.add-edges graph [(nefor.graph.edge start left) (nefor.graph.edge start right) (nefor.graph.edge left out)])))\n(nefor.artifact.compile topology)");
+    source.push_str(r#"let start = nefor.graph.source("start", type_tag<Int>(), 1)
+let left = pass("same")
+let right_input = nefor.graph.port("same", type_tag<Int>(), "nefor.graph.Value")
+let right_output = nefor.graph.port("same", type_tag<Int>(), "different")
+let right_actor = nefor.graph.actor("same", "nefor.factory.output", [`type-evidence`(type_tag<Int>())], nefor.graph.OutputParams {}, nefor.graph.`store-port`(right_input), [nefor.graph.`store-port`(right_output)])
+let right = nefor.graph.node("same", "ordinary", [right_actor], ([]: List<nefor.graph.StoredRoute>), ([]: List<nefor.graph.Message>), right_input, right_output)
+let out = nefor.graph.output("out", type_tag<Int>())
+let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.`add-edges`(graph, [nefor.graph.edge(start, left), nefor.graph.edge(start, right), nefor.graph.edge(left, out)])
+nefor.artifact.compile(topology)"#);
     source
 }
 

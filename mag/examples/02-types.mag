@@ -1,16 +1,16 @@
-(type Score {:name String :accepted Bool})
-(type Accepted {:score Score})
-(type Rejected {:score Score :reason String})
-(type Decision (adt [Accepted Accepted] [Rejected Rejected]))
-(type Entry [K V] {:key K :value V})
+type Score {name: String, accepted: Bool}
+type Accepted {score: Score}
+type Rejected {score: Score, reason: String}
+type Decision = Accepted(Accepted) | Rejected(Rejected)
+type Entry<K, V> {key: K, value: V}
+type ExampleArtifact {decision: Decision, entry: Entry<String, Int>}
 
-;; Functions return the declared sum while selecting one concrete arm.
-(let decide (fn [[score Score]] -> Decision
-  (if (get score "accepted")
-    (construct Decision Accepted (as Accepted {:score score}))
-    (construct Decision Rejected (as Rejected {:score score :reason "score was not accepted"})))))
+// Functions return the declared sum while selecting one concrete arm.
+let decide: fn(Score) -> Decision = |score| => if get(score, "accepted") then named(Decision, Accepted, Accepted {score: score}) else named(Decision, Rejected, Rejected {score: score, reason: "score was not accepted"})
 
-;; Entry demonstrates one reusable type with two independent parameters: this
-;; value instantiates it as Entry String Int.
-(artifact {:decision (decide (as Score {:name "example" :accepted true}))
-           :entry (as (Entry String Int) {:key "answer" :value 42})})
+// Entry demonstrates one reusable type with two independent parameters: this
+// value instantiates it as Entry<String, Int>.
+artifact(ExampleArtifact {
+  decision: decide(Score {name: "example", accepted: true}),
+  entry: Entry<String, Int> {key: "answer", value: 42}
+})

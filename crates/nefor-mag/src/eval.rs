@@ -2026,10 +2026,7 @@ fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
     env.begin_module(name)?;
     let resolve_phase = env.profile_phase(Phase::ModuleResolve);
     let resolved = crate::resolver::resolve_module(env.module_roots(), name)?;
-    let syntax = match resolved.syntax {
-        crate::frontend::SyntaxMode::New => env.default_mag_syntax(),
-        crate::frontend::SyntaxMode::Lisp => crate::frontend::SyntaxMode::Lisp,
-    };
+    let syntax = resolved.syntax;
     let path = resolved.path;
     drop(resolve_phase);
     let read_phase = env.profile_phase(Phase::ModuleRead);
@@ -2262,22 +2259,25 @@ mod tests {
     #[test]
     fn repeated_call_reuses_the_cached_shared_result_without_spending_fuel() {
         let source = r#"
-            (let values [1 2 3])
-            (let copy (fn [[items (List Int)]] -> (List Int)
-              (map (fn [[item Int]] -> Int item) items)))
-            (artifact {})
+            let values = [1, 2, 3]
+            let copy: fn(List<Int>) -> List<Int> = |items| =>
+              map(((|item| => item): fn(Int) -> Int), items)
+            let copied = copy(values)
+            artifact(())
         "#;
         let source = crate::diagnostic::SourceSnapshot::named("test.mag", source);
         let module =
-            crate::lisp::compile_source(&source, None, crate::frontend::SourceRole::Entry).unwrap();
+            crate::new_syntax::compile_source(&source, None, crate::frontend::SourceRole::Entry)
+                .unwrap();
         let mut env = Env::new();
         let _fuel = fuel::install(1_000);
         eval_program(&mut env, &module).unwrap();
         let argument = env.lookup("values").unwrap().clone();
+        let function = env.lookup("copy").unwrap().clone();
 
-        let first = apply_named(&env, "copy", argument.clone()).unwrap();
+        let first = apply(&env, &function, std::slice::from_ref(&argument)).unwrap();
         let after_first = fuel::remaining().unwrap();
-        let second = apply_named(&env, "copy", argument).unwrap();
+        let second = apply(&env, &function, &[argument]).unwrap();
 
         assert_eq!(fuel::remaining(), Some(after_first));
         match (first, second) {

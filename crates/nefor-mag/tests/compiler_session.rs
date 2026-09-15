@@ -62,13 +62,14 @@ fn session_and_free_apis_have_cold_memory_and_file_compile_parity() {
     let root = workspace("parity");
     std::fs::write(
         root.join("support.mag"),
-        "(let expose (fn [[value Int]] -> Int value))",
+        "let expose: fn(Int) -> Int = |value| => value",
     )
     .unwrap();
     let source = r#"
-        (require "support")
-        (let answer (support.expose (host-input "answer" (type-tag Int))))
-        (artifact {:answer answer})
+        import support.{}
+        type Answer {answer: Int}
+        let answer = support.expose(`host-input`("answer", type_tag<Int>()))
+        artifact(Answer {answer: answer})
     "#;
     std::fs::write(root.join("main.mag"), source).unwrap();
     let roots = [root.clone()];
@@ -115,7 +116,7 @@ fn session_and_free_apis_have_cold_memory_and_file_compile_parity() {
 #[test]
 fn session_preserves_structured_syntax_errors() {
     let root = workspace("errors");
-    let source = "(artifact {:answer 42}";
+    let source = "artifact(";
     let roots = [root.clone()];
 
     let free_error = compile_with_inputs_and_module_roots_and_options(
@@ -154,7 +155,7 @@ fn session_stats_accounts_for_cold_successes_and_failures() {
 
     session
         .compile_profiled(CompileRequest {
-            source: "(artifact 1)",
+            source: "artifact(1)",
             source_dir: &root,
             inputs: json!({}),
             module_roots: &roots,
@@ -171,7 +172,7 @@ fn session_stats_accounts_for_cold_successes_and_failures() {
         })
         .unwrap_err();
     assert!(matches!(error, nefor_mag::error::MagError::Eval(_)));
-    std::fs::write(root.join("main.mag"), "(artifact 2)").unwrap();
+    std::fs::write(root.join("main.mag"), "artifact(2)").unwrap();
     session
         .compile_file(file_compile_request(&root, &roots))
         .unwrap();

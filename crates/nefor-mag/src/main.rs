@@ -36,8 +36,8 @@ struct CompileArgs {
     #[arg(long)]
     source_dir: PathBuf,
 
-    /// Override the entry source frontend; imported modules keep suffix selection
-    #[arg(long, value_enum)]
+    /// Override the entry frontend (new|lisp); imports use their .mag/.magl suffix
+    #[arg(long, value_enum, value_name = "SYNTAX")]
     syntax: Option<CliSyntax>,
 
     #[command(flatten)]
@@ -52,8 +52,13 @@ enum CliSyntax {
 
 #[derive(Args)]
 struct BuildArgs {
-    /// Entry file relative to the selected project root
+    /// .mag or .magl entry file relative to the selected project root
     entry: String,
+
+    /// Override the entry frontend (new|lisp); imports use their .mag/.magl suffix
+    #[arg(long, value_enum, value_name = "SYNTAX")]
+    syntax: Option<CliSyntax>,
+
     /// Project directory containing mag.toml (defaults to cwd; no upward search)
     #[arg(long)]
     project: Option<PathBuf>,
@@ -151,41 +156,47 @@ fn compile(args: CompileArgs) -> Result<(Vec<u8>, Option<Value>), Diagnostic> {
     let inputs = load_inputs(&args.inputs, None)?;
     let options = args.options();
     let profiler = args.profile.then(nefor_mag::profile::CompileProfiler::new);
-    let syntax = match syntax {
-        Some(CliSyntax::New) => nefor_mag::SyntaxMode::New,
-        Some(CliSyntax::Lisp) => nefor_mag::SyntaxMode::Lisp,
-        None if entry.ends_with(".mag") => nefor_mag::SyntaxMode::New,
-        None if entry.ends_with(".magl") => nefor_mag::SyntaxMode::Lisp,
-        None => {
-            return Err(Diagnostic {
-                code: "syntax_selection",
-                stage: "input",
-                message: format!("entry must end in .mag or .magl: {entry}"),
-                path: Some(source_dir.join(&entry).display().to_string()),
-                diagnostic: None,
-                profile: None,
-            })
+    let syntax = syntax.map(|syntax| match syntax {
+        CliSyntax::New => nefor_mag::SyntaxMode::New,
+        CliSyntax::Lisp => nefor_mag::SyntaxMode::Lisp,
+    });
+    let artifact = match (&profiler, syntax) {
+        (Some(profiler), Some(syntax)) => {
+            nefor_mag::compile_file_with_profiler_and_options_and_syntax(
+                &source_dir,
+                &entry,
+                inputs,
+                &module_roots,
+                profiler,
+                options,
+                syntax,
+            )
         }
-    };
-    let artifact = if let Some(profiler) = &profiler {
-        nefor_mag::compile_file_with_profiler_and_options_and_syntax(
+        (Some(profiler), None) => nefor_mag::compile_file_with_profiler_and_options(
             &source_dir,
             &entry,
             inputs,
             &module_roots,
             profiler,
             options,
-            syntax,
-        )
-    } else {
-        nefor_mag::compile_file_with_inputs_and_module_roots_and_options_and_syntax(
+        ),
+        (None, Some(syntax)) => {
+            nefor_mag::compile_file_with_inputs_and_module_roots_and_options_and_syntax(
+                &source_dir,
+                &entry,
+                inputs,
+                &module_roots,
+                options,
+                syntax,
+            )
+        }
+        (None, None) => nefor_mag::compile_file_with_inputs_and_module_roots_and_options(
             &source_dir,
             &entry,
             inputs,
             &module_roots,
             options,
-            syntax,
-        )
+        ),
     };
     match artifact {
         Ok(artifact) => Ok((
@@ -365,12 +376,28 @@ fn build(args: BuildArgs) -> Result<(Vec<u8>, Option<Value>), Diagnostic> {
         .common
         .profile
         .then(nefor_mag::profile::CompileProfiler::new);
-    let artifact = nefor_mag::project_cache::build(
-        request.as_file_request(),
-        request.config_version,
-        policy,
-        profiler.as_ref(),
-    );
+    let artifact = match args.syntax {
+        Some(CliSyntax::New) => nefor_mag::project_cache::build_with_syntax(
+            request.as_file_request(),
+            request.config_version,
+            policy,
+            profiler.as_ref(),
+            nefor_mag::SyntaxMode::New,
+        ),
+        Some(CliSyntax::Lisp) => nefor_mag::project_cache::build_with_syntax(
+            request.as_file_request(),
+            request.config_version,
+            policy,
+            profiler.as_ref(),
+            nefor_mag::SyntaxMode::Lisp,
+        ),
+        None => nefor_mag::project_cache::build(
+            request.as_file_request(),
+            request.config_version,
+            policy,
+            profiler.as_ref(),
+        ),
+    };
     match artifact {
         Ok(output) => Ok((
             output.bytes,

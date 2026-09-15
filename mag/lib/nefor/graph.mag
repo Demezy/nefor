@@ -279,7 +279,7 @@ let `unit-input?`: fn(StoredPort) -> Bool = |input| => `descriptor-accepts-value
 let `input-needs-bootstrap?`: fn(Map<String, List<StoredRoute>>, Map<String, List<Message>>, StoredPort) -> Bool = |`routes-by-input`, `messages-by-input`, input| => if `unit-input?`(input) then if (=)(count(`__map-get-or`(`routes-by-input`, `port-address-key`(input), ([]: List<StoredRoute>))), 0) then (=)(count(`__map-get-or`(`messages-by-input`, `port-address-key`(input), ([]: List<Message>))), 0) else false else false
 
 let `bootstrap-message`: fn(StoredPort) -> Message = |input| => {
-  // Activation carries Unit evidence, not the receiving sum's descriptor.
+  // Activation carries exact Unit evidence for the Unit-accepting boundary.
   let `unit-port` = `store-port`(port(get(input, "actor"), type_tag<Unit>(), get(input, "wire")))
   `stored-message`(`unit-port`, MessageContent<Unit> {kind: get(input, "wire"), value: nil})
 }

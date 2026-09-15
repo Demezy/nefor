@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 pub const CACHE_SCENARIO_PROTOCOL_VERSION: &str = "mag-cache-scenario-worker-v2";
-pub const CACHE_SCENARIO_CATALOG_VERSION: &str = "cycle-4-artifact-only-v3";
+pub const CACHE_SCENARIO_CATALOG_VERSION: &str = "cycle-4-artifact-only-v4";
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
@@ -388,22 +388,22 @@ impl PreparedScenario {
                 self.inputs = json!({"factory_contracts": contracts});
             }
             "read-target-changed" => {
-                self.write("main.mag", "(artifact (read \"note.txt\"))");
+                self.write("main.mag", "artifact(read(\"note.txt\"))");
                 self.write("note.txt", "v1");
             }
             "read-json-target-changed" | "read-json-ambiguity-introduced" => {
-                self.write("main.mag", "(artifact (read-json \"data/value.json\"))");
+                self.write("main.mag", "artifact(`read-json`(\"data/value.json\"))");
                 self.write("data/value.json", "{\"version\":1}");
             }
             "host-input-changed" | "alternating-context-a-b-a-b" => {
                 self.write(
                     "main.mag",
-                    "(artifact (host-input \"value\" (type-tag Int)))",
+                    "artifact(`host-input`(\"value\", type_tag<Int>()))",
                 );
                 self.inputs = json!({"value": 1});
             }
             "compiler-options-changed" => {
-                self.write("main.mag", "(artifact (concat [1] [2]))");
+                self.write("main.mag", "artifact(concat([1], [2]))");
             }
             "entry-lex-precedes-module-ambiguity" => {
                 self.module_chain();
@@ -411,44 +411,44 @@ impl PreparedScenario {
             "module-ambiguity-precedes-host-input" => {
                 self.write(
                     "main.mag",
-                    "(require \"a\")\n(artifact (host-input \"missing\" (type-tag Int)))",
+                    "import a.{}\nartifact(`host-input`(\"missing\", type_tag<Int>()))",
                 );
-                self.write("a.mag", "(let value 1)");
+                self.write("a.mag", "let value = 1");
                 self.inputs = json!({"missing": 1});
             }
             "required-module-precedes-entry-error" => {
-                self.write("main.mag", "(require \"a\")\n(artifact a.value)");
-                self.write("a.mag", "(let value 1)");
+                self.write("main.mag", "import a.{}\nartifact(a.value)");
+                self.write("a.mag", "let value = 1");
             }
-            "entry-deleted-after-success" => self.write("main.mag", "(artifact 1)"),
+            "entry-deleted-after-success" => self.write("main.mag", "artifact(1)"),
             _ => self.module_chain(),
         }
     }
 
     fn module_chain(&self) {
-        self.write("main.mag", "(require \"a\")\n(artifact a.value)");
-        self.write("a.mag", "(require \"b\")\n(let value b.value)");
-        self.write("b.mag", "(let value 1)");
+        self.write("main.mag", "import a.{}\nartifact(a.value)");
+        self.write("a.mag", "import b.{}\nlet value = b.value");
+        self.write("b.mag", "let value = 1");
     }
 
     fn setup(&mut self, name: &str) {
         match name {
             "identical-repeat-module-chain" => self.compile_setup_success(),
             "identical-repeat-broken-module" => {
-                self.write("b.mag", "(let value missing)");
+                self.write("b.mag", "let value = missing");
                 self.compile_setup_unresolved("missing");
             }
             "entry-bytes-changed" => {
                 self.compile_setup_success();
-                self.write("main.mag", "(require \"a\")\n(artifact 2)");
+                self.write("main.mag", "import a.{}\nartifact(2)");
             }
             "transitive-module-changed" => {
                 self.compile_setup_success();
-                self.write("b.mag", "(let value 2)");
+                self.write("b.mag", "let value = 2");
             }
             "module-ambiguity-introduced" => {
                 self.compile_setup_success();
-                self.add_ambiguous_module("a.mag", "(let value 2)");
+                self.add_ambiguous_module("a.mag", "let value = 2");
             }
             "read-target-changed" => {
                 self.compile_setup_success();
@@ -471,24 +471,24 @@ impl PreparedScenario {
                 self.options.limits.evaluation_steps = 1;
             }
             "broken-module-repaired" => {
-                self.write("b.mag", "(let value missing)");
+                self.write("b.mag", "let value = missing");
                 self.compile_setup_unresolved("missing");
-                self.write("b.mag", "(let value 2)");
+                self.write("b.mag", "let value = 2");
             }
             "entry-lex-precedes-module-ambiguity" => {
                 self.compile_setup_success();
-                self.add_ambiguous_module("a.mag", "(let value 2)");
-                self.write("main.mag", "(require \"a\")\n(artifact @)");
+                self.add_ambiguous_module("a.mag", "let value = 2");
+                self.write("main.mag", "import a.{}\nartifact(λ)");
             }
             "module-ambiguity-precedes-host-input" => {
                 self.compile_setup_success();
                 self.inputs = json!({});
-                self.add_ambiguous_module("a.mag", "(let value 2)");
+                self.add_ambiguous_module("a.mag", "let value = 2");
             }
             "required-module-precedes-entry-error" => {
                 self.compile_setup_success();
-                self.write("a.mag", "(let value missing)");
-                self.write("main.mag", "(require \"a\")\n(artifact later_missing)");
+                self.write("a.mag", "let value = missing");
+                self.write("main.mag", "import a.{}\nartifact(later_missing)");
             }
             "entry-deleted-after-success" => {
                 self.compile_setup_success();

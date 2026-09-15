@@ -165,19 +165,14 @@ pub fn compile_file_observed(
     request: FileCompileRequest<'_>,
     profiler: Option<&CompileProfiler>,
 ) -> Result<ObservedCompilation, MagError> {
-    compile_file_observed_with_syntax(
-        request,
-        profiler,
-        crate::SyntaxMode::Lisp,
-        crate::SyntaxMode::Lisp,
-    )
+    let syntax = crate::frontend::syntax_for_path(request.entry)?;
+    compile_file_observed_with_syntax(request, profiler, syntax)
 }
 
 pub fn compile_file_observed_with_syntax(
     request: FileCompileRequest<'_>,
     profiler: Option<&CompileProfiler>,
     syntax: crate::SyntaxMode,
-    module_mag_syntax: crate::SyntaxMode,
 ) -> Result<ObservedCompilation, MagError> {
     let observer = Observer::new();
     let artifact = crate::compile_file_cold_observing_with_syntax(
@@ -185,7 +180,6 @@ pub fn compile_file_observed_with_syntax(
         profiler,
         Some(observer.clone()),
         syntax,
-        module_mag_syntax,
     )?;
     let observations = observer.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
     Ok(ObservedCompilation {

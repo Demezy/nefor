@@ -69,6 +69,8 @@ local function collect_modules(root, relative, out)
       collect_modules(root, child, out)
     elseif entry.name:sub(-4) == ".mag" then
       out[#out + 1] = child:sub(1, -5):gsub("/", ".")
+    elseif entry.name:sub(-5) == ".magl" then
+      out[#out + 1] = child:sub(1, -6):gsub("/", ".")
     end
   end
 end

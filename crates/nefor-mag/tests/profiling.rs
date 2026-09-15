@@ -33,10 +33,11 @@ fn profiled_file_compile_reports_phases_and_deterministic_work() {
     let root = temp_dir("profile");
     fs::write(
         root.join("library.mag"),
-        "(let copy (fn [[value Int]] -> Int value))",
+        "let copy: fn(Int) -> Int = |value| => value",
     )
     .expect("library");
-    let source = "(require \"library\")\n(artifact {:value (library.copy 7)})";
+    let source =
+        "import library.{}\ntype Result {value: Int}\nartifact(Result {value: library.copy(7)})";
     let first = profile(&root, source);
     let second = profile(&root, source);
 
@@ -49,13 +50,13 @@ fn profiled_file_compile_reports_phases_and_deterministic_work() {
     assert!(first.counters.checked_expressions > 0);
     assert!(first.counters.environment_snapshots > 0);
     assert!(first.phases.entry_read_ns > 0);
-    assert!(first.phases.entry_lex_ns > 0);
-    assert!(first.phases.entry_parse_ns > 0);
+    assert_eq!(first.phases.entry_lex_ns, 0);
+    assert_eq!(first.phases.entry_parse_ns, 0);
     assert!(first.phases.entry_evaluate_ns > 0);
     assert!(first.phases.module_resolve_ns > 0);
     assert!(first.phases.module_read_ns > 0);
-    assert!(first.phases.module_lex_ns > 0);
-    assert!(first.phases.module_parse_ns > 0);
+    assert_eq!(first.phases.module_lex_ns, 0);
+    assert_eq!(first.phases.module_parse_ns, 0);
     assert!(first.phases.module_evaluate_ns > 0);
     assert!(first.phases.checking_ns > 0);
     assert!(first.total_duration_ns > 0);
@@ -68,7 +69,7 @@ fn profiled_file_compile_reports_phases_and_deterministic_work() {
 fn failed_in_memory_compile_preserves_error_and_profile() {
     let root = temp_dir("compile-failure");
     let roots = [root.clone()];
-    let source = "(artifact {:bad (+ 1 \"x\")})";
+    let source = "artifact(1 + \"x\")";
     let ordinary_error =
         nefor_mag::compile_with_inputs_and_module_roots(source, &root, json!({}), &roots)
             .expect_err("fixture must fail without profiling");
@@ -101,41 +102,66 @@ fn failed_in_memory_compile_preserves_error_and_profile() {
 #[test]
 fn failed_file_compile_records_total_and_every_started_entry_phase() {
     let cases = [
-        ("missing", None, "missing.mag", "entry_read_ns"),
-        ("lex", Some("[λ]"), "main.mag", "entry_lex_ns"),
-        ("parse", Some("(artifact"), "main.mag", "entry_parse_ns"),
+        (
+            "missing",
+            None,
+            "missing.mag",
+            nefor_mag::SyntaxMode::New,
+            "entry_read_ns",
+        ),
+        (
+            "lex",
+            Some("[λ]"),
+            "main.magl",
+            nefor_mag::SyntaxMode::Lisp,
+            "entry_lex_ns",
+        ),
+        (
+            "parse",
+            Some("(artifact"),
+            "main.magl",
+            nefor_mag::SyntaxMode::Lisp,
+            "entry_parse_ns",
+        ),
         (
             "checking",
-            Some("(artifact {:bad (+ 1 \"x\")})"),
+            Some("artifact(1 + \"x\")"),
             "main.mag",
+            nefor_mag::SyntaxMode::New,
             "checking_ns",
         ),
         (
             "evaluate",
-            Some("(fail {:kind \"test\" :message \"stop\"})"),
+            Some(
+                "type Failure {kind: String, message: String}\nfail(Failure {kind: \"test\", message: \"stop\"})",
+            ),
             "main.mag",
+            nefor_mag::SyntaxMode::New,
             "entry_evaluate_ns",
         ),
         (
             "artifact",
-            Some("(let value 1)"),
+            Some("let value = 1"),
             "main.mag",
+            nefor_mag::SyntaxMode::New,
             "artifact_conversion_ns",
         ),
     ];
 
-    for (label, source, entry, expected_phase) in cases {
+    for (label, source, entry, syntax, expected_phase) in cases {
         let root = temp_dir(label);
         if let Some(source) = source {
-            fs::write(root.join("main.mag"), source).expect("entry");
+            fs::write(root.join(entry), source).expect("entry");
         }
         let profiler = CompileProfiler::new();
-        let error = nefor_mag::compile_file_with_profiler(
+        let error = nefor_mag::compile_file_with_profiler_and_options_and_syntax(
             &root,
             entry,
             json!({}),
             std::slice::from_ref(&root),
             &profiler,
+            nefor_mag::CompilerOptions::default(),
+            syntax,
         )
         .expect_err("fixture must fail");
         let profile = profiler.snapshot();
@@ -155,25 +181,27 @@ fn failed_file_compile_records_total_and_every_started_entry_phase() {
 #[test]
 fn failed_module_work_records_started_nested_phases() {
     let cases = [
-        ("resolve", None, "module_resolve_ns"),
-        ("lex", Some("[λ]"), "module_lex_ns"),
-        ("parse", Some("(let broken"), "module_parse_ns"),
+        ("resolve", None, "support.mag", "module_resolve_ns"),
+        ("lex", Some("[λ]"), "support.magl", "module_lex_ns"),
+        (
+            "parse",
+            Some("(let broken"),
+            "support.magl",
+            "module_parse_ns",
+        ),
         (
             "evaluate",
-            Some("(let bad (+ 1 \"x\"))"),
+            Some("let bad = 1 + \"x\""),
+            "support.mag",
             "module_evaluate_ns",
         ),
     ];
 
-    for (label, module_source, expected_phase) in cases {
+    for (label, module_source, module_entry, expected_phase) in cases {
         let root = temp_dir(&format!("module-{label}"));
-        fs::write(
-            root.join("main.mag"),
-            "(require \"support\")\n(artifact {})",
-        )
-        .expect("entry");
+        fs::write(root.join("main.mag"), "import support.{}\nartifact(())").expect("entry");
         if let Some(source) = module_source {
-            fs::write(root.join("support.mag"), source).expect("module");
+            fs::write(root.join(module_entry), source).expect("module");
         }
         let profiler = CompileProfiler::new();
         let error = nefor_mag::compile_file_with_profiler(
@@ -202,14 +230,24 @@ fn failed_module_work_records_started_nested_phases() {
 #[test]
 fn module_cache_hits_mean_reuse_within_one_program() {
     let root = temp_dir("module-cache-scope");
-    fs::write(root.join("support.mag"), "(let value 7)").expect("module");
+    fs::write(root.join("support.mag"), "let value = 7").expect("module");
+    fs::write(
+        root.join("left.mag"),
+        "import support.{}\nlet value = support.value",
+    )
+    .expect("left module");
+    fs::write(
+        root.join("right.mag"),
+        "import support.{}\nlet value = support.value",
+    )
+    .expect("right module");
     let profile = profile(
         &root,
-        "(require \"support\")\n(require \"support\")\n(artifact support.value)",
+        "import left.{}\nimport right.{}\nartifact([left.value, right.value])",
     );
 
-    assert_eq!(profile.counters.module_requests, 2);
-    assert_eq!(profile.counters.modules_loaded, 1);
+    assert_eq!(profile.counters.module_requests, 4);
+    assert_eq!(profile.counters.modules_loaded, 3);
     assert_eq!(profile.counters.module_cache_hits, 1);
     fs::remove_dir_all(root).ok();
 }
@@ -217,12 +255,17 @@ fn module_cache_hits_mean_reuse_within_one_program() {
 #[test]
 fn counters_partition_calls_builtins_and_binding_forces() {
     let root = temp_dir("profile-partitions");
-    let profile = profile(&root, "(let identity (fn [[value Int]] -> Int value))\n(let answer (identity 7))\n(artifact {:answer answer})");
+    let profile = profile(&root, "type Answer {answer: Int}\nlet identity: fn(Int) -> Int = |value| => value\nlet answer = identity(7)\nartifact(Answer {answer: answer})");
     let counters = profile.counters;
 
     assert_eq!(
         counters.function_calls,
-        counters.user_function_calls + counters.builtin_calls
+        counters.builtin_calls
+            + counters
+                .user_function_executions_by_name
+                .values()
+                .copied()
+                .sum::<u64>()
     );
     assert_eq!(
         counters.builtin_calls,
@@ -237,7 +280,11 @@ fn counters_partition_calls_builtins_and_binding_forces() {
     assert!(counters.binding_force_ready_hits >= 2);
     assert_eq!(counters.binding_force_cycles, 0);
     assert_eq!(counters.builtin_calls_by_name.get("artifact"), Some(&1));
-    assert_eq!(counters.user_function_calls, 1);
+    assert_eq!(counters.user_function_calls, 0);
+    assert_eq!(
+        counters.user_function_executions_by_name.get("<anonymous>"),
+        Some(&1)
+    );
     fs::remove_dir_all(root).ok();
 }
 
@@ -246,7 +293,7 @@ fn group_by_profiles_one_builtin_call_and_one_callback_per_item() {
     let root = temp_dir("profile-group-by");
     let profile = profile(
         &root,
-        "(let key (fn [[value Int]] -> String (str value)))\n(let grouped (group-by key [1 2 3]))\n(artifact grouped)",
+        "let key: fn(Int) -> String = |value| => str(value)\nlet grouped = `group-by`(key, [1, 2, 3])\nartifact(grouped)",
     );
     let counters = profile.counters;
 
@@ -255,10 +302,19 @@ fn group_by_profiles_one_builtin_call_and_one_callback_per_item() {
         counters.builtin_input_items_by_name.get("group-by"),
         Some(&3)
     );
-    assert_eq!(counters.user_function_calls, 3);
+    assert_eq!(counters.user_function_calls, 0);
+    assert_eq!(
+        counters.user_function_executions_by_name.get("<anonymous>"),
+        Some(&3)
+    );
     assert_eq!(
         counters.function_calls,
-        counters.user_function_calls + counters.builtin_calls
+        counters.builtin_calls
+            + counters
+                .user_function_executions_by_name
+                .values()
+                .copied()
+                .sum::<u64>()
     );
     assert_eq!(
         counters.builtin_calls,
@@ -276,24 +332,21 @@ fn named_calls_memoization_and_physical_collection_work_are_separate() {
     let root = temp_dir("profile-exclusive-work");
     let profile = profile(
         &root,
-        "(let identity (fn [[value Int]] -> Int value))\n(let first-value (identity 7))\n(let second-value (identity 7))\n(let removed (remove-at [1 2 3] 1))\n(let joined (concat removed [4]))\n(type Joined {:joined (List Int)})\n(let encoded (canonical (as Joined {:joined joined})))\n(artifact {:first first-value :second second-value :encoded encoded})",
+        "type Joined {joined: List<Int>}\ntype Result {first: Int, second: Int, encoded: String}\nlet identity: fn(Int) -> Int = |value| => value\nlet `first-value` = identity(7)\nlet `second-value` = identity(7)\nlet removed = `remove-at`([1, 2, 3], 1)\nlet joined = concat(removed, [4])\nlet encoded = canonical(Joined {joined: joined})\nartifact(Result {first: `first-value`, second: `second-value`, encoded: encoded})",
     );
     let counters = profile.counters;
 
+    assert_eq!(counters.user_function_calls, 0);
     assert_eq!(
-        counters.user_function_calls_by_name.get("identity"),
-        Some(&2)
-    );
-    assert_eq!(
-        counters.user_function_executions_by_name.get("identity"),
+        counters.user_function_executions_by_name.get("<anonymous>"),
         Some(&1)
     );
     assert_eq!(
-        counters.memoized_call_hits_by_name.get("identity"),
+        counters.memoized_call_hits_by_name.get("<anonymous>"),
         Some(&1)
     );
     assert_eq!(
-        counters.memoized_call_misses_by_name.get("identity"),
+        counters.memoized_call_misses_by_name.get("<anonymous>"),
         Some(&1)
     );
     assert_eq!(
@@ -318,7 +371,7 @@ fn descriptor_assignment_and_table_work_are_generic_and_deterministic() {
     let root = temp_dir("profile-descriptors");
     let profile = profile(
         &root,
-        "(let target (type-evidence (type-tag (+ Int Int))))\n(let sources [(type-evidence (type-tag Int)) (type-evidence (type-tag Int))])\n(let assignments (descriptor-input-assignments target sources))\n(let table (descriptor-table [target]))\n(artifact {:assignments assignments :declarations (__map-count table)})",
+        "type Result {assignments: List<Int>, declarations: Int}\nlet target = `type-evidence`(type_tag<(Int, Int)>())\nlet sources = [`type-evidence`(type_tag<Int>()), `type-evidence`(type_tag<Int>())]\nlet assignments = `descriptor-input-assignments`(target, sources)\nlet table = `descriptor-table`([target])\nartifact(Result {assignments: assignments, declarations: `__map-count`(table)})",
     );
     let counters = profile.counters;
 
@@ -337,7 +390,7 @@ fn descriptor_assignment_and_table_work_are_generic_and_deterministic() {
 #[test]
 fn builtin_item_work_and_recursive_validation_are_exact_for_tiny_fixture() {
     let root = temp_dir("profile-items");
-    let profile = profile(&root, "(let identity (fn [[value (List Int)]] -> (List Int) value))\n(let values (identity (as (List Int) (concat [1 2] [3]))))\n(artifact {:count (count values)})");
+    let profile = profile(&root, "type Result {count: Int}\nlet identity: fn(List<Int>) -> List<Int> = |value| => value\nlet values = identity((concat([1, 2], [3]): List<Int>))\nartifact(Result {count: count(values)})");
     let counters = profile.counters;
 
     assert_eq!(counters.builtin_calls_by_name.get("concat"), Some(&1));

@@ -221,23 +221,34 @@ async fn chatgpt_projects_stale_allowlist_and_returns_tool_result_through_gate()
         .expect("fixture content");
 
     let source = r#"
-(require "core.types")
-(require "nefor.actors")
-(require "nefor.artifact")
-(require "nefor.contracts")
-(require "nefor.graph")
-(let exact-model (fn [[model nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel model))
-(let resolved (as nefor.actors.ResolvedModel {:provider "provider" :model "test-model" :reasoning-effort (nefor.actors.reasoning-effort "medium")}))
-(let start (nefor.graph.source "task" (type-tag nefor.contracts.Task) (as nefor.contracts.Task {:prompt "read fixture"})))
-(let answer (nefor.actors.resolved-agent exact-model
-               (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "answer" :model resolved
-                :system "Read fixture.txt, then answer."
-                :tools ["read_file" "python-read"] :da-policy (nefor.contracts.no-da-policy) :max-corrections 0})
-               (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer)))
-(let output (nefor.graph.output "result" (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))
-(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-                 (nefor.graph.add-edges graph [(nefor.graph.edge start answer) (nefor.graph.edge answer output)])))
-(nefor.artifact.compile topology)
+import core.types.{}
+import nefor.actors.{}
+import nefor.artifact.{}
+import nefor.contracts.{}
+import nefor.graph.{}
+
+let `exact-model`: fn(nefor.actors.ResolvedModel) -> nefor.actors.ResolvedModel = |model| => model
+let resolved = nefor.actors.ResolvedModel {provider: "provider", model: "test-model", `reasoning-effort`: nefor.actors.`reasoning-effort`("medium")}
+let start = nefor.graph.source("task", type_tag<nefor.contracts.Task>(), nefor.contracts.Task {prompt: "read fixture"})
+let answer = nefor.actors.`resolved-agent`(
+  `exact-model`,
+  nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {
+    id: "answer",
+    model: resolved,
+    system: "Read fixture.txt, then answer.",
+    tools: ["read_file", "python-read"],
+    `da-policy`: nefor.contracts.`no-da-policy`(),
+    `max-corrections`: 0,
+  },
+  type_tag<nefor.contracts.Task>(),
+  type_tag<nefor.contracts.TextAnswer>(),
+)
+let output = nefor.graph.output("result", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
+let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.`add-edges`(graph, [
+  nefor.graph.edge(start, answer),
+  nefor.graph.edge(answer, output),
+])
+nefor.artifact.compile(topology)
 "#;
     tokio::fs::write(temp.path().join("tool.mag"), source)
         .await
@@ -442,23 +453,34 @@ async fn provider_executed_lifecycle_records_facts_without_activating_run_tool()
     handshake(&mut mag_out, &mut mag_in).await;
 
     let source = r#"
-(require "core.types")
-(require "nefor.actors")
-(require "nefor.artifact")
-(require "nefor.contracts")
-(require "nefor.graph")
-(let exact-model (fn [[model nefor.actors.ResolvedModel]] -> nefor.actors.ResolvedModel model))
-(let resolved (as nefor.actors.ResolvedModel {:provider "provider" :model "test-model" :reasoning-effort (nefor.actors.reasoning-effort "medium")}))
-(let start (nefor.graph.source "task" (type-tag nefor.contracts.Task) (as nefor.contracts.Task {:prompt "research"})))
-(let answer (nefor.actors.resolved-agent exact-model
-               (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "answer" :model resolved
-                :system "Research, then answer."
-                :tools ["web_search"] :da-policy (nefor.contracts.no-da-policy) :max-corrections 0})
-               (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer)))
-(let output (nefor.graph.output "result" (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))
-(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-                 (nefor.graph.add-edges graph [(nefor.graph.edge start answer) (nefor.graph.edge answer output)])))
-(nefor.artifact.compile topology)
+import core.types.{}
+import nefor.actors.{}
+import nefor.artifact.{}
+import nefor.contracts.{}
+import nefor.graph.{}
+
+let `exact-model`: fn(nefor.actors.ResolvedModel) -> nefor.actors.ResolvedModel = |model| => model
+let resolved = nefor.actors.ResolvedModel {provider: "provider", model: "test-model", `reasoning-effort`: nefor.actors.`reasoning-effort`("medium")}
+let start = nefor.graph.source("task", type_tag<nefor.contracts.Task>(), nefor.contracts.Task {prompt: "research"})
+let answer = nefor.actors.`resolved-agent`(
+  `exact-model`,
+  nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {
+    id: "answer",
+    model: resolved,
+    system: "Research, then answer.",
+    tools: ["web_search"],
+    `da-policy`: nefor.contracts.`no-da-policy`(),
+    `max-corrections`: 0,
+  },
+  type_tag<nefor.contracts.Task>(),
+  type_tag<nefor.contracts.TextAnswer>(),
+)
+let output = nefor.graph.output("result", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
+let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.`add-edges`(graph, [
+  nefor.graph.edge(start, answer),
+  nefor.graph.edge(answer, output),
+])
+nefor.artifact.compile(topology)
 "#;
     tokio::fs::write(temp.path().join("native.mag"), source)
         .await

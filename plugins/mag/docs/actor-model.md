@@ -71,10 +71,10 @@ Two obligations:
   the output shapes it produces, and the signals it handles. Composition
   type-checks against declared contracts; nothing selects inputs by sniffing
   their shape. In a cyclic composition (the agentic loop), which output exits
-  the cycle is a type fact — a declared algebraic type, built from sums and
-  products, e.g. `ProviderInput -> (ToolCalls | TextAnswer)` — never a
+  the cycle is a type fact — a declared algebraic type or product, e.g.
+  `ProviderInput -> core.types.Result<AgentError, TextAnswer>` — never a
   position heuristic. The input side carries firing semantics the same way:
-  single type fires per message, union fires on any, product fires on all
+  single or nominal-ADT owner types fire per complete value, while a product fires on all components
   (see ir.md, Firing).
 
 ### Construction and delivery
@@ -139,7 +139,7 @@ convention:
    whether or not an instance exists. The `mag.actor_spawned` lifecycle event
    fires here, at registration.
 2. **Messages feed the id's firing machine immediately** (ir.md, Firing). A
-   single or union input contract is satisfied by the first arriving message;
+   single or ADT input contract is satisfied by the first compatible arriving message;
    a product input buffers components in its sender-bound slots until every
    slot holds one. Partial inputs queue in the machine — discriminated by
    actor id and edge, not replayed from the bus — so no separate pending
@@ -424,7 +424,7 @@ actor's compiler-derived profile selector.
 
 Every public agent uses the `structured-output` provider boundary. Its params
 include a versioned MAG type descriptor produced by
-`(type-schema (type-tag T))` and `max_corrections`. The bridge converts the
+<code>`type-schema`(type_tag&lt;T&gt;())</code> and `max_corrections`. The bridge converts the
 descriptor to provider-neutral JSON Schema; each provider chooses its own
 realization. The OpenAI-compatible provider uses `response_format`, while the
 ChatGPT provider uses the Responses API's `text.format`. MAG does not branch on
@@ -440,7 +440,7 @@ retaining an earlier completed candidate when a later correction round fails.
 
 The canonical MAG constructor is `nefor.actors.agent`. It is generic over the
 configuration-owned model type and its public node boundary is
-`I -> (O | AgentError)`. `max_corrections = 0` means no correction,
+`I -> core.types.Result<AgentError, O>`. `max_corrections = 0` means no correction,
 `1` means one correction, and so on.
 
 The constructor derives its runtime entry protocol from `I`. The nominal

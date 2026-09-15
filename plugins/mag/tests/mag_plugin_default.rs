@@ -1149,7 +1149,7 @@ mod project_build_tests {
         // Use read-json so the artifact and deeply nested extension are ordinary observed data.
         std::fs::write(
             project.path().join("main.mag"),
-            "(artifact (read-json \"artifact.json\"))",
+            "artifact(`read-json`(\"artifact.json\"))",
         )
         .unwrap();
         std::fs::write(
@@ -1204,14 +1204,34 @@ async fn project_build_deep_program_hit_rechecks_current_kernel() {
     let cache = tempfile::tempdir().unwrap();
     std::fs::write(project.path().join("mag.toml"), "version = 1\n").unwrap();
     let bindings = (1..=140)
-        .map(|index| format!("(let n{index} [n{}])\n", index - 1))
+        .map(|index| format!("let n{index} = [n{}]\n", index - 1))
         .collect::<String>();
-    let source = "(artifact {:format \"nefor.mag\" :version 2 :kind \"program\" :program {:initial {:types {:deep n140} :actors [] :messages [] :nodes [] :kills [] :result {}} :operations []}})";
-    std::fs::write(
-        project.path().join("main.mag"),
-        format!("(let n0 0)\n{bindings}{source}"),
-    )
-    .unwrap();
+    let deep_type = (0..140).fold("Int".to_owned(), |ty, _| format!("List<{ty}>"));
+    let source = format!(
+        r#"type Empty {{}}
+type Types {{deep: {deep_type}}}
+type Initial {{types: Types, actors: List<String>, messages: List<String>, nodes: List<String>, kills: List<String>, result: Empty}}
+type Program {{initial: Initial, operations: List<String>}}
+type Envelope {{format: String, version: Int, kind: String, program: Program}}
+let n0 = 0
+{bindings}artifact(Envelope {{
+  format: "nefor.mag",
+  version: 2,
+  kind: "program",
+  program: Program {{
+    initial: Initial {{
+      types: Types {{deep: n140}},
+      actors: ([]: List<String>),
+      messages: ([]: List<String>),
+      nodes: ([]: List<String>),
+      kills: ([]: List<String>),
+      result: Empty {{}},
+    }},
+    operations: ([]: List<String>),
+  }},
+}})"#
+    );
+    std::fs::write(project.path().join("main.mag"), source).unwrap();
     let kernel = project.path().join("kernel.lua");
     std::fs::write(
         &kernel,

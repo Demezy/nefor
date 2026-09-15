@@ -1,18 +1,7 @@
-(require "nefor.actors")
-(require "nefor.contracts")
+import nefor.actors.{}
+import nefor.contracts.{}
 
-(let exact-model (fn [[model nefor.actors.ResolvedModel]]
-  -> nefor.actors.ResolvedModel model))
-(let resolved-model-value (as nefor.actors.ResolvedModel
-  {:provider "mock-plugin" :model "mock-model"
-   :reasoning-effort (nefor.actors.reasoning-effort "medium")}))
+let `exact-model`: fn(nefor.actors.ResolvedModel) -> nefor.actors.ResolvedModel = |model| => model
+let `resolved-model-value` = nefor.actors.ResolvedModel {provider: "mock-plugin", model: "mock-model", `reasoning-effort`: nefor.actors.`reasoning-effort`("medium")}
 
-(nefor.actors.resolved-agent exact-model
-  (as (nefor.actors.AgentConfig nefor.actors.ResolvedModel) {:id "invalid"
-   :model resolved-model-value
-   :system ""
-   :tools []
-   :da-policy (nefor.contracts.no-da-policy)
-   :max-corrections 0})
-  (type-tag nefor.contracts.Task)
-  (type-tag MissingSemanticType))
+nefor.actors.`resolved-agent`(`exact-model`, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {id: "invalid", model: `resolved-model-value`, system: "", tools: [], `da-policy`: nefor.contracts.`no-da-policy`(), `max-corrections`: 0}, type_tag<nefor.contracts.Task>(), type_tag<MissingSemanticType>())

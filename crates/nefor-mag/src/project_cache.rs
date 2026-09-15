@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-const FORMAT: &str = "mag-project-cache-v1";
+const FORMAT: &str = "mag-project-cache-v2";
 const OUTPUT: &str = "mag-json-line-v1";
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -93,7 +93,6 @@ impl Identity {
         version: u32,
         compiler: CompilerBuildId,
         syntax: crate::SyntaxMode,
-        module_mag_syntax: crate::SyntaxMode,
     ) -> Option<Self> {
         if !request.source_dir.is_absolute()
             || request.module_roots.iter().any(|p| !p.is_absolute())
@@ -114,17 +113,11 @@ impl Identity {
                 .collect::<Option<_>>()?,
             inputs: request.inputs.clone(),
             config_version: version,
-            syntax: format!(
-                "{}/{}",
-                match syntax {
-                    crate::SyntaxMode::Lisp => "lisp",
-                    crate::SyntaxMode::New => "new",
-                },
-                match module_mag_syntax {
-                    crate::SyntaxMode::Lisp => "lisp",
-                    crate::SyntaxMode::New => "new",
-                }
-            ),
+            syntax: match syntax {
+                crate::SyntaxMode::Lisp => "lisp",
+                crate::SyntaxMode::New => "new",
+            }
+            .into(),
             evaluation_steps: limits.evaluation_steps,
             call_depth: limits.call_depth,
             expression_depth: limits.expression_depth,
@@ -134,7 +127,7 @@ impl Identity {
     fn bucket(&self, cache_dir: &Path) -> Option<PathBuf> {
         Some(
             cache_dir
-                .join("v1")
+                .join("v2")
                 .join(&self.compiler.0)
                 .join(digest(&serde_json::to_vec(self).ok()?)),
         )
@@ -190,7 +183,6 @@ pub fn build_with_syntax(
         profiler,
         CompilerBuildId::current,
         syntax,
-        crate::SyntaxMode::New,
     )
 }
 
@@ -215,7 +207,7 @@ pub fn build_with_identity(
 }
 
 /// Build using caller-owned writable storage, without changing request identity.
-/// `cache_dir` is the cache root (containing `v1`), not a project root.
+/// `cache_dir` is the cache root (containing `v2`), not a project root.
 /// Unavailable storage falls back to cold compilation as with root-local builds.
 pub fn build_in(
     request: FileCompileRequest<'_>,
@@ -243,6 +235,7 @@ pub fn build_in_with_identity(
     profiler: Option<&CompileProfiler>,
     identity: impl FnOnce() -> io::Result<CompilerBuildId>,
 ) -> Result<BuildOutput, MagError> {
+    let syntax = crate::frontend::syntax_for_path(request.entry)?;
     build_in_with_identity_and_syntax(
         request,
         config_version,
@@ -250,8 +243,7 @@ pub fn build_in_with_identity(
         policy,
         profiler,
         identity,
-        crate::SyntaxMode::Lisp,
-        crate::SyntaxMode::Lisp,
+        syntax,
     )
 }
 
@@ -263,13 +255,12 @@ fn build_in_with_identity_and_syntax(
     profiler: Option<&CompileProfiler>,
     identity: impl FnOnce() -> io::Result<CompilerBuildId>,
     syntax: crate::SyntaxMode,
-    module_mag_syntax: crate::SyntaxMode,
 ) -> Result<BuildOutput, MagError> {
     let started = Instant::now();
     let identity = if policy == CachePolicy::Use {
         identity()
             .ok()
-            .and_then(|id| Identity::new(&request, config_version, id, syntax, module_mag_syntax))
+            .and_then(|id| Identity::new(&request, config_version, id, syntax))
     } else {
         None
     };
@@ -298,8 +289,7 @@ fn build_in_with_identity_and_syntax(
         publication_duration_ns: 0,
     };
     let bytes = if let (Some(identity), Some(bucket)) = (identity, bucket) {
-        let compiled =
-            compile_file_observed_with_syntax(request, profiler, syntax, module_mag_syntax)?;
+        let compiled = compile_file_observed_with_syntax(request, profiler, syntax)?;
         let bytes = serialize_artifact(&compiled.artifact)?;
         let started = Instant::now();
         let provenance = Provenance {
@@ -315,13 +305,8 @@ fn build_in_with_identity_and_syntax(
         cache.publication_duration_ns = nanos(started);
         bytes
     } else {
-        let artifact = crate::compile_file_cold_observing_with_syntax(
-            request,
-            profiler,
-            None,
-            syntax,
-            module_mag_syntax,
-        )?;
+        let artifact =
+            crate::compile_file_cold_observing_with_syntax(request, profiler, None, syntax)?;
         serialize_artifact(&artifact)?
     };
     Ok(BuildOutput { bytes, cache })

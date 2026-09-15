@@ -1,35 +1,15 @@
-(require "core.types")
-;; Each user message executes one short-lived lead constellation over the
-;; persistent canonical chat history. Model selection is resolved by the
-;; config-owned agents module; the runtime composes ambient system context.
+import core.types.{}
+// Each user message executes one short-lived lead constellation over the
+// persistent canonical chat history. Model selection is resolved by the
+// config-owned agents module; the runtime composes ambient system context.
+import agents.{}
+import nefor.agents.{}
+import nefor.artifact.{}
+import nefor.contracts.{}
+import nefor.graph.{}
 
-(require "agents")
-(require "nefor.agents")
-(require "nefor.artifact")
-(require "nefor.contracts")
-(require "nefor.graph")
-
-(let start (nefor.graph.source "lead-task"
-             (type-tag nefor.contracts.Task)
-             (as nefor.contracts.Task {:prompt "<initial task text>"})))
-(let lead (nefor.agents.with-tools agents.resolve-model agents.standard "lead" ""
-         ["read_file"
-                 "read_image"
-                 "instructions"
-                 "mag-status"
-                 "mag-await"
-                 "mag-terminate"
-                 "write-review"
-                 "mag-write-file"
-                 "mag-preview"
-                 "mag-apply"]
-        (type-tag nefor.contracts.Task)
-        (type-tag nefor.contracts.TextAnswer)
-        2))
-(let result (nefor.graph.output "lead-output"
-               (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))
-(let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-                 (nefor.graph.add-edges graph
-                   [(nefor.graph.edge start lead)
-                    (nefor.graph.edge lead result)])))
-(nefor.artifact.compile topology)
+let start = nefor.graph.source("lead-task", type_tag<nefor.contracts.Task>(), nefor.contracts.Task {prompt: "<initial task text>"})
+let lead = nefor.agents.`with-tools`(agents.`resolve-model`, agents.standard, "lead", "", ["read_file", "read_image", "instructions", "mag-status", "mag-await", "mag-terminate", "write-review", "mag-write-file", "mag-preview", "mag-apply"], type_tag<nefor.contracts.Task>(), type_tag<nefor.contracts.TextAnswer>(), 2)
+let result = nefor.graph.output("lead-output", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
+let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.`add-edges`(graph, [nefor.graph.edge(start, lead), nefor.graph.edge(lead, result)])
+nefor.artifact.compile(topology)

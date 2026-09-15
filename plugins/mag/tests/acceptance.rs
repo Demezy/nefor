@@ -750,25 +750,26 @@ fn git<const N: usize>(cwd: &std::path::Path, args: [&str; N]) -> String {
 fn worktree_program(operation: &str, repository: &str, path: &str, branch: &str) -> String {
     let constructor = match operation {
         "create" => format!(
-            "(nefor.worktree.create \"workspace\" (as nefor.worktree.CreateSpec {{:repository {repository:?} :path {path:?} :branch {branch:?} :base \"main\"}}))"
+            "nefor.worktree.create(\"workspace\", nefor.worktree.CreateSpec {{repository: {repository:?}, path: {path:?}, branch: {branch:?}, base: \"main\"}})"
         ),
         "open" => format!(
-            "(nefor.worktree.open \"workspace\" (as nefor.worktree.OpenSpec {{:repository {repository:?} :path {path:?} :branch {branch:?}}}))"
+            "nefor.worktree.open(\"workspace\", nefor.worktree.OpenSpec {{repository: {repository:?}, path: {path:?}, branch: {branch:?}}})"
         ),
         _ => panic!("unsupported worktree operation {operation}"),
     };
     format!(
-        r#"(require "nefor.artifact")
-(require "nefor.graph")
-(require "nefor.worktree")
-(let start (nefor.graph.source "start" (type-tag Unit) nil))
-(let workspace {constructor})
-(let result (nefor.graph.output-for "result" workspace))
-(nefor.artifact.compile
-    (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-      (nefor.graph.add-edges graph
-        [(nefor.graph.edge start workspace)
-         (nefor.graph.edge workspace result)])))"#
+        r#"import nefor.artifact.{{}}
+import nefor.graph.{{}}
+import nefor.worktree.{{}}
+
+let start = nefor.graph.source("start", type_tag<Unit>(), nil)
+let workspace = {constructor}
+let result = nefor.graph.`output-for`("result", workspace)
+
+nefor.artifact.compile((|graph| => nefor.graph.`add-edges`(graph, [
+  nefor.graph.edge(start, workspace),
+  nefor.graph.edge(workspace, result),
+])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#
     )
 }
 
@@ -919,22 +920,19 @@ async fn execute_worktree_program<R: AsyncBufReadExt + Unpin>(
 }
 
 fn approval_program() -> &'static str {
-    r#"(require "nefor.actors")
-(require "nefor.artifact")
-(require "nefor.contracts")
-(require "nefor.graph")
-(require "nefor.node")
-(let subject
-  (nefor.graph.source "subject" (type-tag nefor.contracts.TextAnswer)
-    (as nefor.contracts.TextAnswer "draft")))
-(let approval
-  (nefor.actors.approval-gate
-    (as nefor.actors.ApprovalConfig {:id "approval" :prompt "Ship it?"})))
-(let flow (nefor.node.>>> subject approval))
-(let result (nefor.graph.output-for "result" flow))
-(nefor.artifact.compile
-  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-    (nefor.graph.add-edges graph [(nefor.graph.edge flow result)])))"#
+    r#"import nefor.actors.{}
+import nefor.artifact.{}
+import nefor.contracts.{}
+import nefor.graph.{}
+import nefor.node.{}
+
+let draft: nefor.contracts.TextAnswer = "draft"
+let subject = nefor.graph.source("subject", type_tag<nefor.contracts.TextAnswer>(), draft)
+let approval = nefor.actors.`approval-gate`(nefor.actors.ApprovalConfig {id: "approval", prompt: "Ship it?"})
+let flow = nefor.node.`>>>`(subject, approval)
+let result = nefor.graph.`output-for`("result", flow)
+
+nefor.artifact.compile((|graph| => nefor.graph.`add-edges`(graph, [nefor.graph.edge(flow, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#
 }
 
 #[tokio::test]
@@ -1140,7 +1138,7 @@ async fn canonical_chat_approval_delta_crosses_the_typed_plugin_boundary() {
     .unwrap();
     std::fs::write(
         source_dir.join("reply.mag"),
-        "(artifact (read-json \"reply.json\"))",
+        "artifact(`read-json`(\"reply.json\"))",
     )
     .unwrap();
     let cached_delta = build_twice(&mut reader, &mut stdin, &source_dir, "reply.mag").await;
@@ -1345,8 +1343,16 @@ async fn project_build_process_restart_hit_and_cold_load_equivalence() {
     let project = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
     std::fs::write(project.path().join("mag.toml"), "version = 1\n").unwrap();
-    std::fs::write(project.path().join("main.mag"),
-        "(artifact {:format \"nefor.mag\" :version 2 :kind \"delta\" :delta {:types {} :actors [] :messages [] :nodes [] :kills []}})").unwrap();
+    std::fs::write(
+        project.path().join("main.json"),
+        r#"{"format":"nefor.mag","version":2,"kind":"delta","delta":{"types":{},"actors":[],"messages":[],"nodes":[],"kills":[]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("main.mag"),
+        "artifact(`read-json`(\"main.json\"))",
+    )
+    .unwrap();
     let mut previous = None;
     for status in ["miss", "hit"] {
         let data = tempfile::tempdir().unwrap();

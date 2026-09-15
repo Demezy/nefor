@@ -1,20 +1,15 @@
-(type Entry [K V] {:key K :value V})
-(type NamedValue {:name String :value Int})
+type Entry<K, V> {key: K, value: V}
+type NamedValue {name: String, value: Int}
+type ExampleArtifact {entry: Entry<String, Int>, entries: List<NamedValue>}
 
-;; Both type parameters are inferred from a call such as
-;; (entry "answer" 42), which returns Entry String Int.
-(let entry (fn [K V] [[key K] [value V]] -> (Entry K V)
-  (as (Entry K V) {:key key :value value})))
+// Both type parameters are inferred from a call such as entry("answer", 42),
+// which returns Entry<String, Int>.
+let entry<K, V>: fn(K, V) -> Entry<K, V> = |key, value| => Entry<K, V> {key: key, value: value}
 
-;; A regular helper can itself be passed into a higher-order operation.
-(let label (fn [[name String] [value Int]] -> NamedValue
-  (as NamedValue {:name name :value value})))
+// A regular helper can itself be passed into a higher-order operation.
+let label: fn(String, Int) -> NamedValue = |name, value| => NamedValue {name: name, value: value}
 
-(let names ["one" "two" "three"])
-(let entries (indexed-map
-                (fn [[index Int] [name String]] -> NamedValue
-                  (label name index))
-                names))
+let names = ["one", "two", "three"]
+let entries = `indexed-map`(((|index, name| => label(name, index)): fn(Int, String) -> NamedValue), names)
 
-(artifact {:entry (entry "answer" 42)
-           :entries entries})
+artifact(ExampleArtifact {entry: entry("answer", 42), entries: entries})

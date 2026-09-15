@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 
 pub const SCHEMA_VERSION: u8 = 6;
 pub const COMPARISON_SCHEMA_VERSION: u8 = 5;
-pub const CURRENT_MAIN_A0_WORKLOAD_CATALOG_VERSION: &str = "artifact-only-current-main-v4";
-pub const PHASE0_WORKLOAD_CATALOG_VERSION: &str = "cycle-3-a0-artifact-only-v2";
-pub const ORACLE_CATALOG_VERSION: &str = "mag-oracles-22-artifact-only-v3";
+pub const CURRENT_MAIN_A0_WORKLOAD_CATALOG_VERSION: &str = "artifact-only-current-main-v5";
+pub const PHASE0_WORKLOAD_CATALOG_VERSION: &str = "cycle-3-a0-artifact-only-v3";
+pub const ORACLE_CATALOG_VERSION: &str = "mag-oracles-22-artifact-only-v4";
 pub const PROFILER_SCHEMA_VERSION: &str = "artifact-only-compiler-profile-v3";
 pub const STATISTICS_POLICY_VERSION: &str = "paired-nearest-rank-p90-fwer-v2";
 pub const WORKER_PROTOCOL_VERSION: &str = "mag-bench-worker-v2";
@@ -23,11 +23,11 @@ pub const LEGACY_COMBINED_FINGERPRINT: &str =
 pub const LEGACY_WORKLOAD_FINGERPRINT: &str =
     "sha256:59617bf4d8755e91d7b5ea5d13574bca7efc7c79276e850fd5ce479df037deaa";
 pub const CURRENT_MAIN_A0_WORKLOAD_FINGERPRINT: &str =
-    "sha256:2091566c5de30a202a03fbf44864988f89cb4ca46cc84b35ec72758952bf3ca7";
+    "sha256:7d29a24174761b19a506ff31a49dd248433c3ba7f9f5308237ed24ac51bf2dd2";
 pub const CURRENT_MAIN_A0_ORACLE_FINGERPRINT: &str =
-    "sha256:6a5c94f49c8e400f64f47000934b47a78220384fed4090b7897e7f7268e5c295";
+    "sha256:079162ffe8d364945623e43b61bcd4c57b3854c7659722a408e2bf8c794b8769";
 pub const PHASE0_WORKLOAD_FINGERPRINT: &str =
-    "sha256:9dcde7543ed3c4735eb688d8fcaaedc965b7586487aceccef95c5df64cd9a2de";
+    "sha256:5b92294d5f046d86c0fe6548ff0104dcf7395c3d8808ebe7ad86d6163cbb16bb";
 pub const MAX_TARGET_MEDIAN_RATIO: f64 = 0.90;
 pub const MIN_TARGET_COUNTER_REDUCTION: f64 = 0.40;
 pub const MAX_CASE_P90_RATIO: f64 = 1.10;
@@ -764,10 +764,9 @@ pub fn error_class(error: &MagError) -> &'static str {
 }
 
 pub fn assert_counter_invariants(counters: &OperationCounters, name: &str) {
-    assert_eq!(
-        counters.function_calls,
-        counters.user_function_calls + counters.builtin_calls,
-        "{name} function partition"
+    assert!(
+        counters.function_calls >= counters.user_function_calls + counters.builtin_calls,
+        "{name} categorized more calls than the total function count"
     );
     assert_eq!(
         counters.builtin_calls,
@@ -790,7 +789,7 @@ fn derive_counters(counters: &OperationCounters) -> DerivedCounters {
             .binding_slots_declared
             .saturating_sub(counters.binding_force_initializations),
         function_call_partition_holds: counters.function_calls
-            == counters.user_function_calls + counters.builtin_calls,
+            >= counters.user_function_calls + counters.builtin_calls,
         builtin_name_partition_holds: counters.builtin_calls
             == counters
                 .builtin_calls_by_name
@@ -866,6 +865,11 @@ pub fn counter_semantics() -> BTreeMap<String, String> {
         (
             "binding_force_*".into(),
             "exclusive result buckets for binding force attempts".into(),
+        ),
+        (
+            "function_calls".into(),
+            "all callable applications; nominal constructor calls are included in the total but not in user_function_calls or builtin_calls"
+                .into(),
         ),
         (
             "builtin_input_items_by_name.concat".into(),
@@ -2111,25 +2115,32 @@ pub fn forcing_dependency_proof_from_sources(
 ) -> Option<String> {
     let evidence = match stage {
         "forward-reachability"
-            if source.contains("(nefor.graph.forward-reachable analysis)")
-                && source.contains("(artifact {:summary summary :forced forward-proof})") =>
+            if source.contains("nefor.graph.`forward-reachable`(analysis)")
+                && source.contains(
+                    "artifact(FrontierProof {summary: summary, forced: forward_proof})",
+                ) =>
         {
             "analysis -> forward -> forward-proof"
         }
         "both-reachability"
-            if source.contains("(nefor.graph.forward-reachable analysis)")
-                && source.contains("(let reverse (force-reverse forward-proof))")
-                && source.contains("(artifact {:summary summary :forced reverse-proof})") =>
+            if source.contains("nefor.graph.`forward-reachable`(analysis)")
+                && source.contains("let reverse = force_reverse(forward_proof)")
+                && source.contains(
+                    "artifact(FrontierProof {summary: summary, forced: reverse_proof})",
+                ) =>
         {
             "forward-proof -> reverse -> reverse-proof"
         }
         "lower"
-            if source.contains("(let lowered (nefor.graph.lower topology))")
-                && source.contains("(let forced (canonical lowered))")
-                && source
-                    .contains("(artifact {:summary summary :lowered lowered :forced forced})")
+            if source.contains("let lowered = nefor.graph.lower(topology)")
+                && source.contains("let forced = canonical(lowered)")
+                && source.contains(
+                    "artifact(LowerFrontier {summary: summary, lowered: lowered, forced: forced})",
+                )
                 && graph_source.is_some_and(|graph_source| {
-                    graph_source.contains("(let lower-program (fn [[value Program]] -> Modification\n  (let topology (get value \"graph\"))\n  (let analysis (analyze-graph topology))")
+                    graph_source.contains(
+                        "let `lower-program`: fn(Graph) -> Modification = |topology| => {\n  let analysis = `analyze-for-lowering`(topology)",
+                    )
                 }) =>
         {
             "analysis -> lower-program -> canonical-lowered-artifact"

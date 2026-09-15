@@ -42,11 +42,11 @@ fn request<'a>(root: &'a Path, roots: &'a [PathBuf]) -> FileCompileRequest<'a> {
 #[test]
 fn transitive_inputs_preserve_source_root_and_validate_only_consumed_files() {
     let w = Workspace::new();
-    w.write("main.mag", "(require \"a\") (artifact a.value)");
-    w.write("lib/a.mag", "(require \"b\") (let value b.value)");
+    w.write("main.mag", "import a.{}\nartifact(a.value)");
+    w.write("lib/a.mag", "import b.{}\nlet value = b.value");
     w.write(
         "lib/b.mag",
-        "(type Loaded {:text String :json JsonValue}) (let value (as Loaded {:text (read \"text.txt\") :json (read-json \"data.json\")}))",
+        "type Loaded {text: String, json: JsonValue}\nlet value = Loaded {text: read(\"text.txt\"), json: `read-json`(\"data.json\")}",
     );
     w.write("text.txt", "source root");
     w.write("lib/text.txt", "not the source root");
@@ -72,18 +72,18 @@ fn transitive_inputs_preserve_source_root_and_validate_only_consumed_files() {
     for (path, original, changed) in [
         (
             "main.mag",
-            "(require \"a\") (artifact a.value)",
-            "(artifact 0)",
+            "import a.{}\nartifact(a.value)",
+            "artifact(0)",
         ),
         (
             "lib/a.mag",
-            "(require \"b\") (let value b.value)",
-            "(let value 0)",
+            "import b.{}\nlet value = b.value",
+            "let value = 0",
         ),
         (
             "lib/b.mag",
-            "(type Loaded {:text String :json JsonValue}) (let value (as Loaded {:text (read \"text.txt\") :json (read-json \"data.json\")}))",
-            "(let value 0)",
+            "type Loaded {text: String, json: JsonValue}\nlet value = Loaded {text: read(\"text.txt\"), json: `read-json`(\"data.json\")}",
+            "let value = 0",
         ),
         ("text.txt", "source root", "SOURCE ROOT"),
         ("lib/data.json", "42", "43"),
@@ -112,14 +112,14 @@ fn observed_and_cold_failures_have_identical_diagnostics() {
     let w = Workspace::new();
     let roots = [w.0.clone()];
     for source in [
-        "(artifact \"\\q\")",
-        "(artifact",
-        "(artifact (+ 1 true))",
-        "(artifact (first (as (List Int) [])))",
-        "(require \"absent\") (artifact 1)",
-        "(artifact (read \"../escape\"))",
-        "(artifact (read-json \"missing\"))",
-        "(artifact (read \"missing\"))",
+        "artifact(\"\\q\")",
+        "artifact(",
+        "artifact(1 + true)",
+        "artifact(first(([]: List<Int>)))",
+        "import absent.{}\nartifact(1)",
+        "artifact(read(\"../escape\"))",
+        "artifact(`read-json`(\"missing\"))",
+        "artifact(read(\"missing\"))",
     ] {
         w.write("main.mag", source);
         let cold = CompilerSession::new()
@@ -137,7 +137,7 @@ fn distinct_read_queries_keep_existing_memoization_keys() {
     let w = Workspace::new();
     w.write(
         "main.mag",
-        "(artifact {:first (read \"text\") :second (read \"./text\") :json (read-json \"text\")})",
+        "type Reads {first: String, second: String, json: JsonValue}\nartifact(Reads {first: read(\"text\"), second: read(\"./text\"), json: `read-json`(\"text\")})",
     );
     w.write("text", "42");
     let roots = [w.0.clone()];
@@ -163,9 +163,9 @@ fn canonical_module_dedup_and_leaf_symlinks_preserve_cold_semantics() {
     let w = Workspace::new();
     w.write(
         "main.mag",
-        "(require \"a\") (artifact {:module a.value :text (read \"link\")})",
+        "import a.{}\ntype Result {module: Int, text: String}\nartifact(Result {module: a.value, text: read(\"link\")})",
     );
-    w.write("one/a.mag", "(let value 42)");
+    w.write("one/a.mag", "let value = 42");
     w.write("elsewhere/text", "allowed leaf symlink");
     std::fs::create_dir_all(w.0.join("two")).unwrap();
     symlink(w.0.join("one/a.mag"), w.0.join("two/a.mag")).unwrap();
@@ -180,7 +180,7 @@ fn canonical_module_dedup_and_leaf_symlinks_preserve_cold_semantics() {
             .unwrap()
     );
     std::fs::remove_file(w.0.join("two/a.mag")).unwrap();
-    w.write("two/a.mag", "(let value 42)");
+    w.write("two/a.mag", "let value = 42");
     assert!(!observed.observations.validate());
     let cold = CompilerSession::new()
         .compile_file(request(&w.0, &roots))
@@ -200,7 +200,7 @@ fn canonical_module_dedup_and_leaf_symlinks_preserve_cold_semantics() {
 #[test]
 fn unsupported_and_structurally_invalid_observations_are_misses() {
     let w = Workspace::new();
-    w.write("main.mag", "(artifact 42)");
+    w.write("main.mag", "artifact(42)");
     let observed = compile_file_observed(request(&w.0, &[]), None).unwrap();
     for (key, value) in [
         ("version", json!(100)),

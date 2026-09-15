@@ -24,15 +24,15 @@ fn fixture_fingerprint_separates_workload_and_implementation_roots() {
     let implementation_root = scratch.join("implementation-modules");
     fs::create_dir_all(&workload_root).unwrap();
     fs::create_dir_all(&implementation_root).unwrap();
-    fs::write(workload_root.join("library.mag"), "(let value 1)").unwrap();
-    fs::write(implementation_root.join("library.mag"), "(let value 1)").unwrap();
+    fs::write(workload_root.join("library.mag"), "let value = 1").unwrap();
+    fs::write(implementation_root.join("library.mag"), "let value = 1").unwrap();
     let mut case = fixture(
         &scratch,
         "case",
         "oracle",
         "oracle",
         None,
-        "(artifact {})",
+        "artifact {}",
         vec![
             ModuleRoot::workload("workload", workload_root.clone()),
             ModuleRoot::implementation("implementation", implementation_root.clone()),
@@ -44,11 +44,11 @@ fn fixture_fingerprint_separates_workload_and_implementation_roots() {
     );
     let initial = fixture_fingerprint(&case);
 
-    fs::write(workload_root.join("library.mag"), "(let value 2)").unwrap();
+    fs::write(workload_root.join("library.mag"), "let value = 2").unwrap();
     assert_ne!(initial, fixture_fingerprint(&case));
-    fs::write(workload_root.join("library.mag"), "(let value 1)").unwrap();
+    fs::write(workload_root.join("library.mag"), "let value = 1").unwrap();
 
-    fs::write(implementation_root.join("library.mag"), "(let value 2)").unwrap();
+    fs::write(implementation_root.join("library.mag"), "let value = 2").unwrap();
     assert_eq!(initial, fixture_fingerprint(&case));
 
     case.module_roots[2].role = ModuleRootRole::Workload;
@@ -70,7 +70,7 @@ fn fixture_fingerprint_covers_non_module_workload_inputs() {
         "oracle",
         "oracle",
         None,
-        "(artifact {})",
+        "artifact {}",
         vec![],
         json!({"nested":{"value":1}}),
         None,
@@ -84,13 +84,9 @@ fn fixture_fingerprint_covers_non_module_workload_inputs() {
     assert_ne!(initial, fixture_fingerprint(&case));
     case.inputs = json!({"nested":{"value":1}});
 
-    fs::write(
-        case.source_dir.join("main.mag"),
-        "(artifact {:changed true})",
-    )
-    .unwrap();
+    fs::write(case.source_dir.join("main.mag"), "artifact {changed: true}").unwrap();
     assert_ne!(initial, fixture_fingerprint(&case));
-    fs::write(case.source_dir.join("main.mag"), "(artifact {})").unwrap();
+    fs::write(case.source_dir.join("main.mag"), "artifact {}").unwrap();
 
     write_fixture_file(&mut case, "data.txt", b"second");
     assert_ne!(initial, fixture_fingerprint(&case));

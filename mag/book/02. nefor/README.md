@@ -2,7 +2,7 @@
 
 Nefor is a live application of MAG. Its libraries define typed graph data,
 construct higher-level nodes from lower-level actors, validate the result, and
-return a graph-modification artifact.
+return an immutable program or delta artifact.
 
 This section describes that application in terms of the
 [core language](<../01. core/README.md>). Graphs, nodes, agents, reasoners,

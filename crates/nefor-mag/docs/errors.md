@@ -8,14 +8,14 @@ See [Authoring reference](language.md) for valid forms and [Orchestrating MAG](o
 
 Parsing, name resolution, and type checking happen before execution. Typical causes:
 
-- using removed `import` or bare helper syntax instead of literal `(require "...")` and qualified names;
+- using a Lisp `(require "...")` form in a `.mag` file instead of `import module.identity.{}`;
 - referencing an undeclared semantic type;
 - passing a value that does not conform to a declared record;
 - connecting incompatible semantic types;
 - giving a product input too few or too many incoming occurrences;
 - returning something other than the expected artifact.
 
-Fix the source and compile again. The standalone compiler exits nonzero, writes a human summary to stderr, and emits a structured JSON diagnostic with `code`, `stage`, `message`, and optional `path` on stdout.
+Fix the source and compile again. The standalone compiler exits nonzero, writes the structured diagnostic to stderr, and produces no stdout artifact. The diagnostic retains its `code`, `stage`, `message`, optional `path`, and syntax detail.
 
 ## Graph validation errors
 
@@ -23,8 +23,7 @@ A program may type-check as code but return an invalid concrete topology. Compil
 
 ### Boundary structure
 
-- Only nodes whose input accepts `Unit` may have zero incoming edges, including
-  `Unit`-containing sums. An unfed root receives exactly one automatic `Unit`
+- Only nodes whose input accepts `Unit` may have zero incoming edges, including an ADT with a `Unit` alternative. An unfed root receives exactly one automatic `Unit`
   activation; an incoming route or explicit input message suppresses it. A
   product containing `Unit` still needs its complete input.
 - Exactly one real `output<T>` must exist.
@@ -45,15 +44,15 @@ One node id must denote one immutable definition. Reusing an id with different c
 
 ### Product coverage
 
-For input `A + B`, incoming edge types must exactly cover every occurrence. `T + T` needs two sender edges; one underfills it and three overfill it. If the workflow means “either,” use `A | B`. If it means ordering only, use `Unit` as a product component. Coverage diagnostics include the input boundary and type plus every incoming route's source boundary and type, making missing or extra occurrences visible.
+For input `(A, B)`, incoming edge types must exactly cover every occurrence. `(T, T)` needs two sender edges; one underfills it and three overfill it. If the workflow means “either,” declare a nominal ADT with one constructor for each alternative. If it means ordering only, use `Unit` as a product component. Coverage diagnostics include the input boundary and type plus every incoming route's source boundary and type, making missing or extra occurrences visible.
 
-### Union coverage
+### Nominal ADT routing
 
-Every possible output alternative needs an ordinary route, a typed operation subscription, or the terminal output path. An agent's result is `O | AgentError`; routing only `O` leaves an uncovered error arm. Connect the whole union or handle both arms. The diagnostic names the offending output boundary and type and lists the ordinary routes and declarative operations currently available as handlers.
+A nominal ADT travels as its complete owner value. An agent's output is `core.types.Result<AgentError, O>`; a direct edge to an `O` input is incompatible because it would erase the `Result` constructor. Connect the whole result, bind its successful continuation with `nefor.node.>=>`, or unpack and repack both constructors explicitly.
 
-### Sum construction
+### ADT construction
 
-Graph compatibility and value construction answer different questions. Nominal ADTs never accept a payload as though it were the owner value: construct the owner explicitly with `(construct Owner Constructor payload)`. Graph branches likewise require explicit unpack and lift operations; a route cannot erase an outer constructor merely because its payload type matches the destination. The compiler reports both source and target types for invalid refinements, but does not currently attach a source span to this evaluation-time diagnostic.
+Graph compatibility and value construction answer different questions. Nominal ADTs never accept a payload as though it were the owner value: construct the owner explicitly with `Owner.Constructor(payload)` (for example, `Result<String, Int>.Ok(42)`). Graph branches likewise require explicit unpack and lift operations; a route cannot erase an outer constructor merely because its payload type matches the destination. The compiler reports both source and target types for invalid refinements, but does not currently attach a source span to this evaluation-time diagnostic.
 
 ### Forged values
 
@@ -61,13 +60,13 @@ Do not construct low-level graph or boundary records by copying fields. Compiler
 
 ## Structured-agent errors
 
-A structured agent's declared result is `O | nefor.contracts.AgentError`.
+A structured agent's declared result is `core.types.Result<nefor.contracts.AgentError, O>`.
 
-- `ProviderError` reports provider failure and optional detail.
+- Its `Error` constructor carries an `AgentError`; within that value, `ProviderError` reports provider failure and optional detail.
 - `OutputValidationError` reports one or more path-specific schema violations.
 - `last_output` retains the latest raw model output for diagnosis or a recovery agent.
 
-The agent requests correction up to `:max-corrections`. When the budget is exhausted, `AgentError` is emitted as an ordinary typed result. Route it to the output or to a reviewer/fixer that accepts the union. Do not claim `O` was produced and do not parse provider prose as a substitute.
+The agent requests correction up to `max-corrections`. When the budget is exhausted, `AgentError` is emitted as an ordinary typed result. Route the complete `Result` to the output or use the result combinators to handle `Ok` and `Error` deliberately. Do not claim `O` was produced and do not parse provider prose as a substitute.
 
 ## Shell failures and hangs
 

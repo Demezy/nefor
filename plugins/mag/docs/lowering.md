@@ -12,8 +12,8 @@ fields contain opaque compiler descriptors. Graph validation delegates
 compatibility and product coverage to the compiler rather than interpreting
 descriptor maps in MAG, then marks the lowered value as the compilation result:
 
-```lisp
-(artifact modification-data)
+```mag
+artifact(modification_data)
 ```
 
 The complete path is:
@@ -52,9 +52,9 @@ A typed port records two identities:
   composition and lowered to a complete canonical structural descriptor;
 - `wire`: the runtime tag emitted or accepted by the implementation.
 
-This lets an agent node expose `(CodeAudit | AgentError)` on the stable
+This lets an agent node expose `core.types.Result<AgentError, CodeAudit>` on the stable
 `nefor.agent.Result` wire. The success type is declared with
-`(type-tag CodeAudit)`; an undeclared or misspelled semantic type fails
+`type_tag<CodeAudit>()`; an undeclared or misspelled semantic type fails
 compilation. Compatible edges route each selected constructor directly. Closed declarative
 operations may subscribe to a typed output on the same actor and wire. The
 compiler neither knows what an LLM is nor invents a coercion.
@@ -74,7 +74,7 @@ structural result metadata. Each explicit initial message retains its
 destination descriptor as `semantic_type` even though the current factory
 protocol still consumes `content.kind`. Lowering also gives every `Unit` actor
 input with no incoming route and no explicit message exactly one typed
-bootstrap message. Consequently any unfed `Node Unit T` is a source boundary;
+bootstrap message. Consequently any unfed `Node<Unit, T>` is a source boundary;
 the same node behind an incoming edge remains dependency-driven. A concrete
 `output<T>` identity actor is the unique terminal, and the structural result
 metadata selects that actor's output port.
@@ -123,7 +123,7 @@ run; it does not retrieve or mutate a stored graph.
 
 ## Module resolution
 
-`core/types.mag` has identity `core.types` and is required as
-`"core.types"`. Imports are transitive, definitions remain in their canonical
+`core/types.mag` has identity `core.types` and is imported with
+`import core.types.{}`. Imports are transitive, definitions remain in their canonical
 namespace, and each module evaluates once. `mag.load.module_roots` is the
 complete ordered search path; ambiguous identities across roots are errors.

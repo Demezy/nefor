@@ -26,10 +26,10 @@ impl Fixture {
         };
         this.write(
             "main.mag",
-            "(require \"a\")\n(artifact {:value a.value :note (read \"note.txt\") :data (read-json \"data.json\")})",
+            "import a.{}\nartifact {value: a.value, note: read(\"note.txt\"), data: `read-json`(\"data.json\")}",
         );
-        this.write("a.mag", "(require \"b\")\n(let value b.value)");
-        this.write("b.mag", "(let value 1)");
+        this.write("a.mag", "import b.{}\nlet value = b.value");
+        this.write("b.mag", "let value = 1");
         this.write("note.txt", "first");
         this.write("data.json", "{\"a\":1}");
         this
@@ -51,8 +51,7 @@ impl Fixture {
             &self.request(),
             1,
             CompilerBuildId::from_executable_bytes(compiler),
-            crate::SyntaxMode::Lisp,
-            crate::SyntaxMode::Lisp,
+            crate::SyntaxMode::New,
         )
         .unwrap()
     }
@@ -113,11 +112,11 @@ fn deeply_nested_successful_artifacts_hit_without_compiler_work() {
     let mut f = Fixture::new();
     f.options.limits.expression_depth = 512;
     let depth = 140;
-    let mut source = String::from("(let v0 0)\n");
+    let mut source = String::from("let v0 = 0\n");
     for level in 1..=depth {
-        source.push_str(&format!("(let v{level} [v{}])\n", level - 1));
+        source.push_str(&format!("let v{level} = [v{}]\n", level - 1));
     }
-    source.push_str(&format!("(artifact v{depth})"));
+    source.push_str(&format!("artifact(v{depth})"));
     f.write("main.mag", &source);
     let population = f.run(b"A");
     status(&population, "miss");
@@ -142,8 +141,8 @@ fn deeply_nested_successful_artifacts_hit_without_compiler_work() {
 #[test]
 fn every_observed_input_invalidates_and_source_a_b_a_survives() {
     for (path, changed) in [
-        ("main.mag", "(artifact 2)"),
-        ("b.mag", "(let value 2)"),
+        ("main.mag", "artifact(2)"),
+        ("b.mag", "let value = 2"),
         ("note.txt", "second"),
         ("data.json", "{\"a\":2}"),
     ] {
@@ -164,7 +163,7 @@ fn every_observed_input_invalidates_and_source_a_b_a_survives() {
 
 #[test]
 fn stable_roots_recheck_new_module_and_json_ambiguity_and_cold_precedence() {
-    for (path, value) in [("extra/a.mag", "(let value 2)"), ("extra/data.json", "{}")] {
+    for (path, value) in [("extra/a.mag", "let value = 2"), ("extra/data.json", "{}")] {
         let f = Fixture::new();
         f.run(b"A");
         f.write(path, value);
@@ -177,7 +176,7 @@ fn stable_roots_recheck_new_module_and_json_ambiguity_and_cold_precedence() {
             .unwrap_err();
         assert_eq!(cached.to_string(), cold.to_string());
         assert!(cached.to_string().contains("ambiguous"));
-        f.write("main.mag", "(artifact @)");
+        f.write("main.mag", "artifact(");
         let cached = build_with_identity(f.request(), 1, CachePolicy::Use, None, || {
             Ok(CompilerBuildId::from_executable_bytes(b"A"))
         })
@@ -238,11 +237,21 @@ fn compiler_and_complete_contexts_coexist_without_replacing_prior_records() {
             &f.request(),
             2,
             CompilerBuildId::from_executable_bytes(b"A"),
-            crate::SyntaxMode::Lisp,
-            crate::SyntaxMode::Lisp,
+            crate::SyntaxMode::New,
         )
         .unwrap(),
         original
+    );
+    assert_ne!(
+        Identity::new(
+            &f.request(),
+            1,
+            CompilerBuildId::from_executable_bytes(b"A"),
+            crate::SyntaxMode::Lisp,
+        )
+        .unwrap(),
+        original,
+        "an explicit entry frontend override is part of project cache identity"
     );
 }
 
@@ -266,7 +275,7 @@ fn bypass_and_unavailable_identity_never_touch_storage_or_observe() {
     f.run(b"A");
     let record = f.records().pop().unwrap();
     let old_provenance = fs::read(record.join("provenance.json")).unwrap();
-    f.write("b.mag", "(let value 5)");
+    f.write("b.mag", "let value = 5");
     let bypass = run();
     assert_ne!(
         bypass.bytes,
@@ -348,7 +357,7 @@ fn publication_failure_or_changed_consumption_does_not_change_success() {
         artifact_length: bytes.len() as u64,
         artifact_sha256: digest(&bytes),
     };
-    f.write("b.mag", "(let value 9)");
+    f.write("b.mag", "let value = 9");
     publish(&f.bucket(), &provenance, &bytes).unwrap();
     assert!(f.records().is_empty());
     assert_eq!(fs::read_dir(f.bucket()).unwrap().count(), 0);
@@ -377,7 +386,7 @@ fn concurrent_identical_publications_leave_one_complete_record() {
 fn deleted_entry_and_failures_are_recompiled_without_publishing() {
     let f = Fixture::new();
     f.run(b"A");
-    for source in [Some("(artifact"), Some("(artifact missing)"), None] {
+    for source in [Some("artifact("), Some("artifact(missing)"), None] {
         match source {
             Some(source) => f.write("main.mag", source),
             None => fs::remove_file(f.root.join("main.mag")).unwrap(),
@@ -407,7 +416,7 @@ fn non_utf8_request_paths_bypass_without_lossy_identity() {
     let root = f.root.join(std::ffi::OsString::from_vec(vec![b'x', 0xff]));
     // Some filesystems reject non-UTF-8 names. An unused module root still
     // exercises lossless identity rejection without requiring such a filesystem.
-    f.write("main.mag", "(artifact 1)");
+    f.write("main.mag", "artifact(1)");
     f.roots = vec![root.clone()];
     let request = f.request();
     let output = build_with_identity(request, 1, CachePolicy::Use, None, || {

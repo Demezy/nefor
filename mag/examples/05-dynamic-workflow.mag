@@ -1,61 +1,39 @@
-(require "core.types")
-(require "agents")
-(require "nefor.actors")
-(require "nefor.agents")
-(require "nefor.contracts")
-(require "nefor.dynamic")
-(require "nefor.graph")
-(require "nefor.node")
+import core.types.{}
+import agents.{}
+import nefor.actors.{}
+import nefor.agents.{}
+import nefor.contracts.{}
+import nefor.dynamic.{}
+import nefor.graph.{}
+import nefor.node.{}
 
-(type WorkItem {:task String})
-(type WorkResult {:summary String})
-(type FinalSummary {:summary String})
+type WorkItem {task: String}
+type WorkResult {summary: String}
+type FinalSummary {summary: String}
 
-(let occurrence (nefor.dynamic.trigger-ref (type-tag (nefor.dynamic.Indexed WorkItem))))
-(let occurrence-collection (nefor.dynamic.field-ref occurrence "collection" (type-tag String)))
-(let occurrence-index (nefor.dynamic.field-ref occurrence "index" (type-tag Int)))
-(let occurrence-value (nefor.dynamic.field-ref occurrence "value" (type-tag WorkItem)))
-(let occurrence-text (nefor.dynamic.field-ref occurrence-value "task" (type-tag String)))
-(let occurrence-index-text (nefor.dynamic.int-to-decimal-string-ref occurrence-index))
-(let worker-id (nefor.dynamic.concat-strings-ref
-  [(nefor.dynamic.capture-ref "worker." (type-tag String)) occurrence-index-text]))
-(let worker-root (nefor.dynamic.concat-strings-ref
-  [(nefor.dynamic.capture-ref "workers-" (type-tag String)) occurrence-index-text]))
-(let worker-system (nefor.dynamic.concat-strings-ref
-  [(nefor.dynamic.capture-ref "Complete this work item: " (type-tag String)) occurrence-text]))
-(let worker-template
-  (nefor.agents.dynamic-template-with-tools agents.resolve-model agents.mock
-    "workers" occurrence-collection occurrence-index worker-id worker-root worker-system []
-    (type-tag WorkResult) 1))
+let occurrence = nefor.dynamic.`trigger-ref`(type_tag<nefor.dynamic.Indexed<WorkItem>>())
+let `occurrence-collection` = nefor.dynamic.`field-ref`(occurrence, "collection", type_tag<String>())
+let `occurrence-index` = nefor.dynamic.`field-ref`(occurrence, "index", type_tag<Int>())
+let `occurrence-value` = nefor.dynamic.`field-ref`(occurrence, "value", type_tag<WorkItem>())
+let `occurrence-text` = nefor.dynamic.`field-ref`(`occurrence-value`, "task", type_tag<String>())
+let `occurrence-index-text` = nefor.dynamic.`int-to-decimal-string-ref`(`occurrence-index`)
+let `worker-id` = nefor.dynamic.`concat-strings-ref`([nefor.dynamic.`capture-ref`("worker.", type_tag<String>()), `occurrence-index-text`])
+let `worker-root` = nefor.dynamic.`concat-strings-ref`([nefor.dynamic.`capture-ref`("workers-", type_tag<String>()), `occurrence-index-text`])
+let `worker-system` = nefor.dynamic.`concat-strings-ref`([nefor.dynamic.`capture-ref`("Complete this work item: ", type_tag<String>()), `occurrence-text`])
+let `worker-template` = nefor.agents.`dynamic-template-with-tools`(agents.`resolve-model`, agents.mock, "workers", `occurrence-collection`, `occurrence-index`, `worker-id`, `worker-root`, `worker-system`, [], type_tag<WorkResult>(), 1)
 
-(let task
-  (nefor.actors.task-source "task" "Split this request into independent work."))
-(let planner
-  (nefor.agents.dynamic-with-tools agents.resolve-model agents.mock "planner"
-    "Return the ordered work items as JSON." []
-    (type-tag nefor.contracts.Task) (type-tag WorkItem) 1))
-(let workers
-  (nefor.dynamic.traverse-template "workers" worker-template
-    (type-tag WorkItem)
-    (type-tag (core.types.Result nefor.contracts.AgentError WorkResult))))
-(let result-context
-  (nefor.dynamic.context "result-context"
-    (type-tag (core.types.Result nefor.contracts.AgentError WorkResult))))
-(let integrator
-  (nefor.agents.with-tools agents.resolve-model agents.mock "integrator"
-    "Integrate all ordered worker results into one summary." []
-    (type-tag nefor.contracts.ProviderInput) (type-tag FinalSummary) 1))
-(let integrate
-  (nefor.node.>>> result-context integrator))
+let task = nefor.actors.`task-source`("task", "Split this request into independent work.")
+let planner = nefor.agents.`dynamic-with-tools`(agents.`resolve-model`, agents.mock, "planner", "Return the ordered work items as JSON.", [], type_tag<nefor.contracts.Task>(), type_tag<WorkItem>(), 1)
+let workers = nefor.dynamic.`traverse-template`("workers", `worker-template`, type_tag<WorkItem>(), type_tag<core.types.Result<nefor.contracts.AgentError, WorkResult>>())
+let `result-context` = nefor.dynamic.context("result-context", type_tag<core.types.Result<nefor.contracts.AgentError, WorkResult>>())
+let integrator = nefor.agents.`with-tools`(agents.`resolve-model`, agents.mock, "integrator", "Integrate all ordered worker results into one summary.", [], type_tag<nefor.contracts.ProviderInput>(), type_tag<FinalSummary>(), 1)
+let integrate = nefor.node.`>>>`(`result-context`, integrator)
 
-;; The top-level graph is still assembled entirely from ordinary nodes:
-;; `>=>` continues successful values and preserves AgentError as data.
-(let planned (nefor.node.>>> task planner))
-(let ran
-  (nefor.node.>=> planned (nefor.node.lift-result "workers-result" (type-tag nefor.contracts.AgentError) workers)))
-(let workflow (nefor.node.>=> ran integrate))
-(let result (nefor.graph.output-for "result" workflow))
+// The top-level graph is still assembled entirely from ordinary nodes:
+// >=> continues successful values and preserves AgentError as data.
+let planned = nefor.node.`>>>`(task, planner)
+let ran = nefor.node.`>=>`(planned, nefor.node.`lift-result`("workers-result", type_tag<nefor.contracts.AgentError>(), workers))
+let workflow = nefor.node.`>=>`(ran, integrate)
+let result = nefor.graph.`output-for`("result", workflow)
 
-(nefor.artifact.compile
-  (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
-    (nefor.graph.add-edges graph [(nefor.graph.edge workflow result)])))
+nefor.artifact.compile((|graph| => nefor.graph.`add-edges`(graph, [nefor.graph.edge(workflow, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)

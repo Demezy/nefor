@@ -51,7 +51,7 @@ fn cache_catalog_is_ordered_and_has_an_independent_identity() {
         CACHE_SCENARIO_PROTOCOL_VERSION,
         "mag-cache-scenario-worker-v2"
     );
-    assert_eq!(CACHE_SCENARIO_CATALOG_VERSION, "cycle-4-artifact-only-v3");
+    assert_eq!(CACHE_SCENARIO_CATALOG_VERSION, "cycle-4-artifact-only-v4");
     assert_ne!(
         CACHE_SCENARIO_PROTOCOL_VERSION,
         bench_support::WORKER_PROTOCOL_VERSION

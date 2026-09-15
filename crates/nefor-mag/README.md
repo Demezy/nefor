@@ -12,18 +12,18 @@ mag compile main.mag --source-dir .
 ## Rust API
 
 `CompilerSession` accepts explicit `CompileRequest` values for in-memory entry
-source and `LoadRequest` values for file-backed entry programs. Both requests
+source and `FileCompileRequest` values for file-backed entry programs. Both requests
 carry the source directory, host inputs, module roots, and compiler options.
 The session is cold-only: every call creates independent compiler state and
 `CompilerSessionStats` accounts for requests without implying a cache. No
-compiled artifact retains an evaluator or callable function handle. Existing free `compile_*` and
-`load_*` functions remain available and use the same cold implementation.
+compiled artifact retains an evaluator or callable function handle. The free
+`compile_*` and `compile_file_*` functions use the same cold implementation.
 
 `CompileProfiler` records deterministic operation counts plus inclusive
 wall-clock phase durations. Evaluation durations include nested checking and
 module work, so phases may overlap and must not be summed. `total_duration_ns`
 is the complete compile/load attempt on both success and failure. A profiler
-passed to `CompilerSession::compile_with_profiler` or `load_with_profiler` can be snapshotted
+passed to `CompilerSession::compile_with_profiler` or `compile_file_with_profiler` can be snapshotted
 after an error without changing the returned `MagError`; profiling likewise
 does not alter successful artifacts or the CLI's artifact stdout.
 
@@ -46,13 +46,14 @@ authored IR, which keeps unresolved names and explicit declarations, block
 items, expressions, and type forms; environment-dependent binding, overload,
 generic, and compatibility resolution remains in the checker.
 
-CLI entry selection is deterministic: `.mag` selects the new syntax and `.magl`
-selects Lisp; `--syntax new|lisp` overrides only the entry. Required modules use
-their own suffix, both suffixes for one module identity are ambiguous, and a
-syntax error never retries another frontend. Existing Rust convenience APIs
-remain the explicit legacy lane during the shipped-corpus migration; embedders
-can select `SyntaxMode` through the `*_with_syntax` functions. Evaluation stays
-syntax-independent and MAG core contains no Nefor or graph-language behavior.
+File entry selection is deterministic across the CLI, compiler sessions,
+project builds, observation, and plugin loading: `.mag` selects the new syntax
+and `.magl` selects Lisp. CLI `--syntax new|lisp` and Rust `*_with_syntax`
+functions explicitly override only the entry. In-memory APIs default to the new
+syntax. Required modules always use their own suffix, both suffixes for one
+module identity are ambiguous, and a syntax error never retries another
+frontend. Evaluation stays syntax-independent and MAG core contains no Nefor or
+graph-language behavior.
 
 ## Explicit project builds for embedders
 
@@ -68,7 +69,7 @@ no parent discovery or canonicalization. `ProjectError` exposes the input-stage
 Pass these roots and freshly materialized host inputs in a `FileCompileRequest`
 to `project_cache::build_in(request, config_version, cache_dir, policy, profiler)`
 when immutable project source needs separate writable storage. The directory
-contains the existing `v1/compiler/request/record` hierarchy. Its location is
+contains the `v2/compiler/request/record` hierarchy. Its location is
 not an identity input: original project root, entry, ordered roots, full host
 inputs, options, manifest version, and compiler executable bytes still are.
 Embedders should supply absolute project and cache paths. The compiler identity

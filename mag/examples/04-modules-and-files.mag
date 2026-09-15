@@ -1,14 +1,13 @@
-(require "modules.labels")
+import modules.labels.{}
 
-;; Required bindings live in the module's qualified namespace.
-(let title modules.labels.title)
+type ExampleArtifact {title: String, source: String, project: String, label: String}
 
-;; File inputs become immutable values in the loaded source snapshot.
-(let source (read "data/note.md"))
-(let manifest (read-json "data/manifest.json"))
-(let project (get manifest "project"))
+// Required bindings live in the module's qualified namespace.
+let title = modules.labels.title
 
-(artifact {:title title
-     :source source
-     :project project
-     :label (modules.labels.number-label 4)})
+// File inputs become immutable values in the loaded source snapshot.
+let source = read("data/note.md")
+let manifest = `read-json`("data/manifest.json")
+let `project-name`: String = get(manifest, "project")
+
+artifact(ExampleArtifact {title: title, source: source, project: `project-name`, label: modules.labels.`number-label`(4)})
