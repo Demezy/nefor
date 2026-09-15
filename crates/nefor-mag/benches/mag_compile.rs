@@ -1290,8 +1290,8 @@ fn oracle_cases(root: &Path, scratch: &Path, contracts: &Value) -> Vec<Fixture> 
     out.push(ordering);
 
     let type_descriptor = json!({"kind":"named","name":"main.Choice","arguments":[],"body":{"kind":"record","fields":[{"name":"label","type":{"kind":"primitive","name":"String"}}]}});
-    let type_schema = json!({"version":1,"root":{"kind":"named","name":"main.Choice","body":{"kind":"record","fields":[{"name":"label","schema":{"kind":"string"}}]}}});
-    out.push(fixture(scratch, "evidence-artifact-identity", "oracle", "oracle", None, "(type Choice {:label String})\n(let value (as Choice {:label \"yes\"}))\n(artifact {:descriptor (type-evidence (type-tag Choice)) :schema (type-schema (type-tag Choice)) :semantic_id (type-id (type-evidence (type-tag Choice))) :selected value})", core.clone(), json!({}), None, "static", Some(json!({"descriptor":type_descriptor,"schema":type_schema,"semantic_id":"sha256:604d7d96efdd1a0250532974cc8fd2729a659f6d2f67fc25e28d06b32d97dd10","selected":{"label":"yes"}}))));
+    let type_schema = json!({"version":2,"root":{"kind":"named","name":"main.Choice","body":{"kind":"record","fields":[{"name":"label","schema":{"kind":"string"}}]}}});
+    out.push(fixture(scratch, "evidence-artifact-identity", "oracle", "oracle", None, "(type Choice {:label String})\n(let value (as Choice {:label \"yes\"}))\n(artifact {:descriptor (type-evidence (type-tag Choice)) :schema (type-schema (type-tag Choice)) :semantic_id (type-id (type-evidence (type-tag Choice))) :selected value})", core.clone(), json!({}), None, "static", Some(json!({"descriptor":type_descriptor,"schema":type_schema,"semantic_id":"sha256:77a35c6433fd6f8e52945496c744554e369f633c6257a27e64e02adbe57b31a7","selected":{"label":"yes"}}))));
 
     out.push(fixture(
         scratch,

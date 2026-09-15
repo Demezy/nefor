@@ -30,13 +30,7 @@ end
 local function unbounded()
   return { present = false, milliseconds = 0 }
 end
-local EXITED_TYPE = "sha256:process-exited"
-local SIGNALED_TYPE = "sha256:process-signaled"
-local function typed_params(params)
-  params.exited_type = EXITED_TYPE
-  params.signaled_type = SIGNALED_TYPE
-  return params
-end
+local function typed_params(params) return params end
 
 for _, case in ipairs({
   { module = process.exec, name = "process-exec", capability = "process.exec",
@@ -76,7 +70,7 @@ for _, case in ipairs({
   local result = find(messages, "nefor.process.Result")
   assert_eq(result.value.stdout, "hello", "stdout preserved")
   assert_eq(result.value.stderr, "warning", "stderr preserved")
-  assert_eq(result.value.termination.type, EXITED_TYPE, "exit constructor preserved")
+  assert_eq(result.value.termination.constructor, "ProcessExited", "exit constructor preserved")
   assert_eq(result.value.termination.value.code, 7, "exit code preserved")
   assert_eq(diagnostics[1].kind, "process_exit", "process exit diagnostic emitted")
   assert_eq(diagnostics[1].code, 7, "exit diagnostic preserves the raw code")
@@ -98,7 +92,7 @@ do
   }))
   assert_eq(completion.status, "ok", "signal termination is a normal process result")
   local result = find(messages, "nefor.process.Result")
-  assert_eq(result.value.termination.type, SIGNALED_TYPE, "signal constructor preserved")
+  assert_eq(result.value.termination.constructor, "ProcessSignaled", "signal constructor preserved")
   assert_eq(result.value.termination.value.signal, 15, "signal number preserved")
   assert_eq(diagnostics[1].kind, "process_exit", "signal diagnostic emitted")
   assert_eq(diagnostics[1].signal, 15, "signal diagnostic preserves the raw signal")

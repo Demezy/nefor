@@ -39,7 +39,7 @@ Nefor's MAG library owns an explicit versioned application envelope:
 ```json
 {
   "format": "nefor.mag",
-  "version": 1,
+  "version": 2,
   "kind": "program",
   "program": {
     "initial": {
@@ -100,9 +100,9 @@ with its content hash. No source environment, cache entry, or callable function
 handle survives compilation.
 
 Execution and apply are distinct closed boundaries. `mag.execute` accepts only
-a version-1 program envelope; `mag.apply` accepts only a version-1 delta
+a version-2 program envelope; `mag.apply` accepts only a version-2 delta
 envelope. Raw unversioned modifications and crossed envelope kinds are rejected
-before application. A program can carry only the version-1
+before application. A program can carry only the version-2
 `InstantiateDeltaTemplate` operation and its closed expression vocabulary; it
 cannot carry source, bytecode, arbitrary MAG functions, or a general runtime
 expression language.

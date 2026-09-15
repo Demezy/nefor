@@ -120,6 +120,12 @@ function M.construct(id, params, emit, deps)
       if pending == nil then
         return nil
       end
+      if type(message.approved) ~= "boolean"
+          or type(message.content) ~= "string"
+          or type(message.reason) ~= "string" then
+        return { status = "failed", failure = kinds.Failed,
+          value = { kind = "malformed_approval_reply", actor = id } }
+      end
       local subject = pending
       pending = nil
       if message.approved then
@@ -143,8 +149,12 @@ function M.construct(id, params, emit, deps)
       return nil
     end
 
-    -- Otherwise: a subject to approve. Record it, raise the request, and defer
-    -- completion until the human answers.
+    -- Otherwise: a subject to approve. One actor owns one outstanding prompt;
+    -- replacing it would let an earlier reply authorize a newer subject.
+    if pending ~= nil then
+      return { status = "failed", failure = kinds.Failed,
+        value = { kind = "approval_already_pending", actor = id } }
+    end
     pending = message
     local semantic_host = nefor and nefor.semantic_type
     local reply_type = approval_reply_type()

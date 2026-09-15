@@ -404,8 +404,8 @@ local function unpack_operations(operations)
 end
 
 function M.decode_artifact(artifact)
-  if type(artifact) ~= "table" or artifact.format ~= "nefor.mag" or artifact.version ~= 1 then
-    return nil, "artifact must be a nefor.mag version 1 envelope"
+  if type(artifact) ~= "table" or artifact.format ~= "nefor.mag" or artifact.version ~= 2 then
+    return nil, "artifact must be a nefor.mag version 2 envelope"
   end
   if artifact.kind == "program" then
     local ok, envelope_error = exact_fields(artifact,

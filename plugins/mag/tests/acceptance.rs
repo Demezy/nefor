@@ -206,10 +206,19 @@ fn two_agent_program() -> Value {
         "kind": "program",
         "program": {
             "initial": {
+                "types": {},
                 "actors": actors,
                 "messages": [
                     { "to": "a1.llm", "content": { "$mag": "packed-value", "value": { "kind": "generic-provider.ProviderOut", "messages": [{ "role": "user", "content": "go-a1" }] } } },
                     { "to": "a2.llm", "content": { "$mag": "packed-value", "value": { "kind": "generic-provider.ProviderOut", "messages": [{ "role": "user", "content": "go-a2" }] } } }
+                ],
+                "nodes": [
+                    {"path":["a1.llm"],"members":["a1.llm"]},
+                    {"path":["a1.run-tool"],"members":["a1.run-tool"]},
+                    {"path":["a1.tool-result"],"members":["a1.tool-result"]},
+                    {"path":["a2.llm"],"members":["a2.llm"]},
+                    {"path":["a2.run-tool"],"members":["a2.run-tool"]},
+                    {"path":["a2.tool-result"],"members":["a2.tool-result"]}
                 ],
                 "kills": [],
                 "result": {
@@ -604,7 +613,7 @@ async fn two_agents_one_killed_mid_flight_the_other_completes() {
     // ── SIX STEPS #1: two agents in one graph. ──────────────────────────────
     assert!(
         ready_ids.iter().any(|id| id == "a1.llm") && ready_ids.iter().any(|id| id == "a2.llm"),
-        "both agents' llm actors readied; saw {ready_ids:?}"
+        "both agents' llm actors readied; saw {ready_ids:?}; terminal={run_result:?}"
     );
     assert_eq!(
         provider_agents.iter().cloned().collect::<Vec<_>>(),
@@ -1013,6 +1022,7 @@ async fn canonical_chat_approval_delta_crosses_the_typed_plugin_boundary() {
             "artifact": {
                 "format": "nefor.mag", "version": 2, "kind": "delta",
                 "delta": {
+                    "types": {},
                     "actors": [],
                     "messages": [{
                         "to": "approval.human",

@@ -1695,15 +1695,9 @@ fn graph_modification(
     fields: &[&str],
     context: &str,
 ) -> Result<Value, String> {
-    let object = artifact
-        .as_object()
-        .ok_or_else(|| format!("{context} must be an object"))?;
-    for key in object.keys() {
-        if !fields.contains(&key.as_str()) {
-            return Err(format!("{context} has unknown field {key}"));
-        }
-    }
-    Ok(Value::Object(object.clone()))
+    Ok(Value::Object(
+        exact_object(artifact, fields, context)?.clone(),
+    ))
 }
 
 fn unpack_packed(value: &mut Value, context: &str) -> Result<(), String> {

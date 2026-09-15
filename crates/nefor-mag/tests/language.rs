@@ -906,6 +906,25 @@ fn fail_preserves_library_diagnostics() {
 }
 
 #[test]
+fn never_branch_adopts_the_returning_branch_type() {
+    let root = workspace("never-branch");
+    let artifact = compile(
+        r#"
+        (type Choice (adt [Stop Unit] [Go String]))
+        (let choice (construct Choice Go "matched"))
+        (artifact
+          {:conditional (if true "ok" (fail {:kind "unreachable"}))
+           :matched (match choice
+                      [Stop value (fail {:kind "unreachable"})]
+                      [Go value value])})
+        "#,
+        &root,
+    )
+    .unwrap();
+    assert_eq!(artifact, json!({"conditional":"ok","matched":"matched"}));
+}
+
+#[test]
 fn typed_generic_functions_construct_nominal_records() {
     let root = workspace("typed-functions");
     let source = r#"

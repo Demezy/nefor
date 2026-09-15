@@ -625,9 +625,16 @@ async fn run_case(kind: ProviderKind) {
 
     let result = next_event_of_kind(&mut mag_out, "mag.run_result").await;
     assert_eq!(result["status"], "completed");
-    assert_eq!(result["result"]["value"], "done");
-    assert_eq!(result["result"]["semantic_type_id"], constructor_id);
-    assert_eq!(result["result"]["constructor_id"], constructor_id);
+    assert_eq!(result["result"]["value"]["constructor"], "Ok");
+    assert_eq!(result["result"]["value"]["value"], "done");
+    assert!(result["result"]["semantic_type_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("sha256:")));
+    assert!(result["result"]["constructor_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("sha256:")));
+    assert_ne!(result["result"]["semantic_type_id"], constructor_id);
+    assert_ne!(result["result"]["constructor_id"], constructor_id);
     assert!(result["result"].get("variant").is_none());
 
     server.await.expect("fake server");

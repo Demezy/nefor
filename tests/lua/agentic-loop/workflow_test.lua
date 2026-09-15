@@ -305,8 +305,27 @@ local function lead_artifact()
 end
 
 local function program_artifact()
-  return { format = "nefor.mag", version = 1, kind = "program",
+  return { format = "nefor.mag", version = 2, kind = "program",
     program = { initial = lead_artifact(), operations = {} } }
+end
+
+local function terminal_result(constructor, value)
+  return {
+    semantic_type_id = "sha256:result-owner",
+    constructor_id = "sha256:result-" .. constructor,
+    semantic_type = {
+      kind = "adt", name = "core.types.Result",
+      arguments = {
+        { kind = "named", name = "nefor.contracts.AgentError", arguments = {} },
+        { kind = "named", name = "nefor.contracts.TextAnswer", arguments = {} },
+      },
+      constructors = {
+        { name = "Error", payload = { kind = "named", name = "nefor.contracts.AgentError", arguments = {} } },
+        { name = "Ok", payload = { kind = "named", name = "nefor.contracts.TextAnswer", arguments = {} } },
+      },
+    },
+    value = { constructor = constructor, value = value },
+  }
 end
 
 local function task_prompt(execute_body)
@@ -1076,20 +1095,13 @@ do
   local exec = begin_bound_turn("needs login", "r-auth-error")
   send_to_loop("mag", {
     kind = "mag.run_result", run_id = exec.body.run_id, status = "completed",
-    result = {
-      semantic_type_id = "sha256:agent-error",
-      semantic_type = { kind = "named", name = "nefor.contracts.AgentError" },
-      value = {
-        last_output = nil,
-        reason = {
-          type = "sha256:provider-error",
-          value = {
-            message = "auth not connected; cannot complete turn",
-            detail = { value = "", present = false },
-          },
-        },
-      },
-    },
+    result = terminal_result("Error", {
+      last_output = nil,
+      reason = { constructor = "ProviderError", value = {
+        message = "auth not connected; cannot complete turn",
+        detail = { value = "", present = false },
+      } },
+    }),
   })
   local error_event = find_kind(decode_calls(), "chat.error.append")
   assert(error_event ~= nil, "auth failure emits a structured chat error")
@@ -1108,11 +1120,7 @@ do
   local exec = begin_bound_turn("typed success", "r-typed-success")
   send_to_loop("mag", {
     kind = "mag.run_result", run_id = exec.body.run_id, status = "completed",
-    result = {
-      semantic_type_id = "sha256:final-answer",
-      semantic_type = { kind = "named", name = "nefor.contracts.TextAnswer" },
-      value = { content = "clean answer" },
-    },
+    result = terminal_result("Ok", "clean answer"),
   })
   assert_eq(find_call(decode_calls(), "chat.message.append"), nil,
     "typed success emits no legacy assistant projection")
@@ -1121,14 +1129,12 @@ do
   exec = begin_bound_turn("typed failure", "r-typed-error")
   send_to_loop("mag", {
     kind = "mag.run_result", run_id = exec.body.run_id, status = "completed",
-    result = {
-      semantic_type_id = "sha256:agent-error",
-      semantic_type = { kind = "named", name = "nefor.contracts.AgentError" },
-      value = {
-        last_output = { text = "partial builder report" },
-        reason = { message = "provider unavailable", detail = { tag = "core.types.None" } },
-      },
-    },
+    result = terminal_result("Error", {
+      last_output = { text = "partial builder report" },
+      reason = { constructor = "ProviderError", value = {
+        message = "provider unavailable", detail = { value = "", present = false },
+      } },
+    }),
   })
   local calls = decode_calls()
   assert_eq(find_call(calls, "chat.message.append"), nil,
@@ -1142,20 +1148,13 @@ do
   exec = begin_bound_turn("typed overload", "r-typed-overload")
   send_to_loop("mag", {
     kind = "mag.run_result", run_id = exec.body.run_id, status = "completed",
-    result = {
-      semantic_type_id = "sha256:agent-error",
-      semantic_type = { kind = "named", name = "nefor.contracts.AgentError" },
-      value = {
-        last_output = { text = "", tool_calls = {}, finish_reason = "tool_calls" },
-        reason = {
-          type = "sha256:provider-error",
-          value = {
-            message = "Our servers are currently overloaded. Please try again later.",
-            detail = { value = "", present = false },
-          },
-        },
-      },
-    },
+    result = terminal_result("Error", {
+      last_output = { text = "", tool_calls = {}, finish_reason = "tool_calls" },
+      reason = { constructor = "ProviderError", value = {
+        message = "Our servers are currently overloaded. Please try again later.",
+        detail = { value = "", present = false },
+      } },
+    }),
   })
   calls = decode_calls()
   local overload = find_kind(calls, "chat.error.append")
@@ -1171,6 +1170,19 @@ do
     assert(type(text) ~= "string" or not text:find("semantic_type", 1, true),
       "typed AgentError envelope must never be appended as chat text")
   end
+
+  fresh_loop()
+  exec = begin_bound_turn("malformed typed result", "r-malformed-result")
+  local malformed = terminal_result("Ok", "must not be accepted")
+  malformed.constructor_id = nil
+  send_to_loop("mag", {
+    kind = "mag.run_result", run_id = exec.body.run_id, status = "completed",
+    result = malformed,
+  })
+  local invalid = find_kind(decode_calls(), "chat.error.append")
+  assert(invalid ~= nil, "malformed typed terminal data emits a structured error")
+  assert_eq(invalid.body.title, "Invalid agent result",
+    "malformed typed terminal data is rejected instead of recursively unwrapped")
 end
 
 -- (interrupt preserves context) an interrupted lead turn settles failed with

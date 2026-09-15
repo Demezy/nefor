@@ -34,20 +34,20 @@ fn retry_gate_obeys_budgets_and_preserves_payload_identity() {
             end
 
             local zero, zero_payloads = exercise(0, 1)
-            assert(#zero == 2 and zero[2].kind == "nefor.retry.Exhausted")
-            assert(rawequal(zero[2].value, zero_payloads[1]))
+            assert(#zero == 2 and zero[2].kind == "nefor.retry.Result" and zero[2].value.constructor == "Exhausted")
+            assert(rawequal(zero[2].value.value, zero_payloads[1]))
 
             local one, one_payloads = exercise(1, 2)
-            assert(one[2].kind == "nefor.retry.Continue" and rawequal(one[2].value, one_payloads[1]))
-            assert(one[3].kind == "nefor.retry.Exhausted" and rawequal(one[3].value, one_payloads[2]))
+            assert(one[2].kind == "nefor.retry.Result" and one[2].value.constructor == "Continue" and rawequal(one[2].value.value, one_payloads[1]))
+            assert(one[3].kind == "nefor.retry.Result" and one[3].value.constructor == "Exhausted" and rawequal(one[3].value.value, one_payloads[2]))
 
             local three, three_payloads = exercise(3, 4)
             for index = 1, 3 do
-              assert(three[index + 1].kind == "nefor.retry.Continue")
-              assert(rawequal(three[index + 1].value, three_payloads[index]))
+              assert(three[index + 1].kind == "nefor.retry.Result" and three[index + 1].value.constructor == "Continue")
+              assert(rawequal(three[index + 1].value.value, three_payloads[index]))
             end
-            assert(three[5].kind == "nefor.retry.Exhausted")
-            assert(rawequal(three[5].value, three_payloads[4]))
+            assert(three[5].kind == "nefor.retry.Result" and three[5].value.constructor == "Exhausted")
+            assert(rawequal(three[5].value.value, three_payloads[4]))
             "#,
         )
         .exec()
@@ -68,7 +68,7 @@ fn retry_gate_latches_and_diagnoses_late_input_without_branch_output() {
             actor.deliver({ messages = {{ message = { value = { late = true } } }} })
             actor.deliver({ messages = {{ message = { value = { later = true } } }} })
             assert(#emitted == 2) -- ready + exactly one exhausted branch
-            assert(emitted[2].kind == "nefor.retry.Exhausted")
+            assert(emitted[2].kind == "nefor.retry.Result" and emitted[2].value.constructor == "Exhausted")
             assert(#diagnostics == 2)
             assert(diagnostics[1].kind == "late_input_after_exhaustion")
             assert(diagnostics[2].kind == "late_input_after_exhaustion")

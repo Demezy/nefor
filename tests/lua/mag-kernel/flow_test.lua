@@ -74,10 +74,10 @@ do
   assert_eq(#reg:declaration("sink").outputs, 1, "sink declares one completion output")
   assert_eq(reg:declaration("sink").outputs[1], "mag.Unit", "sink completion output")
 
-  -- human declares a union approve/reject exit and the drain signal.
+  -- human emits one specialized nominal decision and declares the drain signal.
   local hd = reg:declaration("human")
-  assert_eq(hd.outputs[1], "human.Approved", "human output 1")
-  assert_eq(hd.outputs[2], "human.Rejected", "human output 2")
+  assert_eq(#hd.outputs, 1, "human declares one decision output")
+  assert_eq(hd.outputs[1], "human.Decision", "human decision output")
   assert_eq(hd.signals[1], "drain", "human declares the drain signal")
 end
 
@@ -196,16 +196,17 @@ do
   assert_eq(req.correlation, "gate", "request carries a correlation handle")
   assert_eq(req.prompt, "Approve the plan?", "request carries the configured prompt")
   assert_eq(req.subject.text, "proposed plan", "request carries the subject")
-  assert_true(find_kind(msgs, "human.Approved") == nil, "no output before the reply")
+  assert_true(find_kind(msgs, "human.Decision") == nil, "no output before the reply")
 
   -- The reply arrives (stubbed chat surface) as a second graph delivery tagged
   -- mag.ApprovalReply → the gate resolves to Approved and signals async success.
-  local resolved = inst.deliver(single("chat", "mag.ApprovalReply", { approved = true, content = "plan ok" }))
+  local resolved = inst.deliver(single("chat", "mag.ApprovalReply", { approved = true, content = "plan ok", reason = "" }))
   assert_true(resolved == nil, "the reply delivery returns nil — completion arrives via mag.complete")
-  local approved = find_kind(msgs, "human.Approved")
-  assert_true(approved ~= nil, "reply resolves the gate to an approved output")
+  local approved = find_kind(msgs, "human.Decision")
+  assert_true(approved ~= nil and approved.value.constructor == "Approved",
+    "reply resolves the gate to an approved decision")
   assert_eq(approved.from, "gate", "approved output is id-signed")
-  assert_eq(approved.content, "plan ok", "approved output carries the human's content")
+  assert_eq(approved.value.value.content, "plan ok", "approved output carries the human's content")
   assert_eq(approved.subject.text, "proposed plan", "approved output carries the subject")
   local complete = find_kind(msgs, "mag.complete")
   assert_true(complete ~= nil and complete.from == "gate",
@@ -220,11 +221,11 @@ do
   local msgs, emit = capture()
   local inst = human.construct("gate", {}, emit)
   inst.deliver(single("up", "generic-provider.TextAnswer", { text = "risky plan" }))
-  inst.deliver(single("chat", "mag.ApprovalReply", { approved = false, reason = "too risky" }))
-  local rejected = find_kind(msgs, "human.Rejected")
-  assert_true(rejected ~= nil, "a non-approving reply takes the rejected exit")
-  assert_eq(rejected.reason, "too risky", "rejected output carries the reason")
-  assert_true(find_kind(msgs, "human.Approved") == nil, "no approved output on rejection")
+  inst.deliver(single("chat", "mag.ApprovalReply", { approved = false, content = "", reason = "too risky" }))
+  local rejected = find_kind(msgs, "human.Decision")
+  assert_true(rejected ~= nil and rejected.value.constructor == "Rejected",
+    "a non-approving reply selects Rejected")
+  assert_eq(rejected.value.value.reason, "too risky", "rejected output carries the reason")
   assert_true(find_kind(msgs, "mag.complete") ~= nil,
     "a resolved rejection still signals async completion (the gate finished its work)")
 end
@@ -237,7 +238,7 @@ do
   local msgs, emit = capture()
   local inst = human.construct("gate", {}, emit)
   inst.deliver(single("chat", "mag.ApprovalReply", { approved = true, content = "stray" }))
-  assert_true(find_kind(msgs, "human.Approved") == nil,
+  assert_true(find_kind(msgs, "human.Decision") == nil,
     "a stray reply with no pending request emits nothing")
 end
 
@@ -261,6 +262,28 @@ do
   inst.deliver(single("chat", "mag.ApprovalReply", { approved = true, content = "late" }))
   assert_eq(count_kind(msgs, "human.Approved"), before,
     "a reply after drain-cancel produces no output")
+end
+
+
+-- ==================================================================
+-- human: pending requests latch their subject and malformed replies fail
+-- ==================================================================
+
+do
+  local msgs, emit = capture()
+  local inst = human.construct("gate", {}, emit)
+  inst.deliver(single("up", "generic-provider.TextAnswer", { text = "first subject" }))
+  local duplicate = inst.deliver(single("up", "generic-provider.TextAnswer", { text = "second subject" }))
+  assert_eq(duplicate.status, "failed", "a second subject cannot replace the pending request")
+  assert_eq(duplicate.value.kind, "approval_already_pending", "duplicate subject failure is specific")
+  assert_eq(count_kind(msgs, "mag.ApprovalRequest"), 1, "only one approval prompt is emitted")
+
+  local malformed = inst.deliver(single("chat", "mag.ApprovalReply",
+    { approved = "false", content = "", reason = "wrong boolean type" }))
+  assert_eq(malformed.status, "failed", "a malformed approval reply fails")
+  assert_eq(malformed.value.kind, "malformed_approval_reply", "malformed reply failure is specific")
+  assert_true(find_kind(msgs, "human.Decision") == nil,
+    "malformed reply cannot authorize the pending subject")
 end
 
 print("mag-kernel flow_test: all assertions passed")

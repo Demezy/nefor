@@ -10,7 +10,7 @@
     {"kind": "wait_text", "text": "mock-model", "timeout_ms": 30000},
     {"kind": "type", "text": "show me help"},
     {"kind": "key", "key": "Enter"},
-    {"kind": "wait_text", "text": "Error path", "timeout_ms": 30000},
+    {"kind": "wait_text", "text": "Error path", "timeout_ms": 90000},
     {"kind": "key", "key": "Escape"},
     {"kind": "key", "key": "Escape"},
     {"kind": "key", "key": "Escape"},

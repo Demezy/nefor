@@ -52,8 +52,10 @@ fn text_answer_consumes_multiline_terminal_text_without_schema_or_correction() {
       actor.deliver({ kind = "reply", result = { text = "first line\nsecond line" } })
       local terminal = emitted[#emitted - 1]
       assert(terminal.kind == "nefor.agent.Result")
-      assert(terminal.semantic_type_id == "text-answer-tag")
-      assert(terminal.value == "first line\nsecond line")
+      assert(terminal.semantic_type_id == nil)
+      assert(terminal.constructor_id == nil)
+      assert(terminal.value.constructor == "Ok")
+      assert(terminal.value.value == "first line\nsecond line")
       assert(#emitted == 4, "direct text must not start a correction round")
     "#).exec().unwrap();
 }

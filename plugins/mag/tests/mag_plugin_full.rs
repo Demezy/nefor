@@ -1002,10 +1002,10 @@ pub mod kernel {
                 (
                     "invalid-uncovered-sum-arm.mag",
                     [
-                        "input coverage failed",
-                        "start.nefor.graph.Value",
-                        "left.test.Value",
-                        "incoming_sources",
+                        "output coverage failed",
+                        "split.nefor.adt.Second",
+                        "main.Right",
+                        "coverage is incomplete",
                     ],
                 ),
             ] {
@@ -1890,12 +1890,13 @@ mod tests {
             "session_id": "session-1",
             "artifact": {"format":"nefor.mag","version":2,"kind":"program","program":{
                 "initial": {
+                    "types": {},
                     "actors": [{
                         "id": "answer",
                         "factory": "structured-output",
                         "params": {"$mag":"packed-value","value":{"schema": {"version": 1, "root": {"kind": "json_value"}}}}
                     }],
-                    "messages": [], "kills": []
+                    "messages": [], "nodes": [], "kills": [], "result": {}
                 },
                 "operations": []
             }}
@@ -1945,6 +1946,7 @@ mod tests {
             "session_id": "session-1",
             "artifact": {"format":"nefor.mag","version":2,"kind":"program","program":{
                 "initial": {
+                    "types": {},
                     "actors": [{
                         "id": "sync",
                         "factory": "nefor.factory.stub",

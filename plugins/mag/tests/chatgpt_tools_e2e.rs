@@ -221,6 +221,7 @@ async fn chatgpt_projects_stale_allowlist_and_returns_tool_result_through_gate()
         .expect("fixture content");
 
     let source = r#"
+(require "core.types")
 (require "nefor.actors")
 (require "nefor.artifact")
 (require "nefor.contracts")
@@ -233,7 +234,7 @@ async fn chatgpt_projects_stale_allowlist_and_returns_tool_result_through_gate()
                 :system "Read fixture.txt, then answer."
                 :tools ["read_file" "python-read"] :da-policy (nefor.contracts.no-da-policy) :max-corrections 0})
                (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer)))
-(let output (nefor.graph.output "result" (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+(let output (nefor.graph.output "result" (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))
 (let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
                  (nefor.graph.add-edges graph [(nefor.graph.edge start answer) (nefor.graph.edge answer output)])))
 (nefor.artifact.compile topology)
@@ -425,7 +426,7 @@ async fn chatgpt_projects_stale_allowlist_and_returns_tool_result_through_gate()
 
     let result = next_kind(&mut mag_out, "mag.run_result").await;
     assert_eq!(result["status"], "completed");
-    assert_eq!(result["result"]["value"], "done after read_file");
+    assert_eq!(result["result"]["value"]["value"], "done after read_file");
 
     mag.kill().await.ok();
     gate.kill().await.ok();
@@ -441,6 +442,7 @@ async fn provider_executed_lifecycle_records_facts_without_activating_run_tool()
     handshake(&mut mag_out, &mut mag_in).await;
 
     let source = r#"
+(require "core.types")
 (require "nefor.actors")
 (require "nefor.artifact")
 (require "nefor.contracts")
@@ -453,7 +455,7 @@ async fn provider_executed_lifecycle_records_facts_without_activating_run_tool()
                 :system "Research, then answer."
                 :tools ["web_search"] :da-policy (nefor.contracts.no-da-policy) :max-corrections 0})
                (type-tag nefor.contracts.Task) (type-tag nefor.contracts.TextAnswer)))
-(let output (nefor.graph.output "result" (type-tag (| nefor.contracts.TextAnswer nefor.contracts.AgentError))))
+(let output (nefor.graph.output "result" (type-tag (core.types.Result nefor.contracts.AgentError nefor.contracts.TextAnswer))))
 (let topology (fn [[graph nefor.graph.Graph]] -> nefor.graph.Graph
                  (nefor.graph.add-edges graph [(nefor.graph.edge start answer) (nefor.graph.edge answer output)])))
 (nefor.artifact.compile topology)
@@ -568,7 +570,7 @@ async fn provider_executed_lifecycle_records_facts_without_activating_run_tool()
     assert!(!tool_wire.contains("provider_context"));
     assert!(!tool_wire.contains("response_body"));
     assert_eq!(result["status"], "completed");
-    assert_eq!(result["result"]["value"], "native answer");
+    assert_eq!(result["result"]["value"]["value"], "native answer");
 
     mag.kill().await.ok();
 }

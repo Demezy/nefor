@@ -296,7 +296,7 @@ local function artifact_from_modification(modification)
 end
 
 local function envelope_from_modification(modification)
-  return { format = "nefor.mag", version = 1, kind = "program",
+  return { format = "nefor.mag", version = 2, kind = "program",
     program = { initial = artifact_from_modification(modification), operations = {} } }
 end
 
@@ -662,7 +662,7 @@ end
 do
   local authored = { type = "sha256:user-authored", value = { nested = true } }
   local artifact = {
-    format = "nefor.mag", version = 1, kind = "program", program = {
+    format = "nefor.mag", version = 2, kind = "program", program = {
       initial = {
         types = {},
         actors = { {
@@ -698,25 +698,25 @@ do
   local initial = { types = {}, actors = {}, messages = {}, nodes = {}, kills = {}, result = {} }
   local delta = { types = {}, actors = {}, messages = {}, nodes = {}, kills = {} }
   local _, mixed_program_error = workspace.decode_artifact {
-    format = "nefor.mag", version = 1, kind = "program",
+    format = "nefor.mag", version = 2, kind = "program",
     program = { initial = initial, operations = {} }, delta = delta,
   }
   assert_true(mixed_program_error:find("unknown field delta", 1, true) ~= nil,
     "program envelope rejects a delta sibling")
   local _, mixed_delta_error = workspace.decode_artifact {
-    format = "nefor.mag", version = 1, kind = "delta", delta = delta,
+    format = "nefor.mag", version = 2, kind = "delta", delta = delta,
     program = { initial = initial, operations = {} },
   }
   assert_true(mixed_delta_error:find("unknown field program", 1, true) ~= nil,
     "delta envelope rejects a program sibling")
   local _, delta_operations_error = workspace.decode_artifact {
-    format = "nefor.mag", version = 1, kind = "delta",
+    format = "nefor.mag", version = 2, kind = "delta",
     delta = { types = {}, actors = {}, messages = {}, nodes = {}, kills = {}, operations = {} },
   }
   assert_true(delta_operations_error:find("unknown field operations", 1, true) ~= nil,
     "delta payload rejects operation residue")
   local _, operation_error = workspace.decode_artifact {
-    format = "nefor.mag", version = 1, kind = "program",
+    format = "nefor.mag", version = 2, kind = "program",
     program = { initial = initial, operations = { { extra = true } } },
   }
   assert_true(operation_error:find("unknown field extra", 1, true) ~= nil,
@@ -736,7 +736,7 @@ do
     return c.body.kind == "mag.load" and c.target == "mag"
   end)
   local artifact = {
-    format = "nefor.mag", version = 1, kind = "program", program = {
+    format = "nefor.mag", version = 2, kind = "program", program = {
       initial = {
         types = {},
         actors = { {
@@ -1256,7 +1256,7 @@ for _, cache_status in ipairs({ "cold", "miss", "hit" }) do
     build = cache_status ~= "cold" and { status = cache_status } or nil,
     factories = KERNEL_FACTORIES,
     factory_contracts = factory_contracts(KERNEL_FACTORIES),
-    artifact = { format = "nefor.mag", version = 1, kind = "delta", delta = delta },
+    artifact = { format = "nefor.mag", version = 2, kind = "delta", delta = delta },
   })
 
   local apply = find_call(decode_calls(), function(c)
@@ -1318,7 +1318,7 @@ do
     hash = "sha256:not-a-delta",
     factories = KERNEL_FACTORIES,
     factory_contracts = factory_contracts(KERNEL_FACTORIES),
-    artifact = { format = "nefor.mag", version = 1, kind = "program", program = {
+    artifact = { format = "nefor.mag", version = 2, kind = "program", program = {
       initial = { types = {}, actors = {}, messages = {}, nodes = {}, kills = {},
         result = { from = { actor = "existing", type = "Result", wire = "Result" } } },
       operations = {},
@@ -1351,7 +1351,7 @@ do
     hash = "sha256:rejected-delta",
     factories = KERNEL_FACTORIES,
     factory_contracts = factory_contracts(KERNEL_FACTORIES),
-    artifact = { format = "nefor.mag", version = 1, kind = "delta",
+    artifact = { format = "nefor.mag", version = 2, kind = "delta",
       delta = { actors = {}, messages = {}, nodes = {}, kills = {}, types = {} } },
   })
   local apply = find_call(decode_calls(), function(c) return c.body.kind == "mag.apply" end)

@@ -442,7 +442,7 @@ async fn typed_task_contract_lowers_and_corrects_mock_provider_json() {
     );
     assert_eq!(
         structured.pointer("/params/value/schema/version"),
-        Some(&json!(1))
+        Some(&json!(2))
     );
     assert_eq!(
         structured
@@ -540,7 +540,10 @@ async fn typed_task_contract_lowers_and_corrects_mock_provider_json() {
         Some("completed")
     );
     assert_typed_result(&result);
-    assert_eq!(result.pointer_str("/result/value/task"), Some("build"));
+    assert_eq!(
+        result.pointer_str("/result/value/value/task"),
+        Some("build")
+    );
     shutdown(stdin, child).await;
 }
 
@@ -610,7 +613,7 @@ async fn whole_agent_error_union_can_drive_a_recovery_agent() {
     let result = next_event_of_kind(&mut reader, "mag.run_result").await;
     assert_typed_result(&result);
     assert_eq!(
-        result.pointer_str("/result/value/assessment"),
+        result.pointer_str("/result/value/value/assessment"),
         Some("continue from partial work")
     );
     shutdown(stdin, child).await;
@@ -1779,7 +1782,7 @@ async fn lead_turn_runs_through_gate_and_second_turn_replays_seeded_history() {
         Some("exec-turn-1")
     );
     assert_eq!(
-        result.pointer_str("/result/value"),
+        result.pointer_str("/result/value/value"),
         Some("the repo holds nefor"),
         "the sink's final answer rides the terminal reply inline"
     );
@@ -2069,7 +2072,7 @@ async fn interrupt_run_settles_inflight_tool_and_lead_winds_down_completed() {
         "the surviving run settles its original execute reply"
     );
     assert_eq!(
-        result.pointer_str("/result/value"),
+        result.pointer_str("/result/value/value"),
         Some("I stopped the read as you asked."),
         "the lead's post-interrupt final answer rides the terminal reply"
     );

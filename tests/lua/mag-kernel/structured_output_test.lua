@@ -119,8 +119,9 @@ do
   instance.deliver({ kind = "reply", ref = correction.ref,
     result = { text = '{"content":"validated"}' } })
   local result = find_last(messages, "nefor.agent.Result")
-  assert_eq(result.semantic_type_id, "direct-id", "direct result identity remains compiler-derived")
-  assert_eq(result.value.content, "validated", "validated result remains visible")
+  assert_eq(result.semantic_type_id, nil, "raw factory emission has no routed identity")
+  assert_eq(result.value.constructor, "Ok", "validated result selects Ok")
+  assert_eq(result.value.value.content, "validated", "validated result remains visible")
 
   local settled = conversation_messages(facts)
   local visible = {}
@@ -189,7 +190,8 @@ do
   end
   assert_eq(#diagnostics, 2, "each rejected attempt reports one validation diagnostic")
   local result = find_last(messages, "nefor.agent.Result")
-  assert_eq(result.semantic_type_id, "error-id", "exhaustion settles as one typed error result")
+  assert_eq(result.semantic_type_id, nil, "raw factory error has no routed identity")
+  assert_eq(result.value.constructor, "Error", "exhaustion settles as one error result")
   local completions = 0
   for _, fact in ipairs(facts) do
     if fact.kind == "turn_completed" or fact.kind == "turn_failed" then
@@ -204,9 +206,11 @@ end
 do
   validations = {
     { ok = false, violations = {{ path = "$.value", message = "wrong branch" }} },
-    { ok = true, value = { type = "named-branch-id", value = { content = "union ok" } } },
+    { ok = true, value = { constructor = "NamedBranch", value = { content = "union ok" } } },
   }
-  local instance, messages, diagnostics = make({ root = { kind = "union", items = {} } })
+  local instance, messages, diagnostics = make({ version = 2, root = { kind = "adt", name = "test.Output", owner_id = "output-id", constructors = {
+    { name = "NamedBranch", constructor_id = "named-branch-id", schema = { kind = "record", fields = {} } },
+  } } })
   instance.deliver(turn())
   local first = find_last(messages, "capability.invoke")
   instance.deliver({ kind = "reply", ref = first.ref,
@@ -218,7 +222,8 @@ do
   assert_true(diagnostics[1].output == nil,
     "union rejection also omits candidate diagnostic data")
   local result = find_last(messages, "nefor.agent.Result")
-  assert_eq(result.semantic_type_id, "named-branch-id",
-    "named union branch identity remains selected from validated value")
-  assert_eq(result.value.content, "union ok", "validated union payload remains visible")
+  assert_eq(result.semantic_type_id, nil, "raw factory result has no routed identity")
+  assert_eq(result.value.constructor, "Ok", "validated union result selects Ok")
+  assert_eq(result.value.value.constructor, "NamedBranch", "validated payload preserves its constructor")
+  assert_eq(result.value.value.value.content, "union ok", "validated union payload remains visible")
 end

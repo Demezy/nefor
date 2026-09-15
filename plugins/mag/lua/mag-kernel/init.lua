@@ -781,6 +781,11 @@ apply_typed_delta = function(ctx, mod)
   end
   for _, message in ipairs(mod.messages or {}) do
     if type(message.content) == "table" and message.content.kind == "mag.ApprovalReply" then
+      if type(message.semantic_type) ~= "table"
+          or type(message.semantic_type_id) ~= "string"
+          or mod.types[message.semantic_type_id] == nil then
+        return { ok = false, error = "mag.ApprovalReply requires delta semantic declarations" }
+      end
       local validation = type(semantic_host) == "table"
           and type(semantic_host.validate_value) == "function"
           and semantic_host.validate_value(message.semantic_type, message.content)
@@ -880,7 +885,7 @@ return {
         or type(boundary.wire) ~= "string" then
       return { ok = false, error = "initial artifact needs result.from { actor, wire }" }
     end
-    local typed_artifact = type(mod.types) == "table"
+    local typed_artifact = type(mod.types) == "table" and next(mod.types) ~= nil
     ctx.semantic_strict = typed_artifact
     if typed_artifact and (type(boundary.type_id) ~= "string"
         or type(boundary.type) ~= "table") then
@@ -924,10 +929,10 @@ return {
         boundary.wire, tostring(boundary.type_id), boundary.actor) }
     end
     ctx.router:set_result_boundary(boundary)
-    ctx.router:register_type_declarations(mod.types)
+    if typed_artifact then ctx.router:register_type_declarations(mod.types) end
     local modification = {}
     for key, value in pairs(mod) do
-      if key ~= "result" then
+      if key ~= "result" and (typed_artifact or key ~= "types") then
         modification[key] = value
       end
     end

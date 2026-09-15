@@ -1150,7 +1150,7 @@ local function error_display(raw, partial)
   }
 end
 
-local function agent_error_display(result)
+local function direct_agent_error_display(result)
   if typed_semantic_name(result) ~= "nefor.contracts.AgentError"
       or type(result.value) ~= "table" then
     return nil
@@ -1161,29 +1161,83 @@ local function agent_error_display(result)
   )
 end
 
--- The relay text for a successful run result's inline `result` (the sink's
--- final answer riding mag.run_result). Typed AgentError is handled separately
--- so its runtime envelope can never fall through to the JSON encode fallback.
-local function mag_result_text(result)
-  if type(result) ~= "table" then return nil end
-  local semantic_name = typed_semantic_name(result)
-  local typed = semantic_name ~= nil
-  if typed and semantic_name ~= "nefor.contracts.AgentError" then
-    if type(result.value) == "string" then return result.value end
-    if type(result.value) == "table" and type(result.value.content) == "string" then
-      return result.value.content
+local function result_argument_name(descriptor, index)
+  local argument = type(descriptor) == "table" and descriptor.arguments
+      and descriptor.arguments[index] or nil
+  return type(argument) == "table" and argument.name or nil
+end
+
+local function result_constructor_payload_name(descriptor, name)
+  for _, constructor in ipairs(type(descriptor) == "table" and descriptor.constructors or {}) do
+    if constructor.name == name then
+      return type(constructor.payload) == "table" and constructor.payload.name or nil
     end
-  elseif typed then
-    return nil
   end
-  if type(result.text) == "string" and #result.text > 0 then
-    return result.text
+  return nil
+end
+
+-- Decode only the terminal contracts owned by the lead workflow. Result stays
+-- nominal in the kernel; this host deliberately projects its Ok/Error branch
+-- once, at the presentation boundary.
+local function decode_terminal_result(result)
+  if type(result) ~= "table" then return { kind = "untyped", value = result } end
+  local semantic_name = typed_semantic_name(result)
+  if semantic_name == nil then
+    return { kind = "untyped", value = result, result = result }
   end
-  if type(result.text_answer) == "string" and #result.text_answer > 0 then
-    return result.text_answer
+  if semantic_name ~= "core.types.Result" then
+    local direct_error = direct_agent_error_display(result)
+    if direct_error ~= nil then return { kind = "error", display = direct_error } end
+    return { kind = "value", value = result.value, result = result }
   end
-  local ok, encoded = pcall(json.encode, result)
-  if ok and type(encoded) == "string" then return encoded end
+
+  local descriptor = result.semantic_type
+  local value = result.value
+  local error_name = result_argument_name(descriptor, 1)
+  local success_name = result_argument_name(descriptor, 2)
+  if descriptor.kind ~= "adt" or type(result.constructor_id) ~= "string"
+      or type(descriptor.arguments) ~= "table" or #descriptor.arguments ~= 2
+      or error_name ~= "nefor.contracts.AgentError"
+      or success_name ~= "nefor.contracts.TextAnswer"
+      or type(value) ~= "table" or type(value.constructor) ~= "string"
+      or (value.constructor ~= "Ok" and value.constructor ~= "Error")
+      or value.value == nil
+      or result_constructor_payload_name(descriptor, value.constructor)
+          ~= (value.constructor == "Error" and error_name or success_name) then
+    return { kind = "malformed" }
+  end
+  if value.constructor == "Ok" then
+    return { kind = "value", value = value.value, result = result }
+  end
+  if value.constructor == "Error" and type(value.value) == "table" then
+    return {
+      kind = "error",
+      display = error_display(
+        nested_message(value.value.reason),
+        last_output_text(value.value)
+      ),
+    }
+  end
+  return { kind = "malformed" }
+end
+
+local function terminal_value_text(decoded)
+  local value = decoded.value
+  if type(value) == "string" then return value end
+  if type(value) == "table" and type(value.content) == "string" then
+    return value.content
+  end
+  local result = decoded.result
+  if decoded.kind == "untyped" and type(result) == "table" then
+    if type(result.text) == "string" and #result.text > 0 then return result.text end
+    if type(result.text_answer) == "string" and #result.text_answer > 0 then
+      return result.text_answer
+    end
+  end
+  if decoded.kind == "value" then
+    local ok, encoded = pcall(json.encode, value)
+    if ok and type(encoded) == "string" then return encoded end
+  end
   return nil
 end
 
@@ -1206,23 +1260,28 @@ local function finish_mag_run_result(body)
   state.current_turn = nil
 
   if body.status == "completed" then
-    local agent_error = agent_error_display(body.result)
-    if agent_error ~= nil then
+    local decoded = decode_terminal_result(body.result)
+    if decoded.kind == "error" or decoded.kind == "malformed" then
+      local display = decoded.display or {
+        title = "Invalid agent result",
+        message = "The agent run returned malformed typed terminal data.",
+        retryable = false,
+      }
       emit("nefor-tui", {
         kind = "chat.error.append",
-        title = agent_error.title,
-        message = agent_error.message,
-        retryable = agent_error.retryable,
+        title = display.title,
+        message = display.message,
+        retryable = display.retryable,
       })
-      nefor.log.warn("agentic-loop: lead turn returned AgentError", {
+      nefor.log.warn("agentic-loop: lead turn returned a business error", {
         run_id = run_id,
-        error = agent_error.message,
+        error = display.message,
         history_len = #conversation_history(),
       })
       fire_observers(state.complete_observers, run_id, "error")
       request_lifecycle:set_terminal(request_ids, "error", "", {
-        code = "agent_error",
-        message = agent_error.message,
+        code = decoded.kind == "malformed" and "invalid_terminal_result" or "agent_error",
+        message = display.message,
       })
       request_lifecycle:release_all(request_ids, turn_obligation)
       flush_deferred()
@@ -1230,7 +1289,7 @@ local function finish_mag_run_result(body)
       emit_idle_if_idle(run_id)
       return
     end
-    local answer = mag_result_text(body.result) or ""
+    local answer = terminal_value_text(decoded) or ""
     nefor.log.info("agentic-loop: lead turn completed", {
       run_id = run_id,
       answer_len = #answer, history_len = #conversation_history(),

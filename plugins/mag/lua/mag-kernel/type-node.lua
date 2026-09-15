@@ -5,7 +5,7 @@ local KEYS = {
   primitive={kind=true,name=true}, variable={kind=true,name=true},
   named={kind=true,name=true,arguments=true,body=true},
   adt={kind=true,name=true,arguments=true,constructors=true},
-  list={kind=true,item=true}, map={kind=true,key=true,value=true},
+  list={kind=true,item=true}, set={kind=true,item=true}, map={kind=true,key=true,value=true},
   record={kind=true,fields=true}, product={kind=true,items=true},
 }
 
@@ -66,7 +66,7 @@ local function validate(node, variables, path)
         if not ok then return nil,err end
       end
     end
-  elseif node.kind=="list" then
+  elseif node.kind=="list" or node.kind=="set" then
     local ok,err=validate(node.item,variables,path..".item"); if not ok then return nil,err end
   elseif node.kind=="map" then
     local ok,err=validate(node.key,variables,path..".key"); if not ok then return nil,err end

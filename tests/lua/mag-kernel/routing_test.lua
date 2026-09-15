@@ -674,31 +674,33 @@ do
 end
 
 -- ==================================================================
--- RetryGate routes canonical branch records while preserving the original
--- transport payload, then latches closed after the exhausted value.
+-- RetryGate routes one nominal decision while preserving the original
+-- transport payload, then latches closed after Exhausted.
 -- ==================================================================
 
 do
   local retry_gate = require("factories.retry-gate")
   local prior_semantic_type = nefor.semantic_type
   local answer = { kind = "named", name = "test.Answer", arguments = {} }
-  local function branch(name)
-    return { kind = "named", name = name, arguments = { answer } }
-  end
-  local continue_type = branch("nefor.contracts.Continue")
-  local exhausted_type = branch("nefor.contracts.Exhausted")
-  local output_type = { kind = "union", items = { continue_type, exhausted_type } }
+  local decision = { kind = "adt", name = "nefor.contracts.RetryDecision",
+    arguments = { answer }, constructors = {
+      { name = "Continue", payload = answer },
+      { name = "Exhausted", payload = answer },
+    } }
 
   nefor.semantic_type = {
     accepts = function() return true end,
     id = function(value) return value.name or value.kind end,
+    constructor = function(_, constructor)
+      return { id = "test." .. constructor, payload = answer, payload_id = "test.Answer" }
+    end,
     validate_value = function(expected, value)
-      local valid = type(value) == "table" and value.value ~= nil
-        and (expected.name == "nefor.contracts.Continue"
-          or expected.name == "nefor.contracts.Exhausted")
+      local valid = expected.name == "nefor.contracts.RetryDecision"
+        and type(value) == "table" and value.value ~= nil
+        and (value.constructor == "Continue" or value.constructor == "Exhausted")
       return valid and { ok = true } or {
         ok = false,
-        violations = { { path = "$", message = "expected branch record {value:T}" } },
+        violations = { { path = "$", message = "expected RetryDecision" } },
       }
     end,
   }
@@ -707,25 +709,20 @@ do
     local diagnostics = {}
     local sink_decl = {
       name = "retry-sink-" .. maximum,
-      inputs = { input = { "nefor.retry.Continue", "nefor.retry.Exhausted" } },
+      inputs = { input = "nefor.retry.Result" },
       outputs = {},
+      semantic = { input = decision, output = {kind="primitive",name="Unit"},
+        inputs = {{wire="nefor.retry.Result",type=decision}}, outputs = {} },
     }
-    local h = harness({
-      retry = retry_gate,
-      sink = sink_decl,
-    })
+    local h = harness({ retry = retry_gate, sink = sink_decl })
     local received = {}
     local sink_id = "sink-" .. maximum
     local gate_id = "gate-" .. maximum
     local sink_result = h.inv.apply({ actors = { {
-      id = sink_id,
-      factory = sink_decl.name,
-      type_arguments = {},
-      params = {},
+      id = sink_id, factory = sink_decl.name, type_arguments = {}, params = {},
       semantic_strict = true,
-      input = { wire = "retry.Branch", type_id = "test.Branch", type = output_type },
-      outputs = {},
-      routes = {},
+      input = { wire = "nefor.retry.Result", type_id = "test.Decision", type = decision },
+      outputs = {}, routes = {},
     } } })
     assert_true(sink_result.ok, "typed retry sink registers: " .. tostring(sink_result.error))
     local sink = { id = sink_id, emit = h.router:emitter(sink_id) }
@@ -737,27 +734,16 @@ do
     ready(h, sink)
 
     local result = h.inv.apply({ actors = { {
-      id = gate_id,
-      factory = "retry-gate",
-      type_arguments = {},
-      params = { max_retries = maximum },
-      semantic_strict = true,
-      evidence = {
-        version = 2,
-        identity = "nefor.factory.retry-gate",
-        arguments = { answer },
-        input = answer,
-        output = output_type,
-      },
+      id = gate_id, factory = "retry-gate",
+      type_arguments = { answer, decision },
+      params = { max_retries = maximum }, semantic_strict = true,
+      evidence = { version = 2, identity = "nefor.factory.retry-gate",
+        arguments = { answer, decision }, input = answer, output = decision },
       input = { wire = "nefor.retry.Input", type_id = "test.Answer", type = answer },
-      outputs = {
-        { wire = "nefor.retry.Continue", type_id = "test.Continue", type = continue_type },
-        { wire = "nefor.retry.Exhausted", type_id = "test.Exhausted", type = exhausted_type },
-      },
-      routes = {
-        ["nefor.retry.Continue"] = { { actor = sink_id, wire = "nefor.retry.Continue" } },
-        ["nefor.retry.Exhausted"] = { { actor = sink_id, wire = "nefor.retry.Exhausted" } },
-      },
+      outputs = { { wire = "nefor.retry.Result", type_id = "test.Decision", type = decision } },
+      routes = { ["nefor.retry.Result"] = {
+        { actor = sink_id, wire = "nefor.retry.Result" },
+      } },
     } } })
     assert_true(result.ok, "typed retry gate registers: " .. tostring(result.error))
     h.router:set_construct(function(record)
@@ -776,25 +762,28 @@ do
       payloads[index] = { maximum = maximum, index = index }
       h.router:deliver(gate_id, "source", "nefor.retry.Input", { value = payloads[index] })
     end
-    assert_eq(#received, maximum + 1, "max " .. maximum .. " emits one branch per accepted value")
+    assert_eq(#received, maximum + 1, "max " .. maximum .. " emits one decision per accepted value")
     for index = 1, maximum do
-      assert_eq(received[index].tag, "nefor.retry.Continue", "retry-budget values continue")
-      assert_true(rawequal(received[index].message.value, payloads[index]),
+      assert_eq(received[index].tag, "nefor.retry.Result", "retry-budget values use decision wire")
+      assert_eq(received[index].message.value.constructor, "Continue", "retry-budget values continue")
+      assert_true(rawequal(received[index].message.value.value, payloads[index]),
         "continue transport preserves exact payload identity")
-      assert_true(rawequal(received[index].message.semantic_value.value, payloads[index]),
-        "continue semantic record contains the original value")
+      assert_eq(received[index].arrival.constructor_id, "test.Continue",
+        "routing derives the selected Continue identity")
     end
     local exhausted = received[maximum + 1]
-    assert_eq(exhausted.tag, "nefor.retry.Exhausted", "the value after the retry budget exhausts")
-    assert_true(rawequal(exhausted.message.value, payloads[maximum + 1]),
+    assert_eq(exhausted.tag, "nefor.retry.Result", "exhaustion uses decision wire")
+    assert_eq(exhausted.message.value.constructor, "Exhausted",
+      "the value after the retry budget exhausts")
+    assert_true(rawequal(exhausted.message.value.value, payloads[maximum + 1]),
       "exhausted transport preserves exact payload identity")
-    assert_true(rawequal(exhausted.message.semantic_value.value, payloads[maximum + 1]),
-      "exhausted semantic record contains the original value")
-    assert_eq(#h.log.error, 0, "canonical branch records pass semantic-strict routing")
+    assert_eq(exhausted.arrival.constructor_id, "test.Exhausted",
+      "routing derives the selected Exhausted identity")
+    assert_eq(#h.log.error, 0, "canonical decisions pass semantic-strict routing")
 
     local late = { maximum = maximum, late = true }
     h.router:deliver(gate_id, "source", "nefor.retry.Input", { value = late })
-    assert_eq(#received, maximum + 1, "a latched gate emits no branch for late input")
+    assert_eq(#received, maximum + 1, "a latched gate emits no decision for late input")
     assert_eq(#diagnostics, 1, "a latched gate diagnoses late input")
     assert_eq(diagnostics[1].kind, "late_input_after_exhaustion", "late diagnostic is specific")
   end

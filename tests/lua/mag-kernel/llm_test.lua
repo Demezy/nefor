@@ -407,9 +407,9 @@ do
   assert_eq(count_kind(msgs, "capability.invoke"), 2,
     "repeated malformed calls stop at the configured correction bound")
   local failed = find_kind(msgs, "nefor.agent.Result")
-  assert_true(failed ~= nil and failed.semantic_type_id == "agent-error-id",
+  assert_true(failed ~= nil and failed.semantic_type_id == nil and failed.value.constructor == "Error",
     "exhausting correction feedback settles as a typed agent error")
-  assert_true(failed.value.reason.value.message:find("correction limit reached", 1, true) ~= nil,
+  assert_true(failed.value.value.reason.value.message:find("correction limit reached", 1, true) ~= nil,
     "the typed agent error retains the correction-limit detail")
 end
 
@@ -430,8 +430,9 @@ do
 
   local final = find_kind(msgs, "nefor.agent.Result")
   assert_true(final ~= nil, "a reply without tool calls emits a typed result")
-  assert_eq(final.semantic_type_id, "text-answer-id", "result carries the compiler-selected constructor")
-  assert_eq(final.value, "done", "TextAnswer result carries the provider text")
+  assert_eq(final.semantic_type_id, nil, "raw result has no routed identity")
+  assert_eq(final.value.constructor, "Ok", "result selects Ok")
+  assert_eq(final.value.value, "done", "TextAnswer result carries the provider text")
   assert_true(find_kind(msgs, "mag.complete") ~= nil, "deferred success signalled with mag.complete")
   assert_true(find_kind(msgs, "generic-tool.ToolCalls") == nil,
     "no ToolCalls when the result has none")
@@ -966,7 +967,8 @@ do
   assert_eq(facts[#facts].kind, "turn_completed",
     "the terminal provider reply closes the reasoning-only turn")
   local final = find_kind(msgs, "nefor.agent.Result")
-  assert_eq(final.value, "", "the empty terminal answer remains an empty typed result")
+  assert_eq(final.value.constructor, "Ok", "the empty terminal answer selects Ok")
+  assert_eq(final.value.value, "", "the empty terminal answer remains empty")
 end
 
 do
@@ -1206,9 +1208,10 @@ do
 
   local failed = find_kind(msgs, "nefor.agent.Result")
   assert_true(failed ~= nil, "a finish_reason error emits a typed result")
-  assert_eq(failed.semantic_type_id, "agent-error-id", "the error selects the AgentError constructor")
-  assert_eq(failed.value.reason.type, "provider-error-id", "the error identifies its provider cause")
-  assert_eq(failed.value.reason.value.message, "HTTP 400: boom",
+  assert_eq(failed.semantic_type_id, nil, "raw error has no routed identity")
+  assert_eq(failed.value.constructor, "Error", "the result selects Error")
+  assert_eq(failed.value.value.reason.constructor, "ProviderError", "the error identifies its provider cause")
+  assert_eq(failed.value.value.reason.value.message, "HTTP 400: boom",
     "the typed failure threads the provider's detail")
   assert_true(find_kind(msgs, "mag.complete") ~= nil, "the computed AgentError completes normally")
 
@@ -1221,8 +1224,8 @@ do
     result = { text = "", finish_reason = "error" },
   })
   local f2 = find_kind(m2, "nefor.agent.Result")
-  assert_true(f2 ~= nil and type(f2.value.reason.value.message) == "string"
-      and #f2.value.reason.value.message > 0,
+  assert_true(f2 ~= nil and type(f2.value.value.reason.value.message) == "string"
+      and #f2.value.value.reason.value.message > 0,
     "a detail-less provider error still names the failure")
 end
 
@@ -1263,9 +1266,10 @@ do
 
   local failed = find_kind(msgs, "nefor.agent.Result")
   assert_true(failed ~= nil, "a provider error in the reply emits a typed result")
-  assert_eq(failed.semantic_type_id, "agent-error-id", "provider error selects AgentError")
-  assert_eq(failed.value.reason.type, "provider-error-id", "provider cause is typed")
-  assert_eq(failed.value.reason.value.message, "provider timed out",
+  assert_eq(failed.semantic_type_id, nil, "raw provider error has no routed identity")
+  assert_eq(failed.value.constructor, "Error", "provider error selects Error")
+  assert_eq(failed.value.value.reason.constructor, "ProviderError", "provider cause is typed")
+  assert_eq(failed.value.value.reason.value.message, "provider timed out",
     "the failure carries the provider error")
   assert_true(find_kind(msgs, "mag.complete") ~= nil,
     "a computed AgentError completes the actor normally")

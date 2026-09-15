@@ -526,7 +526,7 @@ local function permission_response(popup, approved)
         run_id = popup.run_id,
         source = "chat.human_approval",
         artifact = {
-          format = "nefor.mag", version = 1, kind = "delta",
+          format = "nefor.mag", version = 2, kind = "delta",
           delta = {
             types = { [popup.reply_type_id] = popup.reply_type },
             actors = {},

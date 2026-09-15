@@ -33,6 +33,7 @@ local human = require("factories.human")
 local adapter = require("factories.adapter")
 local sink = require("factories.sink")
 local llm = require("factories.llm")
+local adt_unpack = require("factories.adt-unpack")
 
 -- ------------------------------------------------------------------
 -- assert helpers
@@ -113,6 +114,7 @@ local function harness()
     { declaration = human.declaration, construct = human.construct },
     { declaration = adapter.declaration, construct = adapter.construct },
     { declaration = sink.declaration, construct = sink.construct },
+    { declaration = adt_unpack.declaration, construct = adt_unpack.construct },
     producer_factory(),
   }) do
     local _, err = reg:register(f)
@@ -164,6 +166,12 @@ end
 -- shape (produce → approve → rework → produce; approve → sink) with the
 -- synchronous producer standing in for the llm.
 local function gate_actors()
+  local string = {kind="primitive",name="String"}
+  local approved = {kind="named",name="test.Approved",arguments={},body={kind="record",fields={{name="content",type=string}}}}
+  local rejected = {kind="named",name="test.Rejected",arguments={},body={kind="record",fields={{name="reason",type=string}}}}
+  local decision = {kind="adt",name="test.ApprovalDecision",arguments={},constructors={
+    {name="Approved",payload=approved},{name="Rejected",payload=rejected},
+  }}
   return {
     {
       id = "produce", factory = "producer", type_arguments = {}, params = {},
@@ -172,27 +180,31 @@ local function gate_actors()
       routes = { ["generic-provider.TextAnswer"] = { { actor = "approve", wire = "generic-provider.TextAnswer" } } },
     },
     {
-      id = "approve", factory = "human", type_arguments = {}, params = { prompt = "Approve the draft?" },
-      evidence={version=2,identity="nefor.factory.human",arguments={},input={kind="named",name="nefor.contracts.TextAnswer",arguments={}},output={kind="union",items={{kind="named",name="nefor.contracts.Approved",arguments={}},{kind="named",name="nefor.contracts.Rejected",arguments={}}}}},
-      input={type={kind="named",name="nefor.contracts.TextAnswer",arguments={}},wire="generic-provider.TextAnswer"},outputs={{type={kind="named",name="test.Approved",arguments={}},wire="human.Approved"},{type={kind="named",name="test.Rejected",arguments={}},wire="human.Rejected"}},
-      routes = {
-        ["human.Approved"] = { { actor = "out", wire = "human.Approved" } },
-        ["human.Rejected"] = { { actor = "rework", wire = "nefor.agent.Input" } },
-      },
+      id = "approve", factory = "human", type_arguments = {decision}, params = { prompt = "Approve the draft?" },
+      evidence={version=2,identity="nefor.factory.human",arguments={decision},input={kind="named",name="nefor.contracts.TextAnswer",arguments={}},output=decision},
+      input={type={kind="named",name="nefor.contracts.TextAnswer",arguments={}},wire="generic-provider.TextAnswer"},outputs={{type=decision,wire="human.Decision"}},
+      routes = { ["human.Decision"] = { { actor = "decision", wire = "nefor.adt.Value" } } },
     },
     {
-      id = "rework", factory = "adapter",
-      type_arguments = {{kind="named",name="test.Rejected",arguments={}}},
-      params = { seed = "provider-in" },
-      evidence={version=2,identity="nefor.factory.adapter",arguments={{kind="named",name="test.Rejected",arguments={}}},input={kind="named",name="test.Rejected",arguments={}},output={kind="named",name="nefor.contracts.ProviderInput",arguments={}}},
-      input={type={kind="named",name="test.Rejected",arguments={}},wire="nefor.agent.Input"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
+      id = "decision", factory = "adt-unpack", type_arguments = {decision, approved, rejected},
+      params = { owner=decision, left_payload=approved, right_payload=rejected,
+        left_constructor="Approved", right_constructor="Rejected" },
+      evidence={version=2,identity="nefor.factory.adt-unpack",arguments={decision,approved,rejected},input=decision,output={kind="primitive",name="JsonValue"}},
+      input={type=decision,wire="nefor.adt.Value"},outputs={{type=approved,wire="nefor.adt.First"},{type=rejected,wire="nefor.adt.Second"}},
+      routes = { ["nefor.adt.First"] = { { actor = "out", wire = "human.Approved" } },
+        ["nefor.adt.Second"] = { { actor = "rework", wire = "nefor.agent.Input" } } },
+    },
+    {
+      id = "rework", factory = "adapter", type_arguments = {rejected},
+      params = { seed = "provider-in", schema={version=2,root={kind="named",name="test.Rejected",body={kind="record",fields={{name="reason",schema={kind="string"}}}}}} },
+      evidence={version=2,identity="nefor.factory.adapter",arguments={rejected},input=rejected,output={kind="named",name="nefor.contracts.ProviderInput",arguments={}}},
+      input={type=rejected,wire="nefor.agent.Input"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
       routes = { ["generic-provider.ProviderOut"] = { { actor = "produce", wire = "generic-provider.ProviderOut" } } },
     },
-    { id = "out", factory = "sink",
-      type_arguments = {{kind="named",name="test.Approved",arguments={}}},
+    { id = "out", factory = "sink", type_arguments = {approved},
       params = {}, routes = {},
-      evidence={version=2,identity="nefor.factory.sink",arguments={{kind="named",name="test.Approved",arguments={}}},input={kind="named",name="test.Approved",arguments={}},output={kind="primitive",name="Unit"}},
-      input={type={kind="named",name="test.Approved",arguments={}},wire="human.Approved"},outputs={{type={kind="primitive",name="Unit"},wire="mag.Unit"}} },
+      evidence={version=2,identity="nefor.factory.sink",arguments={approved},input=approved,output={kind="primitive",name="Unit"}},
+      input={type=approved,wire="human.Approved"},outputs={{type={kind="primitive",name="Unit"},wire="mag.Unit"}} },
   }
 end
 
@@ -207,7 +219,7 @@ local function seed_message()
 end
 
 local function reply_message(to, fields)
-  local content = { kind = "mag.ApprovalReply" }
+  local content = { kind = "mag.ApprovalReply", content = "", reason = "" }
   for k, v in pairs(fields) do content[k] = v end
   return { to = to, content = content }
 end
@@ -260,8 +272,7 @@ do
   assert_eq(approved.ok, true, "the approving reply applies: " .. tostring(approved.error))
   local complete = events_of_kind(h, "mag.run_complete")
   assert_eq(#complete, 1, "the approval completed the run")
-  assert_eq(complete[1].result.content, "ship it", "the result carries the human's content")
-  assert_eq(complete[1].result.subject.text, "draft 2", "the result carries the approved subject")
+  assert_eq(complete[1].result.value.content, "ship it", "the result carries the human's content")
 
   -- Activity honesty: strict busy/idle alternation for the gate. The reject
   -- cascade re-fires the gate (rework → produce → draft 2) while its first
@@ -280,8 +291,8 @@ do
   -- gate's persisted outputs are exactly its typed exits.
   for _, p in ipairs(h.persisted) do
     if p.id == "approve" then
-      assert_true(p.output.kind == "human.Approved" or p.output.kind == "human.Rejected",
-        "the gate persists only its typed exits, not the request; got " .. tostring(p.output.kind))
+      assert_true(p.output.kind == "human.Decision",
+        "the gate persists only its nominal decision, not the request; got " .. tostring(p.output.kind))
     end
   end
 end
@@ -380,72 +391,86 @@ do
 end
 
 -- ==================================================================
--- (6) apply-time validation accepts the gate template's lowered wiring
--- against the REAL shipped factories (llm / human / adapter / sink)
+-- (6) apply-time validation accepts explicit Result and decision projection
+-- against the real shipped factories.
 -- ==================================================================
 
 do
   local log = new_logger()
   local reg = Registry.new()
-  local function named(name)
-    return { kind = "named", name = name, arguments = nefor.json.mark_array({}) }
-  end
-  for _, mod in ipairs({ llm, human, adapter, sink }) do
+  local function named(name) return { kind = "named", name = name, arguments = {} } end
+  local unit = {kind="primitive",name="Unit"}
+  local json_value = {kind="primitive",name="JsonValue"}
+  local provider_input = named("nefor.contracts.ProviderInput")
+  local task = named("test.Task")
+  local text_answer = named("nefor.contracts.TextAnswer")
+  local agent_error = named("nefor.contracts.AgentError")
+  local tool_calls = named("nefor.contracts.ToolCalls")
+  local result_type = {kind="adt",name="core.types.Result",arguments={agent_error,text_answer},constructors={
+    {name="Error",payload=agent_error},{name="Ok",payload=text_answer},
+  }}
+  local approved = named("test.Approved")
+  local rejected = named("test.Rejected")
+  local decision = {kind="adt",name="test.ApprovalDecision",arguments={},constructors={
+    {name="Approved",payload=approved},{name="Rejected",payload=rejected},
+  }}
+  for _, mod in ipairs({ llm, human, adapter, sink, adt_unpack }) do
     local _, err = reg:register({ declaration = mod.declaration, construct = mod.construct })
     assert_true(err == nil, "shipped factory registers: " .. tostring(err))
   end
   local inv = inventory.new({ log = log, registry = reg })
-
-  -- The lowered gate program (crates/nefor-mag/tests/templates.rs): an entry
-  -- adapter, the namespaced review.* constellation, the sink terminal.
-  local result = inv.apply({
-    actors = {
-      {
-        id = "entry", factory = "adapter",
-        type_arguments = {{kind="named",name="test.Task",arguments={}}},
-        params = { seed = "provider-in" },
-        evidence={version=2,identity="nefor.factory.adapter",arguments={{kind="named",name="test.Task",arguments={}}},input={kind="named",name="test.Task",arguments={}},output={kind="named",name="nefor.contracts.ProviderInput",arguments={}}},
-        input={type={kind="named",name="test.Task",arguments={}},wire="nefor.agent.Input"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
-        routes = { ["generic-provider.ProviderOut"] = { { actor = "review.produce", wire = "generic-provider.ProviderOut" } } },
-      },
-      {
-        id = "review.produce", factory = "llm",
-        type_arguments = {},
-        params = { provider = "chatgpt-provider", model = "opus",
-          output_type = "nefor.contracts.TextAnswer",
-          error_type = "nefor.contracts.AgentError",
-          provider_error_type = "nefor.contracts.ProviderError" },
-        evidence={version=2,identity="nefor.factory.llm",arguments={},input={kind="named",name="nefor.contracts.ProviderInput",arguments={}},output={kind="union",items={{kind="named",name="nefor.contracts.ToolCalls",arguments={}},{kind="named",name="nefor.contracts.TextAnswer",arguments={}}}}},
-        input={type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"},outputs={{type={kind="named",name="nefor.contracts.ToolCalls",arguments={}},wire="generic-tool.ToolCalls"},{type={kind="union",items={named("nefor.contracts.AgentError"),named("nefor.contracts.TextAnswer")}},wire="nefor.agent.Result"}},
-        routes = { ["nefor.agent.Result"] = { { actor = "review.approve", wire = "generic-provider.TextAnswer" } } },
-      },
-      {
-        id = "review.approve", factory = "human", type_arguments = {}, params = { prompt = "Approve this result?" },
-        evidence={version=2,identity="nefor.factory.human",arguments={},input={kind="named",name="nefor.contracts.TextAnswer",arguments={}},output={kind="union",items={{kind="named",name="nefor.contracts.Approved",arguments={}},{kind="named",name="nefor.contracts.Rejected",arguments={}}}}},
-        input={type=named("nefor.contracts.TextAnswer"),wire="generic-provider.TextAnswer"},outputs={{type={kind="named",name="test.Approved",arguments={}},wire="human.Approved"},{type={kind="named",name="test.Rejected",arguments={}},wire="human.Rejected"}},
-        routes = {
-          ["human.Approved"] = { { actor = "sink", wire = "human.Approved" } },
-          ["human.Rejected"] = { { actor = "review.rework", wire = "nefor.agent.Input" } },
-        },
-      },
-      {
-        id = "review.rework", factory = "adapter",
-        type_arguments = {{kind="named",name="test.Rejected",arguments={}}},
-        params = { seed = "provider-in" },
-        evidence={version=2,identity="nefor.factory.adapter",arguments={{kind="named",name="test.Rejected",arguments={}}},input={kind="named",name="test.Rejected",arguments={}},output={kind="named",name="nefor.contracts.ProviderInput",arguments={}}},
-        input={type={kind="named",name="test.Rejected",arguments={}},wire="nefor.agent.Input"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
-        routes = { ["generic-provider.ProviderOut"] = { { actor = "review.produce", wire = "generic-provider.ProviderOut" } } },
-      },
-      { id = "sink", factory = "sink",
-        type_arguments = {{kind="named",name="test.Approved",arguments={}}},
-        params = {}, routes = {},
-        evidence={version=2,identity="nefor.factory.sink",arguments={{kind="named",name="test.Approved",arguments={}}},input={kind="named",name="test.Approved",arguments={}},output={kind="primitive",name="Unit"}},
-        input={type={kind="named",name="test.Approved",arguments={}},wire="human.Approved"},outputs={{type={kind="primitive",name="Unit"},wire="mag.Unit"}} },
-    },
-  })
+  local function evidence(identity, arguments, input, output)
+    return {version=2,identity=identity,arguments=arguments,input=input,output=output}
+  end
+  local result = inv.apply({ actors = {
+    { id="entry", factory="adapter", type_arguments={task},
+      params={seed="provider-in",schema={version=2,root={kind="string"}}},
+      evidence=evidence("nefor.factory.adapter",{task},task,provider_input),
+      input={type=task,wire="nefor.agent.Input"},
+      outputs={{type=provider_input,wire="generic-provider.ProviderOut"}},
+      routes={["generic-provider.ProviderOut"]={{actor="review.produce",wire="generic-provider.ProviderOut"}}} },
+    { id="review.produce", factory="llm", type_arguments={result_type},
+      params={provider="chatgpt-provider",model="opus",output_type="ok-id",
+        error_type="error-id",provider_error_type="provider-error-id"},
+      evidence=evidence("nefor.factory.llm",{result_type},provider_input,result_type),
+      input={type=provider_input,wire="generic-provider.ProviderOut"},
+      outputs={{type=tool_calls,wire="generic-tool.ToolCalls"},{type=result_type,wire="nefor.agent.Result"}},
+      routes={["nefor.agent.Result"]={{actor="review.result",wire="nefor.adt.Value"}}} },
+    { id="review.result", factory="adt-unpack",
+      type_arguments={result_type,agent_error,text_answer},
+      params={owner=result_type,left_payload=agent_error,right_payload=text_answer,
+        left_constructor="Error",right_constructor="Ok"},
+      evidence=evidence("nefor.factory.adt-unpack",{result_type,agent_error,text_answer},result_type,json_value),
+      input={type=result_type,wire="nefor.adt.Value"},
+      outputs={{type=agent_error,wire="nefor.adt.First"},{type=text_answer,wire="nefor.adt.Second"}},
+      routes={["nefor.adt.Second"]={{actor="review.approve",wire="generic-provider.TextAnswer"}}} },
+    { id="review.approve", factory="human", type_arguments={decision},
+      params={prompt="Approve this result?"},
+      evidence=evidence("nefor.factory.human",{decision},text_answer,decision),
+      input={type=text_answer,wire="generic-provider.TextAnswer"},
+      outputs={{type=decision,wire="human.Decision"}},
+      routes={["human.Decision"]={{actor="review.decision",wire="nefor.adt.Value"}}} },
+    { id="review.decision", factory="adt-unpack",
+      type_arguments={decision,approved,rejected},
+      params={owner=decision,left_payload=approved,right_payload=rejected,
+        left_constructor="Approved",right_constructor="Rejected"},
+      evidence=evidence("nefor.factory.adt-unpack",{decision,approved,rejected},decision,json_value),
+      input={type=decision,wire="nefor.adt.Value"},
+      outputs={{type=approved,wire="nefor.adt.First"},{type=rejected,wire="nefor.adt.Second"}},
+      routes={["nefor.adt.First"]={{actor="sink",wire="human.Approved"}},
+        ["nefor.adt.Second"]={{actor="review.rework",wire="nefor.agent.Input"}}} },
+    { id="review.rework", factory="adapter", type_arguments={rejected},
+      params={seed="provider-in",schema={version=2,root={kind="string"}}},
+      evidence=evidence("nefor.factory.adapter",{rejected},rejected,provider_input),
+      input={type=rejected,wire="nefor.agent.Input"},
+      outputs={{type=provider_input,wire="generic-provider.ProviderOut"}},
+      routes={["generic-provider.ProviderOut"]={{actor="review.produce",wire="generic-provider.ProviderOut"}}} },
+    { id="sink", factory="sink", type_arguments={approved}, params={}, routes={},
+      evidence=evidence("nefor.factory.sink",{approved},approved,unit),
+      input={type=approved,wire="human.Approved"},outputs={{type=unit,wire="mag.Unit"}} },
+  } })
   assert_eq(result.ok, true,
-    "the gate template's wiring validates against the shipped factory contracts: "
-    .. tostring(result.error))
+    "the gate template's explicit ADT wiring validates: " .. tostring(result.error))
 end
 
 print("mag-kernel human_test: all assertions passed")

@@ -75,17 +75,23 @@ end
 -- ------------------------------------------------------------------
 
 local function program()
+  local text_answer = {kind="named",name="nefor.contracts.TextAnswer",arguments={}}
+  local agent_error = {kind="named",name="nefor.contracts.AgentError",arguments={}}
+  local result_type = {kind="adt",name="core.types.Result",
+    arguments={agent_error,text_answer},constructors={
+      {name="Error",payload=agent_error},{name="Ok",payload=text_answer},
+    }}
   return {
     actors = {
       {
         id = "agent",
         factory = "llm",
-        type_arguments = {},
+        type_arguments = {result_type},
         params = { model = "m", provider = "prov", system = "answer",
           output_type = "text-answer-id", error_type = "agent-error-id",
           provider_error_type = "provider-error-id" },
-        evidence={version=2,identity="nefor.factory.llm",arguments={},input={kind="named",name="nefor.contracts.ProviderInput",arguments={}},output={kind="union",items={{kind="named",name="nefor.contracts.ToolCalls",arguments={}},{kind="named",name="nefor.contracts.TextAnswer",arguments={}}}}},
-        input={type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"},outputs={{type={kind="named",name="nefor.contracts.ToolCalls",arguments={}},wire="generic-tool.ToolCalls"},{type={kind="union",items={{kind="named",name="nefor.contracts.TextAnswer",arguments={}},{kind="named",name="nefor.contracts.AgentError",arguments={}}}},wire="nefor.agent.Result"}},
+        evidence={version=2,identity="nefor.factory.llm",arguments={result_type},input={kind="named",name="nefor.contracts.ProviderInput",arguments={}},output=result_type},
+        input={type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"},outputs={{type={kind="named",name="nefor.contracts.ToolCalls",arguments={}},wire="generic-tool.ToolCalls"},{type=result_type,wire="nefor.agent.Result"}},
         routes = {},
       },
     },
@@ -210,7 +216,8 @@ assert_eq(b_complete[1].run_id, "run-B", "run_complete carries run_id")
 
 local rc_b = kernel.take_run_complete("run-B")
 assert_true(rc_b ~= nil, "run-B terminal capture is set")
-assert_eq(rc_b.result.value, "answer-B", "run-B's typed result is run-B's answer")
+assert_eq(rc_b.result.value.constructor, "Ok", "run-B selects Ok")
+assert_eq(rc_b.result.value.value, "answer-B", "run-B's typed result is run-B's answer")
 assert_true(kernel.take_run_complete("run-A") == nil,
   "run-A is still in flight — B's completion is not A's")
 

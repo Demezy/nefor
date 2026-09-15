@@ -323,6 +323,12 @@ fn infer(env: &Env, locals: &mut Locals, expr: &Expr) -> Result<MagType, MagErro
             .map_err(MagError::Type)?;
             let left = infer(env, locals, then_branch)?;
             let right = infer(env, locals, else_branch)?;
+            if left == MagType::Never {
+                return Ok(right);
+            }
+            if right == MagType::Never {
+                return Ok(left);
+            }
             compatible(env, &left, &right, &mut HashMap::new()).map_err(|_| {
                 MagError::Type(format!(
                     "if branches must return one compatible type, got {left} and {right}"
@@ -551,7 +557,9 @@ fn infer_match(
         let mut arm_locals = locals.clone();
         add_local(&mut arm_locals, arm.binding.clone(), payload_type)?;
         let body_type = infer(env, &mut arm_locals, &arm.body)?;
-        if let Some(current) = &result {
+        if result.as_ref() == Some(&MagType::Never) && body_type != MagType::Never {
+            result = Some(body_type);
+        } else if let Some(current) = &result {
             compatible(env, &body_type, current, &mut HashMap::new()).map_err(|_| {
                 MagError::Type(format!(
                     "match arms must return one compatible type, got {current} and {body_type}"
@@ -2422,8 +2430,11 @@ fn compile_match(
         )?;
         let mut arm_scopes = scopes.to_vec();
         arm_scopes.push(arm_scope);
-        let body = compile_expr(env, &arm_scopes, &arm_expression.body, result.as_ref())?;
-        if let Some(current) = &result {
+        let arm_expected = result.as_ref().filter(|ty| **ty != MagType::Never);
+        let body = compile_expr(env, &arm_scopes, &arm_expression.body, arm_expected)?;
+        if result.as_ref() == Some(&MagType::Never) && body.ty != MagType::Never {
+            result = Some(body.ty.clone());
+        } else if let Some(current) = &result {
             compatible_static(env, &body.ty, current, &mut HashMap::new()).map_err(|_| {
                 MagError::Type(format!(
                     "match arms must return one compatible type, got {current} and {}",
@@ -2532,15 +2543,21 @@ fn compile_if(
     let condition = compile_expr(env, scopes, condition, Some(&MagType::Bool))?;
     let then_branch = compile_expr(env, scopes, then_expression, expected)?;
     let else_branch = compile_expr(env, scopes, else_expression, expected)?;
-    compatible_static(env, &then_branch.ty, &else_branch.ty, &mut HashMap::new()).map_err(
-        |_| {
-            MagError::Type(format!(
-                "if branches must return one compatible type, got {} and {}",
-                then_branch.ty, else_branch.ty
-            ))
-        },
-    )?;
-    let ty = else_branch.ty.clone();
+    let ty = if then_branch.ty == MagType::Never {
+        else_branch.ty.clone()
+    } else if else_branch.ty == MagType::Never {
+        then_branch.ty.clone()
+    } else {
+        compatible_static(env, &then_branch.ty, &else_branch.ty, &mut HashMap::new()).map_err(
+            |_| {
+                MagError::Type(format!(
+                    "if branches must return one compatible type, got {} and {}",
+                    then_branch.ty, else_branch.ty
+                ))
+            },
+        )?;
+        else_branch.ty.clone()
+    };
     Ok(checked(
         ty,
         CheckedExprKind::If {

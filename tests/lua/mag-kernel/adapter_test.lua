@@ -214,25 +214,24 @@ end
 -- ==================================================================
 
 do
-  local feedback_schema = { version = 1, root = { kind = "union", variants = {
-    { tag = "build-failed-id", schema = {
-      kind = "named", name = "BuildFailed", body = { kind = "record", fields = {} },
-    } },
-    { tag = "need-changes-id", schema = {
-      kind = "named", name = "NeedChanges", body = { kind = "record", fields = {} },
-    } },
-  } } }
+  local feedback_schema = { version = 2, root = { kind = "adt",
+    name = "test.Feedback", owner_id = "feedback-id", constructors = {
+      { name = "BuildFailed", constructor_id = "build-failed-id",
+        schema = { kind = "record", fields = {} } },
+      { name = "NeedChanges", constructor_id = "need-changes-id",
+        schema = { kind = "record", fields = {} } },
+    } } }
   local msgs, emit = capture()
   local inst = adapter.construct("builder.entry", { schema = feedback_schema }, emit)
   inst.deliver({ shape = "union", messages = { {
     from = "build",
     tag = "nefor.agent.Input",
-    message = { value = { stderr = "compile failed" } },
-    arrival = { constructor_id = "build-failed-id" },
+    message = { value = { constructor = "BuildFailed",
+      value = { stderr = "compile failed" } } },
   } } })
 
   local out = find_kind(msgs, "generic-provider.ProviderOut")
-  assert_eq(out.messages[1].content.value.type, "build-failed-id",
+  assert_eq(out.messages[1].content.value.constructor, "BuildFailed",
     "feedback input preserves its selected sum constructor")
   assert_eq(out.messages[1].content.value.value.stderr, "compile failed",
     "feedback input preserves its complete payload")
@@ -261,11 +260,12 @@ end
 
 do
   local task_schema = { kind = "named", name = "Task", body = { kind = "string" } }
-  local answer_schema = { kind = "union", variants = {
-    { tag = "final-id", schema = { kind = "named", name = "TextAnswer", body = { kind = "string" } } },
-    { tag = "error-id", schema = { kind = "named", name = "AgentError", body = { kind = "string" } } },
-  } }
-  local product_schema = { version = 1, root = { kind = "product", components = {
+  local answer_schema = { kind = "adt", name = "core.types.Result",
+    owner_id = "result-id", constructors = {
+      { name = "Error", constructor_id = "error-id", schema = { kind = "string" } },
+      { name = "Ok", constructor_id = "final-id", schema = { kind = "string" } },
+    } }
+  local product_schema = { version = 2, root = { kind = "product", components = {
     task_schema, answer_schema, answer_schema,
   } } }
   local msgs, emit = capture()
@@ -273,10 +273,9 @@ do
   inst.deliver({ shape = "product", messages = {
     { tag = "nefor.agent.Input", message = { value = { prompt = "coordinate" } },
       arrival = { constructor_id = "task-id" } },
-    { tag = "nefor.agent.Input", message = { value = "done" },
-      arrival = { constructor_id = "final-id" } },
-    { tag = "nefor.agent.Input", message = { value = { error = "blocked" } },
-      arrival = { constructor_id = "error-id" } },
+    { tag = "nefor.agent.Input", message = { value = { constructor = "Ok", value = "done" } } },
+    { tag = "nefor.agent.Input", message = { value = { constructor = "Error",
+      value = { error = "blocked" } } } },
   } })
 
   local out = find_kind(msgs, "generic-provider.ProviderOut")
@@ -285,13 +284,13 @@ do
     "position one carries the Task schema")
   assert_eq(out.messages[1].content.value.prompt, "coordinate",
     "position one includes the complete Task value")
-  assert_eq(out.messages[2].content.mag_type.root.kind, "union",
+  assert_eq(out.messages[2].content.mag_type.root.kind, "adt",
     "position two carries its own union schema")
-  assert_eq(out.messages[2].content.value.type, "final-id",
+  assert_eq(out.messages[2].content.value.constructor, "Ok",
     "position two preserves the selected TextAnswer constructor")
   assert_eq(out.messages[2].content.value.value, "done",
     "position two includes the TextAnswer payload")
-  assert_eq(out.messages[3].content.value.type, "error-id",
+  assert_eq(out.messages[3].content.value.constructor, "Error",
     "position three preserves the selected AgentError constructor")
   assert_eq(out.messages[3].content.value.value.error, "blocked",
     "position three includes the complete AgentError payload")
@@ -323,11 +322,11 @@ end
 -- ==================================================================
 
 do
-  local product_schema = { version = 1, root = { kind = "product", components = {
+  local product_schema = { version = 2, root = { kind = "product", components = {
     { kind = "named", name = "Task", body = { kind = "string" } },
-    { kind = "union", variants = {
-      { tag = "final-id", schema = { kind = "named", name = "TextAnswer", body = { kind = "string" } } },
-      { tag = "error-id", schema = { kind = "named", name = "AgentError", body = { kind = "string" } } },
+    { kind = "adt", name = "core.types.Result", owner_id = "result-id", constructors = {
+      { name = "Error", constructor_id = "error-id", schema = { kind = "string" } },
+      { name = "Ok", constructor_id = "final-id", schema = { kind = "record", fields = {} } },
     } },
   } } }
   local provider_messages, provider_emit = capture()
@@ -354,11 +353,10 @@ do
   entry.deliver({ shape = "product", messages = {
     { tag = "nefor.agent.Input", message = { value = { prompt = "go" } } },
     { tag = "nefor.agent.Input", message = {
-        value = { content = string.rep("v", 2048) },
+        value = { constructor = "Ok", value = { content = string.rep("v", 2048) } },
         transcript_delta = { { role = "tool", content = string.rep("x", 2 * 1024 * 1024) } },
         result = { raw_log = string.rep("y", 2 * 1024 * 1024) },
-      },
-      arrival = { constructor_id = "final-id" } },
+      } },
   } })
 
   local invoke = find_kind(provider_messages, "capability.invoke")
@@ -369,7 +367,7 @@ do
   assert_eq(#history, 2, "the adapter's native message list is recorded once")
   assert_eq(history[1].content.mag_type.root.name, "Task",
     "canonical position one retains the Task envelope")
-  assert_eq(history[2].content.value.type, "final-id",
+  assert_eq(history[2].content.value.constructor, "Ok",
     "canonical position two retains constructor identity")
   assert_eq(#history[2].content.value.value.content, 2048,
     "canonical context receives the final value")
