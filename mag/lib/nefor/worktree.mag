@@ -1,47 +1,25 @@
-(require "nefor.graph")
+import nefor.graph.{}
 
-(type CreateSpec {:repository String
-                  :path String
-                  :branch String
-                  :base String})
-(type OpenSpec {:repository String
-                :path String
-                :branch String})
-(type Worktree {:repository String
-                :path String
-                :branch String
-                :head String})
-(type WorktreeError {:operation String
-                     :kind String
-                     :message String})
+type CreateSpec {repository: String, path: String, branch: String, base: String}
 
-(let create-factory "nefor.factory.worktree-create")
-(let open-factory "nefor.factory.worktree-open")
+type OpenSpec {repository: String, path: String, branch: String}
 
-(let create (fn [[id String] [spec CreateSpec]] -> (nefor.graph.Node Unit Worktree)
-  (let input (nefor.graph.port id (type-tag Unit) "mag.Unit"))
-  (let output (nefor.graph.port id (type-tag Worktree) "nefor.worktree.Ready"))
-  (as (nefor.graph.Node Unit Worktree)
-      {:id id :role "ordinary" :actors [(nefor.graph.actor id create-factory [] spec
-                  (nefor.graph.store-port input)
-                  [(nefor.graph.store-port output)])]
-       :routes (as (List nefor.graph.StoredRoute) [])
-       :messages []
-       :operations []
-       :nodes [(nefor.graph.logical-node [id] [id])]
-       :input input
-       :output output})))
+type Worktree {repository: String, path: String, branch: String, head: String}
 
-(let open (fn [[id String] [spec OpenSpec]] -> (nefor.graph.Node Unit Worktree)
-  (let input (nefor.graph.port id (type-tag Unit) "mag.Unit"))
-  (let output (nefor.graph.port id (type-tag Worktree) "nefor.worktree.Ready"))
-  (as (nefor.graph.Node Unit Worktree)
-      {:id id :role "ordinary" :actors [(nefor.graph.actor id open-factory [] spec
-                  (nefor.graph.store-port input)
-                  [(nefor.graph.store-port output)])]
-       :routes (as (List nefor.graph.StoredRoute) [])
-       :messages []
-       :operations []
-       :nodes [(nefor.graph.logical-node [id] [id])]
-       :input input
-       :output output})))
+type WorktreeError {operation: String, kind: String, message: String}
+
+let `create-factory` = "nefor.factory.worktree-create"
+
+let `open-factory` = "nefor.factory.worktree-open"
+
+let create: fn(String, CreateSpec) -> nefor.graph.Node<Unit, Worktree> = |id, spec| => {
+  let input = nefor.graph.port(id, type_tag<Unit>(), "mag.Unit")
+  let output = nefor.graph.port(id, type_tag<Worktree>(), "nefor.worktree.Ready")
+  nefor.graph.Node<Unit, Worktree> {id: id, role: "ordinary", actors: [nefor.graph.actor(id, `create-factory`, [], spec, nefor.graph.`store-port`(input), [nefor.graph.`store-port`(output)])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.`logical-node`([id], [id])], input: input, output: output}
+}
+
+let open: fn(String, OpenSpec) -> nefor.graph.Node<Unit, Worktree> = |id, spec| => {
+  let input = nefor.graph.port(id, type_tag<Unit>(), "mag.Unit")
+  let output = nefor.graph.port(id, type_tag<Worktree>(), "nefor.worktree.Ready")
+  nefor.graph.Node<Unit, Worktree> {id: id, role: "ordinary", actors: [nefor.graph.actor(id, `open-factory`, [], spec, nefor.graph.`store-port`(input), [nefor.graph.`store-port`(output)])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.`logical-node`([id], [id])], input: input, output: output}
+}

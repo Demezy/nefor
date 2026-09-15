@@ -1,4 +1,6 @@
-use nefor_mag::compile_file_with_inputs_and_module_roots;
+use nefor_mag::{
+    compile_file_with_inputs_and_module_roots_and_options_and_syntax, CompilerOptions, SyntaxMode,
+};
 use serde_json::{json, Value};
 use std::fs;
 
@@ -37,19 +39,43 @@ fn run(name: &str, source: &str, inputs: Value) -> Value {
     let root = workspace(name);
     fs::write(root.join("main.mag"), source).unwrap();
     let mag_lib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
-    compile_file_with_inputs_and_module_roots(&root, "main.mag", inputs, &[root.clone(), mag_lib])
-        .unwrap()
+    compile_file_with_inputs_and_module_roots_and_options_and_syntax(
+        &root,
+        "main.mag",
+        inputs,
+        &[root.clone(), mag_lib],
+        CompilerOptions::default(),
+        SyntaxMode::Lisp,
+    )
+    .unwrap()
+}
+
+fn run_new(name: &str, source: &str, inputs: Value) -> Value {
+    let root = workspace(name);
+    fs::write(root.join("main.mag"), source).unwrap();
+    let mag_lib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
+    compile_file_with_inputs_and_module_roots_and_options_and_syntax(
+        &root,
+        "main.mag",
+        inputs,
+        &[root.clone(), mag_lib],
+        CompilerOptions::default(),
+        SyntaxMode::New,
+    )
+    .unwrap()
 }
 
 fn run_error(name: &str, source: &str) -> String {
     let root = workspace(name);
     fs::write(root.join("main.mag"), source).unwrap();
     let mag_lib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
-    compile_file_with_inputs_and_module_roots(
+    compile_file_with_inputs_and_module_roots_and_options_and_syntax(
         &root,
         "main.mag",
         json!({}),
         &[root.clone(), mag_lib],
+        CompilerOptions::default(),
+        SyntaxMode::Lisp,
     )
     .unwrap_err()
     .to_string()
@@ -595,8 +621,51 @@ fn nefor_artifact_emits_exact_versioned_program_and_delta_envelopes() {
 }
 
 #[test]
+fn compile_graph_closes_one_terminal_through_existing_graph_values() {
+    let explicit = run_new(
+        "compile-graph-explicit",
+        r#"
+import nefor.artifact.{}
+import nefor.graph.{}
+let start = nefor.graph.source("start", type_tag<String>(), "hello")
+let result = nefor.graph.`output-for`("result", start)
+let close: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| =>
+  nefor.graph.`add-edges`(graph, [nefor.graph.edge(start, result)])
+nefor.artifact.compile(close)
+"#,
+        contracts(json!([])),
+    );
+    let convenient = run_new(
+        "compile-graph-convenient",
+        r#"
+import nefor.artifact.{}
+import nefor.graph.{}
+let start = nefor.graph.source("start", type_tag<String>(), "hello")
+nefor.artifact.compile_graph(start)
+"#,
+        contracts(json!([])),
+    );
+
+    assert_eq!(convenient, explicit);
+    assert_eq!(convenient["format"], "nefor.mag");
+    assert_eq!(convenient["version"], 2);
+    assert_eq!(convenient["kind"], "program");
+    assert_eq!(
+        convenient["program"]["initial"]["actors"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        convenient["program"]["initial"]["result"]["from"]["actor"],
+        "result"
+    );
+}
+
+#[test]
 fn unit_sum_root_cache_preserves_actual_activation_evidence() {
-    use nefor_mag::project_cache::{build, CachePolicy, CacheStatus};
+    use nefor_mag::project_cache::{build_with_syntax, CachePolicy, CacheStatus};
     let root = workspace("unit-sum-cache");
     let roots = [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib")];
     fs::write(
@@ -613,7 +682,7 @@ fn unit_sum_root_cache_preserves_actual_activation_evidence() {
     )
     .unwrap();
     let compile = |policy| {
-        build(
+        build_with_syntax(
             nefor_mag::FileCompileRequest {
                 source_dir: &root,
                 entry: "main.mag",
@@ -624,6 +693,7 @@ fn unit_sum_root_cache_preserves_actual_activation_evidence() {
             1,
             policy,
             None,
+            SyntaxMode::Lisp,
         )
         .unwrap()
     };

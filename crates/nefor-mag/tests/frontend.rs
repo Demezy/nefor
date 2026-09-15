@@ -74,6 +74,22 @@ artifact(label)
 }
 
 #[test]
+fn generic_functions_can_construct_generic_nominal_records() {
+    let artifact = compile_with_syntax(
+        r#"
+type Box<T> {value: T}
+let boxed<T>: fn(T) -> Box<T> = |value| => Box<T> {value: value}
+artifact(boxed("value"))
+"#,
+        Path::new("."),
+        SyntaxMode::New,
+    )
+    .unwrap();
+
+    assert_eq!(artifact, serde_json::json!({"value": "value"}));
+}
+
+#[test]
 fn nary_functions_are_not_adapted_when_used_infix() {
     let error = compile_with_syntax(
         r#"

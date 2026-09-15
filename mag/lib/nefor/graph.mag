@@ -1,1547 +1,680 @@
-(require "core.map")
-(require "core.set")
-(require "core.validated")
-(require "nefor.contracts")
-(require "nefor.mag")
+import core.map.{}
 
-;; A graph is an immutable edge set. The list is a deterministic storage
-;; detail: graph/add-edges/remove-edges normalize it to set semantics.
-(type Port [T] {:actor String :type (TypeTag T) :wire String})
-(type StoredPort {:actor String
-                  :type TypeDescriptor
-                  :type_id SemanticTypeId
-                  :wire String})
-(type Actor {:id String
-             :factory String
-             :type_arguments (List TypeDescriptor)
-             :params PackedValue
-             :input StoredPort
-             :outputs (List StoredPort)})
-(type StoredRoute {:id String :from StoredPort :to StoredPort})
-(type Message {:to StoredPort
-               :semantic_type TypeDescriptor
-               :semantic_type_id SemanticTypeId
-               :content PackedValue})
-(type LogicalNode {:path (List String) :members (List String)})
-(type StoredNode {:id String
-                  :role String
-                  :actors (List Actor)
-                  :routes (List StoredRoute)
-                  :messages (List Message)
-                  :operations (List nefor.mag.ProgramOperation)
-                  :nodes (List LogicalNode)
-                  :input StoredPort
-                  :output StoredPort})
-(type Node [I O] {:id String
-                  :role String
-                  :actors (List Actor)
-                  :routes (List StoredRoute)
-                  :messages (List Message)
-                  :operations (List nefor.mag.ProgramOperation)
-                  :nodes (List LogicalNode)
-                  :input (Port I)
-                  :output (Port O)})
-(type Edge {:from StoredNode :to StoredNode :route StoredRoute})
-(type Graph {:edges (List Edge)})
-(type GraphAnalysis
-  {:edges (List Edge)
-   :all_nodes (List StoredNode)
-   :nodes (List StoredNode)
-   :nodes_by_id (Map String (List StoredNode))
-   :actors (List Actor)
-   :actors_by_id (Map String (List Actor))
-   :input_actors_by_address (Map String (List Actor))
-   :output_ports_by_address (Map String (List StoredPort))
-   :routes (List StoredRoute)
-   :route_input_addresses (List String)
-   :diagnostic_routes_by_input (Map String (List StoredRoute))
-   :routes_by_input (Map String (List StoredRoute))
-   :routes_by_output (Map String (List StoredRoute))
-   :routes_by_source_actor (Map String (List StoredRoute))
-   :messages (List Message)
-   :messages_by_input (Map String (List Message))
-   :graph_operations (List nefor.mag.ProgramOperation)
-   :graph_operations_by_output (Map String (List nefor.mag.ProgramOperation))
-   :edges_by_from_node (Map String (List Edge))
-   :edges_by_to_node (Map String (List Edge))
-   :roots (List StoredNode)
-   :outputs (List StoredNode)
-   :terminal_outputs_by_full_port (Map String (List StoredNode))})
-(type GraphProjection
-  {:edges (List Edge)
-   :all_nodes (List StoredNode)
-   :nodes (List StoredNode)
-   :actors (List Actor)
-   :routes (List StoredRoute)
-   :messages (List Message)
-   :graph_operations (List nefor.mag.ProgramOperation)
-   :logical_nodes (List LogicalNode)
-   :edges_by_from_node (Map String (List Edge))
-   :edges_by_to_node (Map String (List Edge))
-   :roots (List StoredNode)
-   :outputs (List StoredNode)})
-(type LoweringAnalysis
-  {:actors (List Actor)
-   :routes (List StoredRoute)
-   :route_input_addresses (List String)
-   :routes_by_input (Map String (List StoredRoute))
-   :messages (List Message)
-   :operations (List nefor.mag.ProgramOperation)
-   :logical_nodes (List LogicalNode)
-   :outputs (List StoredNode)})
+import core.set.{}
 
-(type OrderedNodes {:seen (Set String) :values (List StoredNode)})
-(type OrderedStrings {:seen (Set String) :values (List String)})
-(type ReachabilityState
-  {:visited (Set String) :frontier (List String)})
-(type IndexedPosition {:index String :position Int})
+import core.validated.{}
 
-(type FactoryTypeScheme {:input_tags (List String)
-                         :outputs (List String)})
-(type FactoryContract {:identity String
-                       :type_scheme FactoryTypeScheme})
-(type SourceParams [T] {:value T :value_type SemanticTypeId})
-(type OutputParams {})
-(type LowerDestination {:actor String
-                        :wire String
-                        :edge_id String
-                        :source_type_id SemanticTypeId
-                        :destination_type_id SemanticTypeId
-                        :product_position Int})
-(type AssignedRoute {:route StoredRoute :product_position Int})
-(type LowerActor {:id String
-                  :factory String
-                  :type_arguments (List TypeDescriptor)
-                  :input StoredPort
-                  :outputs (List StoredPort)
-                  :params PackedValue
-                  :routes (Map String (List LowerDestination))})
-(type LowerMessage {:to String
-                    :semantic_type TypeDescriptor
-                    :semantic_type_id SemanticTypeId
-                    :content PackedValue})
-(type ResultBoundary {:from StoredPort})
-(type RouteIdentity {:from StoredPort :to StoredPort})
-(type MessageContent [T] {:kind String :value T})
-(type EdgeIdentity {:from-node String :to-node String :route StoredRoute})
-(type PortAddressIdentity {:actor String :wire String})
-(type RouteSourceDescription {:kind String :from String :type TypeDescriptor})
-(type RouteHandlerDescription {:kind String :to String :type TypeDescriptor})
-(type OperationDescription {:kind String :id String :type TypeDescriptor})
-(type OutputCoverageDescription
-  {:actor String :output String :output_type TypeDescriptor
-   :available_handlers (List String) :reason String})
-(type InputCoverageDescription
-  {:actor String :input String :expected_type TypeDescriptor
-   :incoming_sources (List String) :reason String})
-(type RouteAssignmentIdentity {:input String :route String})
-(type RootValidationDescription
-  {:node String :input String :input_type TypeDescriptor :reason String})
-(type Modification {:actors (List LowerActor)
-                    :messages (List LowerMessage)
-                    :kills (List String)
-                    :types (Map String TypeDescriptor)
-                    :nodes (List LogicalNode)
-                    :result ResultBoundary})
+import nefor.contracts.{}
 
-;; Delta artifacts are an operation format over the running actor kernel. They
-;; are deliberately not Graph values and are not exposed as graph mutation. Authored graph changes are code changes to a pure Graph -> Graph
-;; transformation and execute as a fresh run.
-(type Delta {:actors (List Actor)
-             :routes (List StoredRoute)
-             :messages (List Message)
-             :nodes (List LogicalNode)
-             :kills (List String)})
-(type LowerDelta {:actors (List LowerActor)
-                  :messages (List LowerMessage)
-                  :kills (List String)
-                  :types (Map String TypeDescriptor)
-                  :nodes (List LogicalNode)})
+import nefor.mag.{}
 
-(let port (fn [T] [[actor String] [semantic-type (TypeTag T)] [wire-type String]] -> (Port T)
-  (as (Port T) {:actor actor :type semantic-type :wire wire-type})))
+// A graph is an immutable edge set. The list is a deterministic storage
+// detail: graph/add-edges/remove-edges normalize it to set semantics.
+type Port<T> {actor: String, `type`: TypeTag<T>, wire: String}
 
-(let store-port (fn [T] [[value (Port T)]] -> StoredPort
-  (let descriptor (type-evidence (get value "type")))
-  (as StoredPort {:actor (get value "actor")
-                    :type descriptor
-                    :type_id (type-id descriptor)
-                    :wire (get value "wire")})))
+type StoredPort {actor: String, `type`: TypeDescriptor, type_id: SemanticTypeId, wire: String}
 
-(let actor (fn [P] [[id String] [factory String]
-                [type-arguments (List TypeDescriptor)] [params P]
-                [input StoredPort] [outputs (List StoredPort)]] -> Actor
-  (as Actor {:id id :factory factory
-             :type_arguments type-arguments
-             :params (pack params) :input input :outputs outputs})))
+type Actor {id: String, factory: String, type_arguments: List<TypeDescriptor>, params: PackedValue, input: StoredPort, outputs: List<StoredPort>}
 
-(let actor-ids (fn [[actors (List Actor)]] -> (List String)
-  (map (fn [[candidate Actor]] -> String (get candidate "id")) actors)))
-(let logical-node (fn [[path (List String)] [actors (List String)]] -> LogicalNode
-  (as LogicalNode {:path path :members actors})))
-(let prefix-logical-node (fn [[name String] [value LogicalNode]] -> LogicalNode
-  (logical-node (concat [name] (get value "path")) (get value "members"))))
-(let prefix-logical-nodes
-  (fn [[name String] [values (List LogicalNode)]] -> (List LogicalNode)
-    (map (fn [[value LogicalNode]] -> LogicalNode
-           (prefix-logical-node name value)) values)))
-(let attach-logical-members
-  (fn [[values (List LogicalNode)] [members (List String)]] -> (List LogicalNode)
-    (if (= (count values) 0)
-      []
-      (concat
-        [(logical-node (get (first values) "path")
-           (concat (get (first values) "members") members))]
-        (remove-at values 0)))))
-(let node-with-operations-and-nodes
-  (fn [I O] [[id String] [role String] [actors (List Actor)]
-             [routes (List StoredRoute)] [messages (List Message)]
-             [operations (List nefor.mag.ProgramOperation)] [nodes (List LogicalNode)]
-             [input (Port I)] [output (Port O)]]
-    -> (Node I O)
-    (as (Node I O) {:id id :role role :actors actors :routes routes
-                    :messages messages :operations operations :nodes nodes
-                    :input input :output output})))
+type StoredRoute {id: String, from: StoredPort, to: StoredPort}
 
-(let node (fn [I O] [[id String] [role String] [actors (List Actor)]
-                     [routes (List StoredRoute)] [messages (List Message)]
-                     [input (Port I)] [output (Port O)]] -> (Node I O)
-  (node-with-operations-and-nodes id role actors routes messages []
-    [(logical-node [id] (actor-ids actors))] input output)))
+type Message {to: StoredPort, semantic_type: TypeDescriptor, semantic_type_id: SemanticTypeId, content: PackedValue}
 
-(let node-with-operations
-  (fn [I O] [[id String] [role String] [actors (List Actor)]
-             [routes (List StoredRoute)] [messages (List Message)]
-             [operations (List nefor.mag.ProgramOperation)] [input (Port I)] [output (Port O)]]
-    -> (Node I O)
-    (node-with-operations-and-nodes id role actors routes messages operations
-      [(logical-node [id] (actor-ids actors))] input output)))
+type LogicalNode {path: List<String>, members: List<String>}
 
-(let with-operation
-  (fn [I O] [[value (Node I O)] [subscription nefor.mag.ProgramOperation]] -> (Node I O)
-    (node-with-operations-and-nodes
-      (get value "id") (get value "role")
-      (get value "actors") (get value "routes") (get value "messages")
-      (concat (get value "operations") [subscription])
-      (get value "nodes")
-      (get value "input") (get value "output"))))
+type StoredNode {id: String, role: String, actors: List<Actor>, routes: List<StoredRoute>, messages: List<Message>, operations: List<nefor.mag.ProgramOperation>, nodes: List<LogicalNode>, input: StoredPort, output: StoredPort}
 
-(let store-node (fn [I O] [[value (Node I O)]] -> StoredNode
-  (as StoredNode {:id (get value "id") :role (get value "role")
-                  :actors (get value "actors") :routes (get value "routes")
-                  :messages (get value "messages")
-                  :operations (get value "operations")
-                  :nodes (get value "nodes")
-                  :input (store-port (get value "input"))
-                  :output (store-port (get value "output"))})))
+type Node<I, O> {id: String, role: String, actors: List<Actor>, routes: List<StoredRoute>, messages: List<Message>, operations: List<nefor.mag.ProgramOperation>, nodes: List<LogicalNode>, input: Port<I>, output: Port<O>}
 
-(let stored-route (fn [A B] [[from (Port A)] [to (Port B)]] -> StoredRoute
-  (let stored-from (store-port from))
-  (let stored-to (store-port to))
-  (as StoredRoute
-      {:id (canonical (as RouteIdentity {:from stored-from :to stored-to}))
-       :from stored-from
-       :to stored-to})))
+type Edge {from: StoredNode, to: StoredNode, route: StoredRoute}
 
-(let edge (fn [I T U O] [[from (Node I T)] [to (Node U O)]] -> Edge
-  (as Edge {:from (store-node from) :to (store-node to)
-            :route (stored-route (get from "output") (get to "input"))})))
+type Graph {edges: List<Edge>}
 
-(let stored-message (fn [P] [[to StoredPort] [content P]] -> Message
-  (as Message {:to to
-               :semantic_type (get to "type")
-               :semantic_type_id (get to "type_id")
-               :content (pack content)})))
-(let message (fn [T P] [[to (Port T)] [content P]] -> Message
-  (stored-message (store-port to) content)))
-(let typed-message (fn [T] [[to (Port T)] [value T]] -> Message
-  (let stored (store-port to))
-  (let selected (value-type-evidence value (get stored "type")))
-  (as Message {:to stored
-                 :semantic_type selected
-                 :semantic_type_id (type-id selected)
-                 :content (pack (as (MessageContent T) {:kind (get to "wire") :value value}))})))
-(let instantiate-delta-template
-  (fn [T] [[id String] [on (Port T)]
-           [captures (Map String nefor.mag.TypedCapture)]
-           [expressions (List nefor.mag.Expression)]
-           [template nefor.mag.DeltaTemplate]] -> nefor.mag.ProgramOperation
-    (let stored (store-port on))
-    (as nefor.mag.ProgramOperation
-      {:id id
-       :on_actor (get stored "actor")
-       :on_wire (get stored "wire")
-       :trigger_type (get stored "type")
-       :trigger_type_id (get stored "type_id")
-       :captures captures
-       :expressions expressions
-       :template template})))
-(let operation-port (fn [[value nefor.mag.ProgramOperation]] -> StoredPort
-  (as StoredPort {:actor (get value "on_actor")
-                  :type (get value "trigger_type")
-                  :type_id (get value "trigger_type_id")
-                  :wire (get value "on_wire")})))
-(let source-factory "nefor.factory.source")
-(let source (fn [T] [[id String] [type (TypeTag T)] [value T]] -> (Node Unit T)
-  (let input (port id (type-tag Unit) "mag.Unit"))
-  (let output (port id type "nefor.graph.Value"))
-  (let source-actor (actor id source-factory [(type-evidence type)]
-                       (as (SourceParams T)
-                         {:value value :value_type (value-type-id value type)})
-                       (store-port input) [(store-port output)]))
-  (node id "source" [source-actor] (as (List StoredRoute) [])
-      (as (List Message) []) input output)))
+type GraphAnalysis {edges: List<Edge>, all_nodes: List<StoredNode>, nodes: List<StoredNode>, nodes_by_id: Map<String, List<StoredNode>>, actors: List<Actor>, actors_by_id: Map<String, List<Actor>>, input_actors_by_address: Map<String, List<Actor>>, output_ports_by_address: Map<String, List<StoredPort>>, routes: List<StoredRoute>, route_input_addresses: List<String>, diagnostic_routes_by_input: Map<String, List<StoredRoute>>, routes_by_input: Map<String, List<StoredRoute>>, routes_by_output: Map<String, List<StoredRoute>>, routes_by_source_actor: Map<String, List<StoredRoute>>, messages: List<Message>, messages_by_input: Map<String, List<Message>>, graph_operations: List<nefor.mag.ProgramOperation>, graph_operations_by_output: Map<String, List<nefor.mag.ProgramOperation>>, edges_by_from_node: Map<String, List<Edge>>, edges_by_to_node: Map<String, List<Edge>>, roots: List<StoredNode>, outputs: List<StoredNode>, terminal_outputs_by_full_port: Map<String, List<StoredNode>>}
 
-(let output-factory "nefor.factory.output")
-(let output (fn [T] [[id String] [type (TypeTag T)]] -> (Node T T)
-  (let input (port id type "nefor.graph.Value"))
-  (let result (port id type "nefor.graph.Value"))
-  (let output-actor (actor id output-factory [(type-evidence type)]
-                       (as OutputParams {})
-                       (store-port input) [(store-port result)]))
-  (node id "output" [output-actor]
-      (as (List StoredRoute) []) (as (List Message) []) input result)))
+type GraphProjection {edges: List<Edge>, all_nodes: List<StoredNode>, nodes: List<StoredNode>, actors: List<Actor>, routes: List<StoredRoute>, messages: List<Message>, graph_operations: List<nefor.mag.ProgramOperation>, logical_nodes: List<LogicalNode>, edges_by_from_node: Map<String, List<Edge>>, edges_by_to_node: Map<String, List<Edge>>, roots: List<StoredNode>, outputs: List<StoredNode>}
 
-;; An ordinary identity node is the boundary adapter used by hierarchical
-;; node combinators. The runtime factory already forwards one typed value; the
-;; distinct role keeps this reusable internal node out of the graph's terminal
-;; output semantics.
-(let identity (fn [T] [[id String] [type (TypeTag T)]] -> (Node T T)
-  (let input (port id type "nefor.graph.Value"))
-  (let result (port id type "nefor.graph.Value"))
-  (let identity-actor (actor id output-factory [(type-evidence type)]
-                         (as OutputParams {})
-                         (store-port input) [(store-port result)]))
-  (node id "ordinary" [identity-actor]
-      (as (List StoredRoute) []) (as (List Message) []) input result)))
+type LoweringAnalysis {actors: List<Actor>, routes: List<StoredRoute>, route_input_addresses: List<String>, routes_by_input: Map<String, List<StoredRoute>>, messages: List<Message>, operations: List<nefor.mag.ProgramOperation>, logical_nodes: List<LogicalNode>, outputs: List<StoredNode>}
 
-(let output-for (fn [I T] [[id String] [from (Node I T)]] -> (Node T T)
-  (output id (get (get from "output") "type"))))
+type OrderedNodes {seen: Set<String>, values: List<StoredNode>}
 
-(let same-edge? (fn [[left Edge] [right Edge]] -> Bool
-  (if (= (get (get left "from") "id") (get (get right "from") "id"))
-    (if (= (get (get left "to") "id") (get (get right "to") "id"))
-      (serialized-equal? (get left "route") (get right "route")) false)
-    false)))
-(let edge-key (fn [[value Edge]] -> String
-  (canonical (as EdgeIdentity {:from-node (get (get value "from") "id")
-              :to-node (get (get value "to") "id")
-              :route (get value "route")}))))
-(let edge-in? (fn [[edges (List Edge)] [candidate Edge]] -> Bool
-  (not (= (count (filter (fn [[value Edge]] -> Bool
-                           (same-edge? value candidate)) edges)) 0))))
-(let same-edge-definition? (fn [[left Edge] [right Edge]] -> Bool
-  (serialized-equal? left right)))
-(let insert-edge (fn [[edges (List Edge)] [candidate Edge]] -> (List Edge)
-  ;; Equal logical edges are set-idempotent. A duplicate logical edge whose
-  ;; embedded node definition differs is retained long enough for validate to
-  ;; reject the conflicting node identity; silently dropping it would hide an
-  ;; invalid graph behind normalization.
-  (if (edge-in? edges candidate)
-    (if (not (= (count (filter (fn [[value Edge]] -> Bool
-                                  (same-edge-definition? value candidate))
-                                edges)) 0))
-      edges
-      (concat edges [candidate]))
-    (concat edges [candidate]))))
-(let insert-edge-definition
-  (fn [[definitions (List Edge)] [candidate Edge]] -> (List Edge)
-    (if (= (count (filter (fn [[value Edge]] -> Bool
-                            (same-edge-definition? value candidate))
-                          definitions)) 0)
-      (concat definitions [candidate])
-      definitions)))
-(let normalize-edges (fn [[edges (List Edge)]] -> (List Edge)
-  (fold insert-edge (as (List Edge) []) edges)))
+type OrderedStrings {seen: Set<String>, values: List<String>}
 
-(let serialized-equal? (fn [T] [[left T] [right T]] -> Bool
-  (= (canonical left) (canonical right))))
+type ReachabilityState {visited: Set<String>, frontier: List<String>}
 
-(let empty-graph (as Graph {:edges (as (List Edge) [])}))
-(let graph (fn [[edges (List Edge)]] -> Graph
-  (as Graph {:edges (normalize-edges edges)})))
-(let add-edges (fn [[value Graph] [added (List Edge)]] -> Graph
-  (graph (concat (get value "edges") added))))
-(let remove-edges (fn [[value Graph] [removed (List Edge)]] -> Graph
-  (graph (filter (fn [[candidate Edge]] -> Bool
-                   (not (edge-in? removed candidate)))
-                 (get value "edges")))))
-(let port-address-key (fn [[value StoredPort]] -> String
-  (canonical (as PortAddressIdentity {:actor (get value "actor") :wire (get value "wire")}))))
-(let full-port-key (fn [[value StoredPort]] -> String (canonical value)))
-(let node-id (fn [[value StoredNode]] -> String (get value "id")))
-(let actor-id (fn [[value Actor]] -> String (get value "id")))
-(let route-id (fn [[value StoredRoute]] -> String (get value "id")))
-(let contract-id (fn [[value FactoryContract]] -> String (get value "identity")))
+type IndexedPosition {index: String, position: Int}
 
-(let nodes-from-edge (fn [[value Edge]] -> (List StoredNode)
-  [(get value "from") (get value "to")]))
-(let insert-ordered-node
-  (fn [[state OrderedNodes] [candidate StoredNode]] -> OrderedNodes
-    (let id (node-id candidate))
-    (if (core.set.contains? (get state "seen") id)
-      state
-      (as OrderedNodes
-        {:seen (core.set.insert (get state "seen") id)
-         :values (concat (get state "values") [candidate])}))))
-(let ordered-nodes (fn [[values (List StoredNode)]] -> (List StoredNode)
-  (get
-    (fold insert-ordered-node
-      (as OrderedNodes
-        {:seen (core.set.empty (type-tag String))
-         :values (as (List StoredNode) [])})
-      values)
-    "values")))
-(let insert-ordered-string
-  (fn [[state OrderedStrings] [candidate String]] -> OrderedStrings
-    (if (core.set.contains? (get state "seen") candidate)
-      state
-      (as OrderedStrings
-        {:seen (core.set.insert (get state "seen") candidate)
-         :values (concat (get state "values") [candidate])}))))
-(let ordered-strings (fn [[values (List String)]] -> (List String)
-  (get
-    (fold insert-ordered-string
-      (as OrderedStrings
-        {:seen (core.set.empty (type-tag String))
-         :values (as (List String) [])})
-      values)
-    "values")))
+type FactoryTypeScheme {input_tags: List<String>, outputs: List<String>}
 
-(let external-routes (fn [[value Graph]] -> (List StoredRoute)
-  (map (fn [[candidate Edge]] -> StoredRoute (get candidate "route"))
-       (get value "edges"))))
-(let graph-projection (fn [[value Graph]] -> GraphProjection
-  (let edges (get value "edges"))
-  (let edges-by-from-node
-    (group-by
-      (fn [[candidate Edge]] -> String
-        (node-id (get candidate "from")))
-      edges))
-  (let edges-by-to-node
-    (group-by
-      (fn [[candidate Edge]] -> String
-        (node-id (get candidate "to")))
-      edges))
-  (let all-nodes (flat-map nodes-from-edge edges))
-  (let nodes (ordered-nodes all-nodes))
-  (let roots
-    (filter (fn [[candidate StoredNode]] -> Bool
-              (= (count
-                   (__map-get-or edges-by-to-node (node-id candidate)
-                       (as (List Edge) [])))
-                 0))
-            nodes))
-  (let actors
-    (flat-map (fn [[candidate StoredNode]] -> (List Actor)
-                (get candidate "actors"))
-              nodes))
-  (let internal-routes
-    (flat-map (fn [[candidate StoredNode]] -> (List StoredRoute)
-                (get candidate "routes"))
-              nodes))
-  (let routes (concat internal-routes (external-routes value)))
-  (let authored-messages
-    (flat-map (fn [[candidate StoredNode]] -> (List Message)
-                (get candidate "messages"))
-              nodes))
-  (let messages
-    (concat authored-messages
-      (bootstrap-messages
-        (map (fn [[candidate StoredNode]] -> StoredPort (get candidate "input")) roots)
-        routes authored-messages)))
-  (let graph-operations
-    (flat-map (fn [[candidate StoredNode]] -> (List nefor.mag.ProgramOperation)
-                (get candidate "operations"))
-              nodes))
-  (let logical-nodes
-    (flat-map (fn [[candidate StoredNode]] -> (List LogicalNode)
-                (get candidate "nodes"))
-              nodes))
-  (as GraphProjection
-    {:edges edges
-     :all_nodes all-nodes
-     :nodes nodes
-     :actors actors
-     :routes routes
-     :messages messages
-     :graph_operations graph-operations
-     :logical_nodes logical-nodes
-     :edges_by_from_node edges-by-from-node
-     :edges_by_to_node edges-by-to-node
-     :roots roots
-     :outputs
-       (filter (fn [[candidate StoredNode]] -> Bool
-                 (= (get candidate "role") "output"))
-               nodes)})))
-(let analyze-for-lowering (fn [[value Graph]] -> LoweringAnalysis
-  (let projection (graph-projection value))
-  (let routes (get projection "routes"))
-  (as LoweringAnalysis
-    {:actors (get projection "actors")
-     :routes routes
-     :route_input_addresses
-       (ordered-strings
-         (map (fn [[candidate StoredRoute]] -> String
-                (port-address-key (get candidate "to")))
-              routes))
-     :routes_by_input
-       (group-by
-         (fn [[candidate StoredRoute]] -> String
-           (port-address-key (get candidate "to")))
-         (sort-by route-id routes))
-     :messages (get projection "messages")
-     :operations (get projection "graph_operations")
-     :logical_nodes (get projection "logical_nodes")
-     :outputs (get projection "outputs")})))
-(let analyze-graph (fn [[value Graph]] -> GraphAnalysis
-  (let lowering (analyze-for-lowering value))
-  (let projection (graph-projection value))
-  (let edges (get projection "edges"))
-  (let all-nodes (get projection "all_nodes"))
-  (let nodes (get projection "nodes"))
-  (let actors (get projection "actors"))
-  (let routes (get projection "routes"))
-  (let messages (get projection "messages"))
-  (let graph-operations (get projection "graph_operations"))
-  (let outputs (get projection "outputs"))
-  (as GraphAnalysis
-    {:edges edges
-     :all_nodes all-nodes
-     :nodes nodes
-     :nodes_by_id (group-by node-id all-nodes)
-     :actors actors
-     :actors_by_id (group-by actor-id actors)
-     :input_actors_by_address
-       (group-by
-         (fn [[candidate Actor]] -> String
-           (port-address-key (get candidate "input")))
-         actors)
-     :output_ports_by_address
-       (group-by port-address-key
-         (flat-map (fn [[candidate Actor]] -> (List StoredPort)
-                     (get candidate "outputs"))
-                   actors))
-     :routes routes
-     :route_input_addresses (get lowering "route_input_addresses")
-     :routes_by_input (get lowering "routes_by_input")
-     :diagnostic_routes_by_input
-       (group-by (fn [[route StoredRoute]] -> String
-                   (port-address-key (get route "to"))) routes)
-     :routes_by_output
-       (group-by
-         (fn [[candidate StoredRoute]] -> String
-           (port-address-key (get candidate "from")))
-         routes)
-     :routes_by_source_actor
-       (group-by
-         (fn [[candidate StoredRoute]] -> String
-           (get (get candidate "from") "actor"))
-         routes)
-     :messages messages
-     :messages_by_input
-       (group-by
-         (fn [[candidate Message]] -> String
-           (port-address-key (get candidate "to")))
-         messages)
-     :graph_operations graph-operations
-     :graph_operations_by_output
-       (group-by
-         (fn [[candidate nefor.mag.ProgramOperation]] -> String
-           (port-address-key (operation-port candidate)))
-         graph-operations)
-     :edges_by_from_node (get projection "edges_by_from_node")
-     :edges_by_to_node (get projection "edges_by_to_node")
-     :roots (get projection "roots")
-     :outputs outputs
-     :terminal_outputs_by_full_port
-       (group-by
-         (fn [[candidate StoredNode]] -> String
-           (full-port-key (get candidate "output")))
-         outputs)})))
+type FactoryContract {identity: String, type_scheme: FactoryTypeScheme}
 
-(let graph-nodes (fn [[value Graph]] -> (List StoredNode)
-  (get (graph-projection value) "nodes")))
-(let graph-routes (fn [[value Graph]] -> (List StoredRoute)
-  (get (graph-projection value) "routes")))
-(let graph-actors (fn [[value Graph]] -> (List Actor)
-  (get (graph-projection value) "actors")))
-;; Whole-value compatibility matters: edge compatibility also accepts one
-;; product component, which is not enough to activate a root.
-(let unit-input? (fn [[input StoredPort]] -> Bool
-  (descriptor-accepts-value? (get input "type") (type-evidence (type-tag Unit)))))
-(let input-needs-bootstrap?
-  (fn [[routes-by-input (Map String (List StoredRoute))]
-       [messages-by-input (Map String (List Message))] [input StoredPort]] -> Bool
-    (if (unit-input? input)
-      (if (= (count (__map-get-or routes-by-input (port-address-key input)
-                        (as (List StoredRoute) []))) 0)
-        (= (count (__map-get-or messages-by-input (port-address-key input)
-                       (as (List Message) []))) 0)
-        false)
-      false)))
-(let bootstrap-message (fn [[input StoredPort]] -> Message
-  ;; Activation carries Unit evidence, not the receiving sum's descriptor.
-  (let unit-port (store-port (port (get input "actor") (type-tag Unit)
-                                 (get input "wire"))))
-  (stored-message unit-port
-    (as (MessageContent Unit) {:kind (get input "wire") :value nil}))))
-(let bootstrap-messages
-  (fn [[boundary-ports (List StoredPort)] [routes (List StoredRoute)]
-       [messages (List Message)]] -> (List Message)
-    (let routes-by-input (group-by
-      (fn [[route StoredRoute]] -> String (port-address-key (get route "to"))) routes))
-    (let messages-by-input (group-by
-      (fn [[message Message]] -> String (port-address-key (get message "to"))) messages))
-    (map bootstrap-message
-      (filter (fn [[candidate StoredPort]] -> Bool
-                (input-needs-bootstrap? routes-by-input messages-by-input candidate)) boundary-ports))))
-(let graph-messages (fn [[value Graph]] -> (List Message)
-  (get (graph-projection value) "messages")))
-(let graph-operations (fn [[value Graph]] -> (List nefor.mag.ProgramOperation)
-  (get (graph-projection value) "graph_operations")))
+type SourceParams<T> {value: T, value_type: SemanticTypeId}
 
-(let graph-logical-nodes (fn [[value Graph]] -> (List LogicalNode)
-  (get (graph-projection value) "logical_nodes")))
-(let string-set
-  (fn [[values (List String)]] -> (Set String)
-    (fold
-      (fn [[set (Set String)] [value String]] -> (Set String)
-        (if (core.set.contains? set value) set (core.set.insert set value)))
-      (core.set.empty (type-tag String)) values)))
-(let logical-paths-valid? (fn [[value Graph]] -> Bool
-  (let nodes (graph-logical-nodes value))
-  (let paths
-    (map (fn [[candidate LogicalNode]] -> String
-           (canonical (get candidate "path"))) nodes))
-  (let segments
-    (flat-map (fn [[candidate LogicalNode]] -> (List String)
-                (get candidate "path")) nodes))
-  (let empty-paths
-    (filter (fn [[candidate LogicalNode]] -> Bool
-              (= (count (get candidate "path")) 0)) nodes))
-  (if (= (count empty-paths) 0)
-    (if (= (count (filter (fn [[name String]] -> Bool (= name "")) segments)) 0)
-      (= (core.set.count (string-set paths)) (count paths))
-      false)
-    false)))
-(let logical-members-valid? (fn [[value Graph]] -> Bool
-  (let members
-    (flat-map (fn [[candidate LogicalNode]] -> (List String)
-                (get candidate "members"))
-              (graph-logical-nodes value)))
-  (let actors (actor-ids (graph-actors value)))
-  (if (= (core.set.count (string-set members)) (count members))
-    (= (string-set members) (string-set actors))
-    false)))
+type OutputParams {}
 
-(let role? (fn [[candidate StoredNode] [role String]] -> Bool
-  (= (get candidate "role") role)))
-(let indexed-count
-  (fn [T] [[index (Map String (List T))] [id String]] -> Int
-    (count (__map-get-or index id (as (List T) [])))))
-(let incoming-count (fn [[analysis GraphAnalysis] [id String]] -> Int
-  (indexed-count (get analysis "edges_by_to_node") id)))
-(let outgoing-count (fn [[analysis GraphAnalysis] [id String]] -> Int
-  (indexed-count (get analysis "edges_by_from_node") id)))
-(let root-shape-valid?
-  (fn [[analysis GraphAnalysis] [candidate StoredNode]] -> Bool
-    (if (= (incoming-count analysis (node-id candidate)) 0)
-      (unit-input? (get candidate "input"))
-      true)))
-(let output-shape-valid?
-  (fn [[analysis GraphAnalysis] [candidate StoredNode]] -> Bool
-    (if (role? candidate "output")
-      (if (not (= (incoming-count analysis (node-id candidate)) 0))
-        (= (outgoing-count analysis (node-id candidate)) 0)
-        false)
-      true)))
+type LowerDestination {actor: String, wire: String, edge_id: String, source_type_id: SemanticTypeId, destination_type_id: SemanticTypeId, product_position: Int}
 
-(let enqueue-unvisited
-  (fn [[state ReachabilityState] [id String]] -> ReachabilityState
-    (if (core.set.contains? (get state "visited") id)
-      state
-      (as ReachabilityState
-        {:visited (core.set.insert (get state "visited") id)
-         :frontier (concat (get state "frontier") [id])}))))
-(let initial-reachability-state
-  (fn [[ids (List String)]] -> ReachabilityState
-    (fold enqueue-unvisited
-      (as ReachabilityState
-        {:visited (core.set.empty (type-tag String))
-         :frontier (as (List String) [])})
-      ids)))
-(let next-forward-frontier
-  (fn [[analysis GraphAnalysis] [state ReachabilityState]] -> ReachabilityState
-    (let next
-      (flat-map
-        (fn [[id String]] -> (List String)
-          (map (fn [[candidate Edge]] -> String
-                 (node-id (get candidate "to")))
-               (__map-get-or (get analysis "edges_by_from_node") id
-                   (as (List Edge) []))))
-        (get state "frontier")))
-    (fold enqueue-unvisited
-      (as ReachabilityState
-        {:visited (get state "visited")
-         :frontier (as (List String) [])})
-      next)))
-(let walk-forward
-  (fn [[analysis GraphAnalysis] [state ReachabilityState]]
-    -> (Set String)
-    (if (= (count (get state "frontier")) 0)
-      (get state "visited")
-      (walk-forward analysis (next-forward-frontier analysis state)))))
-(let forward-reachable (fn [[analysis GraphAnalysis]] -> (Set String)
-  (walk-forward analysis
-    (initial-reachability-state
-      (map node-id (get analysis "roots"))))))
-(let next-reverse-frontier
-  (fn [[analysis GraphAnalysis] [state ReachabilityState]] -> ReachabilityState
-    (let previous
-      (flat-map
-        (fn [[id String]] -> (List String)
-          (map (fn [[candidate Edge]] -> String
-                 (node-id (get candidate "from")))
-               (__map-get-or (get analysis "edges_by_to_node") id
-                   (as (List Edge) []))))
-        (get state "frontier")))
-    (fold enqueue-unvisited
-      (as ReachabilityState
-        {:visited (get state "visited")
-         :frontier (as (List String) [])})
-      previous)))
-(let walk-reverse
-  (fn [[analysis GraphAnalysis] [state ReachabilityState]]
-    -> (Set String)
-    (if (= (count (get state "frontier")) 0)
-      (get state "visited")
-      (walk-reverse analysis (next-reverse-frontier analysis state)))))
-(let reverse-reachable
-  (fn [[analysis GraphAnalysis] [result StoredNode]] -> (Set String)
-    (walk-reverse analysis
-      (initial-reachability-state [(node-id result)]))))
+type AssignedRoute {route: StoredRoute, product_position: Int}
 
-(let factory-contract
-  (fn [[entry FactoryContract]] -> FactoryContract entry))
+type LowerActor {id: String, factory: String, type_arguments: List<TypeDescriptor>, input: StoredPort, outputs: List<StoredPort>, params: PackedValue, routes: Map<String, List<LowerDestination>>}
 
-(let contains-string? (fn [[values (List String)] [value String]] -> Bool
-  (not (= (count (filter (fn [[candidate String]] -> Bool (= candidate value)) values)) 0))))
-(let all-strings-in? (fn [[left (List String)] [right (List String)]] -> Bool
-  (= (count (filter (fn [[value String]] -> Bool
-                      (not (contains-string? right value))) left)) 0)))
-(let one-port? (fn [[ports (List StoredPort)] [expected StoredPort]] -> Bool
-  (serialized-equal? ports [expected])))
-(let empty-packed-map? (fn [[value PackedValue]] -> Bool
-  (packed-empty-record? value)))
-(let source-params-valid? (fn [[value PackedValue]] -> Bool
-  (packed-record-has-only-keys? value ["value" "value_type"])))
-(let source-value-valid? (fn [[value Actor] [output StoredPort]] -> Bool
-  (packed-field-conforms? (get value "params") "value"
-                          (get output "type"))))
-(let one-type-argument? (fn [[value Actor] [expected TypeDescriptor]] -> Bool
-  (serialized-equal? (get value "type_arguments") [expected])))
-(let concrete-source? (fn [[candidate StoredNode]] -> Bool
-  (let id (get candidate "id"))
-  (let actors (get candidate "actors"))
-  (let input (get candidate "input"))
-  (let output (get candidate "output"))
-  (if (= (count actors) 1)
-      ((fn [] -> Bool
-        (let boundary (first actors))
-        (if (= (get boundary "id") id)
-          (if (= (get boundary "factory") source-factory)
-            (if (serialized-equal? input (as StoredPort
-                    {:actor id
-                     :type (type-evidence (type-tag Unit))
-                     :type_id (type-id (type-evidence (type-tag Unit)))
-                     :wire "mag.Unit"}))
-              (if (= (get output "actor") id)
-                (if (= (get output "wire") "nefor.graph.Value")
-                  (if (serialized-equal? (get boundary "input") input)
-                    (if (one-type-argument? boundary (get output "type"))
-                      (if (one-port? (get boundary "outputs") output)
-                        (if (= (count (get candidate "routes")) 0)
-                          (if (= (count (get candidate "messages")) 0)
-                            (if (source-params-valid? (get boundary "params"))
-                              (source-value-valid? boundary output) false)
-                            false)
-                          false)
-                        false)
-                      false)
-                    false)
-                  false)
-                false)
-              false)
-            false)
-          false)))
-      false)))
-(let composite-source? (fn [[candidate StoredNode]] -> Bool
-  (let input (get candidate "input"))
-  (let matching
-    (filter (fn [[actor Actor]] -> Bool
-              (if (= (get actor "factory") source-factory)
-                (serialized-equal? (get actor "input") input)
-                false))
-            (get candidate "actors")))
-  (if (= (count matching) 1)
-    ((fn [] -> Bool
-      (let boundary (first matching))
-      (let outputs (get boundary "outputs"))
-      (if (= (count outputs) 1)
-        ((fn [] -> Bool
-          (let source-output (first outputs))
-          (if (one-type-argument? boundary (get source-output "type"))
-            (if (= (count (get candidate "messages")) 0)
-              (if (source-params-valid? (get boundary "params"))
-                (source-value-valid? boundary source-output)
-                false)
-              false)
-            false)))
-        false)))
-    false)))
-(let concrete-output? (fn [[candidate StoredNode]] -> Bool
-  (let id (get candidate "id"))
-  (let actors (get candidate "actors"))
-  (let input (get candidate "input"))
-  (let output (get candidate "output"))
-  (if (= (count actors) 1)
-      ((fn [] -> Bool
-        (let boundary (first actors))
-        (if (= (get boundary "id") id)
-          (if (= (get boundary "factory") output-factory)
-            (if (= (get input "actor") id)
-              (if (= (get output "actor") id)
-                (if (= (get input "wire") "nefor.graph.Value")
-                  (if (= (get output "wire") "nefor.graph.Value")
-                    (if (= (canonical (type-id (get input "type"))) (canonical (type-id (get output "type"))))
-                      (if (serialized-equal? (get boundary "input") input)
-                        (if (one-type-argument? boundary (get input "type"))
-                          (if (one-port? (get boundary "outputs") output)
-                            (if (empty-packed-map? (get boundary "params"))
-                              (if (= (count (get candidate "routes")) 0)
-                                (= (count (get candidate "messages")) 0) false)
-                              false)
-                            false)
-                          false)
-                        false)
-                      false)
-                    false)
-                  false)
-                false)
-              false)
-            false)
-          false)))
-      false)))
-(let boundary-valid? (fn [[candidate StoredNode]] -> Bool
-  (if (role? candidate "source")
-    (if (concrete-source? candidate) true (composite-source? candidate))
-    (if (role? candidate "output")
-      (concrete-output? candidate)
-      (if (role? candidate "ordinary")
-        (= (count (get candidate "messages")) 0)
-        false)))))
-(let actor-output-wires (fn [[value Actor]] -> (List String)
-  (map (fn [[output StoredPort]] -> String (get output "wire"))
-       (get value "outputs"))))
-(let actor-contract-errors
-  (fn [[contracts-by-id (Map String (List FactoryContract))] [value Actor]]
-    -> (List String)
-    (let identity (get value "factory"))
-    (let matching
-      (__map-get-or contracts-by-id identity (as (List FactoryContract) [])))
-    (if (= (count matching) 0)
-      [(str (str (str "actor " (canonical (get value "id")))
-                 ": factory identity ")
-            (str (canonical identity) " is not present in the runtime inventory"))]
-      ((fn [] -> (List String)
-        (let scheme (get (first matching) "type_scheme"))
-        (let input-wire (get (get value "input") "wire"))
-        (let accepted-inputs (get scheme "input_tags"))
-        (let output-wires (actor-output-wires value))
-        (let accepted-outputs (get scheme "outputs"))
-        (let input-errors
-          (if (contains-string? accepted-inputs input-wire)
-            (as (List String) [])
-            [(str
-               (str (str (str (str "actor " (canonical (get value "id")))
-                                  ": factory ")
-                             (canonical identity))
-                        (str " rejects input wire " (canonical input-wire)))
-               (str "; accepted input wires: " (canonical accepted-inputs)))]))
-        (let output-errors
-          (if (all-strings-in? output-wires accepted-outputs)
-            (as (List String) [])
-            [(str
-               (str (str (str (str "actor " (canonical (get value "id")))
-                                  ": factory ")
-                             (canonical identity))
-                        (str " exposes output wires " (canonical output-wires)))
-               (str "; accepted output wires: " (canonical accepted-outputs)))]))
-        (concat input-errors output-errors))))))
+type LowerMessage {to: String, semantic_type: TypeDescriptor, semantic_type_id: SemanticTypeId, content: PackedValue}
 
-(let has-node-conflicts? (fn [[analysis GraphAnalysis]] -> Bool
-  (not (= (count
-    (filter (fn [[candidate StoredNode]] -> Bool
-              (let matching
-                (__map-get-or (get analysis "nodes_by_id") (node-id candidate)
-                    (as (List StoredNode) [])))
-              (if (= (count matching) 0)
-                false
-                (not (serialized-equal? (first matching) candidate))))
-            (get analysis "all_nodes")))
-    0))))
-(let actor-ids-valid? (fn [[analysis GraphAnalysis]] -> Bool
-  (= (count
-    (filter (fn [[candidate Actor]] -> Bool
-              (not (= (indexed-count (get analysis "actors_by_id")
-                                     (actor-id candidate))
-                      1)))
-            (get analysis "actors")))
-    0)))
-(let same-port-address? (fn [[left StoredPort] [right StoredPort]] -> Bool
-  (= (port-address-key left) (port-address-key right))))
-(let port-is-output?
-  (fn [[analysis GraphAnalysis] [value StoredPort]] -> Bool
-    (let candidates
-      (__map-get-or (get analysis "output_ports_by_address")
-               (port-address-key value)
-          (as (List StoredPort) [])))
-    (= (count
-      (filter (fn [[output StoredPort]] -> Bool
-                (descriptor-accepts? (get output "type") (get value "type")))
-              candidates))
-      1)))
-(let port-is-input?
-  (fn [[analysis GraphAnalysis] [value StoredPort]] -> Bool
-    (let candidates
-      (__map-get-or (get analysis "input_actors_by_address")
-               (port-address-key value)
-          (as (List Actor) [])))
-    (= (count
-      (filter (fn [[candidate Actor]] -> Bool
-                (descriptor-accepts? (get (get candidate "input") "type")
-                                     (get value "type")))
-              candidates))
-      1)))
-(let port-address (fn [[value StoredPort]] -> String
-  (str (get value "actor") (str "." (get value "wire")))))
-(let describe-route-source (fn [[route StoredRoute]] -> String
-  (let source (get route "from"))
-  (canonical (as RouteSourceDescription {:kind "route"
-              :from (port-address source)
-              :type (get source "type")}))))
-(let describe-message-source (fn [[message Message]] -> String
-  (str "initial message type " (canonical (get message "semantic_type")))))
-(let describe-route-handler (fn [[route StoredRoute]] -> String
-  (let target (get route "to"))
-  (canonical (as RouteHandlerDescription {:kind "route"
-              :to (port-address target)
-              :type (get target "type")}))))
-(let describe-operation-handler (fn [[candidate nefor.mag.ProgramOperation]] -> String
-  (canonical (as OperationDescription {:kind "operation"
-              :id (get candidate "id")
-              :type (get candidate "trigger_type")}))))
-(let actor-input-sources (fn [[analysis GraphAnalysis] [candidate Actor]] -> (List String)
-  (let key (port-address-key (get candidate "input")))
-  (concat
-    (map describe-route-source (__map-get-or (get analysis "diagnostic_routes_by_input") key
-                                  (as (List StoredRoute) [])))
-    (map describe-message-source (__map-get-or (get analysis "messages_by_input") key
-                                    (as (List Message) []))))))
-(let output-handlers
-  (fn [[analysis GraphAnalysis] [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
-       [output StoredPort]] -> (List String)
-    (let key (port-address-key output))
-    (concat
-      (map describe-route-handler (__map-get-or (get analysis "routes_by_output") key
-                                     (as (List StoredRoute) [])))
-      (map describe-operation-handler (__map-get-or operations-by-output key (as (List nefor.mag.ProgramOperation) []))))))
+type ResultBoundary {from: StoredPort}
 
-(let actor-input-source-types
-  (fn [[analysis GraphAnalysis] [candidate Actor]] -> (List TypeDescriptor)
-    (let key (port-address-key (get candidate "input")))
-    (let incoming
-      (__map-get-or (get analysis "routes_by_input") key
-          (as (List StoredRoute) [])))
-    (let messages
-      (__map-get-or (get analysis "messages_by_input") key
-          (as (List Message) [])))
-    (concat
-      (map (fn [[route StoredRoute]] -> TypeDescriptor
-             (get (get route "from") "type"))
-           incoming)
-      (map (fn [[message Message]] -> TypeDescriptor
-             (get message "semantic_type"))
-           messages))))
-(let actor-input-coverage-valid?
-  (fn [[analysis GraphAnalysis] [candidate Actor]] -> Bool
-    (descriptor-input-covered-by?
-      (get (get candidate "input") "type")
-      (actor-input-source-types analysis candidate))))
-(let route-handler-types
-  (fn [[analysis GraphAnalysis] [output StoredPort]] -> (List TypeDescriptor)
-    (map (fn [[route StoredRoute]] -> TypeDescriptor
-           (get (get route "to") "type"))
-         (__map-get-or (get analysis "routes_by_output")
-                  (port-address-key output)
-             (as (List StoredRoute) [])))))
-(let operation-handler-types
-  (fn [[operations-by-output (Map String (List nefor.mag.ProgramOperation))] [output StoredPort]]
-    -> (List TypeDescriptor)
-    (map (fn [[candidate nefor.mag.ProgramOperation]] -> TypeDescriptor
-           (get (operation-port candidate) "type"))
-         (__map-get-or operations-by-output (port-address-key output)
-             (as (List nefor.mag.ProgramOperation) [])))))
-(let terminal-output?
-  (fn [[analysis GraphAnalysis] [output StoredPort]] -> Bool
-    (not (= (indexed-count (get analysis "terminal_outputs_by_full_port")
-                           (full-port-key output))
-            0))))
-(let actor-output-coverage-valid?
-  (fn [[analysis GraphAnalysis]
-       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
-       [output StoredPort]] -> Bool
-    (if (terminal-output? analysis output)
-      true
-      (descriptor-output-covered-by?
-        (get output "type")
-        (concat (route-handler-types analysis output)
-                (operation-handler-types operations-by-output output))))))
-(let actor-outputs-coverage-valid?
-  (fn [[analysis GraphAnalysis]
-       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
-       [candidate Actor]] -> Bool
-    (= (count
-         (filter (fn [[output StoredPort]] -> Bool
-                   (not (actor-output-coverage-valid?
-                          analysis operations-by-output output)))
-                 (get candidate "outputs")))
-       0)))
-(let route-valid?
-  (fn [[analysis GraphAnalysis] [value StoredRoute]] -> Bool
-    (if (port-is-output? analysis (get value "from"))
-      (if (port-is-input? analysis (get value "to"))
-        (descriptor-accepts? (get (get value "to") "type")
-                             (get (get value "from") "type"))
-        false)
-      false)))
+type RouteIdentity {from: StoredPort, to: StoredPort}
 
-(let validate-routes-stage
-  (fn [[value Graph] [analysis GraphAnalysis]]
-    -> (core.validated.Validated String Graph)
-    (let bad-routes
-      (filter (fn [[candidate StoredRoute]] -> Bool
-                (not (route-valid? analysis candidate)))
-              (get analysis "routes")))
-    (if (= (count bad-routes) 0)
-        (core.validated.valid value)
-        (core.validated.invalid
-          ["graph contains an unknown or incompatible edge"]))))
-(let validate-contracts-stage
-  (fn [[value Graph] [analysis GraphAnalysis]
-       [contracts (List FactoryContract)]]
-    -> (core.validated.Validated String Graph)
-    (let contracts-by-id (group-by contract-id contracts))
-    (let contract-errors
-      (flat-map
-        (fn [[candidate Actor]] -> (List String)
-          (actor-contract-errors contracts-by-id candidate))
-        (get analysis "actors")))
-    (if (= (count contract-errors) 0)
-        (validate-routes-stage value analysis)
-        (core.validated.invalid contract-errors))))
-(let validate-dead-stage
-  (fn [[value Graph] [analysis GraphAnalysis]
-       [contracts (List FactoryContract)] [result StoredNode]]
-    -> (core.validated.Validated String Graph)
-    (let reverse (reverse-reachable analysis result))
-    (let dead
-      (filter (fn [[candidate StoredNode]] -> Bool
-                (not (core.set.contains? reverse (node-id candidate))))
-              (get analysis "nodes")))
-    (if (= (count dead) 0)
-        (validate-contracts-stage value analysis contracts)
-        (core.validated.invalid
-          ["every node must have a path to the output node"]))))
-(let validate-reachable-stage
-  (fn [[value Graph] [analysis GraphAnalysis]
-       [contracts (List FactoryContract)] [result StoredNode]]
-    -> (core.validated.Validated String Graph)
-    (let forward (forward-reachable analysis))
-    (let unreachable
-      (filter (fn [[candidate StoredNode]] -> Bool
-                (not (core.set.contains? forward (node-id candidate))))
-              (get analysis "nodes")))
-    (if (= (count unreachable) 0)
-        (validate-dead-stage value analysis contracts result)
-        (core.validated.invalid
-          ["every node must be reachable from a root node whose input accepts Unit"]))))
-(let validate-output-coverage-stage
-  (fn [[value Graph] [analysis GraphAnalysis]
-       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
-       [contracts (List FactoryContract)] [result StoredNode]]
-    -> (core.validated.Validated String Graph)
-    (let bad-output-coverage
-      (flat-map (fn [[candidate Actor]] -> (List StoredPort)
-                  (filter (fn [[output StoredPort]] -> Bool
-                            (not (actor-output-coverage-valid? analysis operations-by-output output)))
-                          (get candidate "outputs"))) (get analysis "actors")))
-    (let errors
-      (map (fn [[output StoredPort]] -> String
-             (str "output coverage failed: "
-               (canonical (as OutputCoverageDescription {:actor (get output "actor")
-                           :output (port-address output)
-                           :output_type (get output "type")
-                           :available_handlers (output-handlers analysis operations-by-output output)
-                           :reason "coverage is incomplete; every output alternative needs an ordinary route, operation subscription, or terminal output path"}))))
-           bad-output-coverage))
-    (if (= (count bad-output-coverage) 0)
-        (validate-reachable-stage value analysis contracts result)
-        (core.validated.invalid errors))))
-(let validate-input-coverage-stage
-  (fn [[value Graph] [analysis GraphAnalysis]
-       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
-       [contracts (List FactoryContract)] [result StoredNode]]
-    -> (core.validated.Validated String Graph)
-    (let bad-input-coverage
-      (filter (fn [[candidate Actor]] -> Bool
-                (not (actor-input-coverage-valid? analysis candidate)))
-              (get analysis "actors")))
-    (let errors
-      (map (fn [[candidate Actor]] -> String
-             (let input (get candidate "input"))
-             (str "input coverage failed: "
-               (canonical (as InputCoverageDescription {:actor (get candidate "id")
-                           :input (port-address input)
-                           :expected_type (get input "type")
-                           :incoming_sources (actor-input-sources analysis candidate)
-                           :reason "sources must be compatible and exactly cover every product occurrence; check for missing, extra, or ambiguous occurrences"}))))
-           bad-input-coverage))
-    (if (= (count bad-input-coverage) 0)
-        (validate-output-coverage-stage
-          value analysis operations-by-output contracts result)
-        (core.validated.invalid errors))))
-(let validate-outputs-stage
-  (fn [[value Graph] [analysis GraphAnalysis]
-       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
-       [contracts (List FactoryContract)] [result StoredNode]]
-    -> (core.validated.Validated String Graph)
-    (let bad-outputs
-      (filter (fn [[candidate StoredNode]] -> Bool
-                (not (output-shape-valid? analysis candidate)))
-              (get analysis "nodes")))
-    (if (= (count bad-outputs) 0)
-        (validate-input-coverage-stage
-          value analysis operations-by-output contracts result)
-        (core.validated.invalid
-          ["output nodes require an incoming edge and are terminal"]))))
-(let validate-roots-stage
-  (fn [[value Graph] [analysis GraphAnalysis]
-       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
-       [contracts (List FactoryContract)] [result StoredNode]]
-    -> (core.validated.Validated String Graph)
-    (let bad-roots
-      (filter (fn [[candidate StoredNode]] -> Bool
-                (not (root-shape-valid? analysis candidate)))
-              (get analysis "nodes")))
-    (if (= (count bad-roots) 0)
-        (validate-outputs-stage
-          value analysis operations-by-output contracts result)
-        (core.validated.invalid
-          (map (fn [[candidate StoredNode]] -> String
-             (let input (get candidate "input"))
-             (str "root validation failed: "
-               (canonical (as RootValidationDescription {:node (get candidate "id")
-                           :input (port-address input)
-                           :input_type (get input "type")
-                           :reason "zero incoming edges; only inputs that accept Unit can be activated automatically"})))) bad-roots)))))
-(let validate-boundaries-stage
-  (fn [[value Graph] [analysis GraphAnalysis]
-       [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
-       [contracts (List FactoryContract)] [result StoredNode]]
-    -> (core.validated.Validated String Graph)
-    (let bad-boundaries
-      (filter (fn [[candidate StoredNode]] -> Bool
-                (not (boundary-valid? candidate)))
-              (get analysis "nodes")))
-    (if (= (count bad-boundaries) 0)
-        (validate-roots-stage
-          value analysis operations-by-output contracts result)
-        (core.validated.invalid
-          ["boundary node roles require their concrete source/output factory shape, and ordinary nodes cannot contain initial messages"]))))
-(let operation-id (fn [[value nefor.mag.ProgramOperation]] -> String (get value "id")))
-(let operation-valid?
-  (fn [[analysis GraphAnalysis] [value nefor.mag.ProgramOperation]] -> Bool
-    (let on (operation-port value))
-    (if (= (get value "id") "") false
-      (if (not (= (canonical (get value "trigger_type_id")) (canonical (get on "type_id")))) false
-        (if (= (indexed-count (get analysis "output_ports_by_address")
-                 (port-address-key on)) 0) false
-          (not (terminal-output? analysis on)))))))
-(let validate-unique-output-stage
-  (fn [[value Graph] [analysis GraphAnalysis] [operations (List nefor.mag.ProgramOperation)]
-       [contracts (List FactoryContract)]]
-    -> (core.validated.Validated String Graph)
-    (let all-operations (concat (get analysis "graph_operations") operations))
-    (let operation-ids-unique
-      (= (count (ordered-strings (map operation-id all-operations)))
-         (count all-operations)))
-    (let invalid
-      (filter (fn [[candidate nefor.mag.ProgramOperation]] -> Bool
-                (not (operation-valid? analysis candidate))) all-operations))
-    (let operations-by-output
-      (group-by
-        (fn [[candidate nefor.mag.ProgramOperation]] -> String
-          (port-address-key (operation-port candidate)))
-        all-operations))
-    (let result (first (get analysis "outputs")))
-    (if (not operation-ids-unique)
-        (core.validated.invalid ["program operation ids must be non-empty and unique"])
-        (if (not (= (count invalid) 0))
-          (core.validated.invalid
-            ["program operations must observe a declared non-result output with matching trigger type"])
-          (validate-boundaries-stage
-            value analysis operations-by-output contracts result)))))
-(let validate-with-operations
-  (fn [[value Graph] [operations (List nefor.mag.ProgramOperation)]
-       [contracts (List FactoryContract)]]
-    -> (core.validated.Validated String Graph)
-    (let analysis (analyze-graph value))
-    (if (= (count (get analysis "edges")) 0)
-        (core.validated.invalid ["graph needs at least one edge"])
-        (if (has-node-conflicts? analysis)
-          (core.validated.invalid
-            ["one node id must denote one immutable node definition"])
-          (if (not (actor-ids-valid? analysis))
-            (core.validated.invalid
-              ["runtime actor ids must be unique across graph nodes"])
-            (if (not (logical-paths-valid? value))
-              (core.validated.invalid
-                ["logical node paths must be non-empty and unique"])
-              (if (not (logical-members-valid? value))
-                (core.validated.invalid
-                  ["every runtime actor must belong to exactly one logical node"])
-                (if (not (= (count (get analysis "outputs")) 1))
-                  (core.validated.invalid
-                    ["graph needs exactly one concrete output node"])
-                  (validate-unique-output-stage
-                    value analysis operations contracts)))))))))
+type MessageContent<T> {kind: String, value: T}
 
-(let validate (fn [[value Graph] [contracts (List FactoryContract)]]
-  -> (core.validated.Validated String Graph)
-  (validate-with-operations value (as (List nefor.mag.ProgramOperation) []) contracts)))
+type EdgeIdentity {`from-node`: String, `to-node`: String, route: StoredRoute}
 
-(let zip-route-assignments
-  (fn [[routes (List StoredRoute)] [positions (List Int)]]
-    -> (List AssignedRoute)
-    (let positions-by-index
-      (group-by
-        (fn [[candidate IndexedPosition]] -> String
-          (get candidate "index"))
-        (indexed-map
-          (fn [[index Int] [position Int]] -> IndexedPosition
-            (as IndexedPosition
-              {:index (str index) :position position}))
-          positions)))
-    (indexed-map
-      (fn [[index Int] [route StoredRoute]] -> AssignedRoute
-        (as AssignedRoute
-          {:route route
-           :product_position
-             (get (first (core.map.get positions-by-index (str index))) "position")}))
-      routes)))
-(let route-destination-descriptor-key
-  (fn [[value StoredRoute]] -> String
-    (canonical (get (get value "to") "type"))))
-(let assigned-route-id
-  (fn [[assigned AssignedRoute]] -> String
-    (get (get assigned "route") "id")))
-(let descriptor-assignment-index
-  (fn [[routes (List StoredRoute)]
-       [descriptor-keys (List String)]
-       [routes-by-descriptor (Map String (List StoredRoute))]
-       [sources (List TypeDescriptor)]]
-    -> (Map String (Map String (List AssignedRoute)))
-    (fold
-      (fn [[out (Map String (Map String (List AssignedRoute)))]
-           [descriptor-key String]]
-        -> (Map String (Map String (List AssignedRoute)))
-        (let descriptor-routes
-          (__map-get-or routes-by-descriptor descriptor-key
-              (as (List StoredRoute) [])))
-        (let positions
-          (descriptor-input-assignments
-            (get (get (first descriptor-routes) "to") "type")
-            sources))
-        (core.map.insert out descriptor-key
-          (group-by assigned-route-id
-            (zip-route-assignments routes positions))))
-      (as (Map String (Map String (List AssignedRoute)))
-        (core.map.empty (type-tag String)))
-      descriptor-keys)))
-(let assigned-input-bucket
-  (fn [[routes (List StoredRoute)]] -> (List AssignedRoute)
-    (if (= (count routes) 0)
-      (as (List AssignedRoute) [])
-      ((fn [] -> (List AssignedRoute)
-        (let sources
-          (map (fn [[candidate StoredRoute]] -> TypeDescriptor
-                 (get (get candidate "from") "type"))
-               routes))
-        (let routes-by-descriptor
-          (group-by route-destination-descriptor-key routes))
-        (let assignments-by-descriptor
-          (descriptor-assignment-index
-            routes
-            (ordered-strings (map route-destination-descriptor-key routes))
-            routes-by-descriptor sources))
-        (map
-          (fn [[candidate StoredRoute]] -> AssignedRoute
-            (let assignments-by-id
-              (__map-get-or assignments-by-descriptor
-                       (route-destination-descriptor-key candidate)
-                  (as (Map String (List AssignedRoute))
-                    (core.map.empty (type-tag String)))))
-            (first
-              (__map-get-or assignments-by-id (route-id candidate)
-                  (as (List AssignedRoute) []))))
-          routes))))))
-(let route-assignment-key
-  (fn [[value StoredRoute]] -> String
-    (canonical
-      (as RouteAssignmentIdentity {:input (port-address-key (get value "to"))
-       :route (route-id value)}))))
-(let assigned-route-key
-  (fn [[value AssignedRoute]] -> String
-    (route-assignment-key (get value "route"))))
-(let route-assignment-index
-  (fn [[route-input-addresses (List String)]
-       [routes-by-input (Map String (List StoredRoute))]]
-    -> (Map String (List AssignedRoute))
-    (group-by assigned-route-key
-      (flat-map
-        (fn [[address String]] -> (List AssignedRoute)
-          (assigned-input-bucket
-            (__map-get-or routes-by-input address
-                (as (List StoredRoute) []))))
-        route-input-addresses))))
-(let reconstruct-assigned-routes
-  (fn [[routes (List StoredRoute)]
-       [assignments-by-key (Map String (List AssignedRoute))]]
-    -> (List AssignedRoute)
-    (map
-      (fn [[candidate StoredRoute]] -> AssignedRoute
-        (first
-          (__map-get-or assignments-by-key (route-assignment-key candidate)
-              (as (List AssignedRoute) []))))
-      routes)))
-(let assigned-routes-from-indexes
-  (fn [[routes (List StoredRoute)]
-       [route-input-addresses (List String)]
-       [routes-by-input (Map String (List StoredRoute))]]
-    -> (List AssignedRoute)
-    (reconstruct-assigned-routes routes
-      (route-assignment-index route-input-addresses routes-by-input))))
-(let assigned-analysis-routes
-  (fn [[analysis GraphAnalysis]] -> (List AssignedRoute)
-    (assigned-routes-from-indexes
-      (get analysis "routes")
-      (get analysis "route_input_addresses")
-      (get analysis "routes_by_input"))))
-(let assigned-lowering-routes
-  (fn [[analysis LoweringAnalysis]] -> (List AssignedRoute)
-    (assigned-routes-from-indexes
-      (get analysis "routes")
-      (get analysis "route_input_addresses")
-      (get analysis "routes_by_input"))))
-(let assigned-routes
-  (fn [[routes (List StoredRoute)]] -> (List AssignedRoute)
-    (let route-input-addresses
-      (ordered-strings
-        (map (fn [[candidate StoredRoute]] -> String
-               (port-address-key (get candidate "to")))
-             routes)))
-    (let routes-by-input
-      (group-by
-        (fn [[candidate StoredRoute]] -> String
-          (port-address-key (get candidate "to")))
-        (sort-by route-id routes)))
-    (assigned-routes-from-indexes
-      routes route-input-addresses routes-by-input)))
-(let assigned-route-source-actor
-  (fn [[candidate AssignedRoute]] -> String
-    (get (get (get candidate "route") "from") "actor")))
-(let assigned-route-source-wire
-  (fn [[candidate AssignedRoute]] -> String
-    (get (get (get candidate "route") "from") "wire")))
-(let lower-destination
-  (fn [[assigned AssignedRoute]] -> LowerDestination
-    (let candidate (get assigned "route"))
-    (let from (get candidate "from"))
-    (let to (get candidate "to"))
-    (as LowerDestination
-      {:actor (get to "actor")
-       :wire (get to "wire")
-       :edge_id (get candidate "id")
-       :source_type_id (get from "type_id")
-       :destination_type_id (get to "type_id")
-       :product_position (get assigned "product_position")})))
-(let actor-routes
-  (fn [[routes (List AssignedRoute)]]
-    -> (Map String (List LowerDestination))
-    (let routes-by-wire (group-by assigned-route-source-wire routes))
-    (fold
-      (fn [[out (Map String (List LowerDestination))] [wire String]]
-        -> (Map String (List LowerDestination))
-        (core.map.insert out wire
-          (map lower-destination
-            (__map-get-or routes-by-wire wire
-                (as (List AssignedRoute) [])))))
-      (as (Map String (List LowerDestination))
-        (core.map.empty (type-tag String)))
-      (ordered-strings (map assigned-route-source-wire routes)))))
-(let lower-actor-with-routes
-  (fn [[routes (List AssignedRoute)] [value Actor]] -> LowerActor
-    (as LowerActor
-      {:id (get value "id")
-       :factory (get value "factory")
-       :type_arguments (get value "type_arguments")
-       :input (get value "input")
-       :outputs (get value "outputs")
-       :params (get value "params")
-       :routes (actor-routes routes)})))
-(let lower-message (fn [[value Message]] -> LowerMessage
-  (let to (get value "to"))
-  (as LowerMessage {:to (get to "actor")
-                    :semantic_type (get value "semantic_type")
-                    :semantic_type_id (get value "semantic_type_id")
-                    :content (get value "content")})))
-(let result-boundary (fn [[analysis LoweringAnalysis]] -> ResultBoundary
-  (as ResultBoundary
-    {:from (get (first (get analysis "outputs")) "output")})))
-(let actor-descriptors (fn [[actors (List Actor)]] -> (List TypeDescriptor)
-  (flat-map (fn [[candidate Actor]] -> (List TypeDescriptor)
-              (concat [(get (get candidate "input") "type")]
-                      (map (fn [[output StoredPort]] -> TypeDescriptor
-                             (get output "type"))
-                           (get candidate "outputs"))))
-            actors)))
-(let route-descriptors (fn [[routes (List StoredRoute)]] -> (List TypeDescriptor)
-  (flat-map (fn [[candidate StoredRoute]] -> (List TypeDescriptor)
-              [(get (get candidate "from") "type")
-               (get (get candidate "to") "type")])
-            routes)))
-(let message-descriptors (fn [[messages (List Message)]] -> (List TypeDescriptor)
-  (map (fn [[candidate Message]] -> TypeDescriptor
-         (get candidate "semantic_type"))
-       messages)))
-(let operation-descriptors (fn [[operations (List nefor.mag.ProgramOperation)]] -> (List TypeDescriptor)
-  (map (fn [[candidate nefor.mag.ProgramOperation]] -> TypeDescriptor
-         (get (operation-port candidate) "type")) operations)))
-(let program-descriptors
-  (fn [[analysis LoweringAnalysis] [operations (List nefor.mag.ProgramOperation)]]
-    -> (List TypeDescriptor)
-    (concat
-      (concat
-        (concat
-          (actor-descriptors (get analysis "actors"))
-          (route-descriptors (get analysis "routes")))
-        (concat
-          (message-descriptors (get analysis "messages"))
-          (operation-descriptors operations)))
-      [(get (get (first (get analysis "outputs")) "output") "type")])))
-(let delta-descriptors (fn [[value Delta]] -> (List TypeDescriptor)
-  (concat
-    (concat
-      (actor-descriptors (get value "actors"))
-      (route-descriptors (get value "routes")))
-    (message-descriptors (get value "messages")))))
-(let lower-program (fn [[topology Graph]] -> Modification
-  (let analysis (analyze-for-lowering topology))
-  (let assigned (assigned-lowering-routes analysis))
-  (let assigned-by-source
-    (group-by assigned-route-source-actor assigned))
-  (let operations (get analysis "operations"))
-  (as Modification
-    {:actors
-       (map (fn [[candidate Actor]] -> LowerActor
-              (lower-actor-with-routes
-                (__map-get-or assigned-by-source (actor-id candidate)
-                    (as (List AssignedRoute) []))
-                candidate))
-            (get analysis "actors"))
-     :messages (map lower-message (get analysis "messages"))
-     :kills (as (List String) [])
-     :types (descriptor-table (program-descriptors analysis operations))
-     :nodes (get analysis "logical_nodes")
-     :result (result-boundary analysis)})))
-(let lower (fn [[value Graph]] -> Modification
-  (lower-program value)))
+type PortAddressIdentity {actor: String, wire: String}
 
-;; Deltas are operational artifacts, not graph values.
-(let delta (fn [[actors (List Actor)] [routes (List StoredRoute)]
-                [messages (List Message)] [kills (List String)]] -> Delta
-  (as Delta {:actors actors :routes routes :messages messages
-             :nodes (map (fn [[candidate Actor]] -> LogicalNode
-                           (logical-node [(get candidate "id")] [(get candidate "id")]))
-                         actors)
-             :kills kills})))
-(let node-delta (fn [I O] [[value (Node I O)]] -> Delta
-  (as Delta {:actors (get value "actors") :routes (get value "routes")
-             :messages (get value "messages") :nodes (get value "nodes")
-             :kills []})))
-(let merge-delta (fn [[left Delta] [right Delta]] -> Delta
-  (as Delta {:actors (concat (get left "actors") (get right "actors"))
-             :routes (concat (get left "routes") (get right "routes"))
-             :messages (concat (get left "messages") (get right "messages"))
-             :nodes (concat (get left "nodes") (get right "nodes"))
-             :kills (concat (get left "kills") (get right "kills"))})))
-(let delta-edge (fn [I T O] [[change Delta] [from (Node I T)] [to (Node T O)]] -> Delta
-  (as Delta {:actors (get change "actors")
-             :routes (concat (get change "routes")
-                             [(stored-route (get from "output") (get to "input"))])
-             :messages (get change "messages") :nodes (get change "nodes")
-             :kills (get change "kills")})))
-(let delta-route (fn [A B] [[change Delta] [from (Port A)] [to (Port B)]] -> Delta
-  (as Delta {:actors (get change "actors")
-             :routes (concat (get change "routes") [(stored-route from to)])
-             :messages (get change "messages") :nodes (get change "nodes")
-             :kills (get change "kills")})))
-(let delta-message (fn [T] [[change Delta] [to (Port T)] [value T]] -> Delta
-  (as Delta {:actors (get change "actors") :routes (get change "routes")
-             :messages (concat (get change "messages") [(typed-message to value)])
-             :nodes (get change "nodes")
-             :kills (get change "kills")})))
-(let delta-message-front (fn [T] [[change Delta] [to (Port T)] [value T]] -> Delta
-  (as Delta {:actors (get change "actors") :routes (get change "routes")
-             :messages (concat [(typed-message to value)] (get change "messages"))
-             :nodes (get change "nodes")
-             :kills (get change "kills")})))
-(let lower-delta (fn [[value Delta]] -> LowerDelta
-  (let actors (get value "actors"))
-  (let authored-messages (get value "messages"))
-  ;; Deltas retain no exposed Node boundaries. Preserve their existing exact
-  ;; Unit actor bootstrap rule rather than activate newly eligible internals.
-  (let unit-ports
-    (filter (fn [[input StoredPort]] -> Bool
-              (= (canonical (type-id (get input "type")))
-                 (canonical (type-id (type-evidence (type-tag Unit))))))
-      (map (fn [[candidate Actor]] -> StoredPort
-             (get candidate "input")) actors)))
-  (let routes (assigned-routes (get value "routes")))
-  (let routes-by-source
-    (group-by assigned-route-source-actor routes))
-  (as LowerDelta
-    {:actors (map (fn [[candidate Actor]] -> LowerActor
-                    (lower-actor-with-routes
-                      (__map-get-or routes-by-source (actor-id candidate)
-                          (as (List AssignedRoute) []))
-                      candidate))
-                  actors)
-     :messages (map lower-message
-                 (concat authored-messages
-                   (bootstrap-messages unit-ports (get value "routes") authored-messages)))
-     :kills (get value "kills")
-     :types (descriptor-table (delta-descriptors value))
-     :nodes (get value "nodes")})))
+type RouteSourceDescription {kind: String, from: String, `type`: TypeDescriptor}
+
+type RouteHandlerDescription {kind: String, to: String, `type`: TypeDescriptor}
+
+type OperationDescription {kind: String, id: String, `type`: TypeDescriptor}
+
+type OutputCoverageDescription {actor: String, output: String, output_type: TypeDescriptor, available_handlers: List<String>, reason: String}
+
+type InputCoverageDescription {actor: String, input: String, expected_type: TypeDescriptor, incoming_sources: List<String>, reason: String}
+
+type RouteAssignmentIdentity {input: String, route: String}
+
+type RootValidationDescription {node: String, input: String, input_type: TypeDescriptor, reason: String}
+
+type Modification {actors: List<LowerActor>, messages: List<LowerMessage>, kills: List<String>, types: Map<String, TypeDescriptor>, nodes: List<LogicalNode>, result: ResultBoundary}
+
+// Delta artifacts are an operation format over the running actor kernel. They
+// are deliberately not Graph values and are not exposed as graph mutation. Authored graph changes are code changes to a pure Graph -> Graph
+// transformation and execute as a fresh run.
+type Delta {actors: List<Actor>, routes: List<StoredRoute>, messages: List<Message>, nodes: List<LogicalNode>, kills: List<String>}
+
+type LowerDelta {actors: List<LowerActor>, messages: List<LowerMessage>, kills: List<String>, types: Map<String, TypeDescriptor>, nodes: List<LogicalNode>}
+
+let port<T>: fn(String, TypeTag<T>, String) -> Port<T> = |actor, `semantic-type`, `wire-type`| => Port<T> {actor: actor, `type`: `semantic-type`, wire: `wire-type`}
+
+let `store-port`<T>: fn(Port<T>) -> StoredPort = |value| => {
+  let descriptor = `type-evidence`(get(value, "type"))
+  StoredPort {actor: get(value, "actor"), `type`: descriptor, type_id: `type-id`(descriptor), wire: get(value, "wire")}
+}
+
+let actor<P>: fn(String, String, List<TypeDescriptor>, P, StoredPort, List<StoredPort>) -> Actor = |id, factory, `type-arguments`, params, input, outputs| => Actor {id: id, factory: factory, type_arguments: `type-arguments`, params: pack(params), input: input, outputs: outputs}
+
+let `actor-ids`: fn(List<Actor>) -> List<String> = |actors| => map(((|candidate| => get(candidate, "id")) : fn(Actor) -> String), actors)
+
+let `logical-node`: fn(List<String>, List<String>) -> LogicalNode = |path, actors| => LogicalNode {path: path, members: actors}
+
+let `prefix-logical-node`: fn(String, LogicalNode) -> LogicalNode = |name, value| => `logical-node`(concat([name], get(value, "path")), get(value, "members"))
+
+let `prefix-logical-nodes`: fn(String, List<LogicalNode>) -> List<LogicalNode> = |name, values| => map(((|value| => `prefix-logical-node`(name, value)) : fn(LogicalNode) -> LogicalNode), values)
+
+let `attach-logical-members`: fn(List<LogicalNode>, List<String>) -> List<LogicalNode> = |values, members| => if (=)(count(values), 0) then [] else concat([`logical-node`(get(first(values), "path"), concat(get(first(values), "members"), members))], `remove-at`(values, 0))
+
+let `node-with-operations-and-nodes`<I, O>: fn(String, String, List<Actor>, List<StoredRoute>, List<Message>, List<nefor.mag.ProgramOperation>, List<LogicalNode>, Port<I>, Port<O>) -> Node<I, O> = |id, role, actors, routes, messages, operations, nodes, input, output| => Node<I, O> {id: id, role: role, actors: actors, routes: routes, messages: messages, operations: operations, nodes: nodes, input: input, output: output}
+
+let node<I, O>: fn(String, String, List<Actor>, List<StoredRoute>, List<Message>, Port<I>, Port<O>) -> Node<I, O> = |id, role, actors, routes, messages, input, output| => `node-with-operations-and-nodes`(id, role, actors, routes, messages, [], [`logical-node`([id], `actor-ids`(actors))], input, output)
+
+let `node-with-operations`<I, O>: fn(String, String, List<Actor>, List<StoredRoute>, List<Message>, List<nefor.mag.ProgramOperation>, Port<I>, Port<O>) -> Node<I, O> = |id, role, actors, routes, messages, operations, input, output| => `node-with-operations-and-nodes`(id, role, actors, routes, messages, operations, [`logical-node`([id], `actor-ids`(actors))], input, output)
+
+let `with-operation`<I, O>: fn(Node<I, O>, nefor.mag.ProgramOperation) -> Node<I, O> = |value, subscription| => `node-with-operations-and-nodes`(get(value, "id"), get(value, "role"), get(value, "actors"), get(value, "routes"), get(value, "messages"), concat(get(value, "operations"), [subscription]), get(value, "nodes"), get(value, "input"), get(value, "output"))
+
+let `store-node`<I, O>: fn(Node<I, O>) -> StoredNode = |value| => StoredNode {id: get(value, "id"), role: get(value, "role"), actors: get(value, "actors"), routes: get(value, "routes"), messages: get(value, "messages"), operations: get(value, "operations"), nodes: get(value, "nodes"), input: `store-port`(get(value, "input")), output: `store-port`(get(value, "output"))}
+
+let `stored-route`<A, B>: fn(Port<A>, Port<B>) -> StoredRoute = |from, to| => {
+  let `stored-from` = `store-port`(from)
+  let `stored-to` = `store-port`(to)
+  StoredRoute {id: canonical(RouteIdentity {from: `stored-from`, to: `stored-to`}), from: `stored-from`, to: `stored-to`}
+}
+
+let edge<I, T, U, O>: fn(Node<I, T>, Node<U, O>) -> Edge = |from, to| => Edge {from: `store-node`(from), to: `store-node`(to), route: `stored-route`(get(from, "output"), get(to, "input"))}
+
+let `stored-message`<P>: fn(StoredPort, P) -> Message = |to, content| => Message {to: to, semantic_type: get(to, "type"), semantic_type_id: get(to, "type_id"), content: pack(content)}
+
+let message<T, P>: fn(Port<T>, P) -> Message = |to, content| => `stored-message`(`store-port`(to), content)
+
+let `typed-message`<T>: fn(Port<T>, T) -> Message = |to, value| => {
+  let stored = `store-port`(to)
+  let selected = `value-type-evidence`(value, get(stored, "type"))
+  Message {to: stored, semantic_type: selected, semantic_type_id: `type-id`(selected), content: pack(MessageContent<T> {kind: get(to, "wire"), value: value})}
+}
+
+let `instantiate-delta-template`<T>: fn(String, Port<T>, Map<String, nefor.mag.TypedCapture>, List<nefor.mag.Expression>, nefor.mag.DeltaTemplate) -> nefor.mag.ProgramOperation = |id, on, captures, expressions, template| => {
+  let stored = `store-port`(on)
+  nefor.mag.ProgramOperation {id: id, on_actor: get(stored, "actor"), on_wire: get(stored, "wire"), trigger_type: get(stored, "type"), trigger_type_id: get(stored, "type_id"), captures: captures, expressions: expressions, template: template}
+}
+
+let `operation-port`: fn(nefor.mag.ProgramOperation) -> StoredPort = |value| => StoredPort {actor: get(value, "on_actor"), `type`: get(value, "trigger_type"), type_id: get(value, "trigger_type_id"), wire: get(value, "on_wire")}
+
+let `source-factory` = "nefor.factory.source"
+
+let source<T>: fn(String, TypeTag<T>, T) -> Node<Unit, T> = |id, `type`, value| => {
+  let input = port(id, type_tag<Unit>(), "mag.Unit")
+  let output = port(id, `type`, "nefor.graph.Value")
+  let `source-actor` = actor(id, `source-factory`, [`type-evidence`(`type`)], SourceParams<T> {value: value, value_type: `value-type-id`(value, `type`)}, `store-port`(input), [`store-port`(output)])
+  node(id, "source", [`source-actor`], ([]: List<StoredRoute>), ([]: List<Message>), input, output)
+}
+
+let `output-factory` = "nefor.factory.output"
+
+let output<T>: fn(String, TypeTag<T>) -> Node<T, T> = |id, `type`| => {
+  let input = port(id, `type`, "nefor.graph.Value")
+  let result = port(id, `type`, "nefor.graph.Value")
+  let `output-actor` = actor(id, `output-factory`, [`type-evidence`(`type`)], OutputParams {}, `store-port`(input), [`store-port`(result)])
+  node(id, "output", [`output-actor`], ([]: List<StoredRoute>), ([]: List<Message>), input, result)
+}
+
+// An ordinary identity node is the boundary adapter used by hierarchical
+// node combinators. The runtime factory already forwards one typed value; the
+// distinct role keeps this reusable internal node out of the graph's terminal
+// output semantics.
+let identity<T>: fn(String, TypeTag<T>) -> Node<T, T> = |id, `type`| => {
+  let input = port(id, `type`, "nefor.graph.Value")
+  let result = port(id, `type`, "nefor.graph.Value")
+  let `identity-actor` = actor(id, `output-factory`, [`type-evidence`(`type`)], OutputParams {}, `store-port`(input), [`store-port`(result)])
+  node(id, "ordinary", [`identity-actor`], ([]: List<StoredRoute>), ([]: List<Message>), input, result)
+}
+
+let `output-for`<I, T>: fn(String, Node<I, T>) -> Node<T, T> = |id, from| => output(id, get(get(from, "output"), "type"))
+
+let `same-edge?`: fn(Edge, Edge) -> Bool = |left, right| => if (=)(get(get(left, "from"), "id"), get(get(right, "from"), "id")) then if (=)(get(get(left, "to"), "id"), get(get(right, "to"), "id")) then `serialized-equal?`(get(left, "route"), get(right, "route")) else false else false
+
+let `edge-key`: fn(Edge) -> String = |value| => canonical(EdgeIdentity {`from-node`: get(get(value, "from"), "id"), `to-node`: get(get(value, "to"), "id"), route: get(value, "route")})
+
+let `edge-in?`: fn(List<Edge>, Edge) -> Bool = |edges, candidate| => not((=)(count(filter(((|value| => `same-edge?`(value, candidate)) : fn(Edge) -> Bool), edges)), 0))
+
+let `same-edge-definition?`: fn(Edge, Edge) -> Bool = |left, right| => `serialized-equal?`(left, right)
+
+let `insert-edge`: fn(List<Edge>, Edge) -> List<Edge> = |edges, candidate| => if `edge-in?`(edges, candidate) then if not((=)(count(filter(((|value| => `same-edge-definition?`(value, candidate)) : fn(Edge) -> Bool), edges)), 0)) then edges else concat(edges, [candidate]) else concat(edges, [candidate])
+
+let `insert-edge-definition`: fn(List<Edge>, Edge) -> List<Edge> = |definitions, candidate| => if (=)(count(filter(((|value| => `same-edge-definition?`(value, candidate)) : fn(Edge) -> Bool), definitions)), 0) then concat(definitions, [candidate]) else definitions
+
+let `normalize-edges`: fn(List<Edge>) -> List<Edge> = |edges| => fold(`insert-edge`, ([]: List<Edge>), edges)
+
+let `serialized-equal?`<T>: fn(T, T) -> Bool = |left, right| => (=)(canonical(left), canonical(right))
+
+let `empty-graph` = Graph {edges: ([]: List<Edge>)}
+
+let graph: fn(List<Edge>) -> Graph = |edges| => Graph {edges: `normalize-edges`(edges)}
+
+let `add-edges`: fn(Graph, List<Edge>) -> Graph = |value, added| => graph(concat(get(value, "edges"), added))
+
+let `remove-edges`: fn(Graph, List<Edge>) -> Graph = |value, removed| => graph(filter(((|candidate| => not(`edge-in?`(removed, candidate))) : fn(Edge) -> Bool), get(value, "edges")))
+
+let `port-address-key`: fn(StoredPort) -> String = |value| => canonical(PortAddressIdentity {actor: get(value, "actor"), wire: get(value, "wire")})
+
+let `full-port-key`: fn(StoredPort) -> String = |value| => canonical(value)
+
+let `node-id`: fn(StoredNode) -> String = |value| => get(value, "id")
+
+let `actor-id`: fn(Actor) -> String = |value| => get(value, "id")
+
+let `route-id`: fn(StoredRoute) -> String = |value| => get(value, "id")
+
+let `contract-id`: fn(FactoryContract) -> String = |value| => get(value, "identity")
+
+let `nodes-from-edge`: fn(Edge) -> List<StoredNode> = |value| => [get(value, "from"), get(value, "to")]
+
+let `insert-ordered-node`: fn(OrderedNodes, StoredNode) -> OrderedNodes = |state, candidate| => {
+  let id = `node-id`(candidate)
+  if core.set.`contains?`(get(state, "seen"), id) then state else OrderedNodes {seen: core.set.insert(get(state, "seen"), id), values: concat(get(state, "values"), [candidate])}
+}
+
+let `ordered-nodes`: fn(List<StoredNode>) -> List<StoredNode> = |values| => get(fold(`insert-ordered-node`, OrderedNodes {seen: core.set.empty(type_tag<String>()), values: ([]: List<StoredNode>)}, values), "values")
+
+let `insert-ordered-string`: fn(OrderedStrings, String) -> OrderedStrings = |state, candidate| => if core.set.`contains?`(get(state, "seen"), candidate) then state else OrderedStrings {seen: core.set.insert(get(state, "seen"), candidate), values: concat(get(state, "values"), [candidate])}
+
+let `ordered-strings`: fn(List<String>) -> List<String> = |values| => get(fold(`insert-ordered-string`, OrderedStrings {seen: core.set.empty(type_tag<String>()), values: ([]: List<String>)}, values), "values")
+
+let `external-routes`: fn(Graph) -> List<StoredRoute> = |value| => map(((|candidate| => get(candidate, "route")) : fn(Edge) -> StoredRoute), get(value, "edges"))
+
+let `graph-projection`: fn(Graph) -> GraphProjection = |value| => {
+  let edges = get(value, "edges")
+  let `edges-by-from-node` = `group-by`(((|candidate| => `node-id`(get(candidate, "from"))) : fn(Edge) -> String), edges)
+  let `edges-by-to-node` = `group-by`(((|candidate| => `node-id`(get(candidate, "to"))) : fn(Edge) -> String), edges)
+  let `all-nodes` = `flat-map`(`nodes-from-edge`, edges)
+  let nodes = `ordered-nodes`(`all-nodes`)
+  let roots = filter(((|candidate| => (=)(count(`__map-get-or`(`edges-by-to-node`, `node-id`(candidate), ([]: List<Edge>))), 0)) : fn(StoredNode) -> Bool), nodes)
+  let actors = `flat-map`(((|candidate| => get(candidate, "actors")) : fn(StoredNode) -> List<Actor>), nodes)
+  let `internal-routes` = `flat-map`(((|candidate| => get(candidate, "routes")) : fn(StoredNode) -> List<StoredRoute>), nodes)
+  let routes = concat(`internal-routes`, `external-routes`(value))
+  let `authored-messages` = `flat-map`(((|candidate| => get(candidate, "messages")) : fn(StoredNode) -> List<Message>), nodes)
+  let messages = concat(`authored-messages`, `bootstrap-messages`(map(((|candidate| => get(candidate, "input")) : fn(StoredNode) -> StoredPort), roots), routes, `authored-messages`))
+  let `graph-operations` = `flat-map`(((|candidate| => get(candidate, "operations")) : fn(StoredNode) -> List<nefor.mag.ProgramOperation>), nodes)
+  let `logical-nodes` = `flat-map`(((|candidate| => get(candidate, "nodes")) : fn(StoredNode) -> List<LogicalNode>), nodes)
+  GraphProjection {edges: edges, all_nodes: `all-nodes`, nodes: nodes, actors: actors, routes: routes, messages: messages, graph_operations: `graph-operations`, logical_nodes: `logical-nodes`, edges_by_from_node: `edges-by-from-node`, edges_by_to_node: `edges-by-to-node`, roots: roots, outputs: filter(((|candidate| => (=)(get(candidate, "role"), "output")) : fn(StoredNode) -> Bool), nodes)}
+}
+
+let `analyze-for-lowering`: fn(Graph) -> LoweringAnalysis = |value| => {
+  let projection = `graph-projection`(value)
+  let routes = get(projection, "routes")
+  LoweringAnalysis {actors: get(projection, "actors"), routes: routes, route_input_addresses: `ordered-strings`(map(((|candidate| => `port-address-key`(get(candidate, "to"))) : fn(StoredRoute) -> String), routes)), routes_by_input: `group-by`(((|candidate| => `port-address-key`(get(candidate, "to"))) : fn(StoredRoute) -> String), `sort-by`(`route-id`, routes)), messages: get(projection, "messages"), operations: get(projection, "graph_operations"), logical_nodes: get(projection, "logical_nodes"), outputs: get(projection, "outputs")}
+}
+
+let `analyze-graph`: fn(Graph) -> GraphAnalysis = |value| => {
+  let lowering = `analyze-for-lowering`(value)
+  let projection = `graph-projection`(value)
+  let edges = get(projection, "edges")
+  let `all-nodes` = get(projection, "all_nodes")
+  let nodes = get(projection, "nodes")
+  let actors = get(projection, "actors")
+  let routes = get(projection, "routes")
+  let messages = get(projection, "messages")
+  let `graph-operations` = get(projection, "graph_operations")
+  let outputs = get(projection, "outputs")
+  GraphAnalysis {edges: edges, all_nodes: `all-nodes`, nodes: nodes, nodes_by_id: `group-by`(`node-id`, `all-nodes`), actors: actors, actors_by_id: `group-by`(`actor-id`, actors), input_actors_by_address: `group-by`(((|candidate| => `port-address-key`(get(candidate, "input"))) : fn(Actor) -> String), actors), output_ports_by_address: `group-by`(`port-address-key`, `flat-map`(((|candidate| => get(candidate, "outputs")) : fn(Actor) -> List<StoredPort>), actors)), routes: routes, route_input_addresses: get(lowering, "route_input_addresses"), routes_by_input: get(lowering, "routes_by_input"), diagnostic_routes_by_input: `group-by`(((|route| => `port-address-key`(get(route, "to"))) : fn(StoredRoute) -> String), routes), routes_by_output: `group-by`(((|candidate| => `port-address-key`(get(candidate, "from"))) : fn(StoredRoute) -> String), routes), routes_by_source_actor: `group-by`(((|candidate| => get(get(candidate, "from"), "actor")) : fn(StoredRoute) -> String), routes), messages: messages, messages_by_input: `group-by`(((|candidate| => `port-address-key`(get(candidate, "to"))) : fn(Message) -> String), messages), graph_operations: `graph-operations`, graph_operations_by_output: `group-by`(((|candidate| => `port-address-key`(`operation-port`(candidate))) : fn(nefor.mag.ProgramOperation) -> String), `graph-operations`), edges_by_from_node: get(projection, "edges_by_from_node"), edges_by_to_node: get(projection, "edges_by_to_node"), roots: get(projection, "roots"), outputs: outputs, terminal_outputs_by_full_port: `group-by`(((|candidate| => `full-port-key`(get(candidate, "output"))) : fn(StoredNode) -> String), outputs)}
+}
+
+let `graph-nodes`: fn(Graph) -> List<StoredNode> = |value| => get(`graph-projection`(value), "nodes")
+
+let `graph-routes`: fn(Graph) -> List<StoredRoute> = |value| => get(`graph-projection`(value), "routes")
+
+let `graph-actors`: fn(Graph) -> List<Actor> = |value| => get(`graph-projection`(value), "actors")
+
+// Whole-value compatibility matters: edge compatibility also accepts one
+// product component, which is not enough to activate a root.
+let `unit-input?`: fn(StoredPort) -> Bool = |input| => `descriptor-accepts-value?`(get(input, "type"), `type-evidence`(type_tag<Unit>()))
+
+let `input-needs-bootstrap?`: fn(Map<String, List<StoredRoute>>, Map<String, List<Message>>, StoredPort) -> Bool = |`routes-by-input`, `messages-by-input`, input| => if `unit-input?`(input) then if (=)(count(`__map-get-or`(`routes-by-input`, `port-address-key`(input), ([]: List<StoredRoute>))), 0) then (=)(count(`__map-get-or`(`messages-by-input`, `port-address-key`(input), ([]: List<Message>))), 0) else false else false
+
+let `bootstrap-message`: fn(StoredPort) -> Message = |input| => {
+  // Activation carries Unit evidence, not the receiving sum's descriptor.
+  let `unit-port` = `store-port`(port(get(input, "actor"), type_tag<Unit>(), get(input, "wire")))
+  `stored-message`(`unit-port`, MessageContent<Unit> {kind: get(input, "wire"), value: nil})
+}
+
+let `bootstrap-messages`: fn(List<StoredPort>, List<StoredRoute>, List<Message>) -> List<Message> = |`boundary-ports`, routes, messages| => {
+  let `routes-by-input` = `group-by`(((|route| => `port-address-key`(get(route, "to"))) : fn(StoredRoute) -> String), routes)
+  let `messages-by-input` = `group-by`(((|message| => `port-address-key`(get(message, "to"))) : fn(Message) -> String), messages)
+  map(`bootstrap-message`, filter(((|candidate| => `input-needs-bootstrap?`(`routes-by-input`, `messages-by-input`, candidate)) : fn(StoredPort) -> Bool), `boundary-ports`))
+}
+
+let `graph-messages`: fn(Graph) -> List<Message> = |value| => get(`graph-projection`(value), "messages")
+
+let `graph-operations`: fn(Graph) -> List<nefor.mag.ProgramOperation> = |value| => get(`graph-projection`(value), "graph_operations")
+
+let `graph-logical-nodes`: fn(Graph) -> List<LogicalNode> = |value| => get(`graph-projection`(value), "logical_nodes")
+
+let `string-set`: fn(List<String>) -> Set<String> = |values| => fold(((|set, value| => if core.set.`contains?`(set, value) then set else core.set.insert(set, value)) : fn(Set<String>, String) -> Set<String>), core.set.empty(type_tag<String>()), values)
+
+let `logical-paths-valid?`: fn(Graph) -> Bool = |value| => {
+  let nodes = `graph-logical-nodes`(value)
+  let paths = map(((|candidate| => canonical(get(candidate, "path"))) : fn(LogicalNode) -> String), nodes)
+  let segments = `flat-map`(((|candidate| => get(candidate, "path")) : fn(LogicalNode) -> List<String>), nodes)
+  let `empty-paths` = filter(((|candidate| => (=)(count(get(candidate, "path")), 0)) : fn(LogicalNode) -> Bool), nodes)
+  if (=)(count(`empty-paths`), 0) then if (=)(count(filter(((|name| => (=)(name, "")) : fn(String) -> Bool), segments)), 0) then (=)(core.set.count(`string-set`(paths)), count(paths)) else false else false
+}
+
+let `logical-members-valid?`: fn(Graph) -> Bool = |value| => {
+  let members = `flat-map`(((|candidate| => get(candidate, "members")) : fn(LogicalNode) -> List<String>), `graph-logical-nodes`(value))
+  let actors = `actor-ids`(`graph-actors`(value))
+  if (=)(core.set.count(`string-set`(members)), count(members)) then (=)(`string-set`(members), `string-set`(actors)) else false
+}
+
+let `role?`: fn(StoredNode, String) -> Bool = |candidate, role| => (=)(get(candidate, "role"), role)
+
+let `indexed-count`<T>: fn(Map<String, List<T>>, String) -> Int = |index, id| => count(`__map-get-or`(index, id, ([]: List<T>)))
+
+let `incoming-count`: fn(GraphAnalysis, String) -> Int = |analysis, id| => `indexed-count`(get(analysis, "edges_by_to_node"), id)
+
+let `outgoing-count`: fn(GraphAnalysis, String) -> Int = |analysis, id| => `indexed-count`(get(analysis, "edges_by_from_node"), id)
+
+let `root-shape-valid?`: fn(GraphAnalysis, StoredNode) -> Bool = |analysis, candidate| => if (=)(`incoming-count`(analysis, `node-id`(candidate)), 0) then `unit-input?`(get(candidate, "input")) else true
+
+let `output-shape-valid?`: fn(GraphAnalysis, StoredNode) -> Bool = |analysis, candidate| => if `role?`(candidate, "output") then if not((=)(`incoming-count`(analysis, `node-id`(candidate)), 0)) then (=)(`outgoing-count`(analysis, `node-id`(candidate)), 0) else false else true
+
+let `enqueue-unvisited`: fn(ReachabilityState, String) -> ReachabilityState = |state, id| => if core.set.`contains?`(get(state, "visited"), id) then state else ReachabilityState {visited: core.set.insert(get(state, "visited"), id), frontier: concat(get(state, "frontier"), [id])}
+
+let `initial-reachability-state`: fn(List<String>) -> ReachabilityState = |ids| => fold(`enqueue-unvisited`, ReachabilityState {visited: core.set.empty(type_tag<String>()), frontier: ([]: List<String>)}, ids)
+
+let `next-forward-frontier`: fn(GraphAnalysis, ReachabilityState) -> ReachabilityState = |analysis, state| => {
+  let next = `flat-map`(((|id| => map(((|candidate| => `node-id`(get(candidate, "to"))) : fn(Edge) -> String), `__map-get-or`(get(analysis, "edges_by_from_node"), id, ([]: List<Edge>)))) : fn(String) -> List<String>), get(state, "frontier"))
+  fold(`enqueue-unvisited`, ReachabilityState {visited: get(state, "visited"), frontier: ([]: List<String>)}, next)
+}
+
+let `walk-forward`: fn(GraphAnalysis, ReachabilityState) -> Set<String> = |analysis, state| => if (=)(count(get(state, "frontier")), 0) then get(state, "visited") else `walk-forward`(analysis, `next-forward-frontier`(analysis, state))
+
+let `forward-reachable`: fn(GraphAnalysis) -> Set<String> = |analysis| => `walk-forward`(analysis, `initial-reachability-state`(map(`node-id`, get(analysis, "roots"))))
+
+let `next-reverse-frontier`: fn(GraphAnalysis, ReachabilityState) -> ReachabilityState = |analysis, state| => {
+  let previous = `flat-map`(((|id| => map(((|candidate| => `node-id`(get(candidate, "from"))) : fn(Edge) -> String), `__map-get-or`(get(analysis, "edges_by_to_node"), id, ([]: List<Edge>)))) : fn(String) -> List<String>), get(state, "frontier"))
+  fold(`enqueue-unvisited`, ReachabilityState {visited: get(state, "visited"), frontier: ([]: List<String>)}, previous)
+}
+
+let `walk-reverse`: fn(GraphAnalysis, ReachabilityState) -> Set<String> = |analysis, state| => if (=)(count(get(state, "frontier")), 0) then get(state, "visited") else `walk-reverse`(analysis, `next-reverse-frontier`(analysis, state))
+
+let `reverse-reachable`: fn(GraphAnalysis, StoredNode) -> Set<String> = |analysis, result| => `walk-reverse`(analysis, `initial-reachability-state`([`node-id`(result)]))
+
+let `factory-contract`: fn(FactoryContract) -> FactoryContract = |entry| => entry
+
+let `contains-string?`: fn(List<String>, String) -> Bool = |values, value| => not((=)(count(filter(((|candidate| => (=)(candidate, value)) : fn(String) -> Bool), values)), 0))
+
+let `all-strings-in?`: fn(List<String>, List<String>) -> Bool = |left, right| => (=)(count(filter(((|value| => not(`contains-string?`(right, value))) : fn(String) -> Bool), left)), 0)
+
+let `one-port?`: fn(List<StoredPort>, StoredPort) -> Bool = |ports, expected| => `serialized-equal?`(ports, [expected])
+
+let `empty-packed-map?`: fn(PackedValue) -> Bool = |value| => `packed-empty-record?`(value)
+
+let `source-params-valid?`: fn(PackedValue) -> Bool = |value| => `packed-record-has-only-keys?`(value, ["value", "value_type"])
+
+let `source-value-valid?`: fn(Actor, StoredPort) -> Bool = |value, output| => `packed-field-conforms?`(get(value, "params"), "value", get(output, "type"))
+
+let `one-type-argument?`: fn(Actor, TypeDescriptor) -> Bool = |value, expected| => `serialized-equal?`(get(value, "type_arguments"), [expected])
+
+let `concrete-source?`: fn(StoredNode) -> Bool = |candidate| => {
+  let id = get(candidate, "id")
+  let actors = get(candidate, "actors")
+  let input = get(candidate, "input")
+  let output = get(candidate, "output")
+  if (=)(count(actors), 1) then (((| | => {
+    let boundary = first(actors)
+    if (=)(get(boundary, "id"), id) then if (=)(get(boundary, "factory"), `source-factory`) then if `serialized-equal?`(input, StoredPort {actor: id, `type`: `type-evidence`(type_tag<Unit>()), type_id: `type-id`(`type-evidence`(type_tag<Unit>())), wire: "mag.Unit"}) then if (=)(get(output, "actor"), id) then if (=)(get(output, "wire"), "nefor.graph.Value") then if `serialized-equal?`(get(boundary, "input"), input) then if `one-type-argument?`(boundary, get(output, "type")) then if `one-port?`(get(boundary, "outputs"), output) then if (=)(count(get(candidate, "routes")), 0) then if (=)(count(get(candidate, "messages")), 0) then if `source-params-valid?`(get(boundary, "params")) then `source-value-valid?`(boundary, output) else false else false else false else false else false else false else false else false else false else false else false
+  }) : fn() -> Bool))() else false
+}
+
+let `composite-source?`: fn(StoredNode) -> Bool = |candidate| => {
+  let input = get(candidate, "input")
+  let matching = filter(((|actor| => if (=)(get(actor, "factory"), `source-factory`) then `serialized-equal?`(get(actor, "input"), input) else false) : fn(Actor) -> Bool), get(candidate, "actors"))
+  if (=)(count(matching), 1) then (((| | => {
+    let boundary = first(matching)
+    let outputs = get(boundary, "outputs")
+    if (=)(count(outputs), 1) then (((| | => {
+      let `source-output` = first(outputs)
+      if `one-type-argument?`(boundary, get(`source-output`, "type")) then if (=)(count(get(candidate, "messages")), 0) then if `source-params-valid?`(get(boundary, "params")) then `source-value-valid?`(boundary, `source-output`) else false else false else false
+    }) : fn() -> Bool))() else false
+  }) : fn() -> Bool))() else false
+}
+
+let `concrete-output?`: fn(StoredNode) -> Bool = |candidate| => {
+  let id = get(candidate, "id")
+  let actors = get(candidate, "actors")
+  let input = get(candidate, "input")
+  let output = get(candidate, "output")
+  if (=)(count(actors), 1) then (((| | => {
+    let boundary = first(actors)
+    if (=)(get(boundary, "id"), id) then if (=)(get(boundary, "factory"), `output-factory`) then if (=)(get(input, "actor"), id) then if (=)(get(output, "actor"), id) then if (=)(get(input, "wire"), "nefor.graph.Value") then if (=)(get(output, "wire"), "nefor.graph.Value") then if (=)(canonical(`type-id`(get(input, "type"))), canonical(`type-id`(get(output, "type")))) then if `serialized-equal?`(get(boundary, "input"), input) then if `one-type-argument?`(boundary, get(input, "type")) then if `one-port?`(get(boundary, "outputs"), output) then if `empty-packed-map?`(get(boundary, "params")) then if (=)(count(get(candidate, "routes")), 0) then (=)(count(get(candidate, "messages")), 0) else false else false else false else false else false else false else false else false else false else false else false else false
+  }) : fn() -> Bool))() else false
+}
+
+let `boundary-valid?`: fn(StoredNode) -> Bool = |candidate| => if `role?`(candidate, "source") then if `concrete-source?`(candidate) then true else `composite-source?`(candidate) else if `role?`(candidate, "output") then `concrete-output?`(candidate) else if `role?`(candidate, "ordinary") then (=)(count(get(candidate, "messages")), 0) else false
+
+let `actor-output-wires`: fn(Actor) -> List<String> = |value| => map(((|output| => get(output, "wire")) : fn(StoredPort) -> String), get(value, "outputs"))
+
+let `actor-contract-errors`: fn(Map<String, List<FactoryContract>>, Actor) -> List<String> = |`contracts-by-id`, value| => {
+  let identity = get(value, "factory")
+  let matching = `__map-get-or`(`contracts-by-id`, identity, ([]: List<FactoryContract>))
+  if (=)(count(matching), 0) then [str(str(str("actor ", canonical(get(value, "id"))), ": factory identity "), str(canonical(identity), " is not present in the runtime inventory"))] else (((| | => {
+    let scheme = get(first(matching), "type_scheme")
+    let `input-wire` = get(get(value, "input"), "wire")
+    let `accepted-inputs` = get(scheme, "input_tags")
+    let `output-wires` = `actor-output-wires`(value)
+    let `accepted-outputs` = get(scheme, "outputs")
+    let `input-errors` = if `contains-string?`(`accepted-inputs`, `input-wire`) then ([]: List<String>) else [str(str(str(str(str("actor ", canonical(get(value, "id"))), ": factory "), canonical(identity)), str(" rejects input wire ", canonical(`input-wire`))), str("; accepted input wires: ", canonical(`accepted-inputs`)))]
+    let `output-errors` = if `all-strings-in?`(`output-wires`, `accepted-outputs`) then ([]: List<String>) else [str(str(str(str(str("actor ", canonical(get(value, "id"))), ": factory "), canonical(identity)), str(" exposes output wires ", canonical(`output-wires`))), str("; accepted output wires: ", canonical(`accepted-outputs`)))]
+    concat(`input-errors`, `output-errors`)
+  }) : fn() -> List<String>))()
+}
+
+let `has-node-conflicts?`: fn(GraphAnalysis) -> Bool = |analysis| => not((=)(count(filter(((|candidate| => {
+          let matching = `__map-get-or`(get(analysis, "nodes_by_id"), `node-id`(candidate), ([]: List<StoredNode>))
+          if (=)(count(matching), 0) then false else not(`serialized-equal?`(first(matching), candidate))
+        }) : fn(StoredNode) -> Bool), get(analysis, "all_nodes"))), 0))
+
+let `actor-ids-valid?`: fn(GraphAnalysis) -> Bool = |analysis| => (=)(count(filter(((|candidate| => not((=)(`indexed-count`(get(analysis, "actors_by_id"), `actor-id`(candidate)), 1))) : fn(Actor) -> Bool), get(analysis, "actors"))), 0)
+
+let `same-port-address?`: fn(StoredPort, StoredPort) -> Bool = |left, right| => (=)(`port-address-key`(left), `port-address-key`(right))
+
+let `port-is-output?`: fn(GraphAnalysis, StoredPort) -> Bool = |analysis, value| => {
+  let candidates = `__map-get-or`(get(analysis, "output_ports_by_address"), `port-address-key`(value), ([]: List<StoredPort>))
+  (=)(count(filter(((|output| => `descriptor-accepts?`(get(output, "type"), get(value, "type"))) : fn(StoredPort) -> Bool), candidates)), 1)
+}
+
+let `port-is-input?`: fn(GraphAnalysis, StoredPort) -> Bool = |analysis, value| => {
+  let candidates = `__map-get-or`(get(analysis, "input_actors_by_address"), `port-address-key`(value), ([]: List<Actor>))
+  (=)(count(filter(((|candidate| => `descriptor-accepts?`(get(get(candidate, "input"), "type"), get(value, "type"))) : fn(Actor) -> Bool), candidates)), 1)
+}
+
+let `port-address`: fn(StoredPort) -> String = |value| => str(get(value, "actor"), str(".", get(value, "wire")))
+
+let `describe-route-source`: fn(StoredRoute) -> String = |route| => {
+  let source = get(route, "from")
+  canonical(RouteSourceDescription {kind: "route", from: `port-address`(source), `type`: get(source, "type")})
+}
+
+let `describe-message-source`: fn(Message) -> String = |message| => str("initial message type ", canonical(get(message, "semantic_type")))
+
+let `describe-route-handler`: fn(StoredRoute) -> String = |route| => {
+  let target = get(route, "to")
+  canonical(RouteHandlerDescription {kind: "route", to: `port-address`(target), `type`: get(target, "type")})
+}
+
+let `describe-operation-handler`: fn(nefor.mag.ProgramOperation) -> String = |candidate| => canonical(OperationDescription {kind: "operation", id: get(candidate, "id"), `type`: get(candidate, "trigger_type")})
+
+let `actor-input-sources`: fn(GraphAnalysis, Actor) -> List<String> = |analysis, candidate| => {
+  let key = `port-address-key`(get(candidate, "input"))
+  concat(map(`describe-route-source`, `__map-get-or`(get(analysis, "diagnostic_routes_by_input"), key, ([]: List<StoredRoute>))), map(`describe-message-source`, `__map-get-or`(get(analysis, "messages_by_input"), key, ([]: List<Message>))))
+}
+
+let `output-handlers`: fn(GraphAnalysis, Map<String, List<nefor.mag.ProgramOperation>>, StoredPort) -> List<String> = |analysis, `operations-by-output`, output| => {
+  let key = `port-address-key`(output)
+  concat(map(`describe-route-handler`, `__map-get-or`(get(analysis, "routes_by_output"), key, ([]: List<StoredRoute>))), map(`describe-operation-handler`, `__map-get-or`(`operations-by-output`, key, ([]: List<nefor.mag.ProgramOperation>))))
+}
+
+let `actor-input-source-types`: fn(GraphAnalysis, Actor) -> List<TypeDescriptor> = |analysis, candidate| => {
+  let key = `port-address-key`(get(candidate, "input"))
+  let incoming = `__map-get-or`(get(analysis, "routes_by_input"), key, ([]: List<StoredRoute>))
+  let messages = `__map-get-or`(get(analysis, "messages_by_input"), key, ([]: List<Message>))
+  concat(map(((|route| => get(get(route, "from"), "type")) : fn(StoredRoute) -> TypeDescriptor), incoming), map(((|message| => get(message, "semantic_type")) : fn(Message) -> TypeDescriptor), messages))
+}
+
+let `actor-input-coverage-valid?`: fn(GraphAnalysis, Actor) -> Bool = |analysis, candidate| => `descriptor-input-covered-by?`(get(get(candidate, "input"), "type"), `actor-input-source-types`(analysis, candidate))
+
+let `route-handler-types`: fn(GraphAnalysis, StoredPort) -> List<TypeDescriptor> = |analysis, output| => map(((|route| => get(get(route, "to"), "type")) : fn(StoredRoute) -> TypeDescriptor), `__map-get-or`(get(analysis, "routes_by_output"), `port-address-key`(output), ([]: List<StoredRoute>)))
+
+let `operation-handler-types`: fn(Map<String, List<nefor.mag.ProgramOperation>>, StoredPort) -> List<TypeDescriptor> = |`operations-by-output`, output| => map(((|candidate| => get(`operation-port`(candidate), "type")) : fn(nefor.mag.ProgramOperation) -> TypeDescriptor), `__map-get-or`(`operations-by-output`, `port-address-key`(output), ([]: List<nefor.mag.ProgramOperation>)))
+
+let `terminal-output?`: fn(GraphAnalysis, StoredPort) -> Bool = |analysis, output| => not((=)(`indexed-count`(get(analysis, "terminal_outputs_by_full_port"), `full-port-key`(output)), 0))
+
+let `actor-output-coverage-valid?`: fn(GraphAnalysis, Map<String, List<nefor.mag.ProgramOperation>>, StoredPort) -> Bool = |analysis, `operations-by-output`, output| => if `terminal-output?`(analysis, output) then true else `descriptor-output-covered-by?`(get(output, "type"), concat(`route-handler-types`(analysis, output), `operation-handler-types`(`operations-by-output`, output)))
+
+let `actor-outputs-coverage-valid?`: fn(GraphAnalysis, Map<String, List<nefor.mag.ProgramOperation>>, Actor) -> Bool = |analysis, `operations-by-output`, candidate| => (=)(count(filter(((|output| => not(`actor-output-coverage-valid?`(analysis, `operations-by-output`, output))) : fn(StoredPort) -> Bool), get(candidate, "outputs"))), 0)
+
+let `route-valid?`: fn(GraphAnalysis, StoredRoute) -> Bool = |analysis, value| => if `port-is-output?`(analysis, get(value, "from")) then if `port-is-input?`(analysis, get(value, "to")) then `descriptor-accepts?`(get(get(value, "to"), "type"), get(get(value, "from"), "type")) else false else false
+
+let `validate-routes-stage`: fn(Graph, GraphAnalysis) -> core.validated.Validated<String, Graph> = |value, analysis| => {
+  let `bad-routes` = filter(((|candidate| => not(`route-valid?`(analysis, candidate))) : fn(StoredRoute) -> Bool), get(analysis, "routes"))
+  if (=)(count(`bad-routes`), 0) then core.validated.valid(value) else core.validated.invalid(["graph contains an unknown or incompatible edge"])
+}
+
+let `validate-contracts-stage`: fn(Graph, GraphAnalysis, List<FactoryContract>) -> core.validated.Validated<String, Graph> = |value, analysis, contracts| => {
+  let `contracts-by-id` = `group-by`(`contract-id`, contracts)
+  let `contract-errors` = `flat-map`(((|candidate| => `actor-contract-errors`(`contracts-by-id`, candidate)) : fn(Actor) -> List<String>), get(analysis, "actors"))
+  if (=)(count(`contract-errors`), 0) then `validate-routes-stage`(value, analysis) else core.validated.invalid(`contract-errors`)
+}
+
+let `validate-dead-stage`: fn(Graph, GraphAnalysis, List<FactoryContract>, StoredNode) -> core.validated.Validated<String, Graph> = |value, analysis, contracts, result| => {
+  let reverse = `reverse-reachable`(analysis, result)
+  let dead = filter(((|candidate| => not(core.set.`contains?`(reverse, `node-id`(candidate)))) : fn(StoredNode) -> Bool), get(analysis, "nodes"))
+  if (=)(count(dead), 0) then `validate-contracts-stage`(value, analysis, contracts) else core.validated.invalid(["every node must have a path to the output node"])
+}
+
+let `validate-reachable-stage`: fn(Graph, GraphAnalysis, List<FactoryContract>, StoredNode) -> core.validated.Validated<String, Graph> = |value, analysis, contracts, result| => {
+  let forward = `forward-reachable`(analysis)
+  let unreachable = filter(((|candidate| => not(core.set.`contains?`(forward, `node-id`(candidate)))) : fn(StoredNode) -> Bool), get(analysis, "nodes"))
+  if (=)(count(unreachable), 0) then `validate-dead-stage`(value, analysis, contracts, result) else core.validated.invalid(["every node must be reachable from a root node whose input accepts Unit"])
+}
+
+let `validate-output-coverage-stage`: fn(Graph, GraphAnalysis, Map<String, List<nefor.mag.ProgramOperation>>, List<FactoryContract>, StoredNode) -> core.validated.Validated<String, Graph> = |value, analysis, `operations-by-output`, contracts, result| => {
+  let `bad-output-coverage` = `flat-map`(((|candidate| => filter(((|output| => not(`actor-output-coverage-valid?`(analysis, `operations-by-output`, output))) : fn(StoredPort) -> Bool), get(candidate, "outputs"))) : fn(Actor) -> List<StoredPort>), get(analysis, "actors"))
+  let errors = map(((|output| => str("output coverage failed: ", canonical(OutputCoverageDescription {actor: get(output, "actor"), output: `port-address`(output), output_type: get(output, "type"), available_handlers: `output-handlers`(analysis, `operations-by-output`, output), reason: "coverage is incomplete; every output alternative needs an ordinary route, operation subscription, or terminal output path"}))) : fn(StoredPort) -> String), `bad-output-coverage`)
+  if (=)(count(`bad-output-coverage`), 0) then `validate-reachable-stage`(value, analysis, contracts, result) else core.validated.invalid(errors)
+}
+
+let `validate-input-coverage-stage`: fn(Graph, GraphAnalysis, Map<String, List<nefor.mag.ProgramOperation>>, List<FactoryContract>, StoredNode) -> core.validated.Validated<String, Graph> = |value, analysis, `operations-by-output`, contracts, result| => {
+  let `bad-input-coverage` = filter(((|candidate| => not(`actor-input-coverage-valid?`(analysis, candidate))) : fn(Actor) -> Bool), get(analysis, "actors"))
+  let errors = map(((|candidate| => {
+      let input = get(candidate, "input")
+      str("input coverage failed: ", canonical(InputCoverageDescription {actor: get(candidate, "id"), input: `port-address`(input), expected_type: get(input, "type"), incoming_sources: `actor-input-sources`(analysis, candidate), reason: "sources must be compatible and exactly cover every product occurrence; check for missing, extra, or ambiguous occurrences"}))
+    }) : fn(Actor) -> String), `bad-input-coverage`)
+  if (=)(count(`bad-input-coverage`), 0) then `validate-output-coverage-stage`(value, analysis, `operations-by-output`, contracts, result) else core.validated.invalid(errors)
+}
+
+let `validate-outputs-stage`: fn(Graph, GraphAnalysis, Map<String, List<nefor.mag.ProgramOperation>>, List<FactoryContract>, StoredNode) -> core.validated.Validated<String, Graph> = |value, analysis, `operations-by-output`, contracts, result| => {
+  let `bad-outputs` = filter(((|candidate| => not(`output-shape-valid?`(analysis, candidate))) : fn(StoredNode) -> Bool), get(analysis, "nodes"))
+  if (=)(count(`bad-outputs`), 0) then `validate-input-coverage-stage`(value, analysis, `operations-by-output`, contracts, result) else core.validated.invalid(["output nodes require an incoming edge and are terminal"])
+}
+
+let `validate-roots-stage`: fn(Graph, GraphAnalysis, Map<String, List<nefor.mag.ProgramOperation>>, List<FactoryContract>, StoredNode) -> core.validated.Validated<String, Graph> = |value, analysis, `operations-by-output`, contracts, result| => {
+  let `bad-roots` = filter(((|candidate| => not(`root-shape-valid?`(analysis, candidate))) : fn(StoredNode) -> Bool), get(analysis, "nodes"))
+  if (=)(count(`bad-roots`), 0) then `validate-outputs-stage`(value, analysis, `operations-by-output`, contracts, result) else core.validated.invalid(map(((|candidate| => {
+        let input = get(candidate, "input")
+        str("root validation failed: ", canonical(RootValidationDescription {node: get(candidate, "id"), input: `port-address`(input), input_type: get(input, "type"), reason: "zero incoming edges; only inputs that accept Unit can be activated automatically"}))
+      }) : fn(StoredNode) -> String), `bad-roots`))
+}
+
+let `validate-boundaries-stage`: fn(Graph, GraphAnalysis, Map<String, List<nefor.mag.ProgramOperation>>, List<FactoryContract>, StoredNode) -> core.validated.Validated<String, Graph> = |value, analysis, `operations-by-output`, contracts, result| => {
+  let `bad-boundaries` = filter(((|candidate| => not(`boundary-valid?`(candidate))) : fn(StoredNode) -> Bool), get(analysis, "nodes"))
+  if (=)(count(`bad-boundaries`), 0) then `validate-roots-stage`(value, analysis, `operations-by-output`, contracts, result) else core.validated.invalid(["boundary node roles require their concrete source/output factory shape, and ordinary nodes cannot contain initial messages"])
+}
+
+let `operation-id`: fn(nefor.mag.ProgramOperation) -> String = |value| => get(value, "id")
+
+let `operation-valid?`: fn(GraphAnalysis, nefor.mag.ProgramOperation) -> Bool = |analysis, value| => {
+  let on = `operation-port`(value)
+  if (=)(get(value, "id"), "") then false else if not((=)(canonical(get(value, "trigger_type_id")), canonical(get(on, "type_id")))) then false else if (=)(`indexed-count`(get(analysis, "output_ports_by_address"), `port-address-key`(on)), 0) then false else not(`terminal-output?`(analysis, on))
+}
+
+let `validate-unique-output-stage`: fn(Graph, GraphAnalysis, List<nefor.mag.ProgramOperation>, List<FactoryContract>) -> core.validated.Validated<String, Graph> = |value, analysis, operations, contracts| => {
+  let `all-operations` = concat(get(analysis, "graph_operations"), operations)
+  let `operation-ids-unique` = (=)(count(`ordered-strings`(map(`operation-id`, `all-operations`))), count(`all-operations`))
+  let invalid = filter(((|candidate| => not(`operation-valid?`(analysis, candidate))) : fn(nefor.mag.ProgramOperation) -> Bool), `all-operations`)
+  let `operations-by-output` = `group-by`(((|candidate| => `port-address-key`(`operation-port`(candidate))) : fn(nefor.mag.ProgramOperation) -> String), `all-operations`)
+  let result = first(get(analysis, "outputs"))
+  if not(`operation-ids-unique`) then core.validated.invalid(["program operation ids must be non-empty and unique"]) else if not((=)(count(invalid), 0)) then core.validated.invalid(["program operations must observe a declared non-result output with matching trigger type"]) else `validate-boundaries-stage`(value, analysis, `operations-by-output`, contracts, result)
+}
+
+let `validate-with-operations`: fn(Graph, List<nefor.mag.ProgramOperation>, List<FactoryContract>) -> core.validated.Validated<String, Graph> = |value, operations, contracts| => {
+  let analysis = `analyze-graph`(value)
+  if (=)(count(get(analysis, "edges")), 0) then core.validated.invalid(["graph needs at least one edge"]) else if `has-node-conflicts?`(analysis) then core.validated.invalid(["one node id must denote one immutable node definition"]) else if not(`actor-ids-valid?`(analysis)) then core.validated.invalid(["runtime actor ids must be unique across graph nodes"]) else if not(`logical-paths-valid?`(value)) then core.validated.invalid(["logical node paths must be non-empty and unique"]) else if not(`logical-members-valid?`(value)) then core.validated.invalid(["every runtime actor must belong to exactly one logical node"]) else if not((=)(count(get(analysis, "outputs")), 1)) then core.validated.invalid(["graph needs exactly one concrete output node"]) else `validate-unique-output-stage`(value, analysis, operations, contracts)
+}
+
+let validate: fn(Graph, List<FactoryContract>) -> core.validated.Validated<String, Graph> = |value, contracts| => `validate-with-operations`(value, ([]: List<nefor.mag.ProgramOperation>), contracts)
+
+let `zip-route-assignments`: fn(List<StoredRoute>, List<Int>) -> List<AssignedRoute> = |routes, positions| => {
+  let `positions-by-index` = `group-by`(((|candidate| => get(candidate, "index")) : fn(IndexedPosition) -> String), `indexed-map`(((|index, position| => IndexedPosition {index: str(index), position: position}) : fn(Int, Int) -> IndexedPosition), positions))
+  `indexed-map`(((|index, route| => AssignedRoute {route: route, product_position: get(first(core.map.get(`positions-by-index`, str(index))), "position")}) : fn(Int, StoredRoute) -> AssignedRoute), routes)
+}
+
+let `route-destination-descriptor-key`: fn(StoredRoute) -> String = |value| => canonical(get(get(value, "to"), "type"))
+
+let `assigned-route-id`: fn(AssignedRoute) -> String = |assigned| => get(get(assigned, "route"), "id")
+
+let `descriptor-assignment-index`: fn(List<StoredRoute>, List<String>, Map<String, List<StoredRoute>>, List<TypeDescriptor>) -> Map<String, Map<String, List<AssignedRoute>>> = |routes, `descriptor-keys`, `routes-by-descriptor`, sources| => fold(((|out, `descriptor-key`| => {
+    let `descriptor-routes` = `__map-get-or`(`routes-by-descriptor`, `descriptor-key`, ([]: List<StoredRoute>))
+    let positions = `descriptor-input-assignments`(get(get(first(`descriptor-routes`), "to"), "type"), sources)
+    core.map.insert(out, `descriptor-key`, `group-by`(`assigned-route-id`, `zip-route-assignments`(routes, positions)))
+  }) : fn(Map<String, Map<String, List<AssignedRoute>>>, String) -> Map<String, Map<String, List<AssignedRoute>>>), (core.map.empty(type_tag<String>()): Map<String, Map<String, List<AssignedRoute>>>), `descriptor-keys`)
+
+let `assigned-input-bucket`: fn(List<StoredRoute>) -> List<AssignedRoute> = |routes| => if (=)(count(routes), 0) then ([]: List<AssignedRoute>) else (((| | => {
+  let sources = map(((|candidate| => get(get(candidate, "from"), "type")) : fn(StoredRoute) -> TypeDescriptor), routes)
+  let `routes-by-descriptor` = `group-by`(`route-destination-descriptor-key`, routes)
+  let `assignments-by-descriptor` = `descriptor-assignment-index`(routes, `ordered-strings`(map(`route-destination-descriptor-key`, routes)), `routes-by-descriptor`, sources)
+  map(((|candidate| => {
+      let `assignments-by-id` = `__map-get-or`(`assignments-by-descriptor`, `route-destination-descriptor-key`(candidate), (core.map.empty(type_tag<String>()): Map<String, List<AssignedRoute>>))
+      first(`__map-get-or`(`assignments-by-id`, `route-id`(candidate), ([]: List<AssignedRoute>)))
+    }) : fn(StoredRoute) -> AssignedRoute), routes)
+}) : fn() -> List<AssignedRoute>))()
+
+let `route-assignment-key`: fn(StoredRoute) -> String = |value| => canonical(RouteAssignmentIdentity {input: `port-address-key`(get(value, "to")), route: `route-id`(value)})
+
+let `assigned-route-key`: fn(AssignedRoute) -> String = |value| => `route-assignment-key`(get(value, "route"))
+
+let `route-assignment-index`: fn(List<String>, Map<String, List<StoredRoute>>) -> Map<String, List<AssignedRoute>> = |`route-input-addresses`, `routes-by-input`| => `group-by`(`assigned-route-key`, `flat-map`(((|address| => `assigned-input-bucket`(`__map-get-or`(`routes-by-input`, address, ([]: List<StoredRoute>)))) : fn(String) -> List<AssignedRoute>), `route-input-addresses`))
+
+let `reconstruct-assigned-routes`: fn(List<StoredRoute>, Map<String, List<AssignedRoute>>) -> List<AssignedRoute> = |routes, `assignments-by-key`| => map(((|candidate| => first(`__map-get-or`(`assignments-by-key`, `route-assignment-key`(candidate), ([]: List<AssignedRoute>)))) : fn(StoredRoute) -> AssignedRoute), routes)
+
+let `assigned-routes-from-indexes`: fn(List<StoredRoute>, List<String>, Map<String, List<StoredRoute>>) -> List<AssignedRoute> = |routes, `route-input-addresses`, `routes-by-input`| => `reconstruct-assigned-routes`(routes, `route-assignment-index`(`route-input-addresses`, `routes-by-input`))
+
+let `assigned-analysis-routes`: fn(GraphAnalysis) -> List<AssignedRoute> = |analysis| => `assigned-routes-from-indexes`(get(analysis, "routes"), get(analysis, "route_input_addresses"), get(analysis, "routes_by_input"))
+
+let `assigned-lowering-routes`: fn(LoweringAnalysis) -> List<AssignedRoute> = |analysis| => `assigned-routes-from-indexes`(get(analysis, "routes"), get(analysis, "route_input_addresses"), get(analysis, "routes_by_input"))
+
+let `assigned-routes`: fn(List<StoredRoute>) -> List<AssignedRoute> = |routes| => {
+  let `route-input-addresses` = `ordered-strings`(map(((|candidate| => `port-address-key`(get(candidate, "to"))) : fn(StoredRoute) -> String), routes))
+  let `routes-by-input` = `group-by`(((|candidate| => `port-address-key`(get(candidate, "to"))) : fn(StoredRoute) -> String), `sort-by`(`route-id`, routes))
+  `assigned-routes-from-indexes`(routes, `route-input-addresses`, `routes-by-input`)
+}
+
+let `assigned-route-source-actor`: fn(AssignedRoute) -> String = |candidate| => get(get(get(candidate, "route"), "from"), "actor")
+
+let `assigned-route-source-wire`: fn(AssignedRoute) -> String = |candidate| => get(get(get(candidate, "route"), "from"), "wire")
+
+let `lower-destination`: fn(AssignedRoute) -> LowerDestination = |assigned| => {
+  let candidate = get(assigned, "route")
+  let from = get(candidate, "from")
+  let to = get(candidate, "to")
+  LowerDestination {actor: get(to, "actor"), wire: get(to, "wire"), edge_id: get(candidate, "id"), source_type_id: get(from, "type_id"), destination_type_id: get(to, "type_id"), product_position: get(assigned, "product_position")}
+}
+
+let `actor-routes`: fn(List<AssignedRoute>) -> Map<String, List<LowerDestination>> = |routes| => {
+  let `routes-by-wire` = `group-by`(`assigned-route-source-wire`, routes)
+  fold(((|out, wire| => core.map.insert(out, wire, map(`lower-destination`, `__map-get-or`(`routes-by-wire`, wire, ([]: List<AssignedRoute>))))) : fn(Map<String, List<LowerDestination>>, String) -> Map<String, List<LowerDestination>>), (core.map.empty(type_tag<String>()): Map<String, List<LowerDestination>>), `ordered-strings`(map(`assigned-route-source-wire`, routes)))
+}
+
+let `lower-actor-with-routes`: fn(List<AssignedRoute>, Actor) -> LowerActor = |routes, value| => LowerActor {id: get(value, "id"), factory: get(value, "factory"), type_arguments: get(value, "type_arguments"), input: get(value, "input"), outputs: get(value, "outputs"), params: get(value, "params"), routes: `actor-routes`(routes)}
+
+let `lower-message`: fn(Message) -> LowerMessage = |value| => {
+  let to = get(value, "to")
+  LowerMessage {to: get(to, "actor"), semantic_type: get(value, "semantic_type"), semantic_type_id: get(value, "semantic_type_id"), content: get(value, "content")}
+}
+
+let `result-boundary`: fn(LoweringAnalysis) -> ResultBoundary = |analysis| => ResultBoundary {from: get(first(get(analysis, "outputs")), "output")}
+
+let `actor-descriptors`: fn(List<Actor>) -> List<TypeDescriptor> = |actors| => `flat-map`(((|candidate| => concat([get(get(candidate, "input"), "type")], map(((|output| => get(output, "type")) : fn(StoredPort) -> TypeDescriptor), get(candidate, "outputs")))) : fn(Actor) -> List<TypeDescriptor>), actors)
+
+let `route-descriptors`: fn(List<StoredRoute>) -> List<TypeDescriptor> = |routes| => `flat-map`(((|candidate| => [get(get(candidate, "from"), "type"), get(get(candidate, "to"), "type")]) : fn(StoredRoute) -> List<TypeDescriptor>), routes)
+
+let `message-descriptors`: fn(List<Message>) -> List<TypeDescriptor> = |messages| => map(((|candidate| => get(candidate, "semantic_type")) : fn(Message) -> TypeDescriptor), messages)
+
+let `operation-descriptors`: fn(List<nefor.mag.ProgramOperation>) -> List<TypeDescriptor> = |operations| => map(((|candidate| => get(`operation-port`(candidate), "type")) : fn(nefor.mag.ProgramOperation) -> TypeDescriptor), operations)
+
+let `program-descriptors`: fn(LoweringAnalysis, List<nefor.mag.ProgramOperation>) -> List<TypeDescriptor> = |analysis, operations| => concat(concat(concat(`actor-descriptors`(get(analysis, "actors")), `route-descriptors`(get(analysis, "routes"))), concat(`message-descriptors`(get(analysis, "messages")), `operation-descriptors`(operations))), [get(get(first(get(analysis, "outputs")), "output"), "type")])
+
+let `delta-descriptors`: fn(Delta) -> List<TypeDescriptor> = |value| => concat(concat(`actor-descriptors`(get(value, "actors")), `route-descriptors`(get(value, "routes"))), `message-descriptors`(get(value, "messages")))
+
+let `lower-program`: fn(Graph) -> Modification = |topology| => {
+  let analysis = `analyze-for-lowering`(topology)
+  let assigned = `assigned-lowering-routes`(analysis)
+  let `assigned-by-source` = `group-by`(`assigned-route-source-actor`, assigned)
+  let operations = get(analysis, "operations")
+  Modification {actors: map(((|candidate| => `lower-actor-with-routes`(`__map-get-or`(`assigned-by-source`, `actor-id`(candidate), ([]: List<AssignedRoute>)), candidate)) : fn(Actor) -> LowerActor), get(analysis, "actors")), messages: map(`lower-message`, get(analysis, "messages")), kills: ([]: List<String>), types: `descriptor-table`(`program-descriptors`(analysis, operations)), nodes: get(analysis, "logical_nodes"), result: `result-boundary`(analysis)}
+}
+
+let lower: fn(Graph) -> Modification = |value| => `lower-program`(value)
+
+// Deltas are operational artifacts, not graph values.
+let delta: fn(List<Actor>, List<StoredRoute>, List<Message>, List<String>) -> Delta = |actors, routes, messages, kills| => Delta {actors: actors, routes: routes, messages: messages, nodes: map(((|candidate| => `logical-node`([get(candidate, "id")], [get(candidate, "id")])) : fn(Actor) -> LogicalNode), actors), kills: kills}
+
+let `node-delta`<I, O>: fn(Node<I, O>) -> Delta = |value| => Delta {actors: get(value, "actors"), routes: get(value, "routes"), messages: get(value, "messages"), nodes: get(value, "nodes"), kills: []}
+
+let `merge-delta`: fn(Delta, Delta) -> Delta = |left, right| => Delta {actors: concat(get(left, "actors"), get(right, "actors")), routes: concat(get(left, "routes"), get(right, "routes")), messages: concat(get(left, "messages"), get(right, "messages")), nodes: concat(get(left, "nodes"), get(right, "nodes")), kills: concat(get(left, "kills"), get(right, "kills"))}
+
+let `delta-edge`<I, T, O>: fn(Delta, Node<I, T>, Node<T, O>) -> Delta = |change, from, to| => Delta {actors: get(change, "actors"), routes: concat(get(change, "routes"), [`stored-route`(get(from, "output"), get(to, "input"))]), messages: get(change, "messages"), nodes: get(change, "nodes"), kills: get(change, "kills")}
+
+let `delta-route`<A, B>: fn(Delta, Port<A>, Port<B>) -> Delta = |change, from, to| => Delta {actors: get(change, "actors"), routes: concat(get(change, "routes"), [`stored-route`(from, to)]), messages: get(change, "messages"), nodes: get(change, "nodes"), kills: get(change, "kills")}
+
+let `delta-message`<T>: fn(Delta, Port<T>, T) -> Delta = |change, to, value| => Delta {actors: get(change, "actors"), routes: get(change, "routes"), messages: concat(get(change, "messages"), [`typed-message`(to, value)]), nodes: get(change, "nodes"), kills: get(change, "kills")}
+
+let `delta-message-front`<T>: fn(Delta, Port<T>, T) -> Delta = |change, to, value| => Delta {actors: get(change, "actors"), routes: get(change, "routes"), messages: concat([`typed-message`(to, value)], get(change, "messages")), nodes: get(change, "nodes"), kills: get(change, "kills")}
+
+let `lower-delta`: fn(Delta) -> LowerDelta = |value| => {
+  let actors = get(value, "actors")
+  let `authored-messages` = get(value, "messages")
+  // Deltas retain no exposed Node boundaries. Preserve their existing exact
+  // Unit actor bootstrap rule rather than activate newly eligible internals.
+  let `unit-ports` = filter(((|input| => (=)(canonical(`type-id`(get(input, "type"))), canonical(`type-id`(`type-evidence`(type_tag<Unit>()))))) : fn(StoredPort) -> Bool), map(((|candidate| => get(candidate, "input")) : fn(Actor) -> StoredPort), actors))
+  let routes = `assigned-routes`(get(value, "routes"))
+  let `routes-by-source` = `group-by`(`assigned-route-source-actor`, routes)
+  LowerDelta {actors: map(((|candidate| => `lower-actor-with-routes`(`__map-get-or`(`routes-by-source`, `actor-id`(candidate), ([]: List<AssignedRoute>)), candidate)) : fn(Actor) -> LowerActor), actors), messages: map(`lower-message`, concat(`authored-messages`, `bootstrap-messages`(`unit-ports`, get(value, "routes"), `authored-messages`))), kills: get(value, "kills"), types: `descriptor-table`(`delta-descriptors`(value)), nodes: get(value, "nodes")}
+}

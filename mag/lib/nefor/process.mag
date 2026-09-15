@@ -1,38 +1,20 @@
-(require "nefor.graph")
-(require "nefor.contracts")
+import nefor.graph.{}
 
-;; Relative paths are resolved by the process actor against the MAG host's
-;; inherited working directory. Keeping the captured base as data makes that
-;; authority explicit in every process request.
-(let cwd ".")
-(let factory "nefor.factory.process-exec")
-(type ProcessExecParams {:argv (List String)
-                         :cwd String
-                         :timeout nefor.contracts.Timeout})
-(type ProcessExecActorParams {:argv (List String)
-                              :cwd String
-                              :timeout nefor.contracts.Timeout})
+import nefor.contracts.{}
 
-(let exec (fn [[name String] [params ProcessExecParams]]
-  -> (nefor.graph.Node Unit nefor.contracts.ProcessResult)
-  (let input (nefor.graph.port name
-                (type-tag Unit)
-                "nefor.process.Input"))
-  (let output (nefor.graph.port name
-                 (type-tag nefor.contracts.ProcessResult)
-                 "nefor.process.Result"))
-  (as (nefor.graph.Node Unit nefor.contracts.ProcessResult)
-      {:id name :role "ordinary"
-       :actors [(nefor.graph.actor name factory []
-                   (as ProcessExecActorParams
-                     {:argv (get params "argv")
-                      :cwd (get params "cwd")
-                      :timeout (get params "timeout")})
-                   (nefor.graph.store-port input)
-                   [(nefor.graph.store-port output)])]
-       :routes (as (List nefor.graph.StoredRoute) [])
-       :messages []
-       :operations []
-       :nodes [(nefor.graph.logical-node [name] [name])]
-       :input input
-       :output output})))
+// Relative paths are resolved by the process actor against the MAG host's
+// inherited working directory. Keeping the captured base as data makes that
+// authority explicit in every process request.
+let cwd = "."
+
+let factory = "nefor.factory.process-exec"
+
+type ProcessExecParams {argv: List<String>, cwd: String, timeout: nefor.contracts.Timeout}
+
+type ProcessExecActorParams {argv: List<String>, cwd: String, timeout: nefor.contracts.Timeout}
+
+let exec: fn(String, ProcessExecParams) -> nefor.graph.Node<Unit, nefor.contracts.ProcessResult> = |name, params| => {
+  let input = nefor.graph.port(name, type_tag<Unit>(), "nefor.process.Input")
+  let output = nefor.graph.port(name, type_tag<nefor.contracts.ProcessResult>(), "nefor.process.Result")
+  nefor.graph.Node<Unit, nefor.contracts.ProcessResult> {id: name, role: "ordinary", actors: [nefor.graph.actor(name, factory, [], ProcessExecActorParams {argv: get(params, "argv"), cwd: get(params, "cwd"), timeout: get(params, "timeout")}, nefor.graph.`store-port`(input), [nefor.graph.`store-port`(output)])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.`logical-node`([name], [name])], input: input, output: output}
+}

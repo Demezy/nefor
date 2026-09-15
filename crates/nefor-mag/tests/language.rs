@@ -1,7 +1,8 @@
 use nefor_mag::{
     compile as compile_artifact, compile_file_with_inputs,
-    compile_file_with_inputs_and_module_roots, compile_with_options, CompilerLimits,
-    CompilerOptions,
+    compile_file_with_inputs_and_module_roots,
+    compile_file_with_inputs_and_module_roots_and_options_and_syntax, compile_with_options,
+    CompilerLimits, CompilerOptions, SyntaxMode,
 };
 use serde_json::json;
 use std::fs;
@@ -1508,11 +1509,13 @@ fn fallible_nodes_compose_with_kleisli_semantics() {
     )
     .unwrap();
 
-    let program = compile_file_with_inputs_and_module_roots(
+    let program = compile_file_with_inputs_and_module_roots_and_options_and_syntax(
         &root,
         "main.mag",
         json!({}),
         std::slice::from_ref(&mag_lib),
+        CompilerOptions::default(),
+        SyntaxMode::Lisp,
     )
     .unwrap();
 
@@ -1954,11 +1957,13 @@ fn ordinary_core_modules_expose_unordered_maps_and_sets() {
     .unwrap();
     let module_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
     assert_eq!(
-        compile_file_with_inputs_and_module_roots(
+        compile_file_with_inputs_and_module_roots_and_options_and_syntax(
             &root,
             "main.mag",
             json!({}),
             std::slice::from_ref(&module_root),
+            CompilerOptions::default(),
+            SyntaxMode::Lisp,
         )
         .unwrap(),
         json!({"map-value":"one", "map-count":1, "set-member":true, "set-count":1})
@@ -1974,13 +1979,17 @@ fn ordinary_core_modules_expose_unordered_maps_and_sets() {
         (artifact (core.set.insert set "ready"))"#,
     ] {
         fs::write(root.join("main.mag"), source).unwrap();
-        assert!(compile_file_with_inputs_and_module_roots(
-            &root,
-            "main.mag",
-            json!({}),
-            std::slice::from_ref(&module_root),
-        )
-        .is_err());
+        assert!(
+            compile_file_with_inputs_and_module_roots_and_options_and_syntax(
+                &root,
+                "main.mag",
+                json!({}),
+                std::slice::from_ref(&module_root),
+                CompilerOptions::default(),
+                SyntaxMode::Lisp,
+            )
+            .is_err()
+        );
     }
 }
 

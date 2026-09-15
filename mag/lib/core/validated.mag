@@ -1,28 +1,16 @@
-(require "core.types")
+import core.types.{}
 
-;; Validation is a library algebra, not a distinguished evaluator result.
-(type ValidationErrors [E] {:errors (List E)})
-(type Validated [E T] (adt [Valid T] [Invalid (ValidationErrors E)]))
+// Validation is a library algebra, not a distinguished evaluator result.
+type ValidationErrors<E> {errors: List<E>}
 
-(let valid (fn [E T] [[value T]] -> (Validated E T)
-  (construct (Validated E T) Valid value)))
+type Validated<E, T> = Valid(T) | Invalid(ValidationErrors<E>)
 
-(let invalid (fn [E T] [[errors (List E)]] -> (Validated E T)
-  (construct (Validated E T) Invalid
-    (as (ValidationErrors E) {:errors errors}))))
+let valid<E, T>: fn(T) -> Validated<E, T> = |value| => named(Validated<E, T>, Valid, value)
 
-(let valid? (fn [E T] [[validated (Validated E T)]] -> Bool
-  (match validated
-    [Valid accepted true]
-    [Invalid rejected false])))
+let invalid<E, T>: fn(List<E>) -> Validated<E, T> = |errors| => named(Validated<E, T>, Invalid, ValidationErrors<E> {errors: errors})
 
-(let map (fn [E T U] [[f (Fn T U)] [validated (Validated E T)]] -> (Validated E U)
-  (match validated
-    [Valid accepted (construct (Validated E U) Valid (f accepted))]
-    [Invalid rejected (construct (Validated E U) Invalid rejected)])))
+let `valid?`<E, T>: fn(Validated<E, T>) -> Bool = |validated| => match validated { case Valid(accepted) => true, case Invalid(rejected) => false }
 
-(let and-then (fn [E T U] [[f (Fn T (Validated E U))]
-                            [validated (Validated E T)]] -> (Validated E U)
-  (match validated
-    [Valid accepted (f accepted)]
-    [Invalid rejected (construct (Validated E U) Invalid rejected)])))
+let map<E, T, U>: fn(fn(T) -> U, Validated<E, T>) -> Validated<E, U> = |f, validated| => match validated { case Valid(accepted) => named(Validated<E, U>, Valid, f(accepted)), case Invalid(rejected) => named(Validated<E, U>, Invalid, rejected) }
+
+let `and-then`<E, T, U>: fn(fn(T) -> Validated<E, U>, Validated<E, T>) -> Validated<E, U> = |f, validated| => match validated { case Valid(accepted) => f(accepted), case Invalid(rejected) => named(Validated<E, U>, Invalid, rejected) }

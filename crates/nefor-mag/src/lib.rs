@@ -103,6 +103,28 @@ pub fn compile_with_syntax(
     )
 }
 
+pub fn compile_with_inputs_and_module_roots_and_options_and_syntax(
+    source: &str,
+    source_dir: &Path,
+    inputs: serde_json::Value,
+    module_roots: &[std::path::PathBuf],
+    options: CompilerOptions,
+    syntax: SyntaxMode,
+) -> Result<serde_json::Value, MagError> {
+    compile_cold_with_syntax(
+        CompileRequest {
+            source,
+            source_dir,
+            inputs,
+            module_roots,
+            options,
+        },
+        None,
+        syntax,
+        SyntaxMode::New,
+    )
+}
+
 pub fn compile_with_inputs(
     source: &str,
     source_dir: &Path,
@@ -463,7 +485,7 @@ pub(crate) fn compile_file_cold_observing(
     )
 }
 
-fn compile_file_cold_observing_with_syntax(
+pub(crate) fn compile_file_cold_observing_with_syntax(
     request: FileCompileRequest<'_>,
     profiler: Option<&CompileProfiler>,
     observer: Option<observation::Observer>,

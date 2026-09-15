@@ -1,4 +1,5 @@
 use super::*;
+use crate::observation::compile_file_observed;
 use crate::profile::{CompileProfile, CompileProfiler};
 use crate::CompilerOptions;
 use serde_json::{json, Value};
@@ -50,6 +51,8 @@ impl Fixture {
             &self.request(),
             1,
             CompilerBuildId::from_executable_bytes(compiler),
+            crate::SyntaxMode::Lisp,
+            crate::SyntaxMode::Lisp,
         )
         .unwrap()
     }
@@ -234,7 +237,9 @@ fn compiler_and_complete_contexts_coexist_without_replacing_prior_records() {
         Identity::new(
             &f.request(),
             2,
-            CompilerBuildId::from_executable_bytes(b"A")
+            CompilerBuildId::from_executable_bytes(b"A"),
+            crate::SyntaxMode::Lisp,
+            crate::SyntaxMode::Lisp,
         )
         .unwrap(),
         original

@@ -1,4 +1,3 @@
-(let title "Modules are immutable namespaces")
+let title = "Modules are immutable namespaces"
 
-(let number-label (fn [[value Int]] -> String
-  (str "number-" value)))
+let `number-label`: fn(Int) -> String = |value| => str("number-", value)

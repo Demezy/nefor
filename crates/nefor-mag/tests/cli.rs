@@ -369,8 +369,6 @@ fn project_roots_and_host_inputs_are_anchored_to_project() {
         r#"(require "value")
 (require "other")
 (require "local")
-(require "core.types")
-(require "nefor.contracts")
 (artifact [value.number other.number local.number (host-input "data" (type-tag Int))])"#,
     );
     fixture.write("data.json", "42");

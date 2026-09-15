@@ -38,16 +38,19 @@ pub mod kernel {
             std::fs::create_dir_all(&source_dir).expect("create shell test workspace");
             std::fs::write(source_dir.join("main.mag"), source).expect("write shell test program");
             let contracts = host.registry_contracts().expect("runtime contracts");
-            let artifact = nefor_mag::compile_file_with_inputs_and_module_roots(
-                &source_dir,
-                "main.mag",
-                serde_json::json!({"factory_contracts": contracts}),
-                &[
-                    manifest.join("../../mag/lib"),
-                    manifest.join("../../examples/nefor-agent/mag/lib"),
-                ],
-            )
-            .expect("compile MAG test program");
+            let artifact =
+                nefor_mag::compile_file_with_inputs_and_module_roots_and_options_and_syntax(
+                    &source_dir,
+                    "main.mag",
+                    serde_json::json!({"factory_contracts": contracts}),
+                    &[
+                        manifest.join("../../mag/lib"),
+                        manifest.join("../../examples/nefor-agent/mag/lib"),
+                    ],
+                    nefor_mag::CompilerOptions::default(),
+                    nefor_mag::SyntaxMode::Lisp,
+                )
+                .expect("compile MAG test program");
             let modification =
                 crate::artifact_modification(&artifact).expect("normalize shell artifact");
             let _ = std::fs::remove_dir_all(source_dir);
@@ -121,16 +124,19 @@ pub mod kernel {
             std::fs::write(workspace.join("main.mag"), source).expect("write guide program");
 
             let contracts = host.registry_contracts().expect("runtime contracts");
-            let artifact = nefor_mag::compile_file_with_inputs_and_module_roots(
-                &workspace,
-                "main.mag",
-                serde_json::json!({"factory_contracts": contracts}),
-                &[
-                    repository.join("mag/lib"),
-                    repository.join("examples/nefor-agent/mag/lib"),
-                ],
-            )
-            .expect("compile Nefor guide with runtime contracts");
+            let artifact =
+                nefor_mag::compile_file_with_inputs_and_module_roots_and_options_and_syntax(
+                    &workspace,
+                    "main.mag",
+                    serde_json::json!({"factory_contracts": contracts}),
+                    &[
+                        repository.join("mag/lib"),
+                        repository.join("examples/nefor-agent/mag/lib"),
+                    ],
+                    nefor_mag::CompilerOptions::default(),
+                    nefor_mag::SyntaxMode::Lisp,
+                )
+                .expect("compile Nefor guide with runtime contracts");
             let decoded = crate::artifact_program(&artifact).expect("decode guide program");
             let initial = decoded.initial;
 
@@ -949,11 +955,13 @@ pub mod kernel {
   (nefor.graph.delta-message (nefor.graph.node-delta command)
     (get command "input") text))"#;
             let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let artifact = nefor_mag::compile_with_inputs_and_module_roots(
+            let artifact = nefor_mag::compile_with_inputs_and_module_roots_and_options_and_syntax(
                 explicit,
                 &manifest,
                 serde_json::json!({"factory_contracts": host.registry_contracts().unwrap()}),
                 &[manifest.join("../../mag/lib")],
+                nefor_mag::CompilerOptions::default(),
+                nefor_mag::SyntaxMode::Lisp,
             )
             .expect("compile explicit delta");
             let modification = crate::artifact_delta(&artifact).expect("normalize delta envelope");
@@ -977,11 +985,13 @@ pub mod kernel {
   (concat (get command "nodes") (get hidden "nodes"))
   (get command "input") (get command "output")))"#, ["input coverage failed", "hidden.nefor.graph.Value"]),
             ] {
-                let error = nefor_mag::compile_with_inputs_and_module_roots(
+                let error = nefor_mag::compile_with_inputs_and_module_roots_and_options_and_syntax(
                     &unit_root_program(definitions),
                     &manifest,
                     serde_json::json!({"factory_contracts": host.registry_contracts().unwrap()}),
                     &[manifest.join("../../mag/lib")],
+                    nefor_mag::CompilerOptions::default(),
+                    nefor_mag::SyntaxMode::Lisp,
                 ).expect_err(name).to_string();
                 for fragment in expected {
                     assert!(error.contains(fragment), "{name}: missing {fragment:?}: {error}");
@@ -1010,11 +1020,13 @@ pub mod kernel {
                 ),
             ] {
                 let source = std::fs::read_to_string(fixture_root.join(fixture)).unwrap();
-                let error = nefor_mag::compile_with_inputs_and_module_roots(
+                let error = nefor_mag::compile_with_inputs_and_module_roots_and_options_and_syntax(
                     &source,
                     &fixture_root,
                     serde_json::json!({"factory_contracts": host.registry_contracts().unwrap()}),
                     &[manifest.join("../../mag/lib")],
+                    nefor_mag::CompilerOptions::default(),
+                    nefor_mag::SyntaxMode::Lisp,
                 )
                 .expect_err(fixture)
                 .to_string();

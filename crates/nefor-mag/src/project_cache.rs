@@ -1,6 +1,6 @@
 //! Successful project artifacts only. The ordinary compiler APIs remain cold.
 use crate::error::MagError;
-use crate::observation::{compile_file_observed, ObservationSet};
+use crate::observation::{compile_file_observed_with_syntax, ObservationSet};
 use crate::profile::CompileProfiler;
 use crate::FileCompileRequest;
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,7 @@ struct Identity {
     roots: Vec<String>,
     inputs: serde_json::Value,
     config_version: u32,
+    syntax: String,
     evaluation_steps: u64,
     call_depth: u16,
     expression_depth: u16,
@@ -91,6 +92,8 @@ impl Identity {
         request: &FileCompileRequest<'_>,
         version: u32,
         compiler: CompilerBuildId,
+        syntax: crate::SyntaxMode,
+        module_mag_syntax: crate::SyntaxMode,
     ) -> Option<Self> {
         if !request.source_dir.is_absolute()
             || request.module_roots.iter().any(|p| !p.is_absolute())
@@ -111,6 +114,17 @@ impl Identity {
                 .collect::<Option<_>>()?,
             inputs: request.inputs.clone(),
             config_version: version,
+            syntax: format!(
+                "{}/{}",
+                match syntax {
+                    crate::SyntaxMode::Lisp => "lisp",
+                    crate::SyntaxMode::New => "new",
+                },
+                match module_mag_syntax {
+                    crate::SyntaxMode::Lisp => "lisp",
+                    crate::SyntaxMode::New => "new",
+                }
+            ),
             evaluation_steps: limits.evaluation_steps,
             call_depth: limits.call_depth,
             expression_depth: limits.expression_depth,
@@ -157,6 +171,26 @@ pub fn build(
         policy,
         profiler,
         CompilerBuildId::current,
+    )
+}
+
+pub fn build_with_syntax(
+    request: FileCompileRequest<'_>,
+    config_version: u32,
+    policy: CachePolicy,
+    profiler: Option<&CompileProfiler>,
+    syntax: crate::SyntaxMode,
+) -> Result<BuildOutput, MagError> {
+    let cache_dir = request.source_dir.join(".mag/cache");
+    build_in_with_identity_and_syntax(
+        request,
+        config_version,
+        &cache_dir,
+        policy,
+        profiler,
+        CompilerBuildId::current,
+        syntax,
+        crate::SyntaxMode::New,
     )
 }
 
@@ -209,11 +243,33 @@ pub fn build_in_with_identity(
     profiler: Option<&CompileProfiler>,
     identity: impl FnOnce() -> io::Result<CompilerBuildId>,
 ) -> Result<BuildOutput, MagError> {
+    build_in_with_identity_and_syntax(
+        request,
+        config_version,
+        cache_dir,
+        policy,
+        profiler,
+        identity,
+        crate::SyntaxMode::Lisp,
+        crate::SyntaxMode::Lisp,
+    )
+}
+
+fn build_in_with_identity_and_syntax(
+    request: FileCompileRequest<'_>,
+    config_version: u32,
+    cache_dir: &Path,
+    policy: CachePolicy,
+    profiler: Option<&CompileProfiler>,
+    identity: impl FnOnce() -> io::Result<CompilerBuildId>,
+    syntax: crate::SyntaxMode,
+    module_mag_syntax: crate::SyntaxMode,
+) -> Result<BuildOutput, MagError> {
     let started = Instant::now();
     let identity = if policy == CachePolicy::Use {
         identity()
             .ok()
-            .and_then(|id| Identity::new(&request, config_version, id))
+            .and_then(|id| Identity::new(&request, config_version, id, syntax, module_mag_syntax))
     } else {
         None
     };
@@ -242,7 +298,8 @@ pub fn build_in_with_identity(
         publication_duration_ns: 0,
     };
     let bytes = if let (Some(identity), Some(bucket)) = (identity, bucket) {
-        let compiled = compile_file_observed(request, profiler)?;
+        let compiled =
+            compile_file_observed_with_syntax(request, profiler, syntax, module_mag_syntax)?;
         let bytes = serialize_artifact(&compiled.artifact)?;
         let started = Instant::now();
         let provenance = Provenance {
@@ -258,11 +315,13 @@ pub fn build_in_with_identity(
         cache.publication_duration_ns = nanos(started);
         bytes
     } else {
-        let session = crate::CompilerSession::new();
-        let artifact = match profiler {
-            Some(profiler) => session.compile_file_with_profiler(request, profiler),
-            None => session.compile_file(request),
-        }?;
+        let artifact = crate::compile_file_cold_observing_with_syntax(
+            request,
+            profiler,
+            None,
+            syntax,
+            module_mag_syntax,
+        )?;
         serialize_artifact(&artifact)?
     };
     Ok(BuildOutput { bytes, cache })

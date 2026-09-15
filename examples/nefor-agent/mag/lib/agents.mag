@@ -1,22 +1,12 @@
-(require "nefor.actors")
+import nefor.actors.{}
 
-;; This example configuration owns the finite model vocabulary. Nefor only
-;; asks for one typed resolver; each constructor may author a concrete model or
-;; a configuration-resolved run profile.
-(type Model (adt [Standard Unit] [Mock Unit]))
+// This example configuration owns the finite model vocabulary. Nefor only
+// asks for one typed resolver; each constructor may author a concrete model or
+// a configuration-resolved run profile.
+type Model = Standard(Unit) | Mock(Unit)
 
-(let standard (construct Model Standard nil))
-(let mock (construct Model Mock nil))
+let standard = named(Model, Standard, nil)
 
-(let resolve-model (fn [[model Model]] -> nefor.actors.AuthoredModel
-  (match model
-    [Standard value
-      (construct nefor.actors.AuthoredModel ResolvedModel
-        (as nefor.actors.ResolvedModel
-          {:provider "chatgpt" :model "gpt-5.6-sol"
-           :reasoning-effort (nefor.actors.reasoning-effort "medium")}))]
-    [Mock value
-      (construct nefor.actors.AuthoredModel ResolvedModel
-        (as nefor.actors.ResolvedModel
-          {:provider "mock-provider" :model "mock-model"
-           :reasoning-effort (nefor.actors.reasoning-effort "medium")}))])))
+let mock = named(Model, Mock, nil)
+
+let `resolve-model`: fn(Model) -> nefor.actors.AuthoredModel = |model| => match model { case Standard(value) => named(nefor.actors.AuthoredModel, ResolvedModel, nefor.actors.ResolvedModel {provider: "chatgpt", model: "gpt-5.6-sol", `reasoning-effort`: nefor.actors.`reasoning-effort`("medium")}), case Mock(value) => named(nefor.actors.AuthoredModel, ResolvedModel, nefor.actors.ResolvedModel {provider: "mock-provider", model: "mock-model", `reasoning-effort`: nefor.actors.`reasoning-effort`("medium")}) }

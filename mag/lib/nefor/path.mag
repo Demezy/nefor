@@ -1,8 +1,3 @@
-;; Lexical composition only: parent traversal and absolute-looking segments are
-;; deliberately preserved rather than confined or canonicalized.
-(let join (fn [[base String] [segment String]] -> String
-  (if (= base "")
-    segment
-    (if (= segment "")
-      base
-      (str (str base "/") segment)))))
+// Lexical composition only: parent traversal and absolute-looking segments are
+// deliberately preserved rather than confined or canonicalized.
+let join: fn(String, String) -> String = |base, segment| => if (=)(base, "") then segment else if (=)(segment, "") then base else str(str(base, "/"), segment)

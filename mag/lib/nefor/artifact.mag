@@ -1,24 +1,27 @@
-(require "core.validated")
-(require "nefor.graph")
-(require "nefor.mag")
+import core.validated.{}
 
-(let emit-program
-  (fn [[graph nefor.graph.Graph]] -> Artifact
-    (let initial (nefor.graph.lower-program graph))
-    (artifact
-      (nefor.mag.program-envelope
-        initial (get (nefor.graph.analyze-graph graph) "graph_operations")))))
+import nefor.graph.{}
 
-(let compile
-  (fn [[transform (Fn nefor.graph.Graph nefor.graph.Graph)]] -> Artifact
-    (let graph (transform nefor.graph.empty-graph))
-    (let checked (nefor.graph.validate graph
-      (host-input "factory_contracts" (type-tag (List nefor.graph.FactoryContract)))))
-    (match checked
-      [Valid valid (emit-program valid)]
-      [Invalid invalid (fail (get invalid "errors"))])))
+import nefor.mag.{}
 
-(let delta (fn [[change nefor.graph.Delta]] -> Artifact
-  (artifact
-    (nefor.mag.delta-envelope
-      (nefor.graph.lower-delta change)))))
+let `emit-program`: fn(nefor.graph.Graph) -> Artifact = |graph| => {
+  let initial = nefor.graph.`lower-program`(graph)
+  artifact(nefor.mag.`program-envelope`(initial, get(nefor.graph.`analyze-graph`(graph), "graph_operations")))
+}
+
+let compile_graph_value: fn(nefor.graph.Graph) -> Artifact = |graph| => {
+  let checked = nefor.graph.validate(graph, `host-input`("factory_contracts", type_tag<List<nefor.graph.FactoryContract>>()))
+  match checked { case Valid(valid) => `emit-program`(valid), case Invalid(invalid) => fail(get(invalid, "errors")) }
+}
+
+let compile: fn(fn(nefor.graph.Graph) -> nefor.graph.Graph) -> Artifact = |transform| =>
+  compile_graph_value(transform(nefor.graph.`empty-graph`))
+
+// Close one root-capable terminal through the same ordinary output node, edge,
+// graph validation, and lowering values available to every MAG program.
+let compile_graph<O>: fn(nefor.graph.Node<Unit, O>) -> Artifact = |terminal| => {
+  let result = nefor.graph.`output-for`("result", terminal)
+  compile_graph_value(nefor.graph.graph([nefor.graph.edge(terminal, result)]))
+}
+
+let delta: fn(nefor.graph.Delta) -> Artifact = |change| => artifact(nefor.mag.`delta-envelope`(nefor.graph.`lower-delta`(change)))

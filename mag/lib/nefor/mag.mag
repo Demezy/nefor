@@ -1,92 +1,57 @@
-;; Nefor-owned, versioned immutable execution artifacts. Core MAG treats every
-;; value in this module as opaque application data.
+// Nefor-owned, versioned immutable execution artifacts. Core MAG treats every
+// value in this module as opaque application data.
+type TypedCapture {semantic_type: TypeDescriptor, semantic_type_id: SemanticTypeId, value: PackedValue}
 
-(type TypedCapture {:semantic_type TypeDescriptor
-                    :semantic_type_id SemanticTypeId
-                    :value PackedValue})
+type Trigger {id: String, result_type: SemanticTypeId}
 
-(type Trigger {:id String :result_type SemanticTypeId})
-(type Capture {:id String :result_type SemanticTypeId :capture String})
-(type Field {:id String :result_type SemanticTypeId :record String :field String})
-(type IntToDecimalString {:id String :result_type SemanticTypeId :value String})
-(type ConcatStrings {:id String :result_type SemanticTypeId :values (List String)})
-(type Expression
-  (adt [Trigger Trigger]
-       [Capture Capture]
-       [Field Field]
-       [IntToDecimalString IntToDecimalString]
-       [ConcatStrings ConcatStrings]))
+type Capture {id: String, result_type: SemanticTypeId, capture: String}
 
-(type LocalActorRef {:slot String})
-(type ExistingActorRef {:id String})
-(type ActorRef
-  (adt [LocalActorRef LocalActorRef]
-       [ExistingActorRef ExistingActorRef]))
-(type TemplatePort {:actor ActorRef
-                    :type TypeDescriptor
-                    :type_id SemanticTypeId
-                    :wire String})
-(type ScalarParameterBinding {:path (List String) :value String})
-(type ActorReferenceRelocation {:actor LocalActorRef
-                                :path (List String)
-                                :shape String})
-(type TemplateActor {:slot String
-                     :id String
-                     :factory String
-                     :type_arguments (List TypeDescriptor)
-                     :params PackedValue
-                     :input TemplatePort
-                     :outputs (List TemplatePort)
-                     :parameter_bindings (List ScalarParameterBinding)})
-(type TemplateRoute {:from TemplatePort :to TemplatePort :product_position Int})
-(type TemplateMessage {:to TemplatePort
-                       :semantic_type TypeDescriptor
-                       :semantic_type_id SemanticTypeId
-                       :content PackedValue})
-(type FixedPathSegment {:value String})
-(type BoundPathSegment {:value String})
-(type PathSegment
-  (adt [FixedPathSegment FixedPathSegment]
-       [BoundPathSegment BoundPathSegment]))
-(type TemplateLogicalNode {:path (List PathSegment) :members (List LocalActorRef)})
-(type DeltaTemplate {:types (Map String TypeDescriptor)
-                     :actors (List TemplateActor)
-                     :routes (List TemplateRoute)
-                     :messages (List TemplateMessage)
-                     :nodes (List TemplateLogicalNode)
-                     :actor_reference_relocations (List ActorReferenceRelocation)})
+type Field {id: String, result_type: SemanticTypeId, record: String, field: String}
 
-(type InstantiateDeltaTemplate {:id String
-                                :on_actor String
-                                :on_wire String
-                                :trigger_type TypeDescriptor
-                                :trigger_type_id SemanticTypeId
-                                :captures (Map String TypedCapture)
-                                :expressions (List Expression)
-                                :template DeltaTemplate})
-(type ProgramOperation {:id String
-                        :on_actor String
-                        :on_wire String
-                        :trigger_type TypeDescriptor
-                        :trigger_type_id SemanticTypeId
-                        :captures (Map String TypedCapture)
-                        :expressions (List Expression)
-                        :template DeltaTemplate})
+type IntToDecimalString {id: String, result_type: SemanticTypeId, value: String}
 
-(type Program [Initial] {:initial Initial
-                         :operations (List ProgramOperation)})
-(type ProgramEnvelope [Initial]
-  {:format String :version Int :kind String :program (Program Initial)})
-(type DeltaEnvelope [D] {:format String :version Int :kind String :delta D})
+type ConcatStrings {id: String, result_type: SemanticTypeId, values: List<String>}
 
-(let program-envelope
-  (fn [Initial] [[initial Initial] [operations (List ProgramOperation)]]
-    -> (ProgramEnvelope Initial)
-    (as (ProgramEnvelope Initial)
-      {:format "nefor.mag" :version 2 :kind "program"
-       :program (as (Program Initial)
-         {:initial initial :operations operations})})))
-(let delta-envelope
-  (fn [D] [[delta D]] -> (DeltaEnvelope D)
-    (as (DeltaEnvelope D)
-      {:format "nefor.mag" :version 2 :kind "delta" :delta delta})))
+type Expression = Trigger(Trigger) | Capture(Capture) | Field(Field) | IntToDecimalString(IntToDecimalString) | ConcatStrings(ConcatStrings)
+
+type LocalActorRef {slot: String}
+
+type ExistingActorRef {id: String}
+
+type ActorRef = LocalActorRef(LocalActorRef) | ExistingActorRef(ExistingActorRef)
+
+type TemplatePort {actor: ActorRef, `type`: TypeDescriptor, type_id: SemanticTypeId, wire: String}
+
+type ScalarParameterBinding {path: List<String>, value: String}
+
+type ActorReferenceRelocation {actor: LocalActorRef, path: List<String>, shape: String}
+
+type TemplateActor {slot: String, id: String, factory: String, type_arguments: List<TypeDescriptor>, params: PackedValue, input: TemplatePort, outputs: List<TemplatePort>, parameter_bindings: List<ScalarParameterBinding>}
+
+type TemplateRoute {from: TemplatePort, to: TemplatePort, product_position: Int}
+
+type TemplateMessage {to: TemplatePort, semantic_type: TypeDescriptor, semantic_type_id: SemanticTypeId, content: PackedValue}
+
+type FixedPathSegment {value: String}
+
+type BoundPathSegment {value: String}
+
+type PathSegment = FixedPathSegment(FixedPathSegment) | BoundPathSegment(BoundPathSegment)
+
+type TemplateLogicalNode {path: List<PathSegment>, members: List<LocalActorRef>}
+
+type DeltaTemplate {types: Map<String, TypeDescriptor>, actors: List<TemplateActor>, routes: List<TemplateRoute>, messages: List<TemplateMessage>, nodes: List<TemplateLogicalNode>, actor_reference_relocations: List<ActorReferenceRelocation>}
+
+type InstantiateDeltaTemplate {id: String, on_actor: String, on_wire: String, trigger_type: TypeDescriptor, trigger_type_id: SemanticTypeId, captures: Map<String, TypedCapture>, expressions: List<Expression>, template: DeltaTemplate}
+
+type ProgramOperation {id: String, on_actor: String, on_wire: String, trigger_type: TypeDescriptor, trigger_type_id: SemanticTypeId, captures: Map<String, TypedCapture>, expressions: List<Expression>, template: DeltaTemplate}
+
+type Program<Initial> {initial: Initial, operations: List<ProgramOperation>}
+
+type ProgramEnvelope<Initial> {format: String, version: Int, kind: String, program: Program<Initial>}
+
+type DeltaEnvelope<D> {format: String, version: Int, kind: String, delta: D}
+
+let `program-envelope`<Initial>: fn(Initial, List<ProgramOperation>) -> ProgramEnvelope<Initial> = |initial, operations| => ProgramEnvelope<Initial> {format: "nefor.mag", version: 2, kind: "program", program: Program<Initial> {initial: initial, operations: operations}}
+
+let `delta-envelope`<D>: fn(D) -> DeltaEnvelope<D> = |delta| => DeltaEnvelope<D> {format: "nefor.mag", version: 2, kind: "delta", delta: delta}

@@ -1,6 +1,7 @@
-;; MAG bindings for the config-owned neutral toolset manifest. The compiler's
-;; read-json parser validates JSON and converts its values into MAG data.
+// MAG bindings for the config-owned neutral toolset manifest. The compiler's
+// read-json parser validates JSON and converts its values into MAG data.
+let manifest = `read-json`("nefor/toolsets.json")
 
-(let manifest (read-json "nefor/toolsets.json"))
-(let read-only (get manifest "read_only"))
-(let general (get manifest "general"))
+let `read-only` = get(manifest, "read_only")
+
+let general = get(manifest, "general")

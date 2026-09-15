@@ -1,22 +1,20 @@
-(require "core.types")
+import core.types.{}
 
-;; Native maps are unordered immutable data. Their storage order is never
-;; observable; deterministic ordering exists only at artifact serialization.
-(let empty (fn [K V] [[key-type (TypeTag K)]] -> (Map K V)
-  (__map-empty key-type)))
-;; insert requires a new key. put is the explicit replacement/upsert operation.
-(let insert (fn [K V] [[map (Map K V)] [key K] [value V]] -> (Map K V)
-  (__map-insert map key value)))
-(let put (fn [K V] [[map (Map K V)] [key K] [value V]] -> (Map K V)
-  (__map-put map key value)))
-(let contains-key? (fn [K V] [[map (Map K V)] [key K]] -> Bool
-  (__map-contains map key)))
-(let get (fn [K V] [[map (Map K V)] [key K]] -> V
-  (__map-get map key)))
-(let get-or (fn [K V] [[map (Map K V)] [key K] [fallback V]] -> V
-  (__map-get-or map key fallback)))
-(let lookup (fn [K V] [[map (Map K V)] [key K]] -> (core.types.Option V)
-  (if (__map-contains map key)
-    (construct (core.types.Option V) Some (__map-get map key))
-    (construct (core.types.Option V) None nil))))
-(let count (fn [K V] [[map (Map K V)]] -> Int (__map-count map)))
+// Native maps are unordered immutable data. Their storage order is never
+// observable; deterministic ordering exists only at artifact serialization.
+let empty<K, V>: fn(TypeTag<K>) -> Map<K, V> = |`key-type`| => `__map-empty`(`key-type`)
+
+// insert requires a new key. put is the explicit replacement/upsert operation.
+let insert<K, V>: fn(Map<K, V>, K, V) -> Map<K, V> = |map, key, value| => `__map-insert`(map, key, value)
+
+let put<K, V>: fn(Map<K, V>, K, V) -> Map<K, V> = |map, key, value| => `__map-put`(map, key, value)
+
+let `contains-key?`<K, V>: fn(Map<K, V>, K) -> Bool = |map, key| => `__map-contains`(map, key)
+
+let get<K, V>: fn(Map<K, V>, K) -> V = |map, key| => `__map-get`(map, key)
+
+let `get-or`<K, V>: fn(Map<K, V>, K, V) -> V = |map, key, fallback| => `__map-get-or`(map, key, fallback)
+
+let lookup<K, V>: fn(Map<K, V>, K) -> core.types.Option<V> = |map, key| => if `__map-contains`(map, key) then named(core.types.Option<V>, Some, `__map-get`(map, key)) else named(core.types.Option<V>, None, nil)
+
+let count<K, V>: fn(Map<K, V>) -> Int = |map| => `__map-count`(map)

@@ -640,13 +640,18 @@ impl<'a> Parser<'a> {
         self.expect_operator("=")?;
         let mut value = self.parse_expr(expected.as_ref())?;
         if let Some(target) = expected {
-            if let authored::Expr::Function(function) = &mut value {
+            let generic_function = if let authored::Expr::Function(function) = &mut value {
                 function.type_params = type_params;
-            }
-            value = authored::Expr::Ascribe {
-                target,
-                value: Box::new(value),
+                !function.type_params.is_empty()
+            } else {
+                false
             };
+            if !generic_function {
+                value = authored::Expr::Ascribe {
+                    target,
+                    value: Box::new(value),
+                };
+            }
         } else if !type_params.is_empty() {
             return Err(self.here("generic let parameters require a complete type annotation"));
         }
@@ -706,24 +711,26 @@ impl<'a> Parser<'a> {
                     return Err(self.here("generic application requires a callable name"));
                 };
                 let arguments = self.parse_type_arguments()?;
-                if !self.eat_punct('.') {
+                let owner_type = authored::Type::Apply {
+                    constructor: owner.clone(),
+                    arguments,
+                };
+                if self.eat_punct('.') {
+                    let constructor = self.expect_name()?;
+                    let marker = format!("#constructor{}", self.specialized_constructors.len());
+                    self.specialized_constructors
+                        .insert(marker.clone(), (owner_type, constructor));
+                    value = authored::Expr::Name(marker);
+                } else if self.allow_brace_construct && self.eat_punct('{') {
+                    value = authored::Expr::Ascribe {
+                        target: owner_type,
+                        value: Box::new(authored::Expr::Fields(self.parse_value_fields('}')?)),
+                    };
+                } else {
                     return Err(self.here(
                         "explicit term type application requires callable interface resolution",
                     ));
                 }
-                let constructor = self.expect_name()?;
-                let marker = format!("#constructor{}", self.specialized_constructors.len());
-                self.specialized_constructors.insert(
-                    marker.clone(),
-                    (
-                        authored::Type::Apply {
-                            constructor: owner,
-                            arguments,
-                        },
-                        constructor,
-                    ),
-                );
-                value = authored::Expr::Name(marker);
             } else if self.eat_punct('(') {
                 let args = self.parse_arguments()?;
                 value = self.lower_call(value, args, expected)?;

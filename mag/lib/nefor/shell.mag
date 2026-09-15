@@ -1,46 +1,24 @@
-(require "nefor.graph")
-(require "nefor.contracts")
+import nefor.graph.{}
 
-(let factory "nefor.factory.shell-script")
-(type ShellScriptParams {:script String
-                         :cwd String
-                         :timeout nefor.contracts.Timeout})
-(type ShellScriptActorParams {:script String
-                              :cwd String
-                              :timeout nefor.contracts.Timeout})
+import nefor.contracts.{}
 
-(let script (fn [[name String] [params ShellScriptParams]]
-  -> (nefor.graph.Node Unit nefor.contracts.ProcessResult)
-  (let input (nefor.graph.port name
-                (type-tag Unit)
-                "nefor.process.Input"))
-  (let output (nefor.graph.port name
-                 (type-tag nefor.contracts.ProcessResult)
-                 "nefor.process.Result"))
-  (as (nefor.graph.Node Unit nefor.contracts.ProcessResult)
-      {:id name :role "ordinary"
-       :actors [(nefor.graph.actor name factory []
-                   (as ShellScriptActorParams
-                     {:script (get params "script")
-                      :cwd (get params "cwd")
-                      :timeout (get params "timeout")})
-                   (nefor.graph.store-port input)
-                   [(nefor.graph.store-port output)])]
-       :routes (as (List nefor.graph.StoredRoute) [])
-       :messages []
-       :operations []
-       :nodes [(nefor.graph.logical-node [name] [name])]
-       :input input
-       :output output})))
+let factory = "nefor.factory.shell-script"
 
-;; The common dependency form: a Unit occurrence starts the authored script.
-;; `script` keeps the wider Unit | Text boundary for callers that deliberately
-;; pass textual stdin; `run` makes deterministic sequencing read directly.
-(let run (fn [[name String] [params ShellScriptParams]]
-  -> (nefor.graph.Node Unit nefor.contracts.ProcessResult)
-  (let value (script name params))
-  (let input
-    (nefor.graph.port name (type-tag Unit) "nefor.process.Input"))
-  (nefor.graph.node-with-operations-and-nodes name "ordinary"
-    (get value "actors") (get value "routes") (get value "messages")
-    (get value "operations") (get value "nodes") input (get value "output"))))
+type ShellScriptParams {script: String, cwd: String, timeout: nefor.contracts.Timeout}
+
+type ShellScriptActorParams {script: String, cwd: String, timeout: nefor.contracts.Timeout}
+
+let script: fn(String, ShellScriptParams) -> nefor.graph.Node<Unit, nefor.contracts.ProcessResult> = |name, params| => {
+  let input = nefor.graph.port(name, type_tag<Unit>(), "nefor.process.Input")
+  let output = nefor.graph.port(name, type_tag<nefor.contracts.ProcessResult>(), "nefor.process.Result")
+  nefor.graph.Node<Unit, nefor.contracts.ProcessResult> {id: name, role: "ordinary", actors: [nefor.graph.actor(name, factory, [], ShellScriptActorParams {script: get(params, "script"), cwd: get(params, "cwd"), timeout: get(params, "timeout")}, nefor.graph.`store-port`(input), [nefor.graph.`store-port`(output)])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.`logical-node`([name], [name])], input: input, output: output}
+}
+
+// The common dependency form: a Unit occurrence starts the authored script.
+// `script` keeps the wider Unit | Text boundary for callers that deliberately
+// pass textual stdin; `run` makes deterministic sequencing read directly.
+let run: fn(String, ShellScriptParams) -> nefor.graph.Node<Unit, nefor.contracts.ProcessResult> = |name, params| => {
+  let value = script(name, params)
+  let input = nefor.graph.port(name, type_tag<Unit>(), "nefor.process.Input")
+  nefor.graph.`node-with-operations-and-nodes`(name, "ordinary", get(value, "actors"), get(value, "routes"), get(value, "messages"), get(value, "operations"), get(value, "nodes"), input, get(value, "output"))
+}
