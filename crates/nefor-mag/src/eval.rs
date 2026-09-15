@@ -2025,7 +2025,12 @@ fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
     }
     env.begin_module(name)?;
     let resolve_phase = env.profile_phase(Phase::ModuleResolve);
-    let path = crate::resolver::resolve_module(env.module_roots(), name)?;
+    let resolved = crate::resolver::resolve_module(env.module_roots(), name)?;
+    let syntax = match resolved.syntax {
+        crate::frontend::SyntaxMode::New => env.default_mag_syntax(),
+        crate::frontend::SyntaxMode::Lisp => crate::frontend::SyntaxMode::Lisp,
+    };
+    let path = resolved.path;
     drop(resolve_phase);
     let read_phase = env.profile_phase(Phase::ModuleRead);
     let content = std::fs::read_to_string(&path)
@@ -2038,10 +2043,11 @@ fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
     drop(read_phase);
     let source_snapshot = crate::diagnostic::SourceSnapshot::file(&path, &content);
     let profiler = env.profiler();
-    let authored = crate::lisp::compile_source(
+    let authored = crate::frontend::compile_source(
+        syntax,
         &source_snapshot,
         profiler.as_ref(),
-        crate::lisp::SourceRole::Module,
+        crate::frontend::SourceRole::Module,
     )?;
     let mut module = env.module_env(name);
     let eval_phase = env.profile_phase(Phase::ModuleEvaluate);
@@ -2263,7 +2269,7 @@ mod tests {
         "#;
         let source = crate::diagnostic::SourceSnapshot::named("test.mag", source);
         let module =
-            crate::lisp::compile_source(&source, None, crate::lisp::SourceRole::Entry).unwrap();
+            crate::lisp::compile_source(&source, None, crate::frontend::SourceRole::Entry).unwrap();
         let mut env = Env::new();
         let _fuel = fuel::install(1_000);
         eval_program(&mut env, &module).unwrap();

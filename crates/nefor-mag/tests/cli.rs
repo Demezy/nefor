@@ -54,8 +54,26 @@ fn json_stderr(output: &Output) -> Value {
 fn compile_args<'a>(root: &'a Path, extra: &'a [&'a str]) -> Vec<&'a str> {
     let mut args = vec!["compile", "main.mag", "--source-dir"];
     args.push(root.to_str().expect("utf8 fixture path"));
+    args.extend_from_slice(&["--syntax", "lisp"]);
     args.extend_from_slice(extra);
     args
+}
+
+#[test]
+fn mag_suffix_selects_new_syntax_and_magl_selects_lisp_without_fallback() {
+    let fixture = Fixture::new("syntax-selection");
+    fixture.write("new.mag", "artifact(\"new\")\n");
+    fixture.write("legacy.magl", "(artifact \"lisp\")\n");
+    fixture.write("wrong.mag", "(artifact \"must not fall back\")\n");
+    let root = fixture.root.to_str().expect("utf8 fixture path");
+
+    let new = run(&["compile", "new.mag", "--source-dir", root]);
+    assert_eq!(json_stdout(&new), serde_json::json!("new"));
+    let legacy = run(&["compile", "legacy.magl", "--source-dir", root]);
+    assert_eq!(json_stdout(&legacy), serde_json::json!("lisp"));
+    let wrong = run(&["compile", "wrong.mag", "--source-dir", root]);
+    assert!(!wrong.status.success());
+    assert_eq!(json_stderr(&wrong)["diagnostic"]["syntax"], "new");
 }
 
 #[test]
@@ -64,7 +82,7 @@ fn compiles_with_caller_supplied_module_root_and_host_input() {
     let modules = fixture.root.join("modules");
     fs::create_dir_all(&modules).expect("modules");
     fixture.write(
-        "modules/contracts.mag",
+        "modules/contracts.magl",
         "(type Scheme {:input_tags (List String) :outputs (List String)})\n(type Contract {:identity String :type_scheme Scheme})\n(let contracts (host-input \"factory_contracts\" (type-tag (List Contract))))",
     );
     fixture.write(
@@ -190,7 +208,7 @@ fn profiling_does_not_change_failure_stdout_or_diagnostic() {
 #[test]
 fn required_module_syntax_diagnostic_owns_its_snapshot() {
     let fixture = Fixture::new("module-diagnostic");
-    let module = fixture.write("bad.mag", "[λ]");
+    let module = fixture.write("bad.magl", "[λ]");
     fixture.write("main.mag", "(require \"bad\")\n(artifact {})");
     let output = run(&compile_args(&fixture.root, &[]));
     assert!(!output.status.success());
@@ -433,7 +451,7 @@ fn project_build_replays_exact_bytes_with_real_executable_identity_and_zero_work
         "main.mag",
         "(require \"value\")\n(artifact {:value value.number :text (read \"note.txt\")})",
     );
-    fixture.write("value.mag", "(let number 7)");
+    fixture.write("value.magl", "(let number 7)");
     fixture.write("note.txt", "hello\nworld");
     let cold = run(&compile_args(&fixture.root, &[]));
     let population = build_at(&fixture.root, &["--profile"]);

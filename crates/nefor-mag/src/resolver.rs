@@ -21,48 +21,59 @@ pub(crate) fn resolve_workspace_path(root: &Path, relative: &str) -> Result<Path
     Ok(joined)
 }
 
-fn module_path(name: &str) -> Result<String, MagError> {
-    if name.split('.').any(|p| {
-        p.is_empty()
-            || !p
+fn module_stem(name: &str) -> Result<String, MagError> {
+    if name.split('.').any(|part| {
+        part.is_empty()
+            || !part
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     }) {
         return Err(MagError::Eval(format!("invalid module name: {name}")));
     }
-    Ok(format!("{}.mag", name.replace('.', "/")))
+    Ok(name.replace('.', "/"))
 }
 
-pub(crate) fn resolve_module(roots: &[PathBuf], name: &str) -> Result<PathBuf, MagError> {
-    let relative = module_path(name)?;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResolvedModule {
+    pub path: PathBuf,
+    pub syntax: crate::frontend::SyntaxMode,
+}
+
+pub(crate) fn resolve_module(roots: &[PathBuf], name: &str) -> Result<ResolvedModule, MagError> {
+    let stem = module_stem(name)?;
     let mut matches = roots
         .iter()
-        .filter_map(|root| {
-            let path = resolve_workspace_path(root, &relative).ok()?;
-            path.is_file().then(|| path.canonicalize().unwrap_or(path))
+        .flat_map(|root| {
+            [
+                (format!("{stem}.mag"), crate::frontend::SyntaxMode::New),
+                (format!("{stem}.magl"), crate::frontend::SyntaxMode::Lisp),
+            ]
+            .into_iter()
+            .filter_map(|(relative, syntax)| {
+                let path = resolve_workspace_path(root, &relative).ok()?;
+                path.is_file().then(|| ResolvedModule {
+                    path: path.canonicalize().unwrap_or(path),
+                    syntax,
+                })
+            })
         })
         .collect::<Vec<_>>();
-    matches.sort();
-    matches.dedup();
-    let path = match matches.as_slice() {
-        [path] => path.clone(),
-        [] => {
-            return Err(MagError::Eval(format!(
-                "cannot find module {name} in search roots"
-            )))
-        }
-        paths => {
-            return Err(MagError::Eval(format!(
-                "module {name} is ambiguous across search roots: {}",
-                paths
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )))
-        }
-    };
-    Ok(path)
+    matches.sort_by(|left, right| left.path.cmp(&right.path));
+    matches.dedup_by(|left, right| left.path == right.path && left.syntax == right.syntax);
+    match matches.as_slice() {
+        [resolved] => Ok(resolved.clone()),
+        [] => Err(MagError::Eval(format!(
+            "cannot find module {name} in search roots"
+        ))),
+        paths => Err(MagError::Eval(format!(
+            "module {name} is ambiguous across search roots or syntax suffixes: {}",
+            paths
+                .iter()
+                .map(|resolved| resolved.path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }
 
 pub(crate) fn resolve_json(roots: &[PathBuf], path: &str) -> Result<PathBuf, MagError> {

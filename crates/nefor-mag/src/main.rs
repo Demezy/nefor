@@ -3,7 +3,7 @@ mod build_request;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use nefor_mag::error::MagError;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -36,8 +36,18 @@ struct CompileArgs {
     #[arg(long)]
     source_dir: PathBuf,
 
+    /// Override the entry source frontend; imported modules keep suffix selection
+    #[arg(long, value_enum)]
+    syntax: Option<CliSyntax>,
+
     #[command(flatten)]
     common: CommonArgs,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CliSyntax {
+    New,
+    Lisp,
 }
 
 #[derive(Args)]
@@ -126,6 +136,7 @@ fn compile(args: CompileArgs) -> Result<(Vec<u8>, Option<Value>), Diagnostic> {
     let CompileArgs {
         entry,
         source_dir,
+        syntax,
         common: args,
     } = args;
     require_directory(&source_dir, "source_dir")?;
@@ -140,22 +151,40 @@ fn compile(args: CompileArgs) -> Result<(Vec<u8>, Option<Value>), Diagnostic> {
     let inputs = load_inputs(&args.inputs, None)?;
     let options = args.options();
     let profiler = args.profile.then(nefor_mag::profile::CompileProfiler::new);
+    let syntax = match syntax {
+        Some(CliSyntax::New) => nefor_mag::SyntaxMode::New,
+        Some(CliSyntax::Lisp) => nefor_mag::SyntaxMode::Lisp,
+        None if entry.ends_with(".mag") => nefor_mag::SyntaxMode::New,
+        None if entry.ends_with(".magl") => nefor_mag::SyntaxMode::Lisp,
+        None => {
+            return Err(Diagnostic {
+                code: "syntax_selection",
+                stage: "input",
+                message: format!("entry must end in .mag or .magl: {entry}"),
+                path: Some(source_dir.join(&entry).display().to_string()),
+                diagnostic: None,
+                profile: None,
+            })
+        }
+    };
     let artifact = if let Some(profiler) = &profiler {
-        nefor_mag::compile_file_with_profiler_and_options(
+        nefor_mag::compile_file_with_profiler_and_options_and_syntax(
             &source_dir,
             &entry,
             inputs,
             &module_roots,
             profiler,
             options,
+            syntax,
         )
     } else {
-        nefor_mag::compile_file_with_inputs_and_module_roots_and_options(
+        nefor_mag::compile_file_with_inputs_and_module_roots_and_options_and_syntax(
             &source_dir,
             &entry,
             inputs,
             &module_roots,
             options,
+            syntax,
         )
     };
     match artifact {

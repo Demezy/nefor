@@ -36,17 +36,23 @@ work accounting, not a hit from a future cache shared across compilations.
 MAG keeps surface syntax separate from language semantics:
 
 ```text
-Lisp tokens and reader tree -> authored module IR -> checked IR -> evaluation
+selected lexer/parser -> authored module IR -> checked IR -> evaluation
 ```
 
-The Lisp frontend owns special-form recognition, function and match layout,
-record-key normalization, and authored type grammar. The authored IR retains
-unresolved names and explicit declarations, block items, expressions, and type
-forms; environment-dependent type, binding, overload, and generic resolution
-remain in the checker. Entry programs and recursively required modules use the
-same frontend compilation path. Evaluation executes ordered authored
-`require`/`type` declarations and syntax-independent checked expressions, while
-the existing lexer/parser remain the sole owners of Lisp syntax diagnostics.
+The expression-oriented frontend parses nominal declarations, calls, tuples,
+blocks, typed lambdas, imports, and binding-scoped infix chains. The explicit
+Lisp frontend retains its reader and lowering path. Both lower into the same
+authored IR, which keeps unresolved names and explicit declarations, block
+items, expressions, and type forms; environment-dependent binding, overload,
+generic, and compatibility resolution remains in the checker.
+
+CLI entry selection is deterministic: `.mag` selects the new syntax and `.magl`
+selects Lisp; `--syntax new|lisp` overrides only the entry. Required modules use
+their own suffix, both suffixes for one module identity are ambiguous, and a
+syntax error never retries another frontend. Existing Rust convenience APIs
+remain the explicit legacy lane during the shipped-corpus migration; embedders
+can select `SyntaxMode` through the `*_with_syntax` functions. Evaluation stays
+syntax-independent and MAG core contains no Nefor or graph-language behavior.
 
 ## Explicit project builds for embedders
 

@@ -50,7 +50,9 @@ impl Query {
                 [root] => resolver::resolve_workspace_path(root, &self.requested).ok(),
                 _ => None,
             },
-            Operation::Require => resolver::resolve_module(&self.roots, &self.requested).ok(),
+            Operation::Require => resolver::resolve_module(&self.roots, &self.requested)
+                .ok()
+                .map(|resolved| resolved.path),
             Operation::ReadJson => resolver::resolve_json(&self.roots, &self.requested).ok(),
         }
     }

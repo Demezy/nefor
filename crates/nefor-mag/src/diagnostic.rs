@@ -57,6 +57,10 @@ pub struct LocatedSpan {
 #[derive(Debug, Clone, Serialize)]
 pub struct RelatedDiagnostic {
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub span: ByteSpan,
     pub location: LocatedSpan,
 }
@@ -66,6 +70,8 @@ pub struct SyntaxDiagnostic {
     pub code: &'static str,
     pub stage: &'static str,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub syntax: Option<String>,
     pub source_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -95,6 +101,8 @@ impl SyntaxDiagnostic {
             let related_span = clamp_span(&source.text, related_span);
             RelatedDiagnostic {
                 message,
+                source_name: Some(source.name.clone()),
+                path: source.path.clone(),
                 span: related_span,
                 location: locate(&source.text, related_span),
             }
@@ -103,6 +111,7 @@ impl SyntaxDiagnostic {
             code,
             stage,
             message,
+            syntax: None,
             source_name: source.name.clone(),
             path: source.path.clone(),
             source: source.text.clone(),
@@ -112,6 +121,23 @@ impl SyntaxDiagnostic {
             caret,
             related,
         }
+    }
+
+    pub fn with_related_source(
+        mut self,
+        message: impl Into<String>,
+        source: &SourceSnapshot,
+        span: ByteSpan,
+    ) -> Self {
+        let span = clamp_span(&source.text, span);
+        self.related = Some(RelatedDiagnostic {
+            message: message.into(),
+            source_name: Some(source.name.clone()),
+            path: source.path.clone(),
+            span,
+            location: locate(&source.text, span),
+        });
+        self
     }
 }
 
@@ -133,7 +159,7 @@ impl std::fmt::Display for SyntaxDiagnostic {
                 formatter,
                 "\n  = {} at {}:{}:{}",
                 related.message,
-                self.source_name,
+                related.source_name.as_deref().unwrap_or(&self.source_name),
                 related.location.start.line,
                 related.location.start.display_column
             )?;

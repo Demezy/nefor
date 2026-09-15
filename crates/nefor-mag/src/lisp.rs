@@ -3,23 +3,17 @@ use crate::authored::{self, AuthoringError};
 use crate::diagnostic::SourceSnapshot;
 use crate::error::MagError;
 
-#[derive(Debug, Clone, Copy)]
-pub enum SourceRole {
-    Entry,
-    Module,
-}
-
 pub fn compile_source(
     source: &SourceSnapshot,
     profiler: Option<&crate::profile::CompileProfiler>,
-    role: SourceRole,
+    role: crate::frontend::SourceRole,
 ) -> Result<authored::Module, MagError> {
     let (lex, parse) = match role {
-        SourceRole::Entry => (
+        crate::frontend::SourceRole::Entry => (
             crate::profile::Phase::EntryLex,
             crate::profile::Phase::EntryParse,
         ),
-        SourceRole::Module => (
+        crate::frontend::SourceRole::Module => (
             crate::profile::Phase::ModuleLex,
             crate::profile::Phase::ModuleParse,
         ),
@@ -451,7 +445,7 @@ mod tests {
                 (artifact {:answer (type-tag (Map String (Fn Int String)))})
             "#,
         );
-        let module = compile_source(&source, None, SourceRole::Entry).unwrap();
+        let module = compile_source(&source, None, crate::frontend::SourceRole::Entry).unwrap();
 
         assert!(matches!(module.forms[0], authored::Form::Require(_)));
         let authored::Form::Type(declaration) = &module.forms[1] else {
