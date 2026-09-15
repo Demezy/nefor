@@ -367,32 +367,15 @@ impl LuaHost {
 
     /// Interrupt a live run's in-flight work. Two shapes selected by
     /// `terminate`:
-    ///
-    /// * `terminate == false` (GRACEFUL — the lead's own turn): settle every
-    ///   in-flight capability correlation as a failed reply ("interrupted by
-    ///   user") and emit a `tool.cancel` for each. The failure routes through
-    ///   the normal tool-failure path and the run STAYS ALIVE, winding down to a
-    ///   real final answer (contrast [`LuaHost::end_run`]). The caller drains
-    ///   the emit queue (the cancels + any re-fire the settle produced) and
-    ///   settles the run only if it reached a terminal state.
-    /// * `terminate == true` (TERMINATING — a dispatched sub-run): emit a
-    ///   `tool.cancel` per open correlation so the real work dies, but deliver
-    ///   NO reply — the run's llm never re-fires. The caller then ends the run
-    ///   failed, so it settles `mag.run_result status:"failed"`.
-    ///
-    /// Returns `(count, terminated)`: correlations touched, and whether the
-    /// terminating path ran. An unknown/ended run returns `(0, false)`.
-    pub fn interrupt_run(
-        &self,
-        run_id: &str,
-        failure: &str,
-        terminate: bool,
-    ) -> Result<(u64, bool), MagError> {
+    /// Gracefully settle every in-flight capability correlation as an
+    /// interrupted reply and emit one `tool.cancel` for each. The failures
+    /// route through normal actor paths, so the run remains alive and may wind
+    /// down to a final answer. Terminating sub-runs use [`LuaHost::end_run`]
+    /// directly; actor reaping owns their cancellation.
+    pub fn interrupt_run(&self, run_id: &str, failure: &str) -> Result<u64, MagError> {
         let f: Function = self.kernel.get("interrupt_run")?;
-        let res: Table = f.call::<Table>((run_id, failure, terminate))?;
-        let count = res.get::<Option<u64>>("interrupted")?.unwrap_or(0);
-        let terminated = res.get::<Option<bool>>("terminated")?.unwrap_or(false);
-        Ok((count, terminated))
+        let res: Table = f.call::<Table>((run_id, failure))?;
+        Ok(res.get::<Option<u64>>("interrupted")?.unwrap_or(0))
     }
 
     pub fn bus_observation(

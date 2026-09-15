@@ -28,7 +28,6 @@ pub enum MagType {
     EmptyList,
     Map(Box<MagType>, Box<MagType>),
     Record(BTreeMap<String, MagType>),
-    Union(Vec<MagType>),
     Product(Vec<MagType>),
     Function(Vec<MagType>, Box<MagType>),
 }
@@ -66,9 +65,6 @@ pub enum ConcreteType {
     },
     Record {
         fields: BTreeMap<String, ConcreteType>,
-    },
-    Sum {
-        arms: Vec<ConcreteType>,
     },
     Product {
         items: Vec<ConcreteType>,
@@ -164,7 +160,6 @@ impl ConcreteType {
                     .map(|(name, ty)| (name.clone(), ty.to_mag_type()))
                     .collect(),
             ),
-            Self::Sum { arms } => MagType::Union(arms.iter().map(Self::to_mag_type).collect()),
             Self::Product { items } => {
                 MagType::Product(items.iter().map(Self::to_mag_type).collect())
             }
@@ -260,11 +255,6 @@ impl ConcreteType {
                     field.collect_declarations(declarations)?;
                 }
             }
-            Self::Sum { arms } => {
-                for arm in arms {
-                    arm.collect_declarations(declarations)?;
-                }
-            }
             Self::Product { items } => {
                 for item in items {
                     item.collect_declarations(declarations)?;
@@ -278,12 +268,6 @@ impl ConcreteType {
     pub fn accepts(&self, actual: &Self) -> bool {
         if self == actual {
             return true;
-        }
-        if let Self::Sum { arms } = actual {
-            return arms.iter().all(|arm| self.accepts(arm));
-        }
-        if let Self::Sum { arms } = self {
-            return arms.iter().any(|arm| arm.accepts(actual));
         }
         match (self, actual) {
             (Self::List { item: expected }, Self::List { item: actual })
@@ -327,37 +311,8 @@ impl ConcreteType {
     /// destination; exhaustive handling of every source arm is checked across
     /// all outgoing edges separately.
     pub fn accepts_edge_source(&self, actual: &Self) -> bool {
-        if let Self::Sum { arms } = actual {
-            return arms.iter().any(|arm| self.accepts_edge_source(arm));
-        }
-        self.accepts_dynamic_source(actual)
-            || self.accepts(actual)
+        self.accepts(actual)
             || matches!(self, Self::Product { items } if items.iter().any(|item| item.accepts_edge_source(actual)))
-    }
-
-    fn accepts_dynamic_source(&self, actual: &Self) -> bool {
-        let (
-            Self::Named {
-                name: target_name,
-                arguments: target_arguments,
-                ..
-            },
-            Self::Named {
-                name: source_name,
-                arguments: source_arguments,
-                ..
-            },
-        ) = (self, actual)
-        else {
-            return false;
-        };
-        matches!(
-            target_name.as_str(),
-            "nefor.dynamic.DynamicEach" | "nefor.dynamic.DynamicAll"
-        ) && source_name == "nefor.dynamic.DynamicList"
-            && target_arguments.len() == 1
-            && source_arguments.len() == 1
-            && target_arguments[0].accepts(&source_arguments[0])
     }
 
     /// Whether incoming edge types completely supply this input. Ordinary
@@ -443,16 +398,9 @@ impl ConcreteType {
     }
 
     pub fn output_is_covered_by(&self, handlers: &[Self]) -> bool {
-        match self {
-            Self::Sum { arms } => arms.iter().all(|arm| {
-                handlers
-                    .iter()
-                    .any(|handler| handler.accepts_edge_source(arm))
-            }),
-            output => handlers
-                .iter()
-                .any(|handler| handler.accepts_edge_source(output)),
-        }
+        handlers
+            .iter()
+            .any(|handler| handler.accepts_edge_source(self))
     }
 }
 
@@ -525,12 +473,6 @@ fn resolve(
                 .map(|ty| resolve(env, ty, resolving))
                 .collect::<Result<_, _>>()?,
         },
-        MagType::Union(_) => {
-            return Err(MagError::Type(
-                "structural unions cannot enter concrete semantic descriptors; declare an ADT"
-                    .into(),
-            ))
-        }
         MagType::Named(name, args) => {
             let decl = env
                 .type_decl(name)
@@ -660,15 +602,6 @@ impl fmt::Display for MagType {
                     .collect::<Vec<_>>();
                 write!(f, "{{{}}}", fields.join(" "))
             }
-            Self::Union(types) => write!(
-                f,
-                "({})",
-                types
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            ),
             Self::Product(types) => write!(
                 f,
                 "({})",
@@ -714,20 +647,6 @@ mod tests {
             (
                 "Z",
                 MagType::Record(BTreeMap::from([("value".into(), MagType::String)])),
-            ),
-            (
-                "A",
-                MagType::Union(vec![
-                    MagType::Named("main.X".into(), vec![]),
-                    MagType::Named("main.Y".into(), vec![]),
-                ]),
-            ),
-            (
-                "B",
-                MagType::Union(vec![
-                    MagType::Named("main.A".into(), vec![]),
-                    MagType::Named("main.Z".into(), vec![]),
-                ]),
             ),
         ] {
             env.define(
@@ -801,84 +720,6 @@ mod tests {
                 .unwrap(),
             vec![Some(0), None, Some(1)]
         );
-    }
-
-    #[test]
-    fn product_assignments_reject_distinct_position_ambiguity() {
-        let env = env_with_types();
-        let x = ConcreteType::resolve(&env, &MagType::Named("main.X".into(), vec![])).unwrap();
-        let y = ConcreteType::resolve(&env, &MagType::Named("main.Y".into(), vec![])).unwrap();
-        let either = ConcreteType::Sum {
-            arms: vec![x.clone(), y.clone()],
-        };
-        let product = ConcreteType::Product {
-            items: vec![either.clone(), x.clone()],
-        };
-        assert_eq!(
-            product.assign_input_sources(&[x.clone(), x]),
-            Err(InputAssignmentError::AmbiguousCoverage)
-        );
-    }
-
-    #[test]
-    fn output_coverage_is_exhaustive_per_sum_arm() {
-        let env = env_with_types();
-        let x = ConcreteType::resolve(&env, &MagType::Named("main.X".into(), vec![])).unwrap();
-        let y = ConcreteType::resolve(&env, &MagType::Named("main.Y".into(), vec![])).unwrap();
-        let output = ConcreteType::Sum {
-            arms: vec![x.clone(), y.clone()],
-        };
-        assert!(!x.accepts(&output));
-        assert!(x.accepts_edge_source(&output));
-        assert!(output.output_is_covered_by(&[x.clone(), y]));
-        assert!(output.output_is_covered_by(std::slice::from_ref(&output)));
-        assert!(!output.output_is_covered_by(&[x]));
-        assert!(!output.output_is_covered_by(&[]));
-    }
-
-    #[test]
-    fn dynamic_consumers_accept_only_matching_dynamic_list_sources() {
-        let marker = |name: &str, item: ConcreteType| ConcreteType::Named {
-            name: name.into(),
-            arguments: vec![item],
-            body: Box::new(ConcreteType::Record {
-                fields: BTreeMap::new(),
-            }),
-        };
-        let list = marker("nefor.dynamic.DynamicList", ConcreteType::String);
-        let each = marker("nefor.dynamic.DynamicEach", ConcreteType::String);
-        let all = marker("nefor.dynamic.DynamicAll", ConcreteType::String);
-        let wrong = marker("nefor.dynamic.DynamicList", ConcreteType::Int);
-
-        assert!(each.accepts_edge_source(&list));
-        assert!(all.accepts_edge_source(&list));
-        assert!(!list.accepts_edge_source(&each));
-        assert!(!list.accepts_edge_source(&all));
-        assert!(!each.accepts_edge_source(&all));
-        assert!(!all.accepts_edge_source(&each));
-        assert!(!each.accepts_edge_source(&wrong));
-        assert!(!all.accepts_edge_source(&wrong));
-        assert!(!each.accepts(&list));
-    }
-
-    #[test]
-    fn dynamic_consumers_select_matching_dynamic_list_sum_arms() {
-        let marker = |name: &str, item: ConcreteType| ConcreteType::Named {
-            name: name.into(),
-            arguments: vec![item],
-            body: Box::new(ConcreteType::Record {
-                fields: BTreeMap::new(),
-            }),
-        };
-        let each = marker("nefor.dynamic.DynamicEach", ConcreteType::String);
-        let source = ConcreteType::Sum {
-            arms: vec![
-                ConcreteType::Bool,
-                marker("nefor.dynamic.DynamicList", ConcreteType::String),
-            ],
-        };
-
-        assert!(each.accepts_edge_source(&source));
     }
 
     #[test]

@@ -993,29 +993,13 @@ return {
   -- → llm re-fire), so the run STAYS ALIVE and winds down to a real final
   -- answer — the no-amnesia path. The host does not end the run; it settles on
   -- its own completion. Returns { ok = true, interrupted = <count> }.
-  --
-  -- TERMINATING (`terminate` truthy — a dispatched sub-run): a dispatched run
-  -- is ephemeral (its only output is the relayed result), so an interrupt must
-  -- STOP it. Cancel the in-flight work (a `tool.cancel` per open correlation —
-  -- bash dies via killpg, a nested sub-run is interrupted down the chain) but
-  -- deliver NO reply, so the run's llm never re-fires to a "Completed" answer.
-  -- The host then ends the run FAILED. Returns { ok = true, interrupted =
-  -- <count>, terminated = true }. Unknown run rejects; nothing in flight → 0.
-  interrupt_run = function(run_id, failure, terminate)
+  -- Terminating sub-runs bypass this graceful path: the Rust runtime reaps
+  -- their actors directly, and actor teardown owns exactly one cancellation
+  -- per open correlation before the failed run result.
+  interrupt_run = function(run_id, failure)
     local ctx, err = context_of(run_id)
     if not ctx then
       return { ok = false, error = err }
-    end
-    if terminate then
-      local cancelled = ctx.router:cancel_inflight()
-      -- Observable marker; the host follows with end_run(failed) and a
-      -- `mag.run_result status:"failed"` — no re-fire, the run is over.
-      ctx.emit_event({
-        kind = "mag.run_interrupted",
-        interrupted = cancelled,
-        terminated = true,
-      })
-      return { ok = true, interrupted = cancelled, terminated = true }
     end
     local settled = ctx.router:interrupt(failure)
     -- Observable interrupt marker for the panel/transcript (run_id-stamped by

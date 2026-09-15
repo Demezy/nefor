@@ -305,7 +305,7 @@ async fn load_lead_program<R: AsyncBufReadExt + Unpin>(
         .cloned()
         .expect("mag.loaded carries the compiled artifact");
     assert_eq!(artifact.get("format"), Some(&json!("nefor.mag")));
-    assert_eq!(artifact.get("version"), Some(&json!(1)));
+    assert_eq!(artifact.get("version"), Some(&json!(2)));
     assert_eq!(artifact.get("kind"), Some(&json!("program")));
     assert!(artifact.pointer("/program/initial").is_some());
     assert!(artifact.pointer("/program/operations").is_some());
@@ -2152,11 +2152,11 @@ async fn terminating_interrupt_cancels_inflight_tool_and_settles_failed_without_
     )
     .await;
 
-    // The run ends failed with NO re-fire: a tool.cancel for the in-flight call
-    // reaches the wire, and the terminal reply is `status:"failed"`. Crucially,
+    // The run ends failed with NO re-fire: exactly one tool.cancel for the
+    // in-flight call reaches the wire before the terminal failed result.
     // NO round-2 provider request appears — the llm never gets to answer "Completed".
     let cancel_kind = format!("{GATE}.tool.cancel");
-    let mut saw_cancel = false;
+    let mut cancel_count = 0;
     let result = loop {
         let body = next_event(&mut reader, "terminate aftermath").await;
         match body.get("kind").and_then(Value::as_str) {
@@ -2166,7 +2166,7 @@ async fn terminating_interrupt_cancels_inflight_tool_and_settles_failed_without_
                     Some(cap_id.as_str()),
                     "the cancel targets the in-flight tool correlation"
                 );
-                saw_cancel = true;
+                cancel_count += 1;
             }
             Some(k) if k == create_kind => {
                 assert_thin_provider_request(&body, PROVIDER);
@@ -2178,9 +2178,9 @@ async fn terminating_interrupt_cancels_inflight_tool_and_settles_failed_without_
             _ => {}
         }
     };
-    assert!(
-        saw_cancel,
-        "a tool.cancel for the in-flight call reached the wire before the run ended"
+    assert_eq!(
+        cancel_count, 1,
+        "termination emits exactly one tool.cancel for the in-flight call"
     );
     assert_eq!(
         result.get("status").and_then(Value::as_str),

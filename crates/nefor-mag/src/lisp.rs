@@ -88,7 +88,17 @@ fn lower_type_declaration(items: &[ast::Expr]) -> authored::Form {
                 })
                 .collect::<Result<Vec<_>, _>>();
             match params {
-                Ok(params) => (params, lower_declaration_body(body)),
+                Ok(params) => {
+                    let mut seen = std::collections::HashSet::new();
+                    if let Some(duplicate) =
+                        params.iter().find(|parameter| !seen.insert(*parameter))
+                    {
+                        return authored::Form::Invalid(AuthoringError::Type(format!(
+                            "duplicate generic parameter {duplicate}"
+                        )));
+                    }
+                    (params, lower_declaration_body(body))
+                }
                 Err(error) => return authored::Form::Invalid(error),
             }
         }
@@ -328,6 +338,15 @@ fn lower_function(items: &[ast::Expr]) -> authored::Expr {
         Ok(params) => params,
         Err(error) => return authored::Expr::Invalid(error),
     };
+    let mut seen = std::collections::HashSet::new();
+    if let Some(duplicate) = type_params
+        .iter()
+        .find(|parameter| !seen.insert(*parameter))
+    {
+        return authored::Expr::Invalid(AuthoringError::Type(format!(
+            "duplicate generic parameter {duplicate}"
+        )));
+    }
     let ast::Expr::Vector(params) = params else {
         return authored::Expr::Invalid(AuthoringError::Type(
             "fn parameters must be a vector".into(),

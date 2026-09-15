@@ -25,9 +25,9 @@ Declare nominal records and algebraic types with `type`:
 (type Pair (+ Finding Finding))
 ```
 
-`A | B` is a one-of union. `A + B` is an all-of product. Product occurrences matter: `T + T` requires two matching incoming edges from distinct senders.
+Algebraic alternatives are owned by their declared ADT and constructed with `construct`; authored structural unions are unsupported. `A + B` is an all-of product. Product occurrences matter: `T + T` requires two matching incoming edges from distinct senders.
 
-Eliminate a sum with an exhaustive `match`. Each arm names one nominal
+Eliminate an ADT with an exhaustive `match`. Each arm names one nominal
 constructor, binds its payload at that constructor's concrete type, and
 produces the same result type:
 
@@ -43,8 +43,9 @@ An arm has the shape `[Constructor binding expression]`; a generic constructor
 is written as a type application such as `[(Some String) present ...]`.
 Missing, repeated, foreign, or non-nominal arms are rejected while checking.
 Evaluation selects the arm from constructor evidence retained by MAG, never
-from a user-authored string field. Named and generic aliases of sums are
-unfolded for exhaustiveness.
+from a user-authored string field. Generic ADT instantiations retain their
+owner and constructor identities during exhaustiveness checking. Generic binder
+names must be unique within one binder list; nested scopes may reuse names.
 
 Ordinary strings interpret `\n`, `\t`, `\\`, and `\"`. Triple-quoted strings
 are raw and may span lines; quotes, `$`, and backslashes inside them have no
@@ -241,11 +242,11 @@ indefinitely. The current API has no `bash`, `BashOptions`,
 
 Most workflows should be fully static. When runtime data determines cardinality,
 a producer exposes the indexed-items-plus-completion `DynamicList` protocol.
-Consumers select an explicit boundary: `DynamicEach` for one activation per
-item, or `DynamicAll` for one ordered-list activation after completion.
-`nefor.dynamic.traverse-template` authors an immutable
-`InstantiateDeltaTemplate` operation behind the Each boundary. Fixed worker
-lists use `nefor.node.sequence`.
+Consumers retain that same nominal boundary: `nefor.dynamic.traverse-template`
+materializes one worker per item, while `nefor.dynamic.context` buffers through
+completion and activates once with the ordered list. The operation or factory
+owns this interpretation; the compiler grants no privileges from type-name
+spelling. Fixed worker lists use `nefor.node.sequence`.
 
 Version 1 evaluates only the closed Trigger, Capture, Field,
 IntToDecimalString, and ConcatStrings expression forms while materializing a

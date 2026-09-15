@@ -1,4 +1,4 @@
-use mlua::{Lua, Table};
+use mlua::{Lua, LuaSerdeExt, Table};
 use std::path::PathBuf;
 
 fn harness() -> Lua {
@@ -12,11 +12,36 @@ fn harness() -> Lua {
             format!("{0}/?.lua;{0}/?/init.lua;{current}", root.display()),
         )
         .unwrap();
+    let nefor = lua.create_table().unwrap();
+    let json = lua.create_table().unwrap();
+    let array_metatable = lua.array_metatable();
+    json.set(
+        "mark_array",
+        lua.create_function(move |_, table: Table| {
+            table.set_metatable(Some(array_metatable.clone()));
+            Ok(table)
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let array_metatable = lua.array_metatable();
+    json.set(
+        "is_array",
+        lua.create_function(move |_, table: Table| {
+            Ok(table
+                .metatable()
+                .is_some_and(|value| value.to_pointer() == array_metatable.to_pointer()))
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    nefor.set("json", json).unwrap();
+    lua.globals().set("nefor", nefor).unwrap();
     lua
 }
 
 #[test]
-fn collector_orders_by_trusted_sender_and_emits_once() {
+fn collector_orders_recurrent_overlapping_cohorts_by_trusted_sender() {
     harness()
         .load(
             r#"
@@ -27,14 +52,16 @@ fn collector_orders_by_trusted_sender_and_emits_once() {
             }, function(message) emitted[#emitted + 1] = message end))
             actor.deliver({ messages = {{ from = "worker.2", message = { value = "c", from = "forged" } }} })
             actor.deliver({ messages = {{ from = "worker.0", message = { value = "a" } }} })
+            actor.deliver({ messages = {{ from = "worker.0", message = { value = "A" } }} })
             actor.deliver({ messages = {{ from = "worker.1", message = { value = "b" } }} })
             assert(#emitted == 2) -- ready + one output
             assert(emitted[2].kind == "nefor.dynamic.Collected")
             assert(table.concat(emitted[2].value, "") == "abc")
-            local completion = actor.deliver({ messages = {{ from = "worker.1", message = { value = "again" } }} })
-            assert(completion.status == "failed")
-            assert(completion.value.kind == "collector_already_finished")
-            assert(#emitted == 2)
+            actor.deliver({ messages = {{ from = "worker.1", message = { value = "B" } }} })
+            local completion = actor.deliver({ messages = {{ from = "worker.2", message = { value = "C" } }} })
+            assert(completion.status == "ok")
+            assert(#emitted == 3)
+            assert(table.concat(emitted[3].value, "") == "ABC")
             "#,
         )
         .exec()
@@ -53,11 +80,6 @@ fn collector_rejects_bad_topology_and_arrivals_and_clears_on_kill() {
             local unexpected = actor.deliver({ messages = {{ from = "x", message = { value = 1 } }} })
             assert(unexpected.status == "failed")
             assert(unexpected.value.kind == "collector_unexpected_sender")
-            local partial = assert(factory.construct("partial", { expected_senders = { "a", "b" } }, function() end))
-            partial.deliver({ messages = {{ from = "a", message = { value = 1 } }} })
-            local duplicate = partial.deliver({ messages = {{ from = "a", message = { value = 2 } }} })
-            assert(duplicate.status == "failed")
-            assert(duplicate.value.kind == "collector_duplicate_sender")
             local drained_out = {}
             local drained = assert(factory.construct("drained", { expected_senders = { "a", "b" } },
               function(message) drained_out[#drained_out + 1] = message end))
@@ -90,6 +112,8 @@ fn empty_sequence_emits_the_fixed_empty_list_after_input() {
             assert(emitted[2].kind == "nefor.node.SequenceOutput")
             assert(type(emitted[2].value) == "table" and #emitted[2].value == 0)
             assert(type(emitted[2].semantic_value) == "table" and #emitted[2].semantic_value == 0)
+            assert(nefor.json.is_array(emitted[2].value))
+            assert(nefor.json.is_array(emitted[2].semantic_value))
             "#,
         )
         .exec()

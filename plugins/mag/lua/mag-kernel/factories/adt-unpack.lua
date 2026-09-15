@@ -18,8 +18,10 @@ M.declaration = {
       { wire = FIRST, type = first },
       { wire = SECOND, type = second },
     },
+    params = { owner = owner, left_payload = first, right_payload = second },
   },
-  params = { owner = "table", left_constructor = "string", right_constructor = "string" },
+  params = { owner = "table", left_payload = "table", right_payload = "table",
+    left_constructor = "string", right_constructor = "string" },
   inputs = { value = "nefor.adt.Value" },
   outputs = { FIRST, SECOND },
   signals = {},
@@ -35,9 +37,17 @@ function M.construct(id, params, emit)
     return nil, "adt-unpack requires an ADT owner and two distinct constructors"
   end
   local members = {}
-  for _, candidate in ipairs(owner_type.constructors or {}) do members[candidate.name] = true end
+  for _, candidate in ipairs(owner_type.constructors or {}) do members[candidate.name] = candidate end
   if not members[first_constructor] or not members[second_constructor] then
     return nil, "adt-unpack constructor is not owned by its ADT"
+  end
+  local first_payload = params and params.left_payload
+  local second_payload = params and params.right_payload
+  local equal = require("type-node").equal
+  if type(first_payload) ~= "table" or type(second_payload) ~= "table"
+      or not equal(members[first_constructor].payload, first_payload)
+      or not equal(members[second_constructor].payload, second_payload) then
+    return nil, "adt-unpack payload types do not match their constructors"
   end
   local instance = { id = id }
   function instance.deliver(activation)
@@ -59,7 +69,19 @@ function M.construct(id, params, emit)
           constructor = value.constructor } }
     end
     local output = { kind = wire, from = id, value = value.value }
-    if message.semantic_value ~= nil then output.semantic_value = message.semantic_value end
+    if message.semantic_value ~= nil then
+      if message.dynamic ~= nil then
+        output.semantic_value = message.semantic_value
+      else
+        if type(message.semantic_value) ~= "table"
+            or message.semantic_value.constructor ~= value.constructor
+            or message.semantic_value.value == nil then
+          return { status = "failed", failure = kinds.Failed,
+            value = { kind = "malformed_adt_semantic_value", actor = id } }
+        end
+        output.semantic_value = message.semantic_value.value
+      end
+    end
     if message.dynamic ~= nil then output.dynamic = message.dynamic end
     emit(output)
     return { status = "ok" }

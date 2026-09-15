@@ -26,7 +26,8 @@ function M.construct(id, _, emit)
   local instance = { id = id }
 
   function instance.deliver(_)
-    emit({ kind = OUTPUT, from = id, value = {}, semantic_value = {} })
+    emit({ kind = OUTPUT, from = id,
+      value = nefor.json.mark_array({}), semantic_value = nefor.json.mark_array({}) })
     return { status = "ok" }
   end
 

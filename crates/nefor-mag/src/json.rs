@@ -86,31 +86,7 @@ pub fn value_to_json(env: &Env, value: &Value) -> Result<serde_json::Value, MagE
                     return map_to_json(env, entries, key.as_ref() == &MagType::String);
                 }
             }
-            let resolved = crate::types::ConcreteType::resolve(env, ty).ok();
-            if matches!(resolved, Some(crate::types::ConcreteType::Sum { .. })) {
-                let (selected, payload) = selected_sum_payload(env, value)?.ok_or_else(|| {
-                    MagError::Eval(
-                        "cannot serialize a sum without selected constructor evidence".into(),
-                    )
-                })?;
-                let tag = crate::types::ConcreteType::resolve(env, selected)?.stable_id();
-                Ok(serde_json::json!({
-                    "type": tag.as_str(),
-                    "value": value_to_json(env, payload)?,
-                }))
-            } else if matches!(resolved, Some(crate::types::ConcreteType::Named { .. })) {
-                if let Some((selected, payload)) = selected_sum_payload(env, value)? {
-                    if Some(crate::types::ConcreteType::resolve(env, selected)?) == resolved {
-                        value_to_json(env, payload)
-                    } else {
-                        value_to_json(env, value)
-                    }
-                } else {
-                    value_to_json(env, value)
-                }
-            } else {
-                value_to_json(env, value)
-            }
+            value_to_json(env, value)
         }
         other => Err(MagError::Eval(format!(
             "cannot serialize {} to JSON",
@@ -224,20 +200,6 @@ fn reject_duplicate_map_keys(env: &Env, entries: &[(Value, Value)]) -> Result<()
     Ok(())
 }
 
-fn selected_sum_payload<'a>(
-    env: &Env,
-    value: &'a Value,
-) -> Result<Option<(&'a MagType, &'a Value)>, MagError> {
-    match value {
-        Value::Typed(inner, evidence) => match crate::types::ConcreteType::resolve(env, evidence) {
-            Ok(crate::types::ConcreteType::Sum { .. }) => selected_sum_payload(env, inner),
-            Ok(crate::types::ConcreteType::Named { .. }) => Ok(Some((evidence, inner))),
-            Ok(_) | Err(_) => Ok(None),
-        },
-        _ => Ok(None),
-    }
-}
-
 pub fn concrete_type_to_json(
     ty: &crate::types::ConcreteType,
 ) -> Result<serde_json::Value, MagError> {
@@ -289,10 +251,6 @@ pub fn concrete_type_to_json(
             "fields": fields.iter().map(|(name, ty)| Ok(serde_json::json!({
                 "name": name, "type": concrete_type_to_json(ty)?
             }))).collect::<Result<Vec<_>, MagError>>()?,
-        }),
-        ConcreteType::Sum { arms } => serde_json::json!({
-            "kind": "union",
-            "items": arms.iter().map(concrete_type_to_json).collect::<Result<Vec<_>, _>>()?,
         }),
         ConcreteType::Product { items } => serde_json::json!({
             "kind": "product",
@@ -422,21 +380,9 @@ pub fn concrete_type_from_json(
             ConcreteType::Record { fields: decoded }
         }
         "union" => {
-            let arms = descriptor_list(object, "items")?;
-            if arms.len() < 2
-                || arms
-                    != arms
-                        .iter()
-                        .cloned()
-                        .collect::<std::collections::BTreeSet<_>>()
-                        .into_iter()
-                        .collect::<Vec<_>>()
-            {
-                return Err(MagError::Type(
-                    "sum descriptor arms must be canonical, unique, and sorted".into(),
-                ));
-            }
-            ConcreteType::Sum { arms }
+            return Err(MagError::Type(
+                "structural union semantic descriptors are unsupported; declare an ADT".into(),
+            ));
         }
         "product" => {
             let items = descriptor_list(object, "items")?;
@@ -705,40 +651,6 @@ fn decode_typed_value(
                     .collect::<Result<BTreeMap<_, _>, MagError>>()?,
             ))
         }
-        MagType::Union(_) => {
-            let object = value
-                .as_object()
-                .ok_or_else(|| MagError::Type(format!("expected tagged sum envelope for {ty}")))?;
-            if object.len() != 2 || !object.contains_key("type") || !object.contains_key("value") {
-                return Err(MagError::Type(format!(
-                    "expected exact tagged sum envelope {{type, value}} for {ty}"
-                )));
-            }
-            let tag = object
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| {
-                    MagError::Type(format!("sum constructor tag for {ty} must be a string"))
-                })?;
-            let accepted = crate::types::ConcreteType::resolve(env, ty)?;
-            let crate::types::ConcreteType::Sum { arms } = accepted else {
-                return Err(MagError::Type(format!("{ty} did not normalize to a sum")));
-            };
-            let selected = arms
-                .iter()
-                .find(|arm| arm.stable_id().as_str() == tag)
-                .ok_or_else(|| {
-                    MagError::Type(format!("constructor {tag} is not a member of {ty}"))
-                })?;
-            let selected_type = selected.to_mag_type();
-            let payload = object
-                .get("value")
-                .ok_or_else(|| MagError::Type(format!("sum envelope for {ty} needs value")))?;
-            Value::Typed(
-                std::sync::Arc::new(decode_typed_value(env, payload, &selected_type, mode)?),
-                ty.clone(),
-            )
-        }
         MagType::Product(components) => {
             let values = value
                 .as_array()
@@ -905,6 +817,17 @@ mod tests {
             .unwrap()
             .insert("wire".into(), serde_json::json!("not-semantic"));
         assert!(concrete_type_from_json(&forged).is_err());
+        let structural_union = serde_json::json!({
+            "kind": "union",
+            "items": [
+                {"kind":"primitive","name":"Int"},
+                {"kind":"primitive","name":"String"}
+            ]
+        });
+        let error = concrete_type_from_json(&structural_union)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("structural union semantic descriptors are unsupported"));
     }
 
     #[test]

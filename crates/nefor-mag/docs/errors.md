@@ -102,7 +102,7 @@ Use the exact `run_id` returned by a fresh `mag-apply`. Call `mag-await` once wh
 
 Dynamic expansion is validated before execution and materialized atomically at each trigger. Version 1 admits only `instantiate-delta-template`, with ordered trigger, capture, field, integer-to-decimal-string, and string-concatenation expressions. Actor references, parameter bindings, relocations, routes, and logical paths must resolve within the closed template; an invalid or conflicting materialization fails the run without applying a partial delta.
 
-For `nefor.node.sequence`, expected sender ids are derived from the supplied nodes. Unexpected senders, duplicate delivery, or an incomplete drain fail rather than silently reorder results. An empty node list produces `[]` after its input activation.
+For `nefor.node.sequence`, expected sender ids are derived from the supplied nodes. Per-sender FIFOs preserve overlapping activation cohorts, and each complete cohort emits in declared order. Unexpected senders or an incomplete drain fail rather than silently reorder results. An empty node list produces `[]` after each input activation.
 
 ## Worktree errors
 

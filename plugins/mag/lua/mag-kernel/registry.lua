@@ -47,10 +47,7 @@ local function is_dense_list(value)
 end
 
 local function compatible_output_type(expected, actual)
-  if type_node.equal(expected, actual) then return true end
-  -- A library boundary may give an actor's nominal success output a
-  -- more specific domain name while retaining the actor's runtime wire.
-  return expected.kind == "named" and actual.kind == "named"
+  return type_node.equal(expected, actual)
 end
 
 local function accepts_semantic(target, source)
@@ -197,6 +194,18 @@ local function validate_declaration(decl)
       seen[endpoint.wire]=true
       ok,err=type_node.validate(endpoint.type,variables)
       if not ok then return nil,string.format("semantic output %d: %s",index,err) end
+    end
+    if decl.semantic.params ~= nil then
+      if type(decl.semantic.params) ~= "table" then
+        return nil, "semantic params must map parameter names to type schemes"
+      end
+      for name,scheme in pairs(decl.semantic.params) do
+        if type(name) ~= "string" or not (decl.params or {})[name] then
+          return nil, "semantic param names must identify declared factory params"
+        end
+        ok,err=type_node.validate(scheme,variables)
+        if not ok then return nil,string.format("semantic param %s: %s",name,err) end
+      end
     end
 
     local function wire_set(values)
@@ -524,6 +533,13 @@ function registry:validate_modification(modification, resolve, existing_specs)
         if decl.semantic and arguments_ok and spec_input_ok then
           local bindings={}; for index,variable in ipairs(variables) do bindings[variable]=arguments[index] end
           local semantic_output=type_node.substitute(decl.semantic.output,bindings)
+          for name,scheme in pairs(decl.semantic.params or {}) do
+            local expected=type_node.substitute(scheme,bindings)
+            if type(spec.params) ~= "table" or not type_node.equal(spec.params[name],expected) then
+              table.insert(errors,string.format(
+                "actor %q: semantic param %q has the wrong type descriptor",tostring(spec.id),name))
+            end
+          end
           local expected_input=nil
           for _,endpoint in ipairs(decl.semantic.inputs) do
             if endpoint.wire==input.wire then expected_input=type_node.substitute(endpoint.type,bindings) end

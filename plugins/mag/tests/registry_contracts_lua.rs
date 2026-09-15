@@ -351,7 +351,8 @@ fn registry_requires_compiler_specialization_for_generic_factories() {
         params={},inputs={value="In"},outputs={"Final"}},construct=function() return {} end}))
       local refined=reg:validate_modification({actors={{id="answer",factory="answer",type_arguments={},input={wire="In",type=p("String")},
         outputs={{wire="Final",type=n("main.CodeAudit")}},routes={}}}})
-      assert(refined.ok,table.concat(refined.errors or {},"; "))
+      assert(not refined.ok)
+      assert(table.concat(refined.errors or {},"; "):find("semantic output"))
       local structural_refinement=reg:validate_modification({actors={{id="answer",factory="answer",type_arguments={},input={wire="In",type=p("String")},
         outputs={{wire="Final",type=p("String")}},routes={}}}})
       assert(not structural_refinement.ok)

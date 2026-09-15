@@ -52,6 +52,35 @@ fn nominal_adts_construct_match_and_serialize_by_constructor() {
 }
 
 #[test]
+fn nominal_adt_construction_checks_the_selected_payload_type() {
+    let root = workspace("nominal-adt-payload");
+    let error = compile(
+        r#"
+        (type Choice (adt [Number Int]))
+        (artifact (construct Choice Number "not an integer"))
+        "#,
+        &root,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("expected Int, got String"), "{error}");
+}
+
+#[test]
+fn type_declarations_reject_duplicate_generic_parameters() {
+    let root = workspace("duplicate-type-generics");
+    let error = compile("(type Bad [T T] (adt [Wrap T])) (artifact {})", &root)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("duplicate generic parameter T"), "{error}");
+
+    let error = compile("(artifact ((fn [T T] [[value T]] -> T value) 1))", &root)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("duplicate generic parameter T"), "{error}");
+}
+
+#[test]
 fn nominal_adt_descriptors_schemas_and_ids_include_owner_arguments() {
     let root = workspace("nominal-adt-evidence");
     let artifact = compile(

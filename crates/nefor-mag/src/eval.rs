@@ -461,9 +461,6 @@ fn runtime_type(env: &Env, ty: &MagType) -> MagType {
                 .map(|(name, ty)| (name.clone(), runtime_type(env, ty)))
                 .collect(),
         ),
-        MagType::Union(types) => {
-            MagType::Union(types.iter().map(|ty| runtime_type(env, ty)).collect())
-        }
         MagType::Product(types) => {
             MagType::Product(types.iter().map(|ty| runtime_type(env, ty)).collect())
         }
@@ -576,53 +573,7 @@ fn checked_typed_value(env: &Env, value: Value, ty: MagType) -> Result<Value, Ma
     }
 
     validate_value(env, &value, &ty)?;
-    let Ok(accepted) = crate::types::ConcreteType::resolve(env, &ty) else {
-        return Ok(Value::Typed(std::sync::Arc::new(value), ty));
-    };
-    let selected = explicit_constructor(env, &value)?;
-    match (&accepted, selected) {
-        (crate::types::ConcreteType::Sum { .. }, Some(constructor))
-            if accepted.accepts(&constructor) => {}
-        (crate::types::ConcreteType::Sum { .. }, Some(constructor)) => {
-            return Err(MagError::Type(format!(
-                "constructor {constructor:?} is not accepted by {accepted:?}"
-            )));
-        }
-        (crate::types::ConcreteType::Sum { .. }, None) => {
-            let source = crate::checker::value_type(&value)
-                .map(|actual| actual.to_string())
-                .unwrap_or_else(|| value.type_name().to_owned());
-            return Err(MagError::Type(format!(
-                "cannot construct sum {ty} from source type {source}: the source has no explicit nominal constructor evidence; primitive and structural sum construction is unsupported, so first construct a declared nominal arm with `as`, then refine that value to the sum. This value-construction rule is distinct from graph-edge compatibility"
-            )));
-        }
-        (crate::types::ConcreteType::Named { .. }, Some(constructor))
-            if constructor != accepted =>
-        {
-            return Err(MagError::Type(format!(
-                "cannot replace constructor evidence {constructor:?} with {accepted:?}"
-            )));
-        }
-        _ => {}
-    }
     Ok(Value::Typed(std::sync::Arc::new(value), ty))
-}
-
-fn explicit_constructor(
-    env: &Env,
-    value: &Value,
-) -> Result<Option<crate::types::ConcreteType>, MagError> {
-    let mut current = value;
-    while let Value::Typed(inner, evidence) = current {
-        match crate::types::ConcreteType::resolve(env, evidence)? {
-            constructor @ crate::types::ConcreteType::Named { .. } => {
-                return Ok(Some(constructor));
-            }
-            crate::types::ConcreteType::Sum { .. } => current = inner,
-            _ => return Ok(None),
-        }
-    }
-    Ok(None)
 }
 
 fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError> {
@@ -718,7 +669,6 @@ fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError
                 if crate::types::ConcreteType::resolve(env, expected)
                     .is_ok_and(|expected| actual == &expected)
         ),
-        MagType::Union(types) => types.iter().any(|t| validate_value(env, value, t).is_ok()),
         MagType::Product(types) => match value {
             Value::List(values) | Value::Product(values) => {
                 values.len() == types.len()
@@ -1828,7 +1778,6 @@ fn descriptor_node_count(descriptor: &ConcreteType) -> u64 {
             descriptor_node_count(key) + descriptor_node_count(value)
         }
         ConcreteType::Record { fields } => fields.values().map(descriptor_node_count).sum(),
-        ConcreteType::Sum { arms } => arms.iter().map(descriptor_node_count).sum(),
         ConcreteType::Product { items } => items.iter().map(descriptor_node_count).sum(),
         ConcreteType::JsonValue
         | ConcreteType::Unit
@@ -1864,7 +1813,6 @@ fn descriptor_hashed_bytes(descriptor: &ConcreteType) -> u64 {
             descriptor_hashed_bytes(key) + descriptor_hashed_bytes(value)
         }
         ConcreteType::Record { fields } => fields.values().map(descriptor_hashed_bytes).sum(),
-        ConcreteType::Sum { arms } => arms.iter().map(descriptor_hashed_bytes).sum(),
         ConcreteType::Product { items } => items.iter().map(descriptor_hashed_bytes).sum(),
         ConcreteType::JsonValue
         | ConcreteType::Unit
@@ -2051,16 +1999,11 @@ fn declared_value_type(value: &Value) -> Result<&ConcreteType, MagError> {
 }
 
 fn selected_value_type(
-    env: &Env,
-    value: &Value,
+    _env: &Env,
+    _value: &Value,
     declared: &ConcreteType,
 ) -> Result<ConcreteType, MagError> {
-    if matches!(declared, ConcreteType::Sum { .. }) {
-        explicit_constructor(env, value)?
-            .ok_or_else(|| MagError::Type("sum value lacks selected constructor evidence".into()))
-    } else {
-        Ok(declared.clone())
-    }
+    Ok(declared.clone())
 }
 
 fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {

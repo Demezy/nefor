@@ -4,7 +4,7 @@ local M = {}
 local INPUT = "nefor.dynamic.Input"
 local OUTPUT = "generic-provider.ProviderOut"
 local item = { kind = "variable", name = "T" }
-local dynamic = { kind = "named", name = "nefor.dynamic.DynamicAll", arguments = { item } }
+local dynamic = { kind = "named", name = "nefor.dynamic.DynamicList", arguments = { item } }
 local provider_input = {
   kind = "named", name = "nefor.contracts.ProviderInput", arguments = {},
 }
@@ -64,7 +64,7 @@ function M.construct(id, params, emit)
     local content = {
       mag_type = { version = params.item_schema.version or 1,
         root = { kind = "list", item = params.item_schema.root } },
-      value = values,
+      value = nefor.json.mark_array(values),
     }
     emit({ kind = OUTPUT, from = id, value = { content = content },
       messages = { { role = "user", content = content } } })

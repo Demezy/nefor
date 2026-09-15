@@ -1511,7 +1511,7 @@ async fn handle_interrupt_run(
         tracing::info!(run_id = %run_id, "mag.interrupt_run for a run that is not live; no-op");
         return Ok(());
     }
-    let (settled, _) = host.interrupt_run(&run_id, INTERRUPT_FAILURE, false)?;
+    let settled = host.interrupt_run(&run_id, INTERRUPT_FAILURE)?;
     tracing::info!(run_id = %run_id, settled, "mag.interrupt_run: in-flight capabilities settled as interrupted");
     flush_emits(out_tx, host, bridge).await?;
     // The run stays alive on the tool leg (re-fire pending); a provider-leg

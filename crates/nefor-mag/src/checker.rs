@@ -601,7 +601,7 @@ fn equality_admissible_in(
         MagType::Record(fields) => fields
             .values()
             .try_for_each(|field| equality_admissible_in(env, field, variables, visiting)),
-        MagType::Union(items) | MagType::Product(items) => items
+        MagType::Product(items) => items
             .iter()
             .try_for_each(|item| equality_admissible_in(env, item, variables, visiting)),
         MagType::Named(name, arguments) => {
@@ -3268,7 +3268,6 @@ fn has_type_variables(ty: &MagType) -> bool {
 
 fn contains_union(ty: &MagType) -> bool {
     match ty {
-        MagType::Union(_) => true,
         MagType::Named(_, arguments) | MagType::Product(arguments) => {
             arguments.iter().any(contains_union)
         }
@@ -3376,12 +3375,6 @@ fn canonical_type(ty: &MagType) -> String {
                 fields
                     .iter()
                     .map(|(name, ty)| (name.clone(), canonicalize(ty, variables, next)))
-                    .collect(),
-            ),
-            MagType::Union(items) => MagType::Union(
-                items
-                    .iter()
-                    .map(|item| canonicalize(item, variables, next))
                     .collect(),
             ),
             MagType::Product(items) => MagType::Product(
@@ -3492,59 +3485,7 @@ fn field_type(env: &Env, ty: &MagType, key: Option<&str>) -> Option<MagType> {
             let body = substitute(&body, &substitutions);
             field_type(env, &body, key)
         }),
-        MagType::Union(ts) => {
-            let fields = ts
-                .iter()
-                .filter_map(|t| field_type(env, t, key))
-                .collect::<Vec<_>>();
-            if fields.is_empty() {
-                None
-            } else {
-                Some(MagType::Union(fields))
-            }
-        }
         _ => None,
-    }
-}
-
-fn contains_dynamic_boundary(ty: &MagType) -> bool {
-    match ty {
-        MagType::Named(name, arguments) => {
-            matches!(
-                name.as_str(),
-                "nefor.dynamic.DynamicList"
-                    | "nefor.dynamic.DynamicEach"
-                    | "nefor.dynamic.DynamicAll"
-            ) || arguments.iter().any(contains_dynamic_boundary)
-        }
-        MagType::TypeTag(item) | MagType::List(item) | MagType::Set(item) => {
-            contains_dynamic_boundary(item)
-        }
-        MagType::Map(key, value) => {
-            contains_dynamic_boundary(key) || contains_dynamic_boundary(value)
-        }
-        MagType::Record(fields) => fields.values().any(contains_dynamic_boundary),
-        MagType::Union(items) | MagType::Product(items) => {
-            items.iter().any(contains_dynamic_boundary)
-        }
-        MagType::Function(parameters, result) => {
-            parameters.iter().any(contains_dynamic_boundary) || contains_dynamic_boundary(result)
-        }
-        MagType::Artifact
-        | MagType::JsonValue
-        | MagType::TypeDescriptor
-        | MagType::TypeSchema
-        | MagType::SemanticTypeId
-        | MagType::PackedValue
-        | MagType::HostInputs
-        | MagType::Never
-        | MagType::Unit
-        | MagType::Bool
-        | MagType::Int
-        | MagType::Float
-        | MagType::String
-        | MagType::Var(_)
-        | MagType::EmptyList => false,
     }
 }
 
@@ -3628,118 +3569,21 @@ fn compatible_in(
     if matches!(actual, MagType::EmptyList) && matches!(expected, MagType::List(_)) {
         return Ok(());
     }
-    if let (
-        MagType::Named(actual_name, actual_arguments),
-        MagType::Named(expected_name, expected_arguments),
-    ) = (actual, expected)
-    {
-        let dynamic_consumer = |name: &str| {
-            matches!(
-                name,
-                "nefor.dynamic.DynamicEach" | "nefor.dynamic.DynamicAll"
-            )
-        };
-        if actual_name == "nefor.graph.Node"
-            && expected_name == "nefor.graph.Node"
-            && actual_arguments.len() == 2
-            && expected_arguments.len() == 2
-            && matches!(
-                (&actual_arguments[0], &expected_arguments[0]),
-                (MagType::Named(consumer, consumer_arguments), MagType::Named(producer, producer_arguments))
-                    | (MagType::Named(producer, producer_arguments), MagType::Named(consumer, consumer_arguments))
-                    if dynamic_consumer(consumer)
-                        && producer == "nefor.dynamic.DynamicList"
-                        && consumer_arguments.len() == 1
-                        && producer_arguments.len() == 1
-            )
-        {
-            compatible_in(
-                env,
-                &expected_arguments[0],
-                &actual_arguments[0],
-                subst,
-                bindable,
-            )?;
-            return compatible_in(
-                env,
-                &actual_arguments[1],
-                &expected_arguments[1],
-                subst,
-                bindable,
-            );
-        }
-        if actual_name == "nefor.dynamic.DynamicList"
-            && dynamic_consumer(expected_name)
-            && actual_arguments.len() == 1
-            && expected_arguments.len() == 1
-        {
-            return compatible_in(
-                env,
-                &actual_arguments[0],
-                &expected_arguments[0],
-                subst,
-                bindable,
-            );
-        }
-    }
-    // Dynamic producer/consumer markers may occur inside generic Node and
-    // Result types, so preserve their authored structure until recursive
-    // comparison reaches the marker pair. All other closed types use the same
-    // normalized descriptor relation emitted to the runtime.
-    if !contains_dynamic_boundary(actual) && !contains_dynamic_boundary(expected) {
-        if let (Ok(actual), Ok(expected)) = (
-            crate::types::ConcreteType::resolve(env, actual),
-            crate::types::ConcreteType::resolve(env, expected),
-        ) {
-            return expected.accepts(&actual).then_some(()).ok_or_else(|| {
-                if matches!(expected, crate::types::ConcreteType::Named { .. }) {
-                    format!(
-                        "expected nominal {expected:?}, got {actual:?}; use as for explicit refinement"
-                    )
-                } else {
-                    format!("expected {expected:?}, got {actual:?}")
-                }
-            });
-        }
-    }
-    if let MagType::Union(variants) = actual {
-        for variant in variants {
-            compatible_in(env, variant, expected, subst, bindable)?;
-        }
-        return Ok(());
+    if let (Ok(actual), Ok(expected)) = (
+        crate::types::ConcreteType::resolve(env, actual),
+        crate::types::ConcreteType::resolve(env, expected),
+    ) {
+        return expected.accepts(&actual).then_some(()).ok_or_else(|| {
+            if matches!(expected, crate::types::ConcreteType::Named { .. }) {
+                format!(
+                    "expected nominal {expected:?}, got {actual:?}; use as for explicit refinement"
+                )
+            } else {
+                format!("expected {expected:?}, got {actual:?}")
+            }
+        });
     }
     match expected {
-        MagType::Union(options) => {
-            let original_bindings = subst.len();
-            let matches = options.iter().filter_map(|option| {
-                let mut candidate = subst.clone();
-                compatible_in(env, actual, option, &mut candidate, bindable)
-                    .ok()
-                    .map(|_| (candidate.len() - original_bindings, candidate))
-            });
-            let matches = matches.collect::<Vec<_>>();
-            let specificity = matches
-                .iter()
-                .map(|(new_bindings, _)| *new_bindings)
-                .min()
-                .ok_or_else(|| format!("expected {expected}, got {actual}"))?;
-            let mut best = matches
-                .into_iter()
-                .filter(|(new_bindings, _)| *new_bindings == specificity)
-                .map(|(_, candidate)| candidate);
-            let selected = best
-                .next()
-                .ok_or_else(|| format!("expected {expected}, got {actual}"))?;
-            for candidate in best {
-                if candidate != selected {
-                    return Err(format!(
-                        "ambiguous union match for {actual} against {expected}"
-                    ));
-                }
-            }
-            *subst = selected;
-            Ok(())
-        }
         MagType::Named(expected_name, expected_args) => match actual {
             MagType::Named(actual_name, actual_args)
                 if actual_name == expected_name && actual_args.len() == expected_args.len() =>
@@ -3828,7 +3672,6 @@ pub(crate) fn substitute(ty: &MagType, subst: &HashMap<String, MagType>) -> MagT
                 .map(|(k, v)| (k.clone(), substitute(v, subst)))
                 .collect(),
         ),
-        MagType::Union(v) => MagType::Union(v.iter().map(|t| substitute(t, subst)).collect()),
         MagType::Product(v) => MagType::Product(v.iter().map(|t| substitute(t, subst)).collect()),
         MagType::Function(p, r) => MagType::Function(
             p.iter().map(|t| substitute(t, subst)).collect(),
@@ -3843,7 +3686,7 @@ fn collect_vars(ty: &MagType, out: &mut HashSet<String>) {
         MagType::Var(name) => {
             out.insert(name.clone());
         }
-        MagType::Named(_, args) | MagType::Union(args) | MagType::Product(args) => {
+        MagType::Named(_, args) | MagType::Product(args) => {
             for arg in args {
                 collect_vars(arg, out);
             }
@@ -3930,39 +3773,6 @@ mod builtin_signature_tests {
         ] {
             assert!(collides_with_builtin(&env, name, &candidate), "{name}");
         }
-    }
-
-    #[test]
-    fn node_inputs_apply_dynamic_compatibility_contravariantly() {
-        let env = Env::new_with_stdlib();
-        let marker = |name: &str| MagType::Named(name.into(), vec![MagType::String]);
-        let node =
-            |input: MagType| MagType::Named("nefor.graph.Node".into(), vec![input, MagType::Unit]);
-        let producer = marker("nefor.dynamic.DynamicList");
-        let each = marker("nefor.dynamic.DynamicEach");
-        let all = marker("nefor.dynamic.DynamicAll");
-
-        assert!(compatible(
-            &env,
-            &node(each),
-            &node(producer.clone()),
-            &mut HashMap::new()
-        )
-        .is_ok());
-        assert!(compatible(
-            &env,
-            &node(all),
-            &node(producer.clone()),
-            &mut HashMap::new()
-        )
-        .is_ok());
-        assert!(compatible(
-            &env,
-            &node(producer),
-            &node(marker("nefor.dynamic.DynamicEach")),
-            &mut HashMap::new()
-        )
-        .is_err());
     }
 
     #[test]

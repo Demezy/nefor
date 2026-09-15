@@ -1,4 +1,4 @@
-use mlua::{Lua, Table};
+use mlua::{Lua, LuaSerdeExt, Table};
 use std::path::PathBuf;
 
 fn harness() -> Lua {
@@ -17,6 +17,31 @@ fn harness() -> Lua {
             ),
         )
         .unwrap();
+    let nefor = lua.create_table().unwrap();
+    let json = lua.create_table().unwrap();
+    let array_metatable = lua.array_metatable();
+    json.set(
+        "mark_array",
+        lua.create_function(move |_, table: Table| {
+            table.set_metatable(Some(array_metatable.clone()));
+            Ok(table)
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let array_metatable = lua.array_metatable();
+    json.set(
+        "is_array",
+        lua.create_function(move |_, table: Table| {
+            Ok(table
+                .metatable()
+                .is_some_and(|value| value.to_pointer() == array_metatable.to_pointer()))
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    nefor.set("json", json).unwrap();
+    lua.globals().set("nefor", nefor).unwrap();
     lua
 }
 
@@ -26,7 +51,7 @@ fn dynamic_each_requires_an_ordered_complete_stream() {
         .load(
             r#"
             local factory = require("factories.dynamic-each")
-            assert(factory.declaration.semantic.input.name == "nefor.dynamic.DynamicEach")
+            assert(factory.declaration.semantic.input.name == "nefor.dynamic.DynamicList")
             local emitted = {}
             local actor = assert(factory.construct("input", {},
               function(message) emitted[#emitted + 1] = message end))
@@ -228,7 +253,11 @@ fn adt_adapters_preserve_dynamic_protocol_metadata() {
                 arguments = {{ kind = "primitive", name = "String" }} } },
             }}
             local packed = {}
-            local packer = assert(pack.construct("pack", { owner = owner, constructor = "Ok" },
+            local packer = assert(pack.construct("pack", {
+              owner = owner,
+              payload = owner.constructors[2].payload,
+              constructor = "Ok",
+            },
               function(message) packed[#packed + 1] = message end))
             packer.deliver({ messages = {{ message = {
               value = "same", semantic_value = "same",
@@ -240,7 +269,10 @@ fn adt_adapters_preserve_dynamic_protocol_metadata() {
 
             local unpacked = {}
             local unpacker = assert(unpack.construct("unpack", {
-              owner = owner, left_constructor = "Error", right_constructor = "Ok",
+              owner = owner,
+              left_payload = owner.constructors[1].payload,
+              right_payload = owner.constructors[2].payload,
+              left_constructor = "Error", right_constructor = "Ok",
             }, function(message) unpacked[#unpacked + 1] = message end))
             unpacker.deliver({ messages = {{ message = packed[2] }}})
             assert(unpacked[2].kind == "nefor.adt.Second")
@@ -253,12 +285,57 @@ fn adt_adapters_preserve_dynamic_protocol_metadata() {
 }
 
 #[test]
+fn adt_adapters_validate_payload_descriptors_and_round_trip_canonical_values() {
+    harness()
+        .load(
+            r#"
+            local pack = require("factories.adt-pack")
+            local unpack = require("factories.adt-unpack")
+            local text = { kind = "primitive", name = "String" }
+            local int = { kind = "primitive", name = "Int" }
+            local owner = { kind = "adt", name = "Result", arguments = {}, constructors = {
+              { name = "Error", payload = text }, { name = "Ok", payload = int },
+            }}
+            assert(pack.construct("bad", { owner = owner, payload = text,
+              constructor = "Ok" }, function() end) == nil)
+            assert(unpack.construct("bad", { owner = owner,
+              left_payload = text, right_payload = text,
+              left_constructor = "Error", right_constructor = "Ok",
+            }, function() end) == nil)
+
+            local packed = {}
+            local packer = assert(pack.construct("pack", { owner = owner, payload = int,
+              constructor = "Ok" }, function(message) packed[#packed + 1] = message end))
+            packer.deliver({ messages = {{ message = { value = 42, semantic_value = 42 } }}})
+            assert(packed[2].semantic_value.constructor == "Ok")
+            assert(packed[2].semantic_value.value == 42)
+
+            local unpacked = {}
+            local unpacker = assert(unpack.construct("unpack", { owner = owner,
+              left_payload = text, right_payload = int,
+              left_constructor = "Error", right_constructor = "Ok",
+            }, function(message) unpacked[#unpacked + 1] = message end))
+            assert(unpacker.deliver({ messages = {{ message = packed[2] }}}).status == "ok")
+            assert(unpacked[2].value == 42 and unpacked[2].semantic_value == 42)
+            local malformed = unpacker.deliver({ messages = {{ message = {
+              value = { constructor = "Ok", value = 42 },
+              semantic_value = { constructor = "Error", value = 42 },
+            }}}})
+            assert(malformed.status == "failed")
+            assert(malformed.value.kind == "malformed_adt_semantic_value")
+            "#,
+        )
+        .exec()
+        .unwrap();
+}
+
+#[test]
 fn dynamic_all_waits_for_completion_and_preserves_order() {
     harness()
         .load(
             r#"
             local factory = require("factories.dynamic-all")
-            assert(factory.declaration.semantic.input.name == "nefor.dynamic.DynamicAll")
+            assert(factory.declaration.semantic.input.name == "nefor.dynamic.DynamicList")
             assert(factory.construct("bad", {}, function() end) == nil)
             local emitted = {}
             local actor = assert(factory.construct("context", {
@@ -297,6 +374,7 @@ fn dynamic_all_waits_for_completion_and_preserves_order() {
             }}}})
             assert(empty_done.status == "ok")
             assert(#empty_out[2].value.content.value == 0)
+            assert(nefor.json.is_array(empty_out[2].value.content.value))
             "#,
         )
         .exec()

@@ -5,7 +5,7 @@ local INPUT = "nefor.dynamic.Input"
 local INDEXED = "nefor.dynamic.Indexed"
 local COMPLETE = "nefor.dynamic.Complete"
 local item = { kind = "variable", name = "T" }
-local dynamic = { kind = "named", name = "nefor.dynamic.DynamicEach", arguments = { item } }
+local dynamic = { kind = "named", name = "nefor.dynamic.DynamicList", arguments = { item } }
 local indexed = { kind = "named", name = "nefor.dynamic.Indexed", arguments = { item } }
 local count = { kind = "named", name = "nefor.dynamic.DynamicCount", arguments = {} }
 

@@ -1101,22 +1101,9 @@ function M:bus_response(response)
   return true
 end
 
--- Cancel this run's in-flight work WITHOUT settling correlations. The bridge
--- translates each generic cancellation to its owned provider or tool wire.
--- This primitive is retained for direct kernel callers; terminating host paths
--- reap actors instead so kill-time cancellation cannot be duplicated.
-function M:cancel_inflight()
-  local ids = self.correlation:pending_ids()
-  for _, request_id in ipairs(ids) do
-    self.bus_emit({ kind = "tool.cancel", id = request_id })
-  end
-  return #ids
-end
-
 -- GRACEFUL interrupt of this run's in-flight work (NOT a kill). For every OPEN
 -- capability correlation in this run:
---   1. cancel the real work (cancel_inflight above): a `tool.cancel` per
---      correlation. Real termination first.
+--   1. emit a `tool.cancel` per correlation. Real termination first.
 --   2. settle the correlation by delivering a synthesized FAILED reply
 --      ("interrupted by user") through the EXISTING reply path (bus_response —
 --      close + reply activation). The failure lands on the emitting actor's

@@ -11,16 +11,13 @@ the distinctions that matter.
 actors finish out of order. The empty list is the ordinary list identity and
 produces `[]` after its input activation.
 
-`nefor.dynamic.DynamicList O` is a different, producer-side runtime effect. It
-emits indexed occurrences plus explicit completion. Consumers state how they
-interpret that shared protocol: `DynamicEach O` activates once per occurrence
-and accounts for completion without producing an extra occurrence, while
-`DynamicAll O` buffers by index and activates once with the ordered values after
-completion. `nefor.dynamic.traverse-template` exposes the Each boundary and
-instantiates one closed worker template per occurrence;
-`nefor.dynamic.context` exposes the All boundary and presents one ordered
-provider turn, including for zero occurrences. No runtime-sized MAG `List` value
-or implicit consumer interpretation exists. The shipped
+`nefor.dynamic.DynamicList O` is a distinct runtime effect. It emits indexed
+occurrences plus explicit completion. Consumers retain that same nominal type;
+the operation owns its interpretation. `nefor.dynamic.traverse-template`
+instantiates one closed worker template per occurrence, while
+`nefor.dynamic.context` buffers by index and presents one ordered provider turn,
+including for zero occurrences. No runtime-sized MAG `List` value or compiler
+name-based compatibility privilege exists. The shipped
 `examples/nefor-agent/agentic-loop/dynamic-tasks.mag` exercises zero, invalid,
 and reverse-completion cases.
 

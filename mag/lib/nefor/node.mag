@@ -273,9 +273,11 @@
 (let adt-unpack-factory "nefor.factory.adt-unpack")
 (let adt-pack-factory "nefor.factory.adt-pack")
 (type AdtUnpackParams {:owner TypeDescriptor
+                       :left_payload TypeDescriptor
+                       :right_payload TypeDescriptor
                        :left_constructor String
                        :right_constructor String})
-(type AdtPackParams {:owner TypeDescriptor :constructor String})
+(type AdtPackParams {:owner TypeDescriptor :payload TypeDescriptor :constructor String})
 
 (let pack-adt
   (fn [T O] [[id String] [input-type (TypeTag T)] [owner-type (TypeTag O)]
@@ -286,7 +288,9 @@
       [(nefor.graph.actor id adt-pack-factory
          [(type-evidence input-type) (type-evidence owner-type)]
          (as AdtPackParams
-           {:owner (type-evidence owner-type) :constructor constructor})
+           {:owner (type-evidence owner-type)
+            :payload (type-evidence input-type)
+            :constructor constructor})
          (nefor.graph.store-port input) [(nefor.graph.store-port output)])]
       [] [] input output)))
 
@@ -309,6 +313,8 @@
          (type-evidence (type-tag A)) (type-evidence (type-tag B))]
         (as AdtUnpackParams
           {:owner (type-evidence (type-tag (core.types.Either A B)))
+           :left_payload (type-evidence (type-tag A))
+           :right_payload (type-evidence (type-tag B))
            :left_constructor "Left" :right_constructor "Right"})
         (nefor.graph.store-port split-input)
         [(nefor.graph.store-port split-left) (nefor.graph.store-port split-right)]))
@@ -390,6 +396,8 @@
          (type-evidence (type-tag E)) (type-evidence (type-tag A))]
         (as AdtUnpackParams
           {:owner (type-evidence (type-tag (core.types.Result E A)))
+           :left_payload (type-evidence (type-tag E))
+           :right_payload (type-evidence (type-tag A))
            :left_constructor "Error" :right_constructor "Ok"})
         (nefor.graph.store-port split-input)
         [(nefor.graph.store-port failed) (nefor.graph.store-port succeeded)]))
@@ -525,7 +533,7 @@
 
 ;; The supplied compile-time List fixes both producer count and result order.
 ;; The output is therefore an ordinary fixed List, not the DynamicList
-;; producer protocol or either DynamicEach/DynamicAll consumer effect.
+;; DynamicList producer/consumer protocol.
 (let sequence
   (fn [I O] [[id String] [nodes (List (nefor.graph.Node I O))]]
     -> (nefor.graph.Node I (List O))

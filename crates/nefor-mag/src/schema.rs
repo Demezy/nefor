@@ -754,18 +754,6 @@ fn reify_concrete(ty: &crate::types::ConcreteType) -> Result<SchemaType, MagErro
                 })
                 .collect::<Result<_, MagError>>()?,
         },
-        ConcreteType::Sum { arms } => SchemaType::Union {
-            variants: arms
-                .iter()
-                .map(|arm| {
-                    ensure_nominal_constructor(arm)?;
-                    Ok(SchemaVariant {
-                        tag: arm.stable_id().to_string(),
-                        schema: reify_concrete(arm)?,
-                    })
-                })
-                .collect::<Result<_, MagError>>()?,
-        },
         ConcreteType::Adt {
             name, constructors, ..
         } => SchemaType::Adt {
@@ -789,15 +777,6 @@ fn reify_concrete(ty: &crate::types::ConcreteType) -> Result<SchemaType, MagErro
             body: Box::new(reify_concrete(body)?),
         },
     })
-}
-
-fn ensure_nominal_constructor(ty: &crate::types::ConcreteType) -> Result<(), MagError> {
-    match ty {
-        crate::types::ConcreteType::Named { .. } => Ok(()),
-        other => Err(MagError::Type(format!(
-            "sum arm {other:?} has no stable nominal constructor identity"
-        ))),
-    }
 }
 
 fn validate_at(schema: &SchemaType, value: &Value, path: &str, out: &mut Vec<Violation>) {

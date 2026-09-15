@@ -3,12 +3,12 @@
 ## Typed dynamic fan-in
 
 `nefor.factory.collector<T>` is the internal fixed `nefor.node.sequence`
-join. It receives the kernel-owned source actor id with
-each activation; payload fields cannot impersonate a sender. It retains at
-most one value per expected sender and emits `List<T>` once, ordered by
-`expected_senders`. Unexpected senders, duplicates, and incomplete drain are
-terminal failures. The empty sequence uses a dedicated identity actor and
-emits an empty typed list after input activation.
+join. It receives the kernel-owned source actor id with each activation; payload
+fields cannot impersonate a sender. One FIFO per expected sender preserves
+overlapping activations, and each complete cohort emits one `List<T>` ordered by
+`expected_senders`. Unexpected senders and incomplete drain are terminal
+failures. The empty sequence uses a dedicated recurrent identity actor and emits
+an empty typed list after each input activation.
 
 ## Interface
 
