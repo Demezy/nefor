@@ -168,13 +168,18 @@ impl ConcreteType {
     }
 
     pub fn stable_id(&self) -> SemanticTypeId {
-        let descriptor = crate::json::concrete_type_to_json(self)
-            .unwrap_or_else(|_| unreachable!("ConcreteType serialization is infallible"));
-        let mut identity = serde_json::Map::new();
-        identity.insert("domain".into(), "mag.type.v2".into());
-        identity.insert("version".into(), 2.into());
-        identity.insert("descriptor".into(), descriptor);
-        let bytes = serde_json::to_vec(&serde_json::Value::Object(identity))
+        // Keep the established bytes for descriptors expressible before the v2
+        // algebra; only identities using new forms enter the namespaced format.
+        let identity = legacy_identity_json(self).unwrap_or_else(|| {
+            let descriptor = crate::json::concrete_type_to_json(self)
+                .unwrap_or_else(|_| unreachable!("ConcreteType serialization is infallible"));
+            json_object([
+                ("domain", "mag.type.v2".into()),
+                ("version", 2.into()),
+                ("descriptor", descriptor),
+            ])
+        });
+        let bytes = serde_json::to_vec(&identity)
             .unwrap_or_else(|_| unreachable!("semantic descriptor serialization is infallible"));
         SemanticTypeId(format!("sha256:{:x}", Sha256::digest(bytes)))
     }
@@ -396,6 +401,80 @@ impl ConcreteType {
             .iter()
             .any(|handler| handler.accepts_edge_source(self))
     }
+}
+
+fn json_object<const N: usize>(fields: [(&str, serde_json::Value); N]) -> serde_json::Value {
+    serde_json::Value::Object(
+        fields
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect(),
+    )
+}
+
+fn legacy_identity_json(ty: &ConcreteType) -> Option<serde_json::Value> {
+    let primitive = |kind: &str| json_object([("kind", kind.to_owned().into())]);
+    Some(match ty {
+        ConcreteType::JsonValue => primitive("json_value"),
+        ConcreteType::Unit => primitive("unit"),
+        ConcreteType::Bool => primitive("bool"),
+        ConcreteType::Int => primitive("int"),
+        ConcreteType::Float => primitive("float"),
+        ConcreteType::String => primitive("string"),
+        ConcreteType::Named {
+            name,
+            arguments,
+            body,
+        } => {
+            let arguments = arguments
+                .iter()
+                .map(legacy_identity_json)
+                .collect::<Option<Vec<_>>>()?;
+            let body = match body {
+                ConcreteNamedBody::Fields { fields } => json_object([
+                    ("kind", "record".into()),
+                    (
+                        "fields",
+                        serde_json::Value::Object(
+                            fields
+                                .iter()
+                                .map(|(name, ty)| Some((name.clone(), legacy_identity_json(ty)?)))
+                                .collect::<Option<_>>()?,
+                        ),
+                    ),
+                ]),
+                ConcreteNamedBody::Alias { ty } => legacy_identity_json(ty)?,
+            };
+            json_object([
+                ("kind", "named".into()),
+                ("name", name.clone().into()),
+                ("arguments", serde_json::Value::Array(arguments)),
+                ("body", body),
+            ])
+        }
+        ConcreteType::Adt { .. } | ConcreteType::Set { .. } => return None,
+        ConcreteType::List { item } => json_object([
+            ("kind", "list".into()),
+            ("item", legacy_identity_json(item)?),
+        ]),
+        ConcreteType::Map { key, value } => json_object([
+            ("kind", "map".into()),
+            ("key", legacy_identity_json(key)?),
+            ("value", legacy_identity_json(value)?),
+        ]),
+        ConcreteType::Product { items } => json_object([
+            ("kind", "product".into()),
+            (
+                "items",
+                serde_json::Value::Array(
+                    items
+                        .iter()
+                        .map(legacy_identity_json)
+                        .collect::<Option<_>>()?,
+                ),
+            ),
+        ]),
+    })
 }
 
 fn collect_component_assignments(

@@ -979,7 +979,7 @@ mod tests {
         );
         assert_eq!(
             descriptor.stable_id().as_str(),
-            "sha256:f4e5fd24f940d968e579a6b6e2470b1c03048a32293d1ba632dbf18e9e24b286"
+            "sha256:463cd3ec90ea7d41088d550bf4c51d9bdb2796ba415ba593cd61b62a87aab5d2"
         );
     }
 
