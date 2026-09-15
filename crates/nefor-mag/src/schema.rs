@@ -41,7 +41,8 @@ pub enum SchemaType {
         key: Box<SchemaType>,
         value: Box<SchemaType>,
     },
-    Record {
+    #[serde(rename = "record")]
+    Fields {
         fields: Vec<SchemaField>,
     },
     Union {
@@ -263,7 +264,7 @@ fn validation_error(kind: &str, message: String) -> JsonValidation {
 
 fn schema_root_is_record(schema: &SchemaType) -> bool {
     match schema {
-        SchemaType::Record { .. } | SchemaType::Adt { .. } => true,
+        SchemaType::Fields { .. } | SchemaType::Adt { .. } => true,
         SchemaType::Named { body, .. } => schema_root_is_record(body),
         _ => false,
     }
@@ -313,7 +314,7 @@ fn provider_schema_at_path(schema: &SchemaType, path: &str) -> Result<Value, Mag
                 "additionalProperties": false,
             },
         }),
-        SchemaType::Record { fields } => {
+        SchemaType::Fields { fields } => {
             let properties = fields
                 .iter()
                 .map(|field| {
@@ -509,7 +510,7 @@ fn decode_provider_value(
             }
             Ok(Value::Array(decoded))
         }
-        SchemaType::Record { fields } => {
+        SchemaType::Fields { fields } => {
             let Value::Object(mut values) = value else {
                 return Err(provider_decode_violation(path, "object", &value));
             };
@@ -662,7 +663,7 @@ fn schema_type_to_json_schema(schema: &SchemaType) -> Value {
             "required": ["$mag", "entries"],
             "additionalProperties": false,
         }),
-        SchemaType::Record { fields } => {
+        SchemaType::Fields { fields } => {
             let properties = fields
                 .iter()
                 .map(|field| {
@@ -743,17 +744,6 @@ fn reify_concrete(ty: &crate::types::ConcreteType) -> Result<SchemaType, MagErro
             key: Box::new(reify_concrete(key)?),
             value: Box::new(reify_concrete(value)?),
         },
-        ConcreteType::Record { fields } => SchemaType::Record {
-            fields: fields
-                .iter()
-                .map(|(name, ty)| {
-                    Ok(SchemaField {
-                        name: name.clone(),
-                        schema: reify_concrete(ty)?,
-                    })
-                })
-                .collect::<Result<_, MagError>>()?,
-        },
         ConcreteType::Adt {
             name, constructors, ..
         } => SchemaType::Adt {
@@ -774,7 +764,20 @@ fn reify_concrete(ty: &crate::types::ConcreteType) -> Result<SchemaType, MagErro
         },
         ConcreteType::Named { name, body, .. } => SchemaType::Named {
             name: name.clone(),
-            body: Box::new(reify_concrete(body)?),
+            body: Box::new(match body {
+                crate::types::ConcreteNamedBody::Fields { fields } => SchemaType::Fields {
+                    fields: fields
+                        .iter()
+                        .map(|(name, ty)| {
+                            Ok(SchemaField {
+                                name: name.clone(),
+                                schema: reify_concrete(ty)?,
+                            })
+                        })
+                        .collect::<Result<_, MagError>>()?,
+                },
+                crate::types::ConcreteNamedBody::Alias { ty } => reify_concrete(ty)?,
+            }),
         },
     })
 }
@@ -817,7 +820,7 @@ fn validate_at(schema: &SchemaType, value: &Value, path: &str, out: &mut Vec<Vio
             }
         }
         SchemaType::Map { key, value: item } => validate_map(key, item, value, path, out),
-        SchemaType::Record { fields } => match value {
+        SchemaType::Fields { fields } => match value {
             Value::Object(entries) => {
                 let declared = fields
                     .iter()
@@ -1110,7 +1113,7 @@ fn semantic_json_equal(schema: &SchemaType, left: &Value, right: &Value) -> bool
                 a.len() == components.len() && ordered(a, b, components.iter().cloned())
             })
         }
-        SchemaType::Record { fields } => fields.iter().all(|field| {
+        SchemaType::Fields { fields } => fields.iter().all(|field| {
             left.get(&field.name)
                 .zip(right.get(&field.name))
                 .is_some_and(|(a, b)| semantic_json_equal(&field.schema, a, b))
@@ -1221,7 +1224,7 @@ fn describe(schema: &SchemaType) -> String {
         SchemaType::List { item } => format!("List<{}>", describe(item)),
         SchemaType::Set { item } => format!("Set<{}>", describe(item)),
         SchemaType::Map { key, value } => format!("Map<{}, {}>", describe(key), describe(value)),
-        SchemaType::Record { .. } => "record".into(),
+        SchemaType::Fields { .. } => "record".into(),
         SchemaType::Union { variants } => variants
             .iter()
             .map(|variant| variant.tag.clone())
@@ -1274,11 +1277,11 @@ mod tests {
     fn strict_nested_validation_reports_precise_paths() {
         let schema = TypeSchema {
             version: SCHEMA_VERSION,
-            root: SchemaType::Record {
+            root: SchemaType::Fields {
                 fields: vec![SchemaField {
                     name: "tasks".into(),
                     schema: SchemaType::List {
-                        item: Box::new(SchemaType::Record {
+                        item: Box::new(SchemaType::Fields {
                             fields: vec![SchemaField {
                                 name: "description".into(),
                                 schema: SchemaType::String,
@@ -1314,7 +1317,7 @@ mod tests {
     fn validates_maps_unions_and_missing_fields() {
         let schema = TypeSchema {
             version: SCHEMA_VERSION,
-            root: SchemaType::Record {
+            root: SchemaType::Fields {
                 fields: vec![
                     SchemaField {
                         name: "labels".into(),
@@ -1423,7 +1426,7 @@ mod tests {
             version: SCHEMA_VERSION,
             root: SchemaType::Named {
                 name: "TaskPlan".into(),
-                body: Box::new(SchemaType::Record {
+                body: Box::new(SchemaType::Fields {
                     fields: vec![SchemaField {
                         name: "steps".into(),
                         schema: SchemaType::List {
@@ -1452,7 +1455,7 @@ mod tests {
 
         let empty_record = TypeSchema {
             version: SCHEMA_VERSION,
-            root: SchemaType::Record { fields: vec![] },
+            root: SchemaType::Fields { fields: vec![] },
         };
         assert!(empty_record.validate_json("{}").ok);
         assert!(!empty_record.validate_json(r#"{"extra":1}"#).ok);
@@ -1481,7 +1484,7 @@ mod tests {
                 variants: vec![
                     SchemaVariant {
                         tag: "sha256:x".into(),
-                        schema: SchemaType::Record {
+                        schema: SchemaType::Fields {
                             fields: vec![SchemaField {
                                 name: "value".into(),
                                 schema: SchemaType::Int,
@@ -1490,7 +1493,7 @@ mod tests {
                     },
                     SchemaVariant {
                         tag: "sha256:y".into(),
-                        schema: SchemaType::Record {
+                        schema: SchemaType::Fields {
                             fields: vec![SchemaField {
                                 name: "value".into(),
                                 schema: SchemaType::Int,
@@ -1532,7 +1535,7 @@ mod tests {
                     tag: "sha256:answer".into(),
                     schema: SchemaType::Named {
                         name: "TextAnswer".into(),
-                        body: Box::new(SchemaType::Record {
+                        body: Box::new(SchemaType::Fields {
                             fields: vec![SchemaField {
                                 name: "content".into(),
                                 schema: SchemaType::String,
@@ -1564,7 +1567,7 @@ mod tests {
             version: SCHEMA_VERSION,
             root: SchemaType::Named {
                 name: "Envelope".into(),
-                body: Box::new(SchemaType::Record {
+                body: Box::new(SchemaType::Fields {
                     fields: vec![
                         SchemaField {
                             name: "items".into(),
@@ -1680,7 +1683,7 @@ mod tests {
             version: SCHEMA_VERSION,
             root: SchemaType::Named {
                 name: "nefor.contracts.AgentError".into(),
-                body: Box::new(SchemaType::Record {
+                body: Box::new(SchemaType::Fields {
                     fields: vec![SchemaField {
                         name: "last_output".into(),
                         schema: SchemaType::JsonValue,
@@ -1745,7 +1748,7 @@ mod tests {
             crate::ast::Value::TypeDecl(crate::ast::TypeDecl {
                 name: "main.Node".into(),
                 params: vec![],
-                body: crate::ast::TypeDeclBody::Nominal(MagType::Named("main.Node".into(), vec![])),
+                body: crate::ast::TypeDeclBody::Alias(MagType::Named("main.Node".into(), vec![])),
             }),
         );
         let error = TypeSchema::reify(&env, &MagType::Named("main.Node".into(), vec![]))

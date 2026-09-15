@@ -65,7 +65,7 @@ pub fn value_to_json(env: &Env, value: &Value) -> Result<serde_json::Value, MagE
             "constructor": constructor.name,
             "value": value_to_json(env, payload)?,
         })),
-        Value::Record(v) => Ok(serde_json::Value::Object(
+        Value::Fields(v) => Ok(serde_json::Value::Object(
             v.iter()
                 .map(|(key, value)| Ok((key.clone(), value_to_json(env, value)?)))
                 .collect::<Result<_, MagError>>()?,
@@ -200,6 +200,20 @@ fn reject_duplicate_map_keys(env: &Env, entries: &[(Value, Value)]) -> Result<()
     Ok(())
 }
 
+fn concrete_named_body_to_json(
+    body: &crate::types::ConcreteNamedBody,
+) -> Result<serde_json::Value, MagError> {
+    match body {
+        crate::types::ConcreteNamedBody::Fields { fields } => Ok(serde_json::json!({
+            "kind": "record",
+            "fields": fields.iter().map(|(name, ty)| Ok(serde_json::json!({
+                "name": name, "type": concrete_type_to_json(ty)?
+            }))).collect::<Result<Vec<_>, MagError>>()?,
+        })),
+        crate::types::ConcreteNamedBody::Alias { ty } => concrete_type_to_json(ty),
+    }
+}
+
 pub fn concrete_type_to_json(
     ty: &crate::types::ConcreteType,
 ) -> Result<serde_json::Value, MagError> {
@@ -220,7 +234,7 @@ pub fn concrete_type_to_json(
             "kind": "named",
             "name": name,
             "arguments": arguments.iter().map(concrete_type_to_json).collect::<Result<Vec<_>, _>>()?,
-            "body": concrete_type_to_json(body)?,
+            "body": concrete_named_body_to_json(body)?,
         }),
         ConcreteType::Adt {
             name,
@@ -246,17 +260,51 @@ pub fn concrete_type_to_json(
             "key": concrete_type_to_json(key)?,
             "value": concrete_type_to_json(value)?,
         }),
-        ConcreteType::Record { fields } => serde_json::json!({
-            "kind": "record",
-            "fields": fields.iter().map(|(name, ty)| Ok(serde_json::json!({
-                "name": name, "type": concrete_type_to_json(ty)?
-            }))).collect::<Result<Vec<_>, MagError>>()?,
-        }),
         ConcreteType::Product { items } => serde_json::json!({
             "kind": "product",
             "items": items.iter().map(concrete_type_to_json).collect::<Result<Vec<_>, _>>()?,
         }),
     })
+}
+
+fn concrete_named_body_from_json(
+    value: &serde_json::Value,
+) -> Result<crate::types::ConcreteNamedBody, MagError> {
+    let Some(object) = value.as_object() else {
+        return Ok(crate::types::ConcreteNamedBody::Alias {
+            ty: Box::new(concrete_type_from_json(value)?),
+        });
+    };
+    if object.get("kind").and_then(serde_json::Value::as_str) != Some("record") {
+        return Ok(crate::types::ConcreteNamedBody::Alias {
+            ty: Box::new(concrete_type_from_json(value)?),
+        });
+    }
+    let entries = object
+        .get("fields")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| MagError::Type("named record body needs fields".into()))?;
+    let mut fields = BTreeMap::new();
+    let mut previous: Option<&str> = None;
+    for field in entries {
+        let field = field
+            .as_object()
+            .ok_or_else(|| MagError::Type("named field descriptor must be an object".into()))?;
+        let name = string_field(field, "name")?;
+        if previous.is_some_and(|previous| previous >= name) {
+            return Err(MagError::Type(
+                "named descriptor fields must be uniquely sorted".into(),
+            ));
+        }
+        previous = Some(name);
+        let ty = concrete_type_from_json(
+            field
+                .get("type")
+                .ok_or_else(|| MagError::Type("named descriptor field needs type".into()))?,
+        )?;
+        fields.insert(name.to_owned(), ty);
+    }
+    Ok(crate::types::ConcreteNamedBody::Fields { fields })
 }
 
 /// Decode the canonical descriptor representation emitted into MAG artifacts.
@@ -292,10 +340,12 @@ pub fn concrete_type_from_json(
             // declarations and direct kernel fixtures name nominal
             // constructors without embedding MAG definitions; those nodes
             // are usable for nominal compatibility but not stable identity.
-            body: Box::new(match object.get("body") {
-                Some(body) => concrete_type_from_json(body)?,
-                None => ConcreteType::Unit,
-            }),
+            body: match object.get("body") {
+                Some(body) => concrete_named_body_from_json(body)?,
+                None => crate::types::ConcreteNamedBody::Alias {
+                    ty: Box::new(ConcreteType::Unit),
+                },
+            },
         },
         "adt" => {
             let constructors = object
@@ -354,45 +404,18 @@ pub fn concrete_type_from_json(
             )?)?),
         },
         "record" => {
-            let fields = object
-                .get("fields")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| MagError::Type("record semantic descriptor needs fields".into()))?;
-            let mut decoded = BTreeMap::new();
-            let mut previous: Option<&str> = None;
-            for field in fields {
-                let field = field.as_object().ok_or_else(|| {
-                    MagError::Type("record descriptor field must be an object".into())
-                })?;
-                let name = string_field(field, "name")?;
-                if previous.is_some_and(|previous| previous >= name) {
-                    return Err(MagError::Type(
-                        "record descriptor fields must be uniquely sorted".into(),
-                    ));
-                }
-                previous = Some(name);
-                let ty =
-                    concrete_type_from_json(field.get("type").ok_or_else(|| {
-                        MagError::Type("record descriptor field needs type".into())
-                    })?)?;
-                decoded.insert(name.to_owned(), ty);
-            }
-            ConcreteType::Record { fields: decoded }
+            return Err(MagError::Type(
+                "standalone record semantic descriptors are unsupported".into(),
+            ));
         }
         "union" => {
             return Err(MagError::Type(
                 "structural union semantic descriptors are unsupported; declare an ADT".into(),
             ));
         }
-        "product" => {
-            let items = descriptor_list(object, "items")?;
-            if items.len() < 2 {
-                return Err(MagError::Type(
-                    "product semantic descriptor needs at least two items".into(),
-                ));
-            }
-            ConcreteType::Product { items }
-        }
+        "product" => ConcreteType::Product {
+            items: descriptor_list(object, "items")?,
+        },
         other => {
             return Err(MagError::Type(format!(
                 "unknown semantic descriptor kind {other:?}"
@@ -455,22 +478,20 @@ fn descriptor_list(
         .collect()
 }
 
-pub fn json_to_value(value: &serde_json::Value) -> Value {
+pub(crate) fn project_json_value(value: &serde_json::Value) -> Value {
     match value {
         serde_json::Value::Null => Value::Unit,
-        serde_json::Value::Bool(v) => Value::Bool(*v),
-        serde_json::Value::Number(v) => v
+        serde_json::Value::Bool(value) => Value::Bool(*value),
+        serde_json::Value::Number(value) => value
             .as_i64()
             .map(Value::Int)
-            .or_else(|| v.as_f64().map(Value::Float))
-            .unwrap_or_else(|| Value::Str(v.to_string())),
-        serde_json::Value::String(v) => Value::Str(v.clone()),
-        serde_json::Value::Array(v) => Value::List(Arc::new(v.iter().map(json_to_value).collect())),
-        serde_json::Value::Object(v) => Value::Record(Arc::new(
-            v.iter()
-                .map(|(k, v)| (k.clone(), json_to_value(v)))
-                .collect(),
-        )),
+            .or_else(|| value.as_f64().map(Value::Float))
+            .unwrap_or_else(|| Value::JsonValue(serde_json::Value::Number(value.clone()))),
+        serde_json::Value::String(value) => Value::Str(value.clone()),
+        serde_json::Value::Array(values) => {
+            Value::List(Arc::new(values.iter().map(project_json_value).collect()))
+        }
+        serde_json::Value::Object(_) => Value::JsonValue(value.clone()),
     }
 }
 
@@ -496,6 +517,37 @@ pub(crate) fn project_typed_value(
     decode_typed_value(env, value, ty, RecordDecode::Projection)
 }
 
+fn decode_field_values(
+    env: &Env,
+    value: &serde_json::Value,
+    fields: &BTreeMap<String, MagType>,
+    mode: RecordDecode,
+    owner: &MagType,
+) -> Result<Value, MagError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| MagError::Type(format!("expected {owner}")))?;
+    if matches!(mode, RecordDecode::Exact) && object.len() != fields.len() {
+        return Err(MagError::Type(format!(
+            "expected exact named fields for {owner}"
+        )));
+    }
+    Ok(Value::Fields(Arc::new(
+        fields
+            .iter()
+            .map(|(key, field_type)| {
+                let field = object
+                    .get(key)
+                    .ok_or_else(|| MagError::Type(format!("missing field {key} for {owner}")))?;
+                Ok((
+                    key.clone(),
+                    decode_typed_value(env, field, field_type, mode)?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, MagError>>()?,
+    )))
+}
+
 fn decode_typed_value(
     env: &Env,
     value: &serde_json::Value,
@@ -514,7 +566,20 @@ fn decode_typed_value(
                 .zip(args.iter().cloned())
                 .collect();
             match decl.body {
-                crate::ast::TypeDeclBody::Nominal(body) => Value::Typed(
+                crate::ast::TypeDeclBody::Fields(crate::ast::FieldTypes(fields)) => Value::Typed(
+                    std::sync::Arc::new(decode_field_values(
+                        env,
+                        value,
+                        &fields
+                            .iter()
+                            .map(|(name, field)| (name.clone(), substitute(field, &substitutions)))
+                            .collect(),
+                        mode,
+                        ty,
+                    )?),
+                    ty.clone(),
+                ),
+                crate::ast::TypeDeclBody::Alias(body) => Value::Typed(
                     std::sync::Arc::new(decode_typed_value(
                         env,
                         value,
@@ -627,30 +692,6 @@ fn decode_typed_value(
             reject_duplicate_map_keys(env, &decoded)?;
             Value::Map(Arc::new(decoded))
         }
-        MagType::Record(fields) => {
-            let object = value
-                .as_object()
-                .ok_or_else(|| MagError::Type(format!("expected {ty}")))?;
-            if matches!(mode, RecordDecode::Exact) && object.len() != fields.len() {
-                return Err(MagError::Type(format!(
-                    "expected exact record fields for {ty}"
-                )));
-            }
-            Value::Record(Arc::new(
-                fields
-                    .iter()
-                    .map(|(key, field_type)| {
-                        let field = object.get(key).ok_or_else(|| {
-                            MagError::Type(format!("missing field {key} for {ty}"))
-                        })?;
-                        Ok((
-                            key.clone(),
-                            decode_typed_value(env, field, field_type, mode)?,
-                        ))
-                    })
-                    .collect::<Result<BTreeMap<_, _>, MagError>>()?,
-            ))
-        }
         MagType::Product(components) => {
             let values = value
                 .as_array()
@@ -715,7 +756,20 @@ fn decode_typed_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ConcreteType;
+    use crate::types::{ConcreteNamedBody, ConcreteType};
+
+    fn env_with_fields(name: &str, fields: BTreeMap<String, MagType>) -> Env {
+        let mut env = Env::new();
+        env.define(
+            name,
+            Value::TypeDecl(crate::ast::TypeDecl {
+                name: format!("main.{name}"),
+                params: vec![],
+                body: crate::ast::TypeDeclBody::Fields(crate::ast::FieldTypes(fields)),
+            }),
+        );
+        env
+    }
 
     #[test]
     fn typed_int_accepts_provider_integer_notation_and_rejects_non_ints() {
@@ -734,18 +788,18 @@ mod tests {
 
     #[test]
     fn typed_int_canonicalizes_provider_integer_notation_recursively() {
-        let env = Env::new();
-        let ty = MagType::List(Box::new(MagType::Record(BTreeMap::from([(
-            "value".into(),
-            MagType::Int,
-        )]))));
+        let env = env_with_fields("Item", BTreeMap::from([("value".into(), MagType::Int)]));
+        let ty = MagType::List(Box::new(MagType::Named("main.Item".into(), vec![])));
         let value = serde_json::json!([{"value": 1.0}]);
         let decoded = json_to_typed_value(&env, &value, &ty).unwrap();
         let Value::List(items) = decoded else {
             panic!("expected typed list");
         };
-        let Value::Record(fields) = &items[0] else {
-            panic!("expected typed record");
+        let Value::Typed(value, _) = &items[0] else {
+            panic!("expected named value");
+        };
+        let Value::Fields(fields) = value.as_ref() else {
+            panic!("expected named fields");
         };
         assert!(matches!(fields.get("value"), Some(Value::Int(1))));
     }
@@ -761,11 +815,15 @@ mod tests {
             assert!(json_to_typed_value(&env, &value, &ty).is_err());
         }
 
-        let nested = MagType::List(Box::new(MagType::Record(BTreeMap::from([
-            ("enabled".into(), MagType::Bool),
-            ("label".into(), MagType::String),
-            ("marker".into(), MagType::Unit),
-        ]))));
+        let env = env_with_fields(
+            "Nested",
+            BTreeMap::from([
+                ("enabled".into(), MagType::Bool),
+                ("label".into(), MagType::String),
+                ("marker".into(), MagType::Unit),
+            ]),
+        );
+        let nested = MagType::List(Box::new(MagType::Named("main.Nested".into(), vec![])));
         for value in [
             serde_json::json!([{"enabled":"true","label":"ok","marker":null}]),
             serde_json::json!([{"enabled":true,"label":7,"marker":null}]),
@@ -804,9 +862,9 @@ mod tests {
         let descriptor = ConcreteType::Named {
             name: "main.Payload".into(),
             arguments: vec![],
-            body: Box::new(ConcreteType::Record {
+            body: ConcreteNamedBody::Fields {
                 fields: BTreeMap::from([("value".into(), ConcreteType::Int)]),
-            }),
+            },
         };
         let encoded = concrete_type_to_json(&descriptor).unwrap();
         assert_eq!(concrete_type_from_json(&encoded).unwrap(), descriptor);
@@ -828,6 +886,18 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("structural union semantic descriptors are unsupported"));
+
+        let standalone_record = serde_json::json!({
+            "kind": "record",
+            "fields": [{
+                "name": "value",
+                "type": {"kind":"primitive","name":"Int"}
+            }]
+        });
+        let error = concrete_type_from_json(&standalone_record)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("standalone record semantic descriptors are unsupported"));
     }
 
     #[test]
@@ -862,13 +932,11 @@ mod tests {
     }
 
     #[test]
-    fn typed_records_reject_extra_fields() {
-        let ty = MagType::Record(BTreeMap::from([("value".into(), MagType::Int)]));
-        assert!(json_to_typed_value(
-            &Env::new(),
-            &serde_json::json!({"value": 1, "extra": 2}),
-            &ty,
-        )
-        .is_err());
+    fn typed_named_fields_reject_extra_fields() {
+        let env = env_with_fields("Payload", BTreeMap::from([("value".into(), MagType::Int)]));
+        let ty = MagType::Named("main.Payload".into(), vec![]);
+        assert!(
+            json_to_typed_value(&env, &serde_json::json!({"value": 1, "extra": 2}), &ty,).is_err()
+        );
     }
 }

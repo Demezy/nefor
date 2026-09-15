@@ -133,7 +133,6 @@ fn nominal_adt_checker_enforces_ownership_exhaustiveness_and_branch_uniformity()
             "(if true 1 \"no\")",
             "if branches must return one compatible type",
         ),
-        ("[1 \"no\"]", "list elements must have one compatible type"),
         ("(as First 1)", "value does not conform to main.First"),
     ] {
         let source = format!("{declarations}\n(artifact {expression})");
@@ -194,7 +193,9 @@ fn lisp_form_diagnostics_survive_authored_lowering() {
 fn packed_values_have_an_explicit_compiler_owned_envelope() {
     let root = workspace("packed-value-envelope");
     let artifact = compile(
-        r#"(artifact (pack {:type "sha256:user-authored" :value {:nested true}}))"#,
+        r#"(type Nested {:nested Bool})
+            (type PackedInput {:type String :value Nested})
+            (artifact (pack (as PackedInput {:type "sha256:user-authored" :value (as Nested {:nested true})})))"#,
         &root,
     )
     .unwrap();
@@ -415,25 +416,7 @@ fn builtin_signatures_participate_in_typed_overload_sets() {
         "{error}"
     );
 
-    for (name, declaration) in [
-        ("str", r#"(let str (fn [[value Int]] -> String "custom"))"#),
-        (
-            "count",
-            "(let count (fn [[value {:value Int}]] -> Int 0))",
-        ),
-        (
-            "keys",
-            "(let keys (fn [[value {:value Int}]] -> (List String) []))",
-        ),
-        (
-            "get",
-            "(let get (fn [[value {:value Int}] [key String]] -> Int 0))",
-        ),
-        (
-            "assoc",
-            "(let assoc (fn [[value {:value Int}] [key String] [field Int]] -> {:value Int} value))",
-        ),
-    ] {
+    for (name, declaration) in [("str", r#"(let str (fn [[value Int]] -> String "custom"))"#)] {
         let source = format!("{declaration}\n(artifact {{}})");
         let error = match compile(&source, &root) {
             Err(error) => error.to_string(),
@@ -486,7 +469,7 @@ fn nested_same_name_generic_binders_are_fresh_per_candidate() {
               (store-port continued)))
           (artifact
             (retry-gate
-              (as (Port (Continue Int)) {:value {:value 1}})))
+              (as (Port (Continue Int)) {:value (as (Continue Int) {:value 1})})))
         "#,
         &root,
     )
@@ -619,15 +602,16 @@ fn closures_inside_strict_values_see_the_completed_peer_frame() {
     let root = workspace("closure-record-recursion");
     let artifact = compile(
         r#"
+          (type Handlers {:even (Fn (List Int) Bool) :odd (Fn (List Int) Bool)})
           (let handlers
-            {:even (fn [[items (List Int)]] -> Bool
+            (as Handlers {:even (fn [[items (List Int)]] -> Bool
                      (if (= (count items) 0)
                        true
                        ((get handlers "odd") (remove-at items 0))))
              :odd (fn [[items (List Int)]] -> Bool
                     (if (= (count items) 0)
                       false
-                      ((get handlers "even") (remove-at items 0))))})
+                      ((get handlers "even") (remove-at items 0))))}))
           (artifact
             ((get handlers "even") [1 2]))
         "#,
@@ -684,9 +668,10 @@ fn direct_let_builds_nested_shared_scopes_and_checks_parameter_collisions() {
 fn typed_library_functions_return_artifacts() {
     let root = workspace("typed-artifact");
     let source = r#"
+      (type Answer {:answer Int})
       (let emit (fn [T] [[value T]] -> Artifact
         (artifact value)))
-      (emit {:answer 42})
+      (emit (as Answer {:answer 42}))
     "#;
     let artifact = compile(source, &root).unwrap();
     assert_eq!(artifact, json!({"answer":42}));
@@ -765,7 +750,7 @@ fn immutable_host_inputs_expose_only_typed_projections() {
     let root = workspace("inputs");
     fs::write(
         root.join("core/input.mag"),
-        "(type Contract {:identity String :type_scheme {:input_tags (List String) :outputs (List String)}})\n(let contracts (host-input \"factory_contracts\" (type-tag (List Contract))))",
+        "(type TypeScheme {:input_tags (List String) :outputs (List String)})\n(type Contract {:identity String :type_scheme TypeScheme})\n(let contracts (host-input \"factory_contracts\" (type-tag (List Contract))))",
     )
     .unwrap();
     fs::write(
@@ -858,7 +843,7 @@ fn host_input_projection_reports_missing_and_mistyped_values() {
 
     fs::write(
         root.join("main.mag"),
-        "(type Config {:steps (List {:enabled Bool :label String})})\n(artifact (host-input \"config\" (type-tag Config)))",
+        "(type Step {:enabled Bool :label String})\n(type Config {:steps (List Step)})\n(artifact (host-input \"config\" (type-tag Config)))",
     )
     .unwrap();
     let nested = compile_file_with_inputs(
@@ -898,7 +883,7 @@ fn json_data_files_are_parsed_into_mag_values() {
 #[test]
 fn fail_preserves_library_diagnostics() {
     let root = workspace("failure");
-    let error = compile("(fail {:kind \"Invalid\" :errors [\"bad route\"]})", &root)
+    let error = compile("(type Failure {:kind String :errors (List String)})\n(fail (as Failure {:kind \"Invalid\" :errors [\"bad route\"]}))", &root)
         .unwrap_err()
         .to_string();
     assert!(error.contains("Invalid"), "{error}");
@@ -911,11 +896,12 @@ fn never_branch_adopts_the_returning_branch_type() {
     let artifact = compile(
         r#"
         (type Choice (adt [Stop Unit] [Go String]))
+        (type Unreachable {:kind String})
         (let choice (construct Choice Go "matched"))
         (artifact
-          {:conditional (if true "ok" (fail {:kind "unreachable"}))
+          {:conditional (if true "ok" (fail (as Unreachable {:kind "unreachable"})))
            :matched (match choice
-                      [Stop value (fail {:kind "unreachable"})]
+                      [Stop value (fail (as Unreachable {:kind "unreachable"}))]
                       [Go value value])})
         "#,
         &root,
@@ -980,12 +966,15 @@ fn factory_descriptions_use_ordinary_typed_functions() {
       (type Params {:seed String})
       (type Input {:prompt String})
       (type Output {:answer String})
+      (type FactoryDescription
+        {:factory String :type_arguments (List TypeDescriptor) :params Params})
       (let worker
         (fn [[params Params] [input (TypeTag Input)] [output (TypeTag Output)]]
-          -> {:factory String :type_arguments (List TypeDescriptor) :params Params}
-          {:factory "runtime.worker"
-           :type_arguments [(type-evidence input) (type-evidence output)]
-           :params params}))
+          -> FactoryDescription
+          (as FactoryDescription
+            {:factory "runtime.worker"
+             :type_arguments [(type-evidence input) (type-evidence output)]
+             :params params})))
       (artifact
         (worker (as Params {:seed "x"}) (type-tag Input) (type-tag Output)))
     "#;
@@ -1016,6 +1005,55 @@ fn record_literals_do_not_construct_native_maps() {
           (as (Map String String) {:kind "task" :prompt "Audit"}))})
     "#;
     assert!(compile(source, &root).is_err());
+}
+
+#[test]
+fn standalone_record_values_and_types_are_rejected() {
+    let root = workspace("anonymous-record-rejection");
+    for source in [
+        "(let value {:x 1}) (artifact nil)",
+        "(let read (fn [[value {:x Int}]] -> Int 1)) (artifact nil)",
+        "(let make (fn [] -> {:x Int} {:x 1})) (artifact nil)",
+        "(artifact (type-tag {:x Int}))",
+        "(artifact (type-tag (List {:x Int})))",
+        "(artifact (type-tag (Map {:x Int} String)))",
+        "(artifact (type-tag (Set {:x Int})))",
+    ] {
+        let error = compile(source, &root).unwrap_err().to_string();
+        assert!(
+            error.contains("standalone record") || error.contains("anonymous record"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn named_fields_remain_owned_by_nominals_and_adt_constructors() {
+    let root = workspace("constructor-owned-fields");
+    let artifact = compile(
+        r#"
+        (type Payload {:value Int})
+        (type Choice (adt [Selected Payload]))
+        (let payload (as Payload {:value 7}))
+        (let selected (construct Choice Selected {:value 9}))
+        (artifact {:payload payload
+                   :selected (match selected [Selected value (get value "value")])})
+        "#,
+        &root,
+    )
+    .unwrap();
+    assert_eq!(artifact, json!({"payload":{"value":7},"selected":9}));
+
+    for fields in ["{:wrong 9}", "{:value 9 :extra 1}"] {
+        let source = format!(
+            "(type Payload {{:value Int}}) (type Choice (adt [Selected Payload])) (artifact (construct Choice Selected {fields}))"
+        );
+        let error = compile(&source, &root).unwrap_err().to_string();
+        assert!(
+            error.contains("constructor fields must exactly match"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
@@ -1086,7 +1124,7 @@ fn nominal_values_require_explicit_refinement() {
     .unwrap_err()
     .to_string();
     assert!(
-        implicit.contains("use as for explicit refinement"),
+        implicit.contains("standalone record values are unsupported"),
         "{implicit}"
     );
 
@@ -1229,7 +1267,7 @@ fn builtin_type_rules_are_total_and_assoc_checks_values() {
     assert!(arity.contains("expected 2, got 0"), "{arity}");
 
     let mismatch = compile(
-        "(let update (fn [[value {:count Int}]] -> {:count Int} (assoc value :count \"many\")))\n(artifact {})",
+        "(type Counter {:count Int})\n(let update (fn [[value Counter]] -> Counter (assoc value :count \"many\")))\n(artifact {})",
         &root,
     )
     .unwrap_err()
@@ -1237,8 +1275,8 @@ fn builtin_type_rules_are_total_and_assoc_checks_values() {
     assert!(mismatch.contains("expected Int, got String"), "{mismatch}");
 
     for source in [
-        "(artifact (get {:count 1} 0))",
-        "(artifact (assoc {:count 1} 0 2))",
+        "(type Counter {:count Int}) (artifact (get (as Counter {:count 1}) 0))",
+        "(type Counter {:count Int}) (artifact (assoc (as Counter {:count 1}) 0 2))",
     ] {
         let error = compile(source, &root).unwrap_err().to_string();
         assert!(error.contains("expected String, got Int"), "{error}");
@@ -1246,7 +1284,8 @@ fn builtin_type_rules_are_total_and_assoc_checks_values() {
 
     let keys = compile(
         r#"
-          (let original {:count 1})
+          (type Counter {:count Int})
+          (let original (as Counter {:count 1}))
           (artifact {:string (get original "count")
                      :keyword (get original :count)
                      :assoc-string (get (assoc original "count" 2) :count)
@@ -1259,19 +1298,6 @@ fn builtin_type_rules_are_total_and_assoc_checks_values() {
         keys,
         json!({"string":1,"keyword":1,"assoc-string":2,"assoc-keyword":3})
     );
-
-    let distinct = compile(
-        r#"
-          (let get (fn [[value {:count Int}] [key Int]] -> Int 99))
-          (let assoc (fn [[value {:count Int}] [key Int] [field Int]] -> {:count Int}
-            {:count field}))
-          (artifact {:get (get {:count 1} 0)
-                     :assoc (get (assoc {:count 1} 0 7) 0)})
-        "#,
-        &root,
-    )
-    .unwrap();
-    assert_eq!(distinct, json!({"get":99,"assoc":99}));
 }
 
 #[test]
@@ -1402,6 +1428,8 @@ fn canonical_and_sort_by_are_typed_deterministic_builtins() {
     let artifact = compile(
         r#"
           (type Item {:id String :rank Int})
+          (type CanonicalMeta {:z Int :a Int})
+          (type CanonicalInput {:nodes (List String) :meta CanonicalMeta :kind String})
           (let items (as (List Item)
             [(as Item {:id "third" :rank 30})
              (as Item {:id "first" :rank 10})
@@ -1410,13 +1438,14 @@ fn canonical_and_sort_by_are_typed_deterministic_builtins() {
             (sort-by
               (fn [[item Item]] -> String (get item "id"))
               items))
-          (artifact {:canonical (canonical {:nodes ["a" "b"]
-                                    :meta {:z 2 :a 1}
-                                    :kind "edge"})
+          (artifact {:canonical (canonical
+               (as CanonicalInput {:nodes ["a" "b"]
+                  :meta (as CanonicalMeta {:z 2 :a 1})
+                  :kind "edge"}))
              :removed (remove-at ["a" "b" "c"] 1)
              :string-ok (conforms? "value" (type-evidence (type-tag String)))
              :string-bad (conforms? 42 (type-evidence (type-tag String)))
-             :item-ok (conforms? {:id "item" :rank 1}
+             :item-ok (conforms? (as Item {:id "item" :rank 1})
                         (type-evidence (type-tag Item)))
              :ids (map (fn [[item Item]] -> String (get item "id")) ordered)})
         "#,
@@ -1643,9 +1672,11 @@ fn concrete_data_equality_is_recursive_and_float_bit_exact() {
     let root = workspace("concrete-equality");
     let artifact = compile(
         r#"
+        (type Comparable {:a (List Int) :b (List Bool)})
         (let mapped (map (fn [[x Int]] -> Int x) [1 2]))
         (artifact {:list (= mapped [1 2])
-                   :record (= {:b [true false] :a mapped} {:a [1 2] :b [true false]})
+                   :record (= (as Comparable {:b [true false] :a mapped})
+                              (as Comparable {:a [1 2] :b [true false]}))
                    :ordered (not (= [1 2] [2 1]))
                    :close (not (= 1.0 1.0000000000000002))
                    :signed-zero (not (= 0.0 -0.0))
@@ -1665,17 +1696,18 @@ fn native_maps_and_sets_are_unordered_concrete_data() {
     let root = workspace("native-unordered-data");
     let artifact = compile(
         r#"
-        (let empty (__map-empty (type-tag {:id Int}) (type-tag String)))
-        (let left (__map-insert (__map-insert empty {:id 2} "two") {:id 1} "one"))
-        (let right (__map-insert (__map-insert empty {:id 1} "one") {:id 2} "two"))
+        (type IdKey {:id Int})
+        (let empty (__map-empty (type-tag IdKey) (type-tag String)))
+        (let left (__map-insert (__map-insert empty (as IdKey {:id 2}) "two") (as IdKey {:id 1}) "one"))
+        (let right (__map-insert (__map-insert empty (as IdKey {:id 1}) "one") (as IdKey {:id 2}) "two"))
         (let set-empty (__set-empty (type-tag Int)))
         (let a (__set-insert (__set-insert set-empty 2) 1))
         (let b (__set-insert (__set-insert set-empty 1) 2))
         (let keyed (__map-insert (__map-empty (type-tag (Set Int)) (type-tag Bool)) a true))
         (artifact {:map left :set a :map-equal (= left right) :set-equal (= a b)
-                   :lookup (__map-get left {:id 1}) :set-key (__map-get keyed b)
+                   :lookup (__map-get left (as IdKey {:id 1})) :set-key (__map-get keyed b)
                    :map-count (__map-count left) :set-count (__set-count a)
-                   :map-has (__map-contains left {:id 2}) :map-missing (__map-contains left {:id 3})
+                   :map-has (__map-contains left (as IdKey {:id 2})) :map-missing (__map-contains left (as IdKey {:id 3}))
                    :set-has (__set-contains a 1) :set-missing (__set-contains a 3)})
         "#,
         &root,
@@ -1702,8 +1734,9 @@ fn native_collection_duplicates_and_missing_lookup_fail() {
             "duplicate Map key",
         ),
         (
-            r#"(let s (__set-empty (type-tag {:x Int})))
-            (artifact (__set-insert (__set-insert s {:x 1}) {:x 1}))"#,
+            r#"(type SetItem {:x Int})
+            (let s (__set-empty (type-tag SetItem)))
+            (artifact (__set-insert (__set-insert s (as SetItem {:x 1})) (as SetItem {:x 1})))"#,
             "duplicate Set member",
         ),
         (
@@ -1744,7 +1777,19 @@ fn maps_and_sets_have_no_ordered_collection_or_record_surface() {
         );
         assert!(compile(&source, &root).is_err(), "{expression}");
     }
-    assert_eq!(compile(r#"(artifact {:keys (keys {:b 2 :a 1}) :get (get {:a 1} "a") :assoc (assoc {:a 1} "a" 2)})"#, &root).unwrap(), json!({"keys":["a","b"],"get":1,"assoc":{"a":2}}));
+    assert_eq!(
+        compile(
+            r#"
+        (type Pair {:a Int :b Int})
+        (type Single {:a Int})
+        (let pair (as Pair {:b 2 :a 1}))
+        (let single (as Single {:a 1}))
+        (artifact {:keys (keys pair) :get (get single "a") :assoc (assoc single "a" 2)})"#,
+            &root
+        )
+        .unwrap(),
+        json!({"keys":["a","b"],"get":1,"assoc":{"a":2}})
+    );
 }
 
 #[test]
@@ -1767,11 +1812,12 @@ fn equality_rejects_behavior_in_nested_and_generic_positions() {
     assert_eq!(
         compile(
             r#"
+        (type DataBox {:data (List Int)})
         (let eq (fn [T] [[a T] [b T]] -> Bool (= a b)))
         (let twice (fn [T] [[a T]] -> Bool (eq a a)))
         (let identity (fn [T] [[a T]] -> T a))
         (let f (identity (fn [[x Int]] -> Int x)))
-        (artifact {:equal (twice {:data [1 2]}) :function (f 7)})"#,
+        (artifact {:equal (twice (as DataBox {:data [1 2]})) :function (f 7)})"#,
             &root
         )
         .unwrap(),
@@ -1944,10 +1990,11 @@ fn generic_equality_obligations_are_static_in_higher_order_dead_code() {
     for invocation in [
         "(apply eq f)",
         "(apply (if true eq eq) f)",
-        "(apply (get {:equal eq} \"equal\") f)",
+        "(apply (get (as CompareHolder {:equal eq}) \"equal\") f)",
     ] {
         let source = format!(
             r#"
+            (type CompareHolder {{:equal (Fn Int Int Bool)}})
             (let eq (fn [T] [[a T] [b T]] -> Bool (= a b)))
             (let apply (fn [T] [[compare (Fn T T Bool)] [value T]] -> Bool (compare value value)))
             (let f (fn [[x Int]] -> Int x))

@@ -699,10 +699,11 @@ fn indexed_output_diagnostics_include_explicit_operations_and_each_port() {
       (require "core.validated")
       (type Arm {:text String})
       (type Other {:number Int})
+      (type EmptyParams {})
       (let input (nefor.graph.port "worker" (type-tag Unit) "in"))
       (let one (nefor.graph.port "worker" (type-tag Arm) "one"))
       (let two (nefor.graph.port "worker" (type-tag Arm) "two"))
-      (let worker (nefor.graph.actor "worker" "custom" [] {}
+      (let worker (nefor.graph.actor "worker" "custom" [] (as EmptyParams {})
         (nefor.graph.store-port input)
         [(nefor.graph.store-port one) (nefor.graph.store-port two)]))
       (let node (nefor.graph.node "worker" "ordinary" [worker] [] [] input one))
@@ -763,7 +764,8 @@ fn input_diagnostics_keep_raw_occurrences_and_actual_message_evidence() {
       (let analysis (nefor.graph.analyze-graph graph))
       (let actor (first (get target "actors")))
       (let input (get actor "input"))
-      (let message (as nefor.graph.Message (assoc (nefor.graph.stored-message input {:kind "nefor.graph.Value" :value nil})
+      (let message (as nefor.graph.Message (assoc (nefor.graph.stored-message input
+        (as (nefor.graph.MessageContent Unit) {:kind "nefor.graph.Value" :value nil}))
                          "semantic_type" (type-evidence (type-tag Unit)))))
       (let with-message (as nefor.graph.GraphAnalysis (assoc analysis "messages_by_input"
         (core.map.put (get analysis "messages_by_input") (nefor.graph.port-address-key input) [message]))))

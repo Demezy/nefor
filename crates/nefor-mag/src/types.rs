@@ -27,7 +27,6 @@ pub enum MagType {
     Set(Box<MagType>),
     EmptyList,
     Map(Box<MagType>, Box<MagType>),
-    Record(BTreeMap<String, MagType>),
     Product(Vec<MagType>),
     Function(Vec<MagType>, Box<MagType>),
 }
@@ -46,7 +45,7 @@ pub enum ConcreteType {
     Named {
         name: String,
         arguments: Vec<ConcreteType>,
-        body: Box<ConcreteType>,
+        body: ConcreteNamedBody,
     },
     Adt {
         name: String,
@@ -63,11 +62,19 @@ pub enum ConcreteType {
         key: Box<ConcreteType>,
         value: Box<ConcreteType>,
     },
-    Record {
-        fields: BTreeMap<String, ConcreteType>,
-    },
     Product {
         items: Vec<ConcreteType>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConcreteNamedBody {
+    Fields {
+        fields: BTreeMap<String, ConcreteType>,
+    },
+    Alias {
+        ty: Box<ConcreteType>,
     },
 }
 
@@ -154,12 +161,6 @@ impl ConcreteType {
             Self::Map { key, value } => {
                 MagType::Map(Box::new(key.to_mag_type()), Box::new(value.to_mag_type()))
             }
-            Self::Record { fields } => MagType::Record(
-                fields
-                    .iter()
-                    .map(|(name, ty)| (name.clone(), ty.to_mag_type()))
-                    .collect(),
-            ),
             Self::Product { items } => {
                 MagType::Product(items.iter().map(Self::to_mag_type).collect())
             }
@@ -231,7 +232,14 @@ impl ConcreteType {
                 for argument in arguments {
                     argument.collect_declarations(declarations)?;
                 }
-                body.collect_declarations(declarations)?;
+                match body {
+                    ConcreteNamedBody::Fields { fields } => {
+                        for field in fields.values() {
+                            field.collect_declarations(declarations)?;
+                        }
+                    }
+                    ConcreteNamedBody::Alias { ty } => ty.collect_declarations(declarations)?,
+                }
             }
             Self::Adt {
                 arguments,
@@ -249,11 +257,6 @@ impl ConcreteType {
             Self::Map { key, value } => {
                 key.collect_declarations(declarations)?;
                 value.collect_declarations(declarations)?;
-            }
-            Self::Record { fields } => {
-                for field in fields.values() {
-                    field.collect_declarations(declarations)?;
-                }
             }
             Self::Product { items } => {
                 for item in items {
@@ -284,15 +287,6 @@ impl ConcreteType {
                     value: actual_value,
                 },
             ) => expected_key.accepts(actual_key) && expected_value.accepts(actual_value),
-            (Self::Record { fields: expected }, Self::Record { fields: actual })
-                if expected.len() == actual.len() =>
-            {
-                expected.iter().all(|(name, expected)| {
-                    actual
-                        .get(name)
-                        .is_some_and(|actual| expected.accepts(actual))
-                })
-            }
             (Self::Product { items: expected }, Self::Product { items: actual })
                 if expected.len() == actual.len() =>
             {
@@ -459,12 +453,6 @@ fn resolve(
             key: Box::new(resolve(env, key, resolving)?),
             value: Box::new(resolve(env, value, resolving)?),
         },
-        MagType::Record(fields) => ConcreteType::Record {
-            fields: fields
-                .iter()
-                .map(|(name, ty)| Ok((name.clone(), resolve(env, ty, resolving)?)))
-                .collect::<Result<_, MagError>>()?,
-        },
         MagType::Product(items) => ConcreteType::Product {
             // Products deliberately retain authored arity, repetition, order,
             // and every nested Product node.
@@ -501,14 +489,37 @@ fn resolve(
                 .zip(args.iter().cloned())
                 .collect();
             let concrete = match decl.body {
-                crate::ast::TypeDeclBody::Nominal(body) => ConcreteType::Named {
+                crate::ast::TypeDeclBody::Fields(crate::ast::FieldTypes(fields)) => {
+                    ConcreteType::Named {
+                        name: name.clone(),
+                        arguments,
+                        body: ConcreteNamedBody::Fields {
+                            fields: fields
+                                .iter()
+                                .map(|(field, ty)| {
+                                    Ok((
+                                        field.clone(),
+                                        resolve(
+                                            env,
+                                            &crate::checker::substitute(ty, &substitutions),
+                                            resolving,
+                                        )?,
+                                    ))
+                                })
+                                .collect::<Result<_, MagError>>()?,
+                        },
+                    }
+                }
+                crate::ast::TypeDeclBody::Alias(body) => ConcreteType::Named {
                     name: name.clone(),
                     arguments,
-                    body: Box::new(resolve(
-                        env,
-                        &crate::checker::substitute(&body, &substitutions),
-                        resolving,
-                    )?),
+                    body: ConcreteNamedBody::Alias {
+                        ty: Box::new(resolve(
+                            env,
+                            &crate::checker::substitute(&body, &substitutions),
+                            resolving,
+                        )?),
+                    },
                 },
                 crate::ast::TypeDeclBody::Adt(mut constructors) => {
                     constructors.sort_by(|left, right| left.id.name.cmp(&right.id.name));
@@ -595,13 +606,6 @@ impl fmt::Display for MagType {
             Self::Set(item) => write!(f, "(Set {item})"),
             Self::EmptyList => write!(f, "(List _)"),
             Self::Map(key, value) => write!(f, "(Map {key} {value})"),
-            Self::Record(fields) => {
-                let fields = fields
-                    .iter()
-                    .map(|(k, v)| format!(":{k} {v}"))
-                    .collect::<Vec<_>>();
-                write!(f, "{{{}}}", fields.join(" "))
-            }
             Self::Product(types) => write!(
                 f,
                 "({})",
@@ -635,26 +639,17 @@ mod tests {
 
     fn env_with_types() -> Env {
         let mut env = Env::new();
-        for (local, body) in [
-            (
-                "X",
-                MagType::Record(BTreeMap::from([("value".into(), MagType::Int)])),
-            ),
-            (
-                "Y",
-                MagType::Record(BTreeMap::from([("value".into(), MagType::Int)])),
-            ),
-            (
-                "Z",
-                MagType::Record(BTreeMap::from([("value".into(), MagType::String)])),
-            ),
+        for (local, fields) in [
+            ("X", BTreeMap::from([("value".into(), MagType::Int)])),
+            ("Y", BTreeMap::from([("value".into(), MagType::Int)])),
+            ("Z", BTreeMap::from([("value".into(), MagType::String)])),
         ] {
             env.define(
                 local,
                 Value::TypeDecl(TypeDecl {
                     name: format!("main.{local}"),
                     params: vec![],
-                    body: crate::ast::TypeDeclBody::Nominal(body),
+                    body: crate::ast::TypeDeclBody::Fields(crate::ast::FieldTypes(fields)),
                 }),
             );
         }

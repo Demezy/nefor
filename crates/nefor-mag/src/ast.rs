@@ -24,7 +24,7 @@ pub enum CheckedExprKind {
     Keyword(String),
     BindingRef(BindingId),
     Vector(Vec<CheckedExpr>),
-    Map(Vec<(String, CheckedExpr)>),
+    Fields(Vec<(String, CheckedExpr)>),
     If {
         condition: Box<CheckedExpr>,
         then_branch: Box<CheckedExpr>,
@@ -175,8 +175,12 @@ pub struct ConstructorDecl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FieldTypes(pub BTreeMap<String, MagType>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeDeclBody {
-    Nominal(MagType),
+    Fields(FieldTypes),
+    Alias(MagType),
     Adt(Vec<ConstructorDecl>),
     Native,
 }
@@ -201,7 +205,8 @@ pub enum Value {
     /// A checked ordered product. Unlike a List, every position retains its
     /// own trusted type and constructor evidence.
     Product(Arc<Vec<Value>>),
-    Record(Arc<BTreeMap<String, Value>>),
+    Fields(Arc<BTreeMap<String, Value>>),
+    ModuleNamespace(Arc<BTreeMap<String, Value>>),
     Map(Arc<Vec<(Value, Value)>>),
     Set(Arc<Vec<Value>>),
     Fn(Arc<FnValue>),
@@ -243,7 +248,8 @@ impl Value {
             Self::Symbol(_) => "symbol",
             Self::List(_) => "list",
             Self::Product(_) => "product",
-            Self::Record(_) => "record",
+            Self::Fields(_) => "named-fields",
+            Self::ModuleNamespace(_) => "module-namespace",
             Self::Map(_) => "map",
             Self::Set(_) => "set",
             Self::Fn(_) => "fn",

@@ -1,16 +1,27 @@
 (require "core.map")
 
-(let record {:unit nil
-              :bool true
-              :int 3
-              :float 3.5
-              :string "MAG"
-              :list [1 2 3]
-              :map (core.map.insert
-                     (core.map.insert
-                       (core.map.empty (type-tag String))
-                       "one" 1)
-                     "two" 2)})
+(type ExampleValues
+  {:unit Unit
+   :bool Bool
+   :int Int
+   :float Float
+   :string String
+   :list (List Int)
+   :map (Map String Int)})
+
+(let record
+  (as ExampleValues
+    {:unit nil
+     :bool true
+     :int 3
+     :float 3.5
+     :string "MAG"
+     :list [1 2 3]
+     :map (core.map.insert
+            (core.map.insert
+              (core.map.empty (type-tag String))
+              "one" 1)
+            "two" 2)}))
 
 ;; Collection transforms return new values; numbers remains [1 2 3].
 (let numbers [1 2 3])

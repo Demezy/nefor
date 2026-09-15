@@ -25,7 +25,8 @@ pub struct TypeDeclaration {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeDeclarationBody {
-    Nominal(Type),
+    Fields(Vec<(String, Type)>),
+    Alias(Type),
     Adt(Vec<ConstructorDeclaration>),
 }
 
@@ -52,7 +53,7 @@ pub enum Expr {
     Keyword(String),
     Name(String),
     Vector(Vec<Expr>),
-    Record(Vec<(String, Expr)>),
+    Fields(Vec<(String, Expr)>),
     If {
         condition: Box<Expr>,
         then_branch: Box<Expr>,
@@ -104,7 +105,6 @@ pub struct Parameter {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Name(String),
-    Record(Vec<(String, Type)>),
     Product(Vec<Type>),
     Tag(Box<Type>),
     Function {

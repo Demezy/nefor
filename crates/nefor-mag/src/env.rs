@@ -50,7 +50,10 @@ impl PartialEq for MemoArg {
             (Value::List(left), Value::List(right))
             | (Value::Product(left), Value::Product(right))
             | (Value::Set(left), Value::Set(right)) => Arc::ptr_eq(left, right),
-            (Value::Record(left), Value::Record(right)) => Arc::ptr_eq(left, right),
+            (Value::Fields(left), Value::Fields(right))
+            | (Value::ModuleNamespace(left), Value::ModuleNamespace(right)) => {
+                Arc::ptr_eq(left, right)
+            }
             (Value::Map(left), Value::Map(right)) => Arc::ptr_eq(left, right),
             (Value::Fn(left), Value::Fn(right)) => Arc::ptr_eq(left, right),
             (Value::Type(left), Value::Type(right)) => left == right,
@@ -97,7 +100,7 @@ impl Hash for MemoArg {
             Value::List(value) | Value::Product(value) | Value::Set(value) => {
                 Arc::as_ptr(value).hash(state)
             }
-            Value::Record(value) => Arc::as_ptr(value).hash(state),
+            Value::Fields(value) | Value::ModuleNamespace(value) => Arc::as_ptr(value).hash(state),
             Value::Map(value) => Arc::as_ptr(value).hash(state),
             Value::Fn(value) => Arc::as_ptr(value).hash(state),
             Value::Type(value) => value.hash(state),
@@ -1013,7 +1016,7 @@ impl Env {
                     {
                         pending_values.extend(values.iter().cloned());
                     }
-                    Value::Record(values)
+                    Value::Fields(values) | Value::ModuleNamespace(values)
                         if visited_values.insert(Arc::as_ptr(&values).cast::<()>()) =>
                     {
                         pending_values.extend(values.values().cloned());

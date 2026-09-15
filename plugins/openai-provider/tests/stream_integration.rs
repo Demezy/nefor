@@ -115,7 +115,7 @@ async fn structured_request_has_object_root_and_decodes_successful_response() {
         version: SCHEMA_VERSION,
         root: SchemaType::Named {
             name: "nefor.contracts.TextAnswer".into(),
-            body: Box::new(SchemaType::Record {
+            body: Box::new(SchemaType::Fields {
                 fields: vec![SchemaField {
                     name: "content".into(),
                     schema: SchemaType::String,

@@ -10,9 +10,10 @@ instantiation, semantic endpoints, and fixed wire tags before spawning
 anything. Dynamic routes to static actors are validated against the live
 inventory atomically with new actors.
 
-The artifact carries version-2 structural type nodes directly: primitives,
+The artifact carries version-2 semantic type nodes directly: primitives,
 qualified nominal applications with their concrete substituted bodies, lists,
-maps, records, unions, and products.
+maps, ADTs, and ordered products. A named type body may encode its owned fields
+as a `record` object, but no standalone record descriptor is valid.
 Registry schemes use the same representation plus explicit variables. The
 runtime validates every node recursively, substitutes concrete arguments, and
 compares the result structurally; it never reparses a display string. Functions,
@@ -70,7 +71,7 @@ Fields typed as MAG `PackedValue` cross this immutable boundary as
 `{"$mag":"packed-value","value":...}`. The plugin removes exactly that outer
 compiler-owned envelope at the declared actor-param, message-content, capture,
 and template positions. It never recursively interprets the payload, so an
-authored record such as `{"type":"sha256:...","value":...}` remains data.
+packed nominal value with fields such as `{"type":"sha256:...","value":...}` remains data.
 
 `factory` is the qualified registry identity and `type_arguments` supplies its
 concrete generic specialization. The plugin passes both fields through

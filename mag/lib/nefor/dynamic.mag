@@ -14,6 +14,11 @@
 (type DynamicParams {})
 (type DynamicIndexParams {:collection String :index Int})
 (type DynamicContextParams {:item_schema TypeSchema})
+(type CaptureValueIdentity {:type SemanticTypeId :value PackedValue})
+(type CaptureIdentity {:capture String :type SemanticTypeId})
+(type FieldIdentity {:field String :record String :type SemanticTypeId})
+(type DecimalIdentity {:int-to-decimal-string String})
+(type ConcatIdentity {:concat-strings (List String)})
 
 (let dynamic-each-factory "nefor.factory.dynamic-each")
 (let dynamic-output-factory "nefor.factory.dynamic-output")
@@ -89,8 +94,8 @@
 (let capture-ref
   (fn [T] [[value T] [type (TypeTag T)]] -> (ValueRef T)
     (let descriptor (value-type-evidence value (type-evidence type)))
-    (let capture-id (expression-id {:type (type-id descriptor) :value (pack value)}))
-    (let id (expression-id {:capture capture-id :type (type-id descriptor)}))
+    (let capture-id (expression-id (as CaptureValueIdentity {:type (type-id descriptor) :value (pack value)})))
+    (let id (expression-id (as CaptureIdentity {:capture capture-id :type (type-id descriptor)})))
     (let captured
       (as nefor.mag.TypedCapture
         {:semantic_type descriptor :semantic_type_id (type-id descriptor)
@@ -105,8 +110,9 @@
          [(construct nefor.mag.Expression Capture (as nefor.mag.Capture {:id id :result_type (type-id descriptor) :capture capture-id}))]})))
 (let field-ref
   (fn [R T] [[record (ValueRef R)] [field String] [type (TypeTag T)]] -> (ValueRef T)
-    (let id (expression-id {:field field :record (get record "id")
-                            :type (type-id (type-evidence type))}))
+    (let id (expression-id
+      (as FieldIdentity {:field field :record (get record "id")
+                         :type (type-id (type-evidence type))})))
     (as (ValueRef T)
       {:id id :type type :captures (get record "captures")
        :expressions
@@ -115,7 +121,7 @@
                  :record (get record "id") :field field}))])})))
 (let int-to-decimal-string-ref
   (fn [[value (ValueRef Int)]] -> (ValueRef String)
-    (let id (expression-id {:int-to-decimal-string (get value "id")}))
+    (let id (expression-id (as DecimalIdentity {:int-to-decimal-string (get value "id")})))
     (as (ValueRef String)
       {:id id :type (type-tag String) :captures (get value "captures")
        :expressions
@@ -125,7 +131,7 @@
 (let concat-strings-ref
   (fn [[values (List (ValueRef String))]] -> (ValueRef String)
     (let ids (map (fn [[value (ValueRef String)]] -> String (get value "id")) values))
-    (let id (expression-id {:concat-strings ids}))
+    (let id (expression-id (as ConcatIdentity {:concat-strings ids})))
     (as (ValueRef String)
       {:id id :type (type-tag String)
        :captures (merge-captures

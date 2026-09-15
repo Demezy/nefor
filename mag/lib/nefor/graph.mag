@@ -121,6 +121,22 @@
                     :semantic_type_id SemanticTypeId
                     :content PackedValue})
 (type ResultBoundary {:from StoredPort})
+(type RouteIdentity {:from StoredPort :to StoredPort})
+(type MessageContent [T] {:kind String :value T})
+(type EdgeIdentity {:from-node String :to-node String :route StoredRoute})
+(type PortAddressIdentity {:actor String :wire String})
+(type RouteSourceDescription {:kind String :from String :type TypeDescriptor})
+(type RouteHandlerDescription {:kind String :to String :type TypeDescriptor})
+(type OperationDescription {:kind String :id String :type TypeDescriptor})
+(type OutputCoverageDescription
+  {:actor String :output String :output_type TypeDescriptor
+   :available_handlers (List String) :reason String})
+(type InputCoverageDescription
+  {:actor String :input String :expected_type TypeDescriptor
+   :incoming_sources (List String) :reason String})
+(type RouteAssignmentIdentity {:input String :route String})
+(type RootValidationDescription
+  {:node String :input String :input_type TypeDescriptor :reason String})
 (type Modification {:actors (List LowerActor)
                     :messages (List LowerMessage)
                     :kills (List String)
@@ -223,7 +239,7 @@
   (let stored-from (store-port from))
   (let stored-to (store-port to))
   (as StoredRoute
-      {:id (canonical {:from stored-from :to stored-to})
+      {:id (canonical (as RouteIdentity {:from stored-from :to stored-to}))
        :from stored-from
        :to stored-to})))
 
@@ -244,7 +260,7 @@
   (as Message {:to stored
                  :semantic_type selected
                  :semantic_type_id (type-id selected)
-                 :content (pack {:kind (get to "wire") :value value})})))
+                 :content (pack (as (MessageContent T) {:kind (get to "wire") :value value}))})))
 (let instantiate-delta-template
   (fn [T] [[id String] [on (Port T)]
            [captures (Map String nefor.mag.TypedCapture)]
@@ -308,9 +324,9 @@
       (serialized-equal? (get left "route") (get right "route")) false)
     false)))
 (let edge-key (fn [[value Edge]] -> String
-  (canonical {:from-node (get (get value "from") "id")
+  (canonical (as EdgeIdentity {:from-node (get (get value "from") "id")
               :to-node (get (get value "to") "id")
-              :route (get value "route")})))
+              :route (get value "route")}))))
 (let edge-in? (fn [[edges (List Edge)] [candidate Edge]] -> Bool
   (not (= (count (filter (fn [[value Edge]] -> Bool
                            (same-edge? value candidate)) edges)) 0))))
@@ -351,7 +367,7 @@
                    (not (edge-in? removed candidate)))
                  (get value "edges")))))
 (let port-address-key (fn [[value StoredPort]] -> String
-  (canonical {:actor (get value "actor") :wire (get value "wire")})))
+  (canonical (as PortAddressIdentity {:actor (get value "actor") :wire (get value "wire")}))))
 (let full-port-key (fn [[value StoredPort]] -> String (canonical value)))
 (let node-id (fn [[value StoredNode]] -> String (get value "id")))
 (let actor-id (fn [[value Actor]] -> String (get value "id")))
@@ -568,7 +584,8 @@
   ;; Activation carries Unit evidence, not the receiving sum's descriptor.
   (let unit-port (store-port (port (get input "actor") (type-tag Unit)
                                  (get input "wire"))))
-  (stored-message unit-port {:kind (get input "wire") :value nil})))
+  (stored-message unit-port
+    (as (MessageContent Unit) {:kind (get input "wire") :value nil}))))
 (let bootstrap-messages
   (fn [[boundary-ports (List StoredPort)] [routes (List StoredRoute)]
        [messages (List Message)]] -> (List Message)
@@ -911,20 +928,20 @@
   (str (get value "actor") (str "." (get value "wire")))))
 (let describe-route-source (fn [[route StoredRoute]] -> String
   (let source (get route "from"))
-  (canonical {:kind "route"
+  (canonical (as RouteSourceDescription {:kind "route"
               :from (port-address source)
-              :type (get source "type")})))
+              :type (get source "type")}))))
 (let describe-message-source (fn [[message Message]] -> String
   (str "initial message type " (canonical (get message "semantic_type")))))
 (let describe-route-handler (fn [[route StoredRoute]] -> String
   (let target (get route "to"))
-  (canonical {:kind "route"
+  (canonical (as RouteHandlerDescription {:kind "route"
               :to (port-address target)
-              :type (get target "type")})))
+              :type (get target "type")}))))
 (let describe-operation-handler (fn [[candidate nefor.mag.ProgramOperation]] -> String
-  (canonical {:kind "operation"
+  (canonical (as OperationDescription {:kind "operation"
               :id (get candidate "id")
-              :type (get candidate "trigger_type")})))
+              :type (get candidate "trigger_type")}))))
 (let actor-input-sources (fn [[analysis GraphAnalysis] [candidate Actor]] -> (List String)
   (let key (port-address-key (get candidate "input")))
   (concat
@@ -1073,11 +1090,11 @@
     (let errors
       (map (fn [[output StoredPort]] -> String
              (str "output coverage failed: "
-               (canonical {:actor (get output "actor")
+               (canonical (as OutputCoverageDescription {:actor (get output "actor")
                            :output (port-address output)
                            :output_type (get output "type")
                            :available_handlers (output-handlers analysis operations-by-output output)
-                           :reason "coverage is incomplete; every output alternative needs an ordinary route, operation subscription, or terminal output path"})))
+                           :reason "coverage is incomplete; every output alternative needs an ordinary route, operation subscription, or terminal output path"}))))
            bad-output-coverage))
     (if (= (count bad-output-coverage) 0)
         (validate-reachable-stage value analysis contracts result)
@@ -1095,11 +1112,11 @@
       (map (fn [[candidate Actor]] -> String
              (let input (get candidate "input"))
              (str "input coverage failed: "
-               (canonical {:actor (get candidate "id")
+               (canonical (as InputCoverageDescription {:actor (get candidate "id")
                            :input (port-address input)
                            :expected_type (get input "type")
                            :incoming_sources (actor-input-sources analysis candidate)
-                           :reason "sources must be compatible and exactly cover every product occurrence; check for missing, extra, or ambiguous occurrences"})))
+                           :reason "sources must be compatible and exactly cover every product occurrence; check for missing, extra, or ambiguous occurrences"}))))
            bad-input-coverage))
     (if (= (count bad-input-coverage) 0)
         (validate-output-coverage-stage
@@ -1135,10 +1152,10 @@
           (map (fn [[candidate StoredNode]] -> String
              (let input (get candidate "input"))
              (str "root validation failed: "
-               (canonical {:node (get candidate "id")
+               (canonical (as RootValidationDescription {:node (get candidate "id")
                            :input (port-address input)
                            :input_type (get input "type")
-                           :reason "zero incoming edges; only inputs that accept Unit can be activated automatically"}))) bad-roots)))))
+                           :reason "zero incoming edges; only inputs that accept Unit can be activated automatically"})))) bad-roots)))))
 (let validate-boundaries-stage
   (fn [[value Graph] [analysis GraphAnalysis]
        [operations-by-output (Map String (List nefor.mag.ProgramOperation))]
@@ -1293,8 +1310,8 @@
 (let route-assignment-key
   (fn [[value StoredRoute]] -> String
     (canonical
-      {:input (port-address-key (get value "to"))
-       :route (route-id value)})))
+      (as RouteAssignmentIdentity {:input (port-address-key (get value "to"))
+       :route (route-id value)}))))
 (let assigned-route-key
   (fn [[value AssignedRoute]] -> String
     (route-assignment-key (get value "route"))))

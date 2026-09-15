@@ -1114,7 +1114,7 @@ fn schema_contains_named(schema: &nefor_mag::schema::SchemaType, expected: &str)
         SchemaType::Map { key, value } => {
             schema_contains_named(key, expected) || schema_contains_named(value, expected)
         }
-        SchemaType::Record { fields } => fields
+        SchemaType::Fields { fields } => fields
             .iter()
             .any(|field| schema_contains_named(&field.schema, expected)),
         SchemaType::Union { variants } => variants

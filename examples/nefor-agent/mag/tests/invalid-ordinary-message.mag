@@ -4,6 +4,7 @@
 
 ;; Initial messages are boundary authority, not a capability ordinary nodes
 ;; may obtain by placing a message in their record.
+(type InitialContent {:kind String})
 (let start (nefor.graph.source "start" (type-tag Unit) nil))
 (let operation (nefor.shell.script "operation" (as nefor.shell.ShellScriptParams {:script "true" :cwd "." :timeout (nefor.contracts.no-timeout)})))
 (let injected (nefor.graph.node
@@ -12,7 +13,7 @@
                  (get operation "actors")
                  (get operation "routes")
                  [(nefor.graph.message (get operation "input")
-                                       {:kind "mag.Unit"})]
+                                       (as InitialContent {:kind "mag.Unit"}))]
                  (get operation "input")
                  (get operation "output")))
 (let result (nefor.graph.output-for "result" injected))

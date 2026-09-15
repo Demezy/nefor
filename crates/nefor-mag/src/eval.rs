@@ -231,8 +231,11 @@ fn eval_type_declaration(env: &mut Env, authored: &TypeDeclaration) -> Result<Va
     let vars = authored.params.iter().cloned().collect();
     let qualified = env.qualify(&authored.name);
     let body = match &authored.body {
-        TypeDeclarationBody::Nominal(body) => {
-            TypeDeclBody::Nominal(crate::checker::resolve_type(env, body, &vars)?)
+        TypeDeclarationBody::Fields(fields) => TypeDeclBody::Fields(crate::ast::FieldTypes(
+            crate::checker::resolve_field_types(env, fields, &vars)?,
+        )),
+        TypeDeclarationBody::Alias(body) => {
+            TypeDeclBody::Alias(crate::checker::resolve_type(env, body, &vars)?)
         }
         TypeDeclarationBody::Adt(constructors) => {
             if constructors.is_empty() {
@@ -335,12 +338,12 @@ fn eval_checked_expr(env: &mut Env, expression: &CheckedExpr) -> Result<Value, M
                 .map(|item| eval_checked_expr(env, item))
                 .collect::<Result<_, _>>()?,
         ))),
-        CheckedExprKind::Map(fields) => {
+        CheckedExprKind::Fields(fields) => {
             let fields = fields
                 .iter()
                 .map(|(name, value)| Ok((name.clone(), eval_checked_expr(env, value)?)))
                 .collect::<Result<BTreeMap<_, _>, MagError>>()?;
-            Ok(Value::Record(std::sync::Arc::new(fields)))
+            Ok(Value::Fields(std::sync::Arc::new(fields)))
         }
         CheckedExprKind::If {
             condition,
@@ -455,12 +458,6 @@ fn runtime_type(env: &Env, ty: &MagType) -> MagType {
             Box::new(runtime_type(env, key)),
             Box::new(runtime_type(env, value)),
         ),
-        MagType::Record(fields) => MagType::Record(
-            fields
-                .iter()
-                .map(|(name, ty)| (name.clone(), runtime_type(env, ty)))
-                .collect(),
-        ),
         MagType::Product(types) => {
             MagType::Product(types.iter().map(|ty| runtime_type(env, ty)).collect())
         }
@@ -481,28 +478,11 @@ fn binding_initialization_error(name: &str, error: MagError) -> MagError {
 }
 
 fn record_fields(env: &Env, ty: &MagType) -> Option<BTreeMap<String, MagType>> {
-    match ty {
-        MagType::Record(fields) => Some(fields.clone()),
-        MagType::Named(name, args) => {
-            let decl = env.type_decl(name)?;
-            let substitutions = decl
-                .params
-                .iter()
-                .cloned()
-                .zip(args.iter().cloned())
-                .collect();
-            let TypeDeclBody::Nominal(body) = decl.body else {
-                return None;
-            };
-            let body = crate::checker::substitute(&body, &substitutions);
-            record_fields(env, &body)
-        }
-        _ => None,
-    }
+    crate::checker::named_field_types(env, ty)
 }
 
 fn record_field_diff(env: &Env, value: &Value, ty: &MagType) -> Option<String> {
-    let Value::Record(actual) = raw(value) else {
+    let Value::Fields(actual) = raw(value) else {
         return None;
     };
     let expected = record_fields(env, ty)?;
@@ -636,32 +616,42 @@ fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError
             Value::Set(items) => items.iter().all(|v| validate_value(env, v, item).is_ok()),
             _ => false,
         },
-        MagType::Record(fields) => match value {
-            Value::Record(map) => {
-                map.len() == fields.len()
-                    && fields.iter().all(|(key, field)| {
-                        map.get(key)
-                            .is_some_and(|v| validate_value(env, v, field).is_ok())
-                    })
+        MagType::Named(name, args) => env.type_decl(name).is_some_and(|decl| {
+            let substitutions = decl
+                .params
+                .iter()
+                .cloned()
+                .zip(args.iter().cloned())
+                .collect();
+            match decl.body {
+                TypeDeclBody::Fields(crate::ast::FieldTypes(fields)) => match value {
+                    Value::Fields(map) => {
+                        map.len() == fields.len()
+                            && fields.iter().all(|(key, field)| {
+                                map.get(key).is_some_and(|value| {
+                                    validate_value(
+                                        env,
+                                        value,
+                                        &crate::checker::substitute(field, &substitutions),
+                                    )
+                                    .is_ok()
+                                })
+                            })
+                    }
+                    _ => false,
+                },
+                TypeDeclBody::Alias(body) => validate_value(
+                    env,
+                    value,
+                    &crate::checker::substitute(&body, &substitutions),
+                )
+                .is_ok(),
+                TypeDeclBody::Adt(_) => matches!(
+                    value,
+                    Value::Adt { owner, .. } if owner == ty
+                ),
+                TypeDeclBody::Native => false,
             }
-            _ => false,
-        },
-        MagType::Named(name, args) => env.type_decl(name).is_some_and(|decl| match decl.body {
-            TypeDeclBody::Nominal(body) => {
-                let substitutions = decl
-                    .params
-                    .iter()
-                    .cloned()
-                    .zip(args.iter().cloned())
-                    .collect();
-                let body = crate::checker::substitute(&body, &substitutions);
-                validate_value(env, value, &body).is_ok()
-            }
-            TypeDeclBody::Adt(_) => matches!(
-                value,
-                Value::Adt { owner, .. } if owner == ty
-            ),
-            TypeDeclBody::Native => false,
         }),
         MagType::TypeTag(expected) => matches!(
             value,
@@ -823,7 +813,7 @@ pub fn apply_named(env: &Env, name: &str, arg: Value) -> Result<Value, MagError>
 fn collection_len(value: &Value) -> Option<u64> {
     match raw(value) {
         Value::List(values) | Value::Product(values) => Some(values.len() as u64),
-        Value::Record(values) => Some(values.len() as u64),
+        Value::Fields(values) => Some(values.len() as u64),
         _ => None,
     }
 }
@@ -1077,7 +1067,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             arity(args, 1)?;
             let n = match raw(&args[0]) {
                 Value::List(v) => v.len(),
-                Value::Record(v) => v.len(),
+                Value::Fields(v) => v.len(),
                 Value::Str(v) => v.chars().count(),
                 _ => return Err(MagError::Eval("count expects a collection".into())),
             };
@@ -1110,29 +1100,38 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             arity(args, 2)?;
             let key = value_string(&args[1]);
             match raw(&args[0]) {
-                Value::Record(m) => Ok(m
+                Value::Fields(m) => Ok(m
                     .get(key.trim_start_matches(':'))
                     .cloned()
                     .unwrap_or(Value::Unit)),
-                _ => Err(MagError::Eval("get expects a map".into())),
+                Value::JsonValue(serde_json::Value::Object(fields)) => {
+                    Ok(crate::json::project_json_value(
+                        fields
+                            .get(key.trim_start_matches(':'))
+                            .unwrap_or(&serde_json::Value::Null),
+                    ))
+                }
+                _ => Err(MagError::Eval(
+                    "get expects named fields or a JSON object".into(),
+                )),
             }
         }
         "assoc" => {
             arity(args, 3)?;
             let mut m = match raw(&args[0]) {
-                Value::Record(m) => m.as_ref().clone(),
+                Value::Fields(m) => m.as_ref().clone(),
                 _ => return Err(MagError::Eval("assoc expects a map".into())),
             };
             m.insert(
                 value_string(&args[1]).trim_start_matches(':').into(),
                 args[2].clone(),
             );
-            Ok(Value::Record(std::sync::Arc::new(m)))
+            Ok(Value::Fields(std::sync::Arc::new(m)))
         }
         "keys" => {
             arity(args, 1)?;
             match raw(&args[0]) {
-                Value::Record(m) => Ok(Value::List(std::sync::Arc::new(
+                Value::Fields(m) => Ok(Value::List(std::sync::Arc::new(
                     m.keys().cloned().map(Value::Str).collect(),
                 ))),
                 _ => Err(MagError::Eval("keys expects a map".into())),
@@ -1249,7 +1248,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 ));
             };
             Ok(Value::Bool(
-                matches!(raw(value), Value::Record(fields) if fields.is_empty()),
+                matches!(raw(value), Value::Fields(fields) if fields.is_empty()),
             ))
         }
         "packed-record-has-only-key?" => {
@@ -1264,7 +1263,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 .ok_or_else(|| MagError::Type("packed record key must be String".into()))?;
             Ok(Value::Bool(matches!(
                 raw(value),
-                Value::Record(fields) if fields.len() == 1 && fields.contains_key(key)
+                Value::Fields(fields) if fields.len() == 1 && fields.contains_key(key)
             )))
         }
         "packed-record-has-only-keys?" => {
@@ -1292,7 +1291,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 .collect::<Result<BTreeSet<_>, _>>()?;
             Ok(Value::Bool(matches!(
                 raw(value),
-                Value::Record(fields)
+                Value::Fields(fields)
                     if fields.len() == keys.len()
                         && fields.keys().all(|key| keys.contains(key.as_str()))
             )))
@@ -1313,7 +1312,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 ));
             };
             let valid = match raw(value) {
-                Value::Record(fields) => fields
+                Value::Fields(fields) => fields
                     .get(key)
                     .is_some_and(|field| validate_value(env, field, &ty.to_mag_type()).is_ok()),
                 _ => false,
@@ -1522,7 +1521,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 &full,
                 &s,
             );
-            if let Some(Value::Record(m)) = args.get(1) {
+            if let Some(Value::Fields(m)) = args.get(1) {
                 for (k, v) in m.iter() {
                     s = s.replace(&format!("{{{{{k}}}}}"), &value_string(v));
                 }
@@ -1546,7 +1545,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             );
             let value = serde_json::from_str(&source)
                 .map_err(|error| MagError::Eval(format!("cannot parse JSON {path}: {error}")))?;
-            Ok(crate::json::json_to_value(&value))
+            Ok(Value::JsonValue(value))
         }
         "require" => Err(MagError::Eval("require is a special form".into())),
         _ => Err(MagError::Eval(format!("unknown builtin {name}"))),
@@ -1761,7 +1760,15 @@ fn descriptor_node_count(descriptor: &ConcreteType) -> u64 {
     1 + match descriptor {
         ConcreteType::Named {
             arguments, body, ..
-        } => arguments.iter().map(descriptor_node_count).sum::<u64>() + descriptor_node_count(body),
+        } => {
+            arguments.iter().map(descriptor_node_count).sum::<u64>()
+                + match body {
+                    crate::types::ConcreteNamedBody::Fields { fields } => {
+                        fields.values().map(descriptor_node_count).sum()
+                    }
+                    crate::types::ConcreteNamedBody::Alias { ty } => descriptor_node_count(ty),
+                }
+        }
         ConcreteType::Adt {
             arguments,
             constructors,
@@ -1777,7 +1784,6 @@ fn descriptor_node_count(descriptor: &ConcreteType) -> u64 {
         ConcreteType::Map { key, value } => {
             descriptor_node_count(key) + descriptor_node_count(value)
         }
-        ConcreteType::Record { fields } => fields.values().map(descriptor_node_count).sum(),
         ConcreteType::Product { items } => items.iter().map(descriptor_node_count).sum(),
         ConcreteType::JsonValue
         | ConcreteType::Unit
@@ -1795,7 +1801,12 @@ fn descriptor_hashed_bytes(descriptor: &ConcreteType) -> u64 {
             arguments, body, ..
         } => {
             arguments.iter().map(descriptor_hashed_bytes).sum::<u64>()
-                + descriptor_hashed_bytes(body)
+                + match body {
+                    crate::types::ConcreteNamedBody::Fields { fields } => {
+                        fields.values().map(descriptor_hashed_bytes).sum()
+                    }
+                    crate::types::ConcreteNamedBody::Alias { ty } => descriptor_hashed_bytes(ty),
+                }
         }
         ConcreteType::Adt {
             arguments,
@@ -1812,7 +1823,6 @@ fn descriptor_hashed_bytes(descriptor: &ConcreteType) -> u64 {
         ConcreteType::Map { key, value } => {
             descriptor_hashed_bytes(key) + descriptor_hashed_bytes(value)
         }
-        ConcreteType::Record { fields } => fields.values().map(descriptor_hashed_bytes).sum(),
         ConcreteType::Product { items } => items.iter().map(descriptor_hashed_bytes).sum(),
         ConcreteType::JsonValue
         | ConcreteType::Unit
@@ -1934,7 +1944,7 @@ pub(crate) fn equal(env: &Env, a: &Value, b: &Value) -> bool {
                 && a.iter()
                     .all(|item| b.iter().any(|other| equal(env, item, other)))
         }
-        (Value::Record(a), Value::Record(b)) => {
+        (Value::Fields(a), Value::Fields(b)) => {
             a.len() == b.len()
                 && a.iter()
                     .all(|(key, value)| b.get(key).is_some_and(|other| equal(env, value, other)))
@@ -2009,7 +2019,9 @@ fn selected_value_type(
 fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
     if let Some(defs) = env.module_cached(name) {
         env.install_module(name, defs.clone());
-        return Ok(Value::Record(std::sync::Arc::new(module_value_map(&defs))));
+        return Ok(Value::ModuleNamespace(std::sync::Arc::new(
+            module_value_map(&defs),
+        )));
     }
     env.begin_module(name)?;
     let resolve_phase = env.profile_phase(Phase::ModuleResolve);
@@ -2042,7 +2054,9 @@ fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
             for (module_name, module_defs) in env.loaded_modules() {
                 env.install_module(&module_name, module_defs);
             }
-            Ok(Value::Record(std::sync::Arc::new(module_value_map(&defs))))
+            Ok(Value::ModuleNamespace(std::sync::Arc::new(
+                module_value_map(&defs),
+            )))
         }
         Err(e) => Err(e),
     }

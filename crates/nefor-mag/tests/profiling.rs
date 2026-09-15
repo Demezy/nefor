@@ -276,7 +276,7 @@ fn named_calls_memoization_and_physical_collection_work_are_separate() {
     let root = temp_dir("profile-exclusive-work");
     let profile = profile(
         &root,
-        "(let identity (fn [[value Int]] -> Int value))\n(let first-value (identity 7))\n(let second-value (identity 7))\n(let removed (remove-at [1 2 3] 1))\n(let joined (concat removed [4]))\n(let encoded (canonical {:joined joined}))\n(artifact {:first first-value :second second-value :encoded encoded})",
+        "(let identity (fn [[value Int]] -> Int value))\n(let first-value (identity 7))\n(let second-value (identity 7))\n(let removed (remove-at [1 2 3] 1))\n(let joined (concat removed [4]))\n(type Joined {:joined (List Int)})\n(let encoded (canonical (as Joined {:joined joined})))\n(artifact {:first first-value :second second-value :encoded encoded})",
     );
     let counters = profile.counters;
 

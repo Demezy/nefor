@@ -17,7 +17,7 @@ Load modules only with literal requires:
 (require "nefor.graph")
 ```
 
-Declare nominal records and algebraic types with `type`:
+Declare nominal named-field values and algebraic types with `type`:
 
 ```lisp
 (type Finding {:path String :summary String})
@@ -63,9 +63,11 @@ leading whitespace through `|` while preserving line breaks:
 ## Native data collections and equality
 
 `[...]` constructs the single native `List` representation unless an expected
-`(+ A B ...)` product type makes it an ordered tuple. Record literals remain
-closed fixed-field construction values and are refined explicitly to nominal
-record types when they carry reusable meaning.
+`(+ A B ...)` is the only anonymous product type and makes an ordered tuple.
+Braced fields construct a declared nominal type only through `as` or as a named
+ADT constructor payload; they are not standalone values or types. Use `Map K V`
+for homogeneous dynamically keyed data. Braced objects remain available inside
+the `artifact` serialization boundary.
 
 Native `Map K V` and `Set T` values have no literal syntax. Require `core.map`
 or `core.set` and construct them through those ordinary modules. Map/Set lookup,

@@ -137,7 +137,7 @@ fn syntax_type_and_evaluation_failures_are_structured() {
         ),
         (
             "evaluation",
-            "(fail {:kind \"application\" :message \"requested failure\"})",
+            "(type Failure {:kind String :message String})\n(fail (as Failure {:kind \"application\" :message \"requested failure\"}))",
             "evaluation_error",
             "evaluate",
         ),

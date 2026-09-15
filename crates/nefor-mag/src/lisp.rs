@@ -118,26 +118,38 @@ fn lower_type_declaration(items: &[ast::Expr]) -> authored::Form {
 }
 
 fn lower_declaration_body(expression: &ast::Expr) -> authored::TypeDeclarationBody {
+    if let ast::Expr::Map(fields) = expression {
+        let mut lowered = Vec::with_capacity(fields.len());
+        for (key, value) in fields {
+            let Some(key) = record_key(key) else {
+                return authored::TypeDeclarationBody::Alias(authored::Type::Invalid(
+                    "named field names must be symbols or keywords".into(),
+                ));
+            };
+            lowered.push((key, lower_type(value)));
+        }
+        return authored::TypeDeclarationBody::Fields(lowered);
+    }
     let ast::Expr::List(items) = expression else {
-        return authored::TypeDeclarationBody::Nominal(lower_type(expression));
+        return authored::TypeDeclarationBody::Alias(lower_type(expression));
     };
     if items.first().and_then(ast::Expr::as_symbol) != Some("adt") {
-        return authored::TypeDeclarationBody::Nominal(lower_type(expression));
+        return authored::TypeDeclarationBody::Alias(lower_type(expression));
     }
     let mut constructors = Vec::with_capacity(items.len().saturating_sub(1));
     for constructor in &items[1..] {
         let ast::Expr::Vector(parts) = constructor else {
-            return authored::TypeDeclarationBody::Nominal(authored::Type::Invalid(
+            return authored::TypeDeclarationBody::Alias(authored::Type::Invalid(
                 "ADT constructor must be [Name PayloadType]".into(),
             ));
         };
         let [name, payload] = parts.as_slice() else {
-            return authored::TypeDeclarationBody::Nominal(authored::Type::Invalid(
+            return authored::TypeDeclarationBody::Alias(authored::Type::Invalid(
                 "ADT constructor must be [Name PayloadType]".into(),
             ));
         };
         let Some(name) = name.as_symbol() else {
-            return authored::TypeDeclarationBody::Nominal(authored::Type::Invalid(
+            return authored::TypeDeclarationBody::Alias(authored::Type::Invalid(
                 "ADT constructor name must be a symbol".into(),
             ));
         };
@@ -189,7 +201,7 @@ fn lower_expr(expression: &ast::Expr) -> authored::Expr {
                 };
                 lowered.push((key, lower_expr(value)));
             }
-            authored::Expr::Record(lowered)
+            authored::Expr::Fields(lowered)
         }
         ast::Expr::List(items) => lower_list(items),
     }
@@ -383,18 +395,9 @@ fn lower_function(items: &[ast::Expr]) -> authored::Expr {
 fn lower_type(expression: &ast::Expr) -> authored::Type {
     match expression {
         ast::Expr::Symbol(name) => authored::Type::Name(name.clone()),
-        ast::Expr::Map(fields) => {
-            let mut lowered = Vec::with_capacity(fields.len());
-            for (key, value) in fields {
-                let Some(key) = record_key(key) else {
-                    return authored::Type::Invalid(
-                        "record field names must be symbols or keywords".into(),
-                    );
-                };
-                lowered.push((key, lower_type(value)));
-            }
-            authored::Type::Record(lowered)
-        }
+        ast::Expr::Map(_) => authored::Type::Invalid(
+            "anonymous record types are unsupported; declare a named type".into(),
+        ),
         ast::Expr::List(items) if !items.is_empty() => {
             let Some(head) = items[0].as_symbol() else {
                 return authored::Type::Invalid("type application head must be a symbol".into());
@@ -476,7 +479,7 @@ mod tests {
         else {
             panic!("artifact call")
         };
-        let authored::Expr::Record(fields) = &args[0] else {
+        let authored::Expr::Fields(fields) = &args[0] else {
             panic!("record")
         };
         assert!(matches!(fields[0].1, authored::Expr::TypeTag(_)));

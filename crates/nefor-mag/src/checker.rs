@@ -297,18 +297,9 @@ fn infer(env: &Env, locals: &mut Locals, expr: &Expr) -> Result<MagType, MagErro
                 .ok_or_else(|| MagError::Unresolved(name.clone())),
         },
         Expr::Vector(items) => infer_list(env, locals, items),
-        Expr::Record(fields) => {
-            let mut inferred = BTreeMap::new();
-            for (key, value) in fields {
-                if inferred
-                    .insert(key.clone(), infer(env, locals, value)?)
-                    .is_some()
-                {
-                    return Err(MagError::Type(format!("duplicate record field {key}")));
-                }
-            }
-            Ok(MagType::Record(inferred))
-        }
+        Expr::Fields(_) => Err(MagError::Type(
+            "standalone record values are unsupported; use a named type or Map".into(),
+        )),
         Expr::If {
             condition,
             then_branch,
@@ -400,6 +391,35 @@ fn infer_list(env: &Env, locals: &mut Locals, items: &[Expr]) -> Result<MagType,
         compatible(env, &ty, &first, &mut HashMap::new()).map_err(MagError::Type)?;
     }
     Ok(MagType::List(Box::new(first)))
+}
+
+fn infer_fields_against(
+    env: &Env,
+    locals: &mut Locals,
+    expression: &Expr,
+    expected: &MagType,
+) -> Result<MagType, MagError> {
+    let Expr::Fields(fields) = expression else {
+        return infer(env, locals, expression);
+    };
+    let expected_fields = named_field_types(env, expected).ok_or_else(|| {
+        MagError::Type(format!("named field literal cannot construct {expected}"))
+    })?;
+    let authored_names = fields.iter().map(|(name, _)| name).collect::<HashSet<_>>();
+    let expected_names = expected_fields.keys().collect::<HashSet<_>>();
+    if authored_names != expected_names || authored_names.len() != fields.len() {
+        return Err(MagError::Type(format!(
+            "named field literal must exactly match {expected}"
+        )));
+    }
+    for (name, value) in fields {
+        let actual = infer(env, locals, value)?;
+        let field = expected_fields
+            .get(name)
+            .ok_or_else(|| MagError::Type(format!("unexpected field {name} for {expected}")))?;
+        compatible(env, &actual, field, &mut HashMap::new()).map_err(MagError::Type)?;
+    }
+    Ok(expected.clone())
 }
 
 fn infer_call(
@@ -531,8 +551,12 @@ fn infer_construct(
     }
     let owner = resolve_type(env, owner, &vars)?;
     let (_, payload_type) = instantiated_constructor(env, &owner, constructor)?;
-    let actual = infer(env, locals, payload)?;
-    compatible(env, &actual, &payload_type, &mut HashMap::new()).map_err(MagError::Type)?;
+    if matches!(payload, Expr::Fields(_)) {
+        infer_fields_against(env, locals, payload, &payload_type)?;
+    } else {
+        let actual = infer(env, locals, payload)?;
+        compatible(env, &actual, &payload_type, &mut HashMap::new()).map_err(MagError::Type)?;
+    }
     Ok(owner)
 }
 
@@ -606,9 +630,6 @@ fn equality_admissible_in(
             equality_admissible_in(env, key, variables, visiting)?;
             equality_admissible_in(env, value, variables, visiting)
         }
-        MagType::Record(fields) => fields
-            .values()
-            .try_for_each(|field| equality_admissible_in(env, field, variables, visiting)),
         MagType::Product(items) => items
             .iter()
             .try_for_each(|item| equality_admissible_in(env, item, variables, visiting)),
@@ -629,7 +650,17 @@ fn equality_admissible_in(
                 .zip(arguments.iter().cloned())
                 .collect::<HashMap<_, _>>();
             let result = match declaration.body {
-                TypeDeclBody::Nominal(body) => equality_admissible_in(
+                TypeDeclBody::Fields(crate::ast::FieldTypes(fields)) => {
+                    fields.values().try_for_each(|field| {
+                        equality_admissible_in(
+                            env,
+                            &substitute(field, &substitution),
+                            variables,
+                            visiting,
+                        )
+                    })
+                }
+                TypeDeclBody::Alias(body) => equality_admissible_in(
                     env,
                     &substitute(&body, &substitution),
                     variables,
@@ -855,11 +886,15 @@ fn infer_builtin(
         }
         "count" => {
             exact(1)?;
-            match infer(env, locals, &args[0])? {
-                MagType::List(_) | MagType::Record(_) | MagType::String => Ok(MagType::Int),
-                actual => Err(MagError::Type(format!(
+            let actual = infer(env, locals, &args[0])?;
+            if matches!(actual, MagType::List(_) | MagType::String)
+                || named_field_types(env, &actual).is_some()
+            {
+                Ok(MagType::Int)
+            } else {
+                Err(MagError::Type(format!(
                     "count expects a collection, got {actual}"
-                ))),
+                )))
             }
         }
         "=" => {
@@ -1101,7 +1136,6 @@ fn infer_builtin(
         }
         "artifact" => {
             exact(1)?;
-            let _ = infer(env, locals, &args[0])?;
             Ok(MagType::Artifact)
         }
         "strip-margin" => {
@@ -1141,11 +1175,13 @@ fn infer_builtin(
         }
         "keys" => {
             exact(1)?;
-            match infer(env, locals, &args[0])? {
-                MagType::Record(_) => Ok(MagType::List(Box::new(MagType::String))),
-                actual => Err(MagError::Type(format!(
-                    "keys expects a record, got {actual}"
-                ))),
+            let actual = infer(env, locals, &args[0])?;
+            if named_field_types(env, &actual).is_some() {
+                Ok(MagType::List(Box::new(MagType::String)))
+            } else {
+                Err(MagError::Type(format!(
+                    "keys expects a named value, got {actual}"
+                )))
             }
         }
         "first" => {
@@ -1464,21 +1500,11 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
         "require" => vec![function(vec![MagType::String], MagType::Unit)],
         "artifact" => vec![function(vec![var("value")], MagType::Artifact)],
         "or" => vec![function(vec![var("value"), var("value")], var("value"))],
-        "keys" => vec![function(
-            vec![MagType::Record(BTreeMap::new())],
-            list(MagType::String),
-        )],
-        "get" => vec![function(
-            vec![MagType::Record(BTreeMap::new()), MagType::String],
-            var("field"),
-        )],
+        "keys" => vec![function(vec![var("named")], list(MagType::String))],
+        "get" => vec![function(vec![var("named"), MagType::String], var("field"))],
         "assoc" => vec![function(
-            vec![
-                MagType::Record(BTreeMap::new()),
-                MagType::String,
-                var("field"),
-            ],
-            MagType::Record(BTreeMap::new()),
+            vec![var("named"), MagType::String, var("field")],
+            var("named"),
         )],
         "map" => vec![function(
             vec![
@@ -1535,29 +1561,6 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
     if let Some(MagType::Function(params, _)) = candidate {
         if name == "or" && params.len() == 2 && params[0] == params[1] {
             signatures.push(function(params.clone(), params[0].clone()));
-        }
-        if let Some(MagType::Record(fields)) = params.first() {
-            match name {
-                "count" => signatures.push(function(vec![params[0].clone()], MagType::Int)),
-                "keys" => signatures.push(function(vec![params[0].clone()], list(MagType::String))),
-                "get" if params.len() == 2 && params[1] == MagType::String => {
-                    signatures.extend(
-                        fields
-                            .values()
-                            .cloned()
-                            .map(|field| function(vec![params[0].clone(), MagType::String], field)),
-                    );
-                }
-                "assoc" if params.len() == 3 && params[1] == MagType::String => {
-                    signatures.extend(fields.values().cloned().map(|field| {
-                        function(
-                            vec![params[0].clone(), MagType::String, field],
-                            params[0].clone(),
-                        )
-                    }));
-                }
-                _ => {}
-            }
         }
     }
     signatures
@@ -1634,13 +1637,12 @@ fn check_equality_specialization(
                 check_equality_specialization(env, item, expected, &substitutions)?;
             }
         }
-        CheckedExprKind::Map(fields) => {
+        CheckedExprKind::Fields(fields) => {
             for (name, field) in fields {
-                let expected = match &resolved {
-                    MagType::Record(fields) => fields.get(name).unwrap_or(&field.ty),
-                    _ => &field.ty,
-                };
-                check_equality_specialization(env, field, expected, &substitutions)?;
+                let expected = named_field_types(env, &resolved)
+                    .and_then(|fields| fields.get(name).cloned())
+                    .unwrap_or_else(|| field.ty.clone());
+                check_equality_specialization(env, field, &expected, &substitutions)?;
             }
         }
         CheckedExprKind::If {
@@ -1685,7 +1687,7 @@ fn collect_called_bindings(expression: &CheckedExpr, calls: &mut Vec<(BindingId,
                 collect_called_bindings(item, calls);
             }
         }
-        CheckedExprKind::Map(fields) => {
+        CheckedExprKind::Fields(fields) => {
             for (_, value) in fields {
                 collect_called_bindings(value, calls);
             }
@@ -2114,7 +2116,11 @@ fn compile_expr(
         Expr::Keyword(value) => checked(MagType::String, CheckedExprKind::Keyword(value.clone())),
         Expr::Name(name) => compile_symbol(env, scopes, name, expected)?,
         Expr::Vector(items) => compile_vector(env, scopes, items, expected)?,
-        Expr::Record(fields) => compile_map(env, scopes, fields, expected)?,
+        Expr::Fields(_) => {
+            return Err(MagError::Type(
+                "standalone record values are unsupported; use a named type or Map".into(),
+            ))
+        }
         Expr::If {
             condition,
             then_branch,
@@ -2288,23 +2294,27 @@ fn compile_map(
     fields: &[(String, Expr)],
     expected: Option<&MagType>,
 ) -> Result<CheckedExpr, MagError> {
+    let expected = expected.ok_or_else(|| {
+        MagError::Type("standalone record values are unsupported; use a named type or Map".into())
+    })?;
+    let expected_fields = named_field_types(env, expected).ok_or_else(|| {
+        MagError::Type(format!("named field literal cannot construct {expected}"))
+    })?;
+    let mut names = HashSet::new();
     let mut checked_fields = Vec::with_capacity(fields.len());
-    let mut field_types = BTreeMap::new();
     for (key, value) in fields {
-        let key = key.clone();
-        let expected_field = match expected {
-            Some(MagType::Record(fields)) => fields.get(&key),
-            _ => None,
-        };
-        let value = compile_expr(env, scopes, value, expected_field)?;
-        if field_types.insert(key.clone(), value.ty.clone()).is_some() {
-            return Err(MagError::Type(format!("duplicate record field {key}")));
+        if !names.insert(key) {
+            return Err(MagError::Type(format!("duplicate named field {key}")));
         }
-        checked_fields.push((key, value));
+        let value = match expected_fields.get(key) {
+            Some(expected_field) => compile_expr(env, scopes, value, Some(expected_field))?,
+            None => compile_expr(env, scopes, value, None)?,
+        };
+        checked_fields.push((key.clone(), value));
     }
     Ok(checked(
-        MagType::Record(field_types),
-        CheckedExprKind::Map(checked_fields),
+        expected.clone(),
+        CheckedExprKind::Fields(checked_fields),
     ))
 }
 
@@ -2381,7 +2391,24 @@ fn compile_construct(
 ) -> Result<CheckedExpr, MagError> {
     let owner = parse_checked_type(env, scopes, authored_owner)?;
     let (constructor, payload_type) = instantiated_constructor(env, &owner, constructor_name)?;
-    let payload = compile_expr(env, scopes, payload_expression, Some(&payload_type))?;
+    let payload = match payload_expression {
+        Expr::Fields(fields) => {
+            let expected_fields = named_field_types(env, &payload_type).ok_or_else(|| {
+                MagError::Type(format!(
+                    "constructor field payload cannot construct {payload_type}"
+                ))
+            })?;
+            let authored_names = fields.iter().map(|(name, _)| name).collect::<HashSet<_>>();
+            let expected_names = expected_fields.keys().collect::<HashSet<_>>();
+            if authored_names != expected_names || authored_names.len() != fields.len() {
+                return Err(MagError::Type(format!(
+                    "constructor fields must exactly match {payload_type}"
+                )));
+            }
+            compile_map(env, scopes, fields, Some(&payload_type))?
+        }
+        expression => compile_expr(env, scopes, expression, Some(&payload_type))?,
+    };
     Ok(checked(
         owner.clone(),
         CheckedExprKind::Construct {
@@ -2576,10 +2603,12 @@ fn compile_ascribe(
 ) -> Result<CheckedExpr, MagError> {
     let target = parse_checked_type(env, scopes, authored_target)?;
     let source_expected = match source {
+        Expr::Fields(_) => Some(&target),
         Expr::Name(name) if all_candidates(env, scopes, name).len() > 1 => Some(&target),
         _ => None,
     };
     let value = match source {
+        Expr::Fields(fields) => compile_map(env, scopes, fields, Some(&target))?,
         Expr::Vector(values) if matches!(target, MagType::Product(_)) => {
             compile_vector(env, scopes, values, Some(&target))?
         }
@@ -2775,6 +2804,39 @@ fn compile_call_args(
     Ok((args, substitution))
 }
 
+fn compile_artifact_expr(
+    env: &Env,
+    scopes: &[CheckedScope],
+    expression: &Expr,
+) -> Result<CheckedExpr, MagError> {
+    match expression {
+        Expr::Fields(fields) => {
+            let mut names = HashSet::new();
+            let mut checked_fields = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                if !names.insert(name) {
+                    return Err(MagError::Type(format!("duplicate artifact field {name}")));
+                }
+                checked_fields.push((name.clone(), compile_artifact_expr(env, scopes, value)?));
+            }
+            Ok(checked(
+                MagType::JsonValue,
+                CheckedExprKind::Fields(checked_fields),
+            ))
+        }
+        Expr::Vector(items) => Ok(checked(
+            MagType::JsonValue,
+            CheckedExprKind::Vector(
+                items
+                    .iter()
+                    .map(|item| compile_artifact_expr(env, scopes, item))
+                    .collect::<Result<_, _>>()?,
+            ),
+        )),
+        _ => compile_expr(env, scopes, expression, None),
+    }
+}
+
 fn compile_builtin_call(
     env: &Env,
     scopes: &[CheckedScope],
@@ -2856,7 +2918,7 @@ fn compile_builtin_call(
                 got: expressions.len(),
             });
         }
-        let data = compile_expr(env, scopes, &expressions[0], None)?;
+        let data = compile_artifact_expr(env, scopes, &expressions[0])?;
         let result = MagType::Artifact;
         return Ok(checked(
             result.clone(),
@@ -3171,6 +3233,23 @@ fn parse_checked_type(
     resolve_type(env, expression, &visible_type_variables(scopes))
 }
 
+pub(crate) fn resolve_field_types(
+    env: &Env,
+    authored: &[(String, Type)],
+    vars: &HashSet<String>,
+) -> Result<BTreeMap<String, MagType>, MagError> {
+    let mut resolved = BTreeMap::new();
+    for (name, ty) in authored {
+        if resolved
+            .insert(name.clone(), resolve_type(env, ty, vars)?)
+            .is_some()
+        {
+            return Err(MagError::Type(format!("duplicate named field {name}")));
+        }
+    }
+    Ok(resolved)
+}
+
 pub(crate) fn resolve_type(
     env: &Env,
     authored: &Type,
@@ -3194,20 +3273,6 @@ pub(crate) fn resolve_type(
                 [] => Err(MagError::Type(format!("{name} is not a type"))),
                 _ => Err(MagError::Type(format!("ambiguous type name {name}"))),
             }
-        }
-        Type::Record(fields) => {
-            let mut resolved = BTreeMap::new();
-            for (name, ty) in fields {
-                if resolved
-                    .insert(name.clone(), resolve_type(env, ty, vars)?)
-                    .is_some()
-                {
-                    return Err(MagError::Type(format!(
-                        "duplicate record type field {name}"
-                    )));
-                }
-            }
-            Ok(MagType::Record(resolved))
         }
         Type::Product(types) => types
             .iter()
@@ -3292,7 +3357,6 @@ fn contains_union(ty: &MagType) -> bool {
             contains_union(value)
         }
         MagType::Map(key, value) => contains_union(key) || contains_union(value),
-        MagType::Record(fields) => fields.values().any(contains_union),
         MagType::Function(parameters, result) => {
             parameters.iter().any(contains_union) || contains_union(result)
         }
@@ -3388,12 +3452,6 @@ fn canonical_type(ty: &MagType) -> String {
                 Box::new(canonicalize(key, variables, next)),
                 Box::new(canonicalize(value, variables, next)),
             ),
-            MagType::Record(fields) => MagType::Record(
-                fields
-                    .iter()
-                    .map(|(name, ty)| (name.clone(), canonicalize(ty, variables, next)))
-                    .collect(),
-            ),
             MagType::Product(items) => MagType::Product(
                 items
                     .iter()
@@ -3425,12 +3483,7 @@ pub(crate) fn value_type(value: &Value) -> Option<MagType> {
         Value::Product(v) => Some(MagType::Product(
             v.iter().map(value_type).collect::<Option<Vec<_>>>()?,
         )),
-        Value::Record(fields) => Some(MagType::Record(
-            fields
-                .iter()
-                .map(|(key, value)| Some((key.clone(), value_type(value)?)))
-                .collect::<Option<BTreeMap<_, _>>>()?,
-        )),
+        Value::Fields(_) | Value::ModuleNamespace(_) => None,
         Value::Map(entries) => {
             let (key, value) = entries.first()?;
             Some(MagType::Map(
@@ -3485,24 +3538,43 @@ pub(crate) fn canonical_value_type(value: &Value) -> Option<String> {
     value_type(value).map(|ty| ty.to_string())
 }
 
+pub(crate) fn named_field_types(env: &Env, ty: &MagType) -> Option<BTreeMap<String, MagType>> {
+    fn resolve(
+        env: &Env,
+        ty: &MagType,
+        visiting: &mut HashSet<MagType>,
+    ) -> Option<BTreeMap<String, MagType>> {
+        if !visiting.insert(ty.clone()) {
+            return None;
+        }
+        let MagType::Named(name, args) = ty else {
+            return None;
+        };
+        let decl = env.type_decl(name)?;
+        let substitutions = decl
+            .params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
+        match decl.body {
+            TypeDeclBody::Fields(crate::ast::FieldTypes(fields)) => Some(
+                fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), substitute(ty, &substitutions)))
+                    .collect(),
+            ),
+            TypeDeclBody::Alias(body) => resolve(env, &substitute(&body, &substitutions), visiting),
+            TypeDeclBody::Adt(_) | TypeDeclBody::Native => None,
+        }
+    }
+    resolve(env, ty, &mut HashSet::new())
+}
+
 fn field_type(env: &Env, ty: &MagType, key: Option<&str>) -> Option<MagType> {
     match ty {
         MagType::JsonValue => Some(MagType::JsonValue),
-        MagType::Record(fields) => key.and_then(|k| fields.get(k).cloned()),
-        MagType::Named(name, args) => env.type_decl(name).and_then(|decl| {
-            let substitutions = decl
-                .params
-                .iter()
-                .cloned()
-                .zip(args.iter().cloned())
-                .collect();
-            let TypeDeclBody::Nominal(body) = decl.body else {
-                return None;
-            };
-            let body = substitute(&body, &substitutions);
-            field_type(env, &body, key)
-        }),
-        _ => None,
+        _ => key.and_then(|key| named_field_types(env, ty)?.get(key).cloned()),
     }
 }
 
@@ -3635,21 +3707,6 @@ fn compatible_in(
             }
             _ => Err(format!("expected {expected}, got {actual}")),
         },
-        MagType::Record(ef) => match actual {
-            MagType::Record(af) if ef.len() == af.len() => {
-                for (k, e) in ef {
-                    compatible_in(
-                        env,
-                        af.get(k).ok_or_else(|| format!("missing field {k}"))?,
-                        e,
-                        subst,
-                        bindable,
-                    )?;
-                }
-                Ok(())
-            }
-            _ => Err(format!("expected {expected}, got {actual}")),
-        },
         MagType::Product(expected_items) => match actual {
             MagType::Product(actual_items) if actual_items.len() == expected_items.len() => {
                 for (actual_item, expected_item) in actual_items.iter().zip(expected_items) {
@@ -3684,11 +3741,6 @@ pub(crate) fn substitute(ty: &MagType, subst: &HashMap<String, MagType>) -> MagT
             Box::new(substitute(k, subst)),
             Box::new(substitute(v, subst)),
         ),
-        MagType::Record(f) => MagType::Record(
-            f.iter()
-                .map(|(k, v)| (k.clone(), substitute(v, subst)))
-                .collect(),
-        ),
         MagType::Product(v) => MagType::Product(v.iter().map(|t| substitute(t, subst)).collect()),
         MagType::Function(p, r) => MagType::Function(
             p.iter().map(|t| substitute(t, subst)).collect(),
@@ -3713,11 +3765,6 @@ fn collect_vars(ty: &MagType, out: &mut HashSet<String>) {
         MagType::Map(key, value) => {
             collect_vars(key, out);
             collect_vars(value, out);
-        }
-        MagType::Record(fields) => {
-            for field in fields.values() {
-                collect_vars(field, out);
-            }
         }
         MagType::Function(params, result) => {
             for param in params {
@@ -3754,41 +3801,6 @@ mod builtin_signature_tests {
                     "visible builtin {name} does not recognize signature {signature}"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn record_builtin_families_are_in_the_collision_inventory() {
-        let env = Env::new_with_stdlib();
-        let record = MagType::Record(BTreeMap::from([("value".into(), MagType::Int)]));
-        for (name, candidate) in [
-            (
-                "count",
-                MagType::Function(vec![record.clone()], Box::new(MagType::Int)),
-            ),
-            (
-                "keys",
-                MagType::Function(
-                    vec![record.clone()],
-                    Box::new(MagType::List(Box::new(MagType::String))),
-                ),
-            ),
-            (
-                "get",
-                MagType::Function(
-                    vec![record.clone(), MagType::String],
-                    Box::new(MagType::Int),
-                ),
-            ),
-            (
-                "assoc",
-                MagType::Function(
-                    vec![record.clone(), MagType::String, MagType::Int],
-                    Box::new(record.clone()),
-                ),
-            ),
-        ] {
-            assert!(collides_with_builtin(&env, name, &candidate), "{name}");
         }
     }
 

@@ -1204,10 +1204,9 @@ async fn project_build_deep_program_hit_rechecks_current_kernel() {
     let cache = tempfile::tempdir().unwrap();
     std::fs::write(project.path().join("mag.toml"), "version = 1\n").unwrap();
     let bindings = (1..=140)
-        .map(|i| format!("(let n{i} {{:a n{}}})\n", i - 1))
+        .map(|index| format!("(let n{index} [n{}])\n", index - 1))
         .collect::<String>();
-    let nested = "n140";
-    let source = format!("(artifact {{:format \"nefor.mag\" :version 2 :kind \"program\" :program {{:initial {{:types {{:deep {nested}}} :actors [] :messages [] :nodes [] :kills [] :result {{}}}} :operations []}}}})");
+    let source = "(artifact {:format \"nefor.mag\" :version 2 :kind \"program\" :program {:initial {:types {:deep n140} :actors [] :messages [] :nodes [] :kills [] :result {}} :operations []}})";
     std::fs::write(
         project.path().join("main.mag"),
         format!("(let n0 0)\n{bindings}{source}"),

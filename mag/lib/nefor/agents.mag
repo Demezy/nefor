@@ -6,6 +6,8 @@
 (require "nefor.graph")
 (require "nefor.mag")
 
+(type AgentInputEnvelope {:kind String :value Unit})
+
 ;; Reusable agent constructors stay generic over the configuration-owned model
 ;; vocabulary. A consumer supplies only its typed resolver, selected model, and
 ;; tools; Nefor owns the graph construction once.
@@ -195,7 +197,7 @@
       (as nefor.mag.TemplateMessage
         {:to entry-in :semantic_type unit-descriptor
          :semantic_type_id (type-id unit-descriptor)
-         :content (pack {:kind "nefor.agent.Input" :value nil})}))
+         :content (pack (as AgentInputEnvelope {:kind "nefor.agent.Input" :value nil}))}))
     (let root-segment (nefor.dynamic.bound-segment root-id))
     (let worker-segment (nefor.dynamic.fixed-segment "worker"))
     (let result-segment (nefor.dynamic.fixed-segment "result"))

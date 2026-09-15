@@ -46,7 +46,7 @@ fn transitive_inputs_preserve_source_root_and_validate_only_consumed_files() {
     w.write("lib/a.mag", "(require \"b\") (let value b.value)");
     w.write(
         "lib/b.mag",
-        "(let value {:text (read \"text.txt\") :json (read-json \"data.json\")})",
+        "(type Loaded {:text String :json JsonValue}) (let value (as Loaded {:text (read \"text.txt\") :json (read-json \"data.json\")}))",
     );
     w.write("text.txt", "source root");
     w.write("lib/text.txt", "not the source root");
@@ -82,7 +82,7 @@ fn transitive_inputs_preserve_source_root_and_validate_only_consumed_files() {
         ),
         (
             "lib/b.mag",
-            "(let value {:text (read \"text.txt\") :json (read-json \"data.json\")})",
+            "(type Loaded {:text String :json JsonValue}) (let value (as Loaded {:text (read \"text.txt\") :json (read-json \"data.json\")}))",
             "(let value 0)",
         ),
         ("text.txt", "source root", "SOURCE ROOT"),

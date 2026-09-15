@@ -1,15 +1,16 @@
 (require "nefor.artifact")
 (require "nefor.graph")
 
-;; Actor parameter storage is compiler-packed. A map cannot forge the private
-;; existential package even when every other actor field is copied.
+;; Actor parameter storage is compiler-packed. An ordinary named value cannot
+;; forge the private existential package even when every other actor field is copied.
+(type ForgedParams {:value Int})
 (let legitimate (nefor.graph.source "start" (type-tag String) "valid"))
 (let original (first (get legitimate "actors")))
 (let forged-actor (as nefor.graph.Actor
         {:id (get original "id")
          :factory (get original "factory")
          :type_arguments (get original "type_arguments")
-         :params {:value 42}
+         :params (as ForgedParams {:value 42})
          :input (get original "input")
          :outputs (get original "outputs")}))
 (let forged (nefor.graph.node "start" "source" [forged-actor]
