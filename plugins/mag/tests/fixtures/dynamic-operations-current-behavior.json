@@ -3,7 +3,7 @@
   "identity": {
     "source": "examples/nefor-agent/agentic-loop/dynamic-tasks.mag",
     "source_sha256": "43c25728218fb2b0fb98d2be993c93c2cdf215705d3ee9c8a3a41b36a916f945",
-    "compiled_artifact_hash": "sha256:a1d621e7e1dce49350d078a03be26dc72481b931398618d89c9f0f1015f5dfc7"
+    "compiled_artifact_hash": "sha256:c8e109c33883f0437865b67d1d22351f86e5bd3ccea71d3a1e57836a182ada5f"
   },
   "item_delta_zero": {
     "actors": [
