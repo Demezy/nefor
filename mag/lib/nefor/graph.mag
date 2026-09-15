@@ -272,9 +272,9 @@ let `graph-routes`: fn(Graph) -> List<StoredRoute> = |value| => get(`graph-proje
 
 let `graph-actors`: fn(Graph) -> List<Actor> = |value| => get(`graph-projection`(value), "actors")
 
-// Whole-value compatibility matters: edge compatibility also accepts one
-// product component, which is not enough to activate a root.
-let `unit-input?`: fn(StoredPort) -> Bool = |input| => `descriptor-accepts-value?`(get(input, "type"), `type-evidence`(type_tag<Unit>()))
+// Root activation is reserved for the exact Unit boundary. A sum or product
+// that merely contains Unit still requires an explicit incoming value.
+let `unit-input?`: fn(StoredPort) -> Bool = |input| => (=)(canonical(get(input, "type_id")), canonical(`type-id`(`type-evidence`(type_tag<Unit>()))))
 
 let `input-needs-bootstrap?`: fn(Map<String, List<StoredRoute>>, Map<String, List<Message>>, StoredPort) -> Bool = |`routes-by-input`, `messages-by-input`, input| => if `unit-input?`(input) then if (=)(count(`__map-get-or`(`routes-by-input`, `port-address-key`(input), ([]: List<StoredRoute>))), 0) then (=)(count(`__map-get-or`(`messages-by-input`, `port-address-key`(input), ([]: List<Message>))), 0) else false else false
 

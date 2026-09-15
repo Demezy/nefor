@@ -1102,11 +1102,16 @@ impl Env {
                     .collect::<Vec<_>>()
             })
             .filter_map(|(name, values)| {
+                let qualified = self.qualify(&name);
+                let own_nested_type = values.iter().any(
+                    |value| matches!(value, Value::TypeDecl(declaration) if declaration.name == qualified),
+                );
                 let values = values
                     .into_iter()
                     .filter(|v| !matches!(v, Value::BuiltinFn(_) | Value::Type(_)))
                     .collect::<Vec<_>>();
-                (!name.contains('.') && !values.is_empty()).then_some((name, values))
+                ((!name.contains('.') || own_nested_type) && !values.is_empty())
+                    .then_some((name, values))
             })
             .collect()
     }
@@ -1161,12 +1166,12 @@ impl Env {
     pub fn install_module(&mut self, name: &str, defs: BTreeMap<String, Vec<Value>>) {
         self.imports.insert(name.into());
         for (local, values) in defs {
-            let qualified = if local.contains('.') {
-                local
-            } else {
-                format!("{name}.{local}")
-            };
             for value in values {
+                let qualified = match &value {
+                    Value::TypeDecl(declaration) => declaration.name.clone(),
+                    _ if local.contains('.') => local.clone(),
+                    _ => format!("{name}.{local}"),
+                };
                 if !self
                     .lookup_candidates(&qualified)
                     .iter()

@@ -460,10 +460,45 @@ nefor.artifact.compile_graph(start)
         convenient["program"]["initial"]["result"]["from"]["actor"],
         "result"
     );
+
+    let collision = run(
+        "compile-graph-collision",
+        r#"
+import nefor.artifact.{}
+import nefor.graph.{}
+let result = nefor.graph.source("result", type_tag<String>(), "hello")
+nefor.artifact.compile_graph(result)
+"#,
+        contracts(json!([])),
+    );
+    assert_eq!(
+        collision["program"]["initial"]["result"]["from"]["actor"],
+        "result-"
+    );
 }
 
 #[test]
-fn unit_sum_root_cache_preserves_actual_activation_evidence() {
+fn only_exact_unit_ports_are_root_capable() {
+    let artifact = run(
+        "exact-unit-root",
+        r#"
+import nefor.graph.{}
+type Maybe = Ready(Unit) | Waiting(String)
+let exact = nefor.graph.`store-port`(nefor.graph.port("exact", type_tag<Unit>(), "wire"))
+let sum = nefor.graph.`store-port`(nefor.graph.port("sum", type_tag<Maybe>(), "wire"))
+let product = nefor.graph.`store-port`(nefor.graph.port("product", type_tag<(Unit, String)>(), "wire"))
+artifact {exact: nefor.graph.`unit-input?`(exact), sum: nefor.graph.`unit-input?`(sum), product: nefor.graph.`unit-input?`(product)}
+"#,
+        json!({}),
+    );
+    assert_eq!(
+        artifact,
+        json!({"exact": true, "sum": false, "product": false})
+    );
+}
+
+#[test]
+fn exact_unit_root_cache_preserves_actual_activation_evidence() {
     use nefor_mag::project_cache::{build_with_syntax, CachePolicy, CacheStatus};
     let root = workspace("exact-unit-cache");
     let roots = [std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib")];

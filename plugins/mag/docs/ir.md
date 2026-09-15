@@ -246,7 +246,7 @@ Dependencies use the same language: "A depends on C finishing" is the edge
 is to encode the ordering. No second vocabulary exists.
 
 The shipped process and shell libraries lean on exactly this algebra: each
-actor accepts `Unit`. An unfed node receives the graph's one automatic root
+actor has an exact `Unit` input. An unfed node receives the graph's one automatic root
 activation; placing the same node behind an incoming `Unit` route suppresses
 that bootstrap and makes it dependency-driven. No second pipe or sequencing
 rule is required.

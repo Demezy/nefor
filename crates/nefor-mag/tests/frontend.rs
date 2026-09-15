@@ -136,6 +136,51 @@ fn lisp_entry_can_load_a_new_syntax_module() {
 }
 
 #[test]
+fn imported_adts_construct_through_qualified_and_selective_owners() {
+    let root = workspace("imported-adts");
+    fs::write(
+        root.join("support.mag"),
+        "type Pair<T> = Pair(T, T)\ntype Outcome = Ok(Int) | Error {message: String}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.mag"),
+        r#"
+import support.{Outcome}
+import support.{}
+let left = 1
+let right = 2
+let pair: support.Pair<Int> = support.Pair<Int>.Pair(left, right)
+let outcome: support.Outcome = Outcome.Error(message: "failed")
+let message = match outcome { case Ok(value) => str(value), case Error(error) => get(error, "message") }
+artifact(message)
+"#,
+    )
+    .unwrap();
+
+    let artifact = compile_file_with_syntax(&root, "main.mag", SyntaxMode::New).unwrap();
+    assert_eq!(artifact, serde_json::json!("failed"));
+}
+
+#[test]
+fn selectively_imported_values_keep_dot_field_access() {
+    let root = workspace("imported-field-access");
+    fs::write(
+        root.join("support.mag"),
+        "type Box {value: Int}\nlet box = Box {value: 42}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.mag"),
+        "import support.{box}\nartifact(box.value)\n",
+    )
+    .unwrap();
+
+    let artifact = compile_file_with_syntax(&root, "main.mag", SyntaxMode::New).unwrap();
+    assert_eq!(artifact, serde_json::json!(42));
+}
+
+#[test]
 fn both_module_suffixes_are_ambiguous() {
     let root = workspace("ambiguous-suffix");
     fs::write(root.join("support.mag"), "let value = 1\n").unwrap();

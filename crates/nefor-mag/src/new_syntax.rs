@@ -83,7 +83,11 @@ impl<'a> Lexer<'a> {
                 b'"' => tokens.push(self.lex_string()?),
                 b'`' => tokens.push(self.lex_backtick()?),
                 b'0'..=b'9' => tokens.push(self.lex_number(false)?),
-                b'-' if self.peek_byte(1).is_some_and(|next| next.is_ascii_digit()) => {
+                b'-' if self.peek_byte(1).is_some_and(|next| next.is_ascii_digit())
+                    && !tokens
+                        .last()
+                        .is_some_and(|token| token_can_end_expression(&token.kind)) =>
+                {
                     tokens.push(self.lex_number(true)?)
                 }
                 b'a'..=b'z' | b'A'..=b'Z' | b'_' => tokens.push(self.lex_ident()),
@@ -349,6 +353,17 @@ impl<'a> Lexer<'a> {
     }
 }
 
+fn token_can_end_expression(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Ident(_)
+            | TokenKind::String(_)
+            | TokenKind::Int(_)
+            | TokenKind::Float(_)
+            | TokenKind::Punct(')' | ']' | '}')
+    )
+}
+
 fn is_operator_byte(byte: u8) -> bool {
     matches!(
         byte,
@@ -372,6 +387,14 @@ fn is_operator_byte(byte: u8) -> bool {
     )
 }
 
+#[derive(Debug, Clone)]
+struct VariantMetadata {
+    owner: String,
+    owner_params: Vec<String>,
+    payload: authored::Type,
+    field_order: Vec<String>,
+}
+
 #[derive(Clone)]
 struct Parser<'a> {
     source: &'a SourceSnapshot,
@@ -380,7 +403,7 @@ struct Parser<'a> {
     fixities: HashMap<String, Fixity>,
     aliases: HashMap<String, String>,
     alias_origins: HashMap<String, (String, ByteSpan)>,
-    variants: HashMap<String, (String, Vec<String>)>,
+    variants: HashMap<String, VariantMetadata>,
     requires: Vec<String>,
     bound_names: HashSet<String>,
     local_types: HashSet<String>,
@@ -412,7 +435,7 @@ impl<'a> Parser<'a> {
         let mut forms = Vec::new();
         self.separators();
         while !self.at_eof() {
-            if self.at_word("import") || self.at_word("require") {
+            if self.at_word("import") {
                 self.parse_import()?;
             } else if self.at_word("fixity")
                 || self.at_word("infixl")
@@ -441,16 +464,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_import(&mut self) -> Result<(), MagError> {
-        let require = self.at_word("require");
-        self.bump();
-        if require {
-            let token = self.bump().clone();
-            let TokenKind::String(module) = token.kind else {
-                return Err(self.parse_error("require expects a module string", token.span));
-            };
-            self.add_require(module);
-            return Ok(());
-        }
+        self.expect_word("import")?;
         let mut path = self.expect_name()?;
         while self.eat_punct('.') {
             if self.eat_operator("*") {
@@ -490,6 +504,9 @@ impl<'a> Parser<'a> {
                         } else {
                             self.alias_origins
                                 .insert(alias.clone(), (canonical.clone(), declaration_span));
+                            if let Some(fixity) = self.fixities.get(&alias).copied() {
+                                self.fixities.insert(canonical.clone(), fixity);
+                            }
                             self.aliases.insert(alias, canonical);
                         }
                         if self.eat_punct('}') {
@@ -549,6 +566,7 @@ impl<'a> Parser<'a> {
             self.eat_operator("|");
             self.newlines();
             let constructor = self.expect_name()?;
+            let mut field_order = Vec::new();
             let payload = if self.eat_punct('(') {
                 let items = self.parse_type_list(')')?;
                 match items.as_slice() {
@@ -558,19 +576,13 @@ impl<'a> Parser<'a> {
                 }
             } else if self.eat_punct('{') {
                 let fields = self.parse_type_fields('}')?;
+                field_order = fields.iter().map(|(field, _)| field.clone()).collect();
                 let helper = format!("{name}.{constructor}");
                 helper_forms.push(authored::Form::Type(authored::TypeDeclaration {
                     name: helper.clone(),
                     params: params.clone(),
-                    body: authored::TypeDeclarationBody::Fields(fields.clone()),
+                    body: authored::TypeDeclarationBody::Fields(fields),
                 }));
-                self.variants.insert(
-                    format!("{name}.{constructor}"),
-                    (
-                        name.clone(),
-                        fields.iter().map(|(field, _)| field.clone()).collect(),
-                    ),
-                );
                 let arguments = params
                     .iter()
                     .cloned()
@@ -587,9 +599,15 @@ impl<'a> Parser<'a> {
             } else {
                 return Err(self.here("constructor requires a positional or named payload"));
             };
-            self.variants
-                .entry(format!("{name}.{constructor}"))
-                .or_insert_with(|| (name.clone(), Vec::new()));
+            self.variants.insert(
+                format!("{name}.{constructor}"),
+                VariantMetadata {
+                    owner: name.clone(),
+                    owner_params: params.clone(),
+                    payload: payload.clone(),
+                    field_order,
+                },
+            );
             variants.push(authored::ConstructorDeclaration {
                 name: constructor,
                 payload,
@@ -728,7 +746,7 @@ impl<'a> Parser<'a> {
                     };
                 } else {
                     return Err(self.here(
-                        "explicit term type application requires callable interface resolution",
+                        "explicit type arguments on ordinary function calls are unsupported; generic function arguments are inferred",
                     ));
                 }
             } else if self.eat_punct('(') {
@@ -753,20 +771,15 @@ impl<'a> Parser<'a> {
                         args: vec![authored::Expr::Fields(fields)],
                     }
                 } else if let Some((owner_prefix, constructor)) = owner.rsplit_once('.') {
-                    if let Some((sum, field_order)) = self.variants.get(&owner) {
-                        if sum != owner_prefix || field_order.is_empty() {
+                    if let Some(metadata) = self.variants.get(&owner) {
+                        if metadata.owner != owner_prefix || metadata.field_order.is_empty() {
                             return Err(
                                 self.here("named constructor owner or payload does not match")
                             );
                         }
-                        let (sum_type, _) = constructor_types(sum, constructor, expected);
-                        let payload_type = match &sum_type {
-                            authored::Type::Apply { arguments, .. } => authored::Type::Apply {
-                                constructor: format!("{sum}.{constructor}"),
-                                arguments: arguments.clone(),
-                            },
-                            _ => authored::Type::Name(format!("{sum}.{constructor}")),
-                        };
+                        let (sum_type, _) =
+                            constructor_types(&metadata.owner, constructor, expected);
+                        let payload_type = specialize_variant_payload(metadata, &sum_type);
                         let payload = authored::Expr::Ascribe {
                             target: payload_type,
                             value: Box::new(authored::Expr::Fields(fields)),
@@ -775,6 +788,14 @@ impl<'a> Parser<'a> {
                             owner: sum_type,
                             constructor: constructor.to_owned(),
                             payload: Box::new(payload),
+                        }
+                    } else if expected_owner_name(expected) == Some(owner_prefix) {
+                        authored::Expr::Construct {
+                            owner: expected
+                                .cloned()
+                                .unwrap_or_else(|| authored::Type::Name(owner_prefix.into())),
+                            constructor: constructor.to_owned(),
+                            payload: Box::new(authored::Expr::Fields(fields)),
                         }
                     } else {
                         authored::Expr::Ascribe {
@@ -808,13 +829,13 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(word) if word == "nil" => Ok(authored::Expr::Unit),
             TokenKind::Ident(word) if word == "true" => Ok(authored::Expr::Bool(true)),
             TokenKind::Ident(word) if word == "false" => Ok(authored::Expr::Bool(false)),
-            TokenKind::Ident(word) if word == "if" => self.parse_if(),
-            TokenKind::Ident(word) if word == "match" => self.parse_match(),
+            TokenKind::Ident(word) if word == "if" => self.parse_if(expected),
+            TokenKind::Ident(word) if word == "match" => self.parse_match(expected),
             TokenKind::Ident(word) if word == "type_tag" || word == "type-tag" => {
                 self.parse_type_tag()
             }
             TokenKind::Ident(word) if word == "named" => self.parse_named(),
-            TokenKind::Ident(word) => self.parse_name_expression(word),
+            TokenKind::Ident(word) => self.parse_name_expression(word, expected),
             TokenKind::Operator(word) if word == "|" => self.parse_lambda(expected, token.span),
             TokenKind::Operator(word) => Ok(authored::Expr::Name(self.resolve_name(&word))),
             TokenKind::Punct('[') => self.parse_list(),
@@ -824,17 +845,44 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_name_expression(&mut self, word: String) -> Result<authored::Expr, MagError> {
+    fn parse_name_expression(
+        &mut self,
+        word: String,
+        expected: Option<&authored::Type>,
+    ) -> Result<authored::Expr, MagError> {
         let mut name = self.resolve_name(&word);
-        // Bound values own dot access. An otherwise unbound dotted name is a
-        // qualified export, and its path (without the final export) is required.
-        if !self.bound_names.contains(&word) && self.at_punct('.') {
+        let imported_alias = self.aliases.contains_key(&word);
+        // Bound values and selectively imported values own dot access. An import
+        // alias is consumed as a qualified owner only when the next segment is
+        // immediately constructed or called.
+        let alias_qualifies = imported_alias
+            && self.at_punct('.')
+            && matches!(
+                self.peek_n(1).kind,
+                TokenKind::Ident(_) | TokenKind::Operator(_)
+            )
+            && matches!(self.peek_n(2).kind, TokenKind::Punct('(' | '{'));
+        if !self.bound_names.contains(&word)
+            && self.at_punct('.')
+            && (!imported_alias || alias_qualifies)
+        {
             while self.eat_punct('.') {
                 name.push('.');
                 name.push_str(&self.expect_name()?);
             }
-            if !self.local_types.contains(&word) {
-                if let Some((module, _)) = name.rsplit_once('.') {
+            if !self.local_types.contains(&word)
+                && !imported_alias
+                && !self
+                    .requires
+                    .iter()
+                    .any(|module| name.starts_with(&format!("{module}.")))
+            {
+                if let Some((owner, _)) = name.rsplit_once('.') {
+                    let module = if expected_owner_name(expected) == Some(owner) {
+                        owner.rsplit_once('.').map_or(owner, |(module, _)| module)
+                    } else {
+                        owner
+                    };
                     self.add_require(module.to_owned());
                 }
             }
@@ -894,6 +942,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_function_block(&mut self) -> Result<Vec<authored::BlockItem>, MagError> {
+        let outer_names = self.bound_names.clone();
+        self.bound_names
+            .extend(scan_direct_block_lets(&self.tokens, self.cursor));
         let mut items = Vec::new();
         self.separators();
         while !self.eat_punct('}') {
@@ -909,17 +960,18 @@ impl<'a> Parser<'a> {
         if items.is_empty() {
             items.push(authored::BlockItem::Expr(authored::Expr::Unit));
         }
+        self.bound_names = outer_names;
         Ok(items)
     }
 
-    fn parse_if(&mut self) -> Result<authored::Expr, MagError> {
+    fn parse_if(&mut self, expected: Option<&authored::Type>) -> Result<authored::Expr, MagError> {
         let condition = self.parse_expr(None)?;
         self.expect_word("then")?;
         self.newlines();
-        let then_branch = self.parse_expr(None)?;
+        let then_branch = self.parse_expr(expected)?;
         self.expect_word("else")?;
         self.newlines();
-        let else_branch = self.parse_expr(None)?;
+        let else_branch = self.parse_expr(expected)?;
         Ok(authored::Expr::If {
             condition: Box::new(condition),
             then_branch: Box::new(then_branch),
@@ -939,6 +991,9 @@ impl<'a> Parser<'a> {
         &mut self,
         expected: Option<&authored::Type>,
     ) -> Result<authored::Expr, MagError> {
+        let outer_names = self.bound_names.clone();
+        self.bound_names
+            .extend(scan_direct_block_lets(&self.tokens, self.cursor));
         let mut body = Vec::new();
         self.separators();
         while self.at_word("let") {
@@ -956,6 +1011,7 @@ impl<'a> Parser<'a> {
         body.push(authored::BlockItem::Expr(result));
         self.separators();
         self.expect_punct('}')?;
+        self.bound_names = outer_names;
         Ok(authored::Expr::Call {
             callee: Box::new(authored::Expr::Function(authored::Function {
                 type_params: Vec::new(),
@@ -967,7 +1023,10 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_match(&mut self) -> Result<authored::Expr, MagError> {
+    fn parse_match(
+        &mut self,
+        expected: Option<&authored::Type>,
+    ) -> Result<authored::Expr, MagError> {
         let value = self.parse_expr_before_block()?;
         self.expect_punct('{')?;
         self.separators();
@@ -984,7 +1043,7 @@ impl<'a> Parser<'a> {
             let binding = self.expect_name()?;
             self.expect_punct(')')?;
             self.expect_fat_arrow()?;
-            let body = self.parse_expr(None)?;
+            let body = self.parse_expr(expected)?;
             arms.push(authored::MatchArm {
                 constructor,
                 binding,
@@ -1173,23 +1232,14 @@ impl<'a> Parser<'a> {
                     let first = matching.next()?;
                     matching.next().is_none().then_some(first)
                 });
-            if let Some((owner, field_order)) = variant {
-                let (owner_type, payload_type) = if let Some((owner_type, _)) = specialized {
-                    let payload_type = match &owner_type {
-                        authored::Type::Apply {
-                            constructor: owner_name,
-                            arguments,
-                        } => authored::Type::Apply {
-                            constructor: format!("{owner_name}.{constructor}"),
-                            arguments: arguments.clone(),
-                        },
-                        _ => authored::Type::Name(format!("{owner}.{constructor}")),
-                    };
-                    (owner_type, payload_type)
+            if let Some(metadata) = variant {
+                let owner_type = if let Some((owner_type, _)) = specialized.clone() {
+                    owner_type
                 } else {
-                    constructor_types(&owner, &constructor, expected)
+                    constructor_types(&metadata.owner, &constructor, expected).0
                 };
-                let payload = if field_order.is_empty()
+                let payload_type = specialize_variant_payload(&metadata, &owner_type);
+                let payload = if metadata.field_order.is_empty()
                     && args
                         .iter()
                         .all(|arg| matches!(arg, CallArgument::Positional(_)))
@@ -1204,24 +1254,10 @@ impl<'a> Parser<'a> {
                     match values.as_slice() {
                         [] => authored::Expr::Unit,
                         [value] => value.clone(),
-                        _ => {
-                            let target = authored::Type::Product(
-                                values
-                                    .iter()
-                                    .map(obvious_expr_type)
-                                    .collect::<Option<Vec<_>>>()
-                                    .unwrap_or_else(|| {
-                                        vec![authored::Type::Invalid(
-                                            "constructor product payload requires annotations"
-                                                .into(),
-                                        )]
-                                    }),
-                            );
-                            authored::Expr::Ascribe {
-                                target,
-                                value: Box::new(authored::Expr::Vector(values)),
-                            }
-                        }
+                        _ => authored::Expr::Ascribe {
+                            target: payload_type,
+                            value: Box::new(authored::Expr::Vector(values)),
+                        },
                     }
                 } else {
                     let fields = args
@@ -1230,7 +1266,8 @@ impl<'a> Parser<'a> {
                         .map(|(index, arg)| match arg {
                             CallArgument::Named(name, value) => (name, value),
                             CallArgument::Positional(value) => (
-                                field_order
+                                metadata
+                                    .field_order
                                     .get(index)
                                     .cloned()
                                     .unwrap_or_else(|| index.to_string()),
@@ -1246,6 +1283,55 @@ impl<'a> Parser<'a> {
                 return Ok(authored::Expr::Construct {
                     owner: owner_type,
                     constructor: constructor.to_owned(),
+                    payload: Box::new(payload),
+                });
+            }
+            let imported_owner = specialized
+                .as_ref()
+                .map(|(owner, _)| owner.clone())
+                .or_else(|| {
+                    owner_hint.as_ref().and_then(|owner| {
+                        (expected_owner_name(expected) == Some(owner.as_str()))
+                            .then(|| expected.cloned())
+                            .flatten()
+                    })
+                });
+            if let Some(owner) = imported_owner {
+                let all_positional = args
+                    .iter()
+                    .all(|argument| matches!(argument, CallArgument::Positional(_)));
+                let all_named = args
+                    .iter()
+                    .all(|argument| matches!(argument, CallArgument::Named(_, _)));
+                let payload = if all_positional {
+                    let values = args
+                        .into_iter()
+                        .map(|argument| match argument {
+                            CallArgument::Positional(value) => value,
+                            CallArgument::Named(_, _) => unreachable!(),
+                        })
+                        .collect::<Vec<_>>();
+                    match values.as_slice() {
+                        [] => authored::Expr::Unit,
+                        [value] => value.clone(),
+                        _ => authored::Expr::Vector(values),
+                    }
+                } else if all_named {
+                    authored::Expr::Fields(
+                        args.into_iter()
+                            .map(|argument| match argument {
+                                CallArgument::Named(name, value) => (name, value),
+                                CallArgument::Positional(_) => unreachable!(),
+                            })
+                            .collect(),
+                    )
+                } else {
+                    return Err(self
+                        .here("constructor arguments must be either all positional or all named"));
+                };
+                return Ok(authored::Expr::Construct {
+                    owner,
+                    constructor,
                     payload: Box::new(payload),
                 });
             }
@@ -1748,6 +1834,14 @@ enum CallArgument {
     Named(String, authored::Expr),
 }
 
+fn expected_owner_name(expected: Option<&authored::Type>) -> Option<&str> {
+    match expected {
+        Some(authored::Type::Name(name)) => Some(name),
+        Some(authored::Type::Apply { constructor, .. }) => Some(constructor),
+        _ => None,
+    }
+}
+
 fn constructor_types(
     owner: &str,
     constructor: &str,
@@ -1778,6 +1872,60 @@ fn constructor_types(
     }
 }
 
+fn specialize_variant_payload(
+    metadata: &VariantMetadata,
+    owner: &authored::Type,
+) -> authored::Type {
+    let arguments = match owner {
+        authored::Type::Apply { arguments, .. } => arguments,
+        _ => return metadata.payload.clone(),
+    };
+    let substitutions = metadata
+        .owner_params
+        .iter()
+        .zip(arguments)
+        .collect::<HashMap<_, _>>();
+    substitute_authored_type(&metadata.payload, &substitutions)
+}
+
+fn substitute_authored_type(
+    ty: &authored::Type,
+    substitutions: &HashMap<&String, &authored::Type>,
+) -> authored::Type {
+    match ty {
+        authored::Type::Name(name) => substitutions
+            .get(name)
+            .map_or_else(|| ty.clone(), |replacement| (*replacement).clone()),
+        authored::Type::Product(items) => authored::Type::Product(
+            items
+                .iter()
+                .map(|item| substitute_authored_type(item, substitutions))
+                .collect(),
+        ),
+        authored::Type::Tag(item) => {
+            authored::Type::Tag(Box::new(substitute_authored_type(item, substitutions)))
+        }
+        authored::Type::Function { params, result } => authored::Type::Function {
+            params: params
+                .iter()
+                .map(|parameter| substitute_authored_type(parameter, substitutions))
+                .collect(),
+            result: Box::new(substitute_authored_type(result, substitutions)),
+        },
+        authored::Type::Apply {
+            constructor,
+            arguments,
+        } => authored::Type::Apply {
+            constructor: constructor.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| substitute_authored_type(argument, substitutions))
+                .collect(),
+        },
+        authored::Type::Invalid(_) => ty.clone(),
+    }
+}
+
 fn obvious_expr_type(expression: &authored::Expr) -> Option<authored::Type> {
     match expression {
         authored::Expr::Unit => Some(authored::Type::Name("Unit".into())),
@@ -1801,6 +1949,37 @@ fn reduce_operator(values: &mut Vec<authored::Expr>, operator: String) -> Option
         args: vec![right],
     });
     Some(())
+}
+
+fn scan_direct_block_lets(tokens: &[Token], cursor: usize) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut depth = 0usize;
+    let mut index = cursor;
+    while index < tokens.len() {
+        match &tokens[index].kind {
+            TokenKind::Punct('}') if depth == 0 => break,
+            TokenKind::Punct('{') => depth += 1,
+            TokenKind::Punct('}') => depth = depth.saturating_sub(1),
+            TokenKind::Ident(word) if word == "let" && depth == 0 => {
+                match tokens.get(index + 1).map(|token| &token.kind) {
+                    Some(TokenKind::Ident(name) | TokenKind::Operator(name)) => {
+                        names.insert(name.clone());
+                    }
+                    Some(TokenKind::Punct('(')) => {
+                        if let Some(TokenKind::Operator(name)) =
+                            tokens.get(index + 2).map(|token| &token.kind)
+                        {
+                            names.insert(name.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    names
 }
 
 fn scan_top_level_lets(tokens: &[Token]) -> HashSet<String> {
@@ -2143,7 +2322,8 @@ mod tests {
     }
 
     #[test]
-    fn semicolons_and_leading_operator_continuations_are_rejected() {
+    fn legacy_forms_semicolons_and_leading_operator_continuations_are_rejected() {
+        assert!(parse("require \"support\"\n").is_err());
         assert!(parse("let x = 1; let y = 2\n").is_err());
         assert!(parse("let x = 1\n+ 2\n").is_err());
     }
@@ -2217,5 +2397,93 @@ mod tests {
         assert!(
             matches!(&module.forms[1], authored::Form::Block(authored::BlockItem::Let { value: authored::Expr::Float(value), .. }) if *value == -2.5)
         );
+    }
+
+    #[test]
+    fn subtraction_does_not_depend_on_whitespace() {
+        let compact = parse("let value = 1-2\n").unwrap();
+        let spaced = parse("let value = 1 - 2\n").unwrap();
+        assert_eq!(compact, spaced);
+        assert!(parse("let value = 1 - -2\n").is_ok());
+        assert!(parse("let value = f(-2)\n").is_ok());
+    }
+
+    #[test]
+    fn function_block_peer_bindings_shadow_import_aliases_before_declaration() {
+        let module = parse(
+            "import support.{value}\nlet f: fn() -> Int = | | => {\n  let result = value\n  let value = 1\n  result\n}\n",
+        )
+        .unwrap();
+        let authored::Form::Block(authored::BlockItem::Let {
+            value: authored::Expr::Ascribe { value, .. },
+            ..
+        }) = module.forms.last().unwrap()
+        else {
+            panic!("function")
+        };
+        let authored::Expr::Function(function) = value.as_ref() else {
+            panic!("function")
+        };
+        assert!(matches!(
+            &function.body[0],
+            authored::BlockItem::Let {
+                value: authored::Expr::Name(name),
+                ..
+            } if name == "value"
+        ));
+    }
+
+    #[test]
+    fn constructor_product_uses_its_declared_payload_type() {
+        let module = parse(
+            "type PairResult = Pair(Int, String)\nlet number = 1\nlet text = \"x\"\nlet result: PairResult = PairResult.Pair(number, text)\n",
+        )
+        .unwrap();
+        let authored::Form::Block(authored::BlockItem::Let {
+            value: authored::Expr::Ascribe { value, .. },
+            ..
+        }) = module.forms.last().unwrap()
+        else {
+            panic!("constructor")
+        };
+        let authored::Expr::Construct { payload, .. } = value.as_ref() else {
+            panic!("constructor")
+        };
+        assert!(matches!(
+            payload.as_ref(),
+            authored::Expr::Ascribe {
+                target: authored::Type::Product(items),
+                ..
+            } if items == &[authored::Type::Name("Int".into()), authored::Type::Name("String".into())]
+        ));
+    }
+
+    #[test]
+    fn expected_generic_owner_reaches_if_and_match_arms() {
+        assert!(parse(
+            "type Option<T> = Some(T) | None(Unit)\nlet value: Option<Int> = if true then Option.Some(1) else Option.None(nil)\n",
+        )
+        .is_ok());
+        assert!(parse(
+            "type Option<T> = Some(T) | None(Unit)\ntype Flag = Yes(Unit) | No(Unit)\nlet flag: Flag = Flag.Yes(nil)\nlet value: Option<Int> = match flag { case Yes(unit) => Option.Some(1), case No(unit) => Option.None(nil) }\n",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn local_fixity_applies_to_an_imported_alias() {
+        let module = parse(
+            "import operators.{append as plus}\ninfixr 5 plus\nlet value = a plus b plus c\n",
+        )
+        .unwrap();
+        let authored::Form::Block(authored::BlockItem::Let { value, .. }) =
+            module.forms.last().unwrap()
+        else {
+            panic!("value")
+        };
+        let authored::Expr::Call { args, .. } = value else {
+            panic!("right-associated call")
+        };
+        assert!(matches!(args.as_slice(), [authored::Expr::Call { .. }]));
     }
 }

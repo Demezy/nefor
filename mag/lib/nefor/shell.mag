@@ -13,11 +13,3 @@ let script: fn(String, ShellScriptParams) -> nefor.graph.Node<Unit, nefor.contra
   let output = nefor.graph.port(name, type_tag<nefor.contracts.ProcessResult>(), "nefor.process.Result")
   nefor.graph.Node<Unit, nefor.contracts.ProcessResult> {id: name, role: "ordinary", actors: [nefor.graph.actor(name, factory, [], ShellScriptActorParams {script: get(params, "script"), cwd: get(params, "cwd"), timeout: get(params, "timeout")}, nefor.graph.`store-port`(input), [nefor.graph.`store-port`(output)])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.`logical-node`([name], [name])], input: input, output: output}
 }
-
-// A Unit occurrence starts the authored script. Textual stdin requires a
-// separate explicit input node rather than an implicit sum arm.
-let run: fn(String, ShellScriptParams) -> nefor.graph.Node<Unit, nefor.contracts.ProcessResult> = |name, params| => {
-  let value = script(name, params)
-  let input = nefor.graph.port(name, type_tag<Unit>(), "nefor.process.Input")
-  nefor.graph.`node-with-operations-and-nodes`(name, "ordinary", get(value, "actors"), get(value, "routes"), get(value, "messages"), get(value, "operations"), get(value, "nodes"), input, get(value, "output"))
-}

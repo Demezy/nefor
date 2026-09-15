@@ -821,7 +821,7 @@ nefor.artifact.compile((|graph| => nefor.graph.`add-edges`(graph, [nefor.graph.e
             for (name, definitions, expected) in [
                 (
                     "unit-root-run",
-                    "let operation = nefor.shell.run(\"command\", params)",
+                    "let operation = nefor.shell.script(\"command\", params)",
                     "command",
                 ),
                 (
@@ -842,7 +842,7 @@ let operation = nefor.node.named("outer", sequence)"#,
                 (
                     "unit-root-dependent",
                     r#"
-let operation = nefor.node.`*>`("ordered", nefor.shell.script("dependency", params), nefor.shell.run("command", params))"#,
+let operation = nefor.node.`*>`("ordered", nefor.shell.script("dependency", params), nefor.shell.script("command", params))"#,
                     "dependency",
                 ),
             ] {
@@ -897,7 +897,7 @@ nefor.artifact.delta(nefor.graph.`delta-message`(nefor.graph.`node-delta`(comman
                 ("product", "let operation = nefor.graph.identity(\"missing\", type_tag<(Unit, Unit)>())", ["root validation failed", "product"]),
                 ("non-unit", "let operation = nefor.graph.identity(\"missing\", type_tag<nefor.contracts.Text>())", ["root validation failed", "Text"]),
                 ("internal", r#"
-let command = nefor.shell.run("command", params)
+let command = nefor.shell.script("command", params)
 let hidden = nefor.graph.identity("hidden", type_tag<Unit>())
 let operation = nefor.graph.`node-with-operations-and-nodes`("wrapper", "ordinary", concat(get(command, "actors"), get(hidden, "actors")), get(command, "routes"), [], [], concat(get(command, "nodes"), get(hidden, "nodes")), get(command, "input"), get(command, "output"))"#, ["input coverage failed", "hidden.nefor.graph.Value"]),
             ] {
@@ -985,7 +985,7 @@ let operation = nefor.graph.`node-with-operations-and-nodes`("wrapper", "ordinar
             for (name, definitions, dependent) in [
                 (
                     "unit-runtime-run",
-                    "let operation = nefor.shell.run(\"command\", params)",
+                    "let operation = nefor.shell.script(\"command\", params)",
                     false,
                 ),
                 (
@@ -996,7 +996,7 @@ let operation = nefor.graph.`node-with-operations-and-nodes`("wrapper", "ordinar
                 (
                     "unit-runtime-dependent",
                     r#"
-let operation = nefor.node.`*>`("ordered", nefor.shell.script("dependency", params), nefor.shell.run("command", params))"#,
+let operation = nefor.node.`*>`("ordered", nefor.shell.script("dependency", params), nefor.shell.script("command", params))"#,
                     true,
                 ),
             ] {

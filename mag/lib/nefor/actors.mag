@@ -64,10 +64,9 @@ type RetryGateConfig {id: String, `max-retries`: Int}
 
 let `task-source`: fn(String, String) -> nefor.graph.Node<Unit, nefor.contracts.Task> = |id, prompt| => nefor.graph.source(id, type_tag<nefor.contracts.Task>(), nefor.contracts.Task {prompt: prompt})
 
-// Every agent has one public result port with semantic type `O | AgentError`.
-// The stable result wire carries the selected constructor identity. Ordinary
-// edges route compatible arms directly; `result-arm` creates a typed operation
-// subscription on that same actor/wire without inserting a selector actor.
+// Every agent has one public nominal Result<AgentError, O> port. Workflows
+// continue successful values with the ordinary result combinators and preserve
+// AgentError as an explicit alternative.
 let `agent-with-schema`<M, I, O>: fn(fn(M) -> AuthoredModel, AgentConfig<M>, TypeTag<I>, TypeTag<O>, TypeSchema, Bool, SemanticTypeId, TypeDescriptor) -> nefor.graph.Node<I, core.types.Result<nefor.contracts.AgentError, O>> = |`resolve-model`, config, `input-type`, `output-type`, schema, dynamic, `dynamic-item-type`, `dynamic-item-descriptor`| => {
   let id = get(config, "id")
   let `authored-model` = `resolve-model`(get(config, "model"))

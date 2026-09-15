@@ -133,6 +133,24 @@ fn dynamic_output_restores_source_order_and_supports_empty_collections() {
             assert(out_of_range.status == "failed")
             assert(out_of_range.value.kind == "dynamic_output_invalid_item")
 
+            local false_complete = assert(factory.construct("false-complete", {}, function() end))
+            local false_complete_failure = false_complete.deliver({ messages = {{ message = {
+              value = { constructor = "Complete", value = {
+                collection = "false-complete", index = 0, value = "wrong"
+              }}
+            }}}})
+            assert(false_complete_failure.status == "failed")
+            assert(false_complete_failure.value.kind == "dynamic_output_invalid_count")
+
+            local false_item = assert(factory.construct("false-item", {}, function() end))
+            local false_item_failure = false_item.deliver({ messages = {{ message = {
+              value = { constructor = "Item", value = {
+                collection = "false-item", count = 0
+              }}
+            }}}})
+            assert(false_item_failure.status == "failed")
+            assert(false_item_failure.value.kind == "dynamic_output_invalid_item")
+
             local empty_out = {}
             local empty = assert(factory.construct("empty", {},
               function(message) empty_out[#empty_out + 1] = message end))

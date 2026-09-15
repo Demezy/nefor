@@ -118,7 +118,7 @@ An authored program is a pure `Graph -> Graph` function. `nefor.artifact.compile
 
 ### Sources and output
 
-`nefor.graph.source<T>` captures and emits a value checked against `T`. More generally, any exposed node whose input accepts `Unit` may be an unfed root and receives one automatic activation; feeding it through an edge suppresses that activation.
+`nefor.graph.source<T>` captures and emits a value checked against `T`. More generally, any exposed node whose complete input type is exactly `Unit` may be an unfed root and receives one automatic activation; feeding it through an edge suppresses that activation. An ADT or product that merely contains `Unit` still requires an explicit input.
 
 `nefor.graph.output<T>` is a concrete `T -> T` identity node and the result boundary. A graph must contain exactly one, it must be terminal, and every ordinary node must be reachable from a root and able to reach it. <code>nefor.graph.`output-for`</code> derives the compatible type from a preceding node.
 

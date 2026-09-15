@@ -23,9 +23,7 @@ A program may type-check as code but return an invalid concrete topology. Compil
 
 ### Boundary structure
 
-- Only nodes whose input accepts `Unit` may have zero incoming edges, including an ADT with a `Unit` alternative. An unfed root receives exactly one automatic `Unit`
-  activation; an incoming route or explicit input message suppresses it. A
-  product containing `Unit` still needs its complete input.
+- Only nodes whose complete input type is exactly `Unit` may have zero incoming edges. An ADT or product that merely contains `Unit` still requires an explicit input. An unfed exact-`Unit` root receives one automatic activation; an incoming route or explicit input message suppresses it.
 - Exactly one real `output<T>` must exist.
 - The output is terminal and cannot source another edge.
 - Every ordinary node must be root-reachable and able to reach the output.

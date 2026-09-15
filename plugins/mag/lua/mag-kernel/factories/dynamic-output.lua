@@ -67,7 +67,7 @@ function M.construct(id, _, emit)
     if value.collection ~= collection then
       return failure("dynamic_output_collection_changed", value)
     end
-    if value.index ~= nil then
+    if constructor == "Item" then
       if type(value.index) ~= "number" or value.index < 0 or value.index % 1 ~= 0
           or value.value == nil or values[value.index] ~= nil
           or (count_value ~= nil and value.index >= count_value) then
@@ -80,14 +80,12 @@ function M.construct(id, _, emit)
       semantic_values[value.index] = type(semantic_indexed) == "table"
         and semantic_indexed.value or value.value
       received = received + 1
-    elseif value.count ~= nil then
+    else
       if count_value ~= nil or type(value.count) ~= "number" or value.count < 0
           or value.count % 1 ~= 0 or received > value.count then
         return failure("dynamic_output_invalid_count", value)
       end
       count_value = value.count
-    else
-      return failure("dynamic_output_unknown_value", value)
     end
     return finish_if_ready()
   end
