@@ -21,6 +21,11 @@ unsafe extern "C" {
 }
 
 static SIGNING_LOCK: Mutex<()> = Mutex::new(());
+const CONTROLLED_TIMEOUT_MILLIS: u64 = 200;
+#[cfg(target_os = "macos")]
+const PREPARED_FIXTURE_BUDGET: Duration = Duration::from_secs(3);
+#[cfg(not(target_os = "macos"))]
+const PREPARED_FIXTURE_BUDGET: Duration = Duration::from_secs(1);
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -144,7 +149,7 @@ fn prepared_runner_aggregates_failure_timeout_and_later_success() {
                 &fixture,
                 &repository,
                 "hang",
-                Some(200),
+                Some(CONTROLLED_TIMEOUT_MILLIS),
                 Some(&descendant_pid),
             ),
             fixture_artifact(
@@ -158,7 +163,10 @@ fn prepared_runner_aggregates_failure_timeout_and_later_success() {
         ],
         doctest_targets: Vec::new(),
     };
-    let summary = execute_prepared_manifest(&manifest, Duration::from_secs(5), &[], &root).unwrap();
+    let fixture_count = u32::try_from(manifest.tests().count()).unwrap();
+    let deadline =
+        PREPARED_FIXTURE_BUDGET * fixture_count + Duration::from_millis(CONTROLLED_TIMEOUT_MILLIS);
+    let summary = execute_prepared_manifest(&manifest, deadline, &[], &root).unwrap();
     assert_eq!(summary.passed, 1);
     assert_eq!(summary.failed, 1);
     assert_eq!(summary.timed_out, 1);

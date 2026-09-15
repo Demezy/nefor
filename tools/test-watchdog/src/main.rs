@@ -172,7 +172,6 @@ fn run(config: &Config) -> io::Result<RunResult> {
         artifact_dir.join("command.argv.txt"),
         format!("{command_display}\n"),
     )?;
-    let started = Instant::now();
     eprintln!("=== WATCHDOG PHASE START: {} ===", config.phase);
     eprintln!("command argv: {command_display}");
     eprintln!("deadline: {:.3}s", config.timeout.as_secs_f64());
@@ -206,6 +205,7 @@ fn run(config: &Config) -> io::Result<RunResult> {
         .ok_or_else(|| io::Error::other("missing stderr"))?;
     let stdout_thread = tee(stdout, artifact_dir.join("stdout.log"), false);
     let stderr_thread = tee(stderr, artifact_dir.join("stderr.log"), true);
+    let started = Instant::now();
 
     let mut timed_out = false;
     let status = loop {
@@ -570,16 +570,8 @@ mod tests {
     #[test]
     fn timeout_terminates_descendant_process_group() {
         let root = temp_root("descendants");
-        let pid_file = root.join("descendant.pid");
         let fixture = root.join("fixture.sh");
-        fs::write(
-            &fixture,
-            format!(
-                "#!/bin/sh\nsleep 30 &\necho $! > '{}'\nwait\n",
-                pid_file.display()
-            ),
-        )
-        .unwrap();
+        fs::write(&fixture, "#!/bin/sh\nsleep 30 &\necho $!\nwait\n").unwrap();
         fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
         let result = run(&Config {
             phase: "descendants".to_owned(),
@@ -590,7 +582,7 @@ mod tests {
         })
         .unwrap();
         assert!(result.timed_out);
-        let descendant: i32 = fs::read_to_string(pid_file)
+        let descendant: i32 = fs::read_to_string(result.artifact_dir.join("stdout.log"))
             .unwrap()
             .trim()
             .parse()
