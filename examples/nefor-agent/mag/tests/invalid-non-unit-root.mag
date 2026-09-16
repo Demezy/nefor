@@ -4,5 +4,5 @@ import nefor.graph.{}
 // A root has no upstream value. Its input must therefore accept the
 // topology-derived Unit activation.
 let unfed = nefor.graph.identity("unfed", type_tag<String>())
-let result = nefor.graph.`output-for`("result", unfed)
-nefor.artifact.compile((|graph| => nefor.graph.`add-edges`(graph, [nefor.graph.edge(unfed, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
+let result = nefor.graph.output_for("result", unfed)
+nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(unfed, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)

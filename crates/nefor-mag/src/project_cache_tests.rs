@@ -26,7 +26,7 @@ impl Fixture {
         };
         this.write(
             "main.mag",
-            "import a.{}\nartifact {value: a.value, note: read(\"note.txt\"), data: `read-json`(\"data.json\")}",
+            "import a.{}\nartifact {value: a.value, note: read(\"note.txt\"), data: read_json(\"data.json\")}",
         );
         this.write("a.mag", "import b.{}\nlet value = b.value");
         this.write("b.mag", "let value = 1");

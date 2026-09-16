@@ -764,9 +764,9 @@ import nefor.worktree.{{}}
 
 let start = nefor.graph.source("start", type_tag<Unit>(), nil)
 let workspace = {constructor}
-let result = nefor.graph.`output-for`("result", workspace)
+let result = nefor.graph.output_for("result", workspace)
 
-nefor.artifact.compile((|graph| => nefor.graph.`add-edges`(graph, [
+nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [
   nefor.graph.edge(start, workspace),
   nefor.graph.edge(workspace, result),
 ])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#
@@ -928,11 +928,11 @@ import nefor.node.{}
 
 let draft: nefor.contracts.TextAnswer = "draft"
 let subject = nefor.graph.source("subject", type_tag<nefor.contracts.TextAnswer>(), draft)
-let approval = nefor.actors.`approval-gate`(nefor.actors.ApprovalConfig {id: "approval", prompt: "Ship it?"})
+let approval = nefor.actors.approval_gate(nefor.actors.ApprovalConfig {id: "approval", prompt: "Ship it?"})
 let flow = nefor.node.`>>>`(subject, approval)
-let result = nefor.graph.`output-for`("result", flow)
+let result = nefor.graph.output_for("result", flow)
 
-nefor.artifact.compile((|graph| => nefor.graph.`add-edges`(graph, [nefor.graph.edge(flow, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#
+nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(flow, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#
 }
 
 #[tokio::test]
@@ -1138,7 +1138,7 @@ async fn canonical_chat_approval_delta_crosses_the_typed_plugin_boundary() {
     .unwrap();
     std::fs::write(
         source_dir.join("reply.mag"),
-        "artifact(`read-json`(\"reply.json\"))",
+        "artifact(read_json(\"reply.json\"))",
     )
     .unwrap();
     let cached_delta = build_twice(&mut reader, &mut stdin, &source_dir, "reply.mag").await;
@@ -1350,7 +1350,7 @@ async fn project_build_process_restart_hit_and_cold_load_equivalence() {
     .unwrap();
     std::fs::write(
         project.path().join("main.mag"),
-        "artifact(`read-json`(\"main.json\"))",
+        "artifact(read_json(\"main.json\"))",
     )
     .unwrap();
     let mut previous = None;

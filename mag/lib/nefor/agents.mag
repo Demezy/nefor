@@ -17,69 +17,69 @@ type AgentInputEnvelope {kind: String, value: Unit}
 // Reusable agent constructors stay generic over the configuration-owned model
 // vocabulary. A consumer supplies only its typed resolver, selected model, and
 // tools; Nefor owns the graph construction once.
-let `with-tools`<M, I, O>: fn(fn(M) -> nefor.actors.AuthoredModel, M, String, String, List<String>, TypeTag<I>, TypeTag<O>, Int) -> nefor.graph.Node<I, core.types.Result<nefor.contracts.AgentError, O>> = |`resolve-model`, model, id, system, tools, `input-type`, `output-type`, `max-corrections`| => nefor.actors.agent(`resolve-model`, nefor.actors.AgentConfig<M> {id: id, model: model, system: system, tools: tools, `da-policy`: nefor.contracts.`no-da-policy`(), `max-corrections`: `max-corrections`}, `input-type`, `output-type`)
+let with_tools<M, I, O>: fn(fn(M) -> nefor.actors.AuthoredModel, M, String, String, List<String>, TypeTag<I>, TypeTag<O>, Int) -> nefor.graph.Node<I, core.types.Result<nefor.contracts.AgentError, O>> = |resolve_model, model, id, system, tools, input_type, output_type, max_corrections| => nefor.actors.agent(resolve_model, nefor.actors.AgentConfig<M> {id: id, model: model, system: system, tools: tools, da_policy: nefor.contracts.no_da_policy(), max_corrections: max_corrections}, input_type, output_type)
 
-let `with-resolved-tools`<M, I, O>: fn(fn(M) -> nefor.actors.ResolvedModel, M, String, String, List<String>, TypeTag<I>, TypeTag<O>, Int) -> nefor.graph.Node<I, core.types.Result<nefor.contracts.AgentError, O>> = |`resolve-model`, model, id, system, tools, `input-type`, `output-type`, `max-corrections`| => `with-tools`(((|selected| => named(nefor.actors.AuthoredModel, ResolvedModel, `resolve-model`(selected))) : fn(M) -> nefor.actors.AuthoredModel), model, id, system, tools, `input-type`, `output-type`, `max-corrections`)
+let with_resolved_tools<M, I, O>: fn(fn(M) -> nefor.actors.ResolvedModel, M, String, String, List<String>, TypeTag<I>, TypeTag<O>, Int) -> nefor.graph.Node<I, core.types.Result<nefor.contracts.AgentError, O>> = |resolve_model, model, id, system, tools, input_type, output_type, max_corrections| => with_tools(((|selected| => named(nefor.actors.AuthoredModel, ResolvedModel, resolve_model(selected))) : fn(M) -> nefor.actors.AuthoredModel), model, id, system, tools, input_type, output_type, max_corrections)
 
-let `dynamic-with-tools`<M, I, O>: fn(fn(M) -> nefor.actors.AuthoredModel, M, String, String, List<String>, TypeTag<I>, TypeTag<O>, Int) -> nefor.graph.Node<I, core.types.Result<nefor.contracts.AgentError, nefor.dynamic.DynamicList<O>>> = |`resolve-model`, model, id, system, tools, `input-type`, `item-type`, `max-corrections`| => nefor.actors.`dynamic-agent`(`resolve-model`, nefor.actors.AgentConfig<M> {id: id, model: model, system: system, tools: tools, `da-policy`: nefor.contracts.`no-da-policy`(), `max-corrections`: `max-corrections`}, `input-type`, `item-type`)
+let dynamic_with_tools<M, I, O>: fn(fn(M) -> nefor.actors.AuthoredModel, M, String, String, List<String>, TypeTag<I>, TypeTag<O>, Int) -> nefor.graph.Node<I, core.types.Result<nefor.contracts.AgentError, nefor.dynamic.DynamicList<O>>> = |resolve_model, model, id, system, tools, input_type, item_type, max_corrections| => nefor.actors.dynamic_agent(resolve_model, nefor.actors.AgentConfig<M> {id: id, model: model, system: system, tools: tools, da_policy: nefor.contracts.no_da_policy(), max_corrections: max_corrections}, input_type, item_type)
 
-let `dynamic-with-resolved-tools`<M, I, O>: fn(fn(M) -> nefor.actors.ResolvedModel, M, String, String, List<String>, TypeTag<I>, TypeTag<O>, Int) -> nefor.graph.Node<I, core.types.Result<nefor.contracts.AgentError, nefor.dynamic.DynamicList<O>>> = |`resolve-model`, model, id, system, tools, `input-type`, `item-type`, `max-corrections`| => `dynamic-with-tools`(((|selected| => named(nefor.actors.AuthoredModel, ResolvedModel, `resolve-model`(selected))) : fn(M) -> nefor.actors.AuthoredModel), model, id, system, tools, `input-type`, `item-type`, `max-corrections`)
+let dynamic_with_resolved_tools<M, I, O>: fn(fn(M) -> nefor.actors.ResolvedModel, M, String, String, List<String>, TypeTag<I>, TypeTag<O>, Int) -> nefor.graph.Node<I, core.types.Result<nefor.contracts.AgentError, nefor.dynamic.DynamicList<O>>> = |resolve_model, model, id, system, tools, input_type, item_type, max_corrections| => dynamic_with_tools(((|selected| => named(nefor.actors.AuthoredModel, ResolvedModel, resolve_model(selected))) : fn(M) -> nefor.actors.AuthoredModel), model, id, system, tools, input_type, item_type, max_corrections)
 
 // Build the one structural template shape currently required by runtime
 // traversal. This is deliberately agent-specific rather than a generic node
 // serializer: every dynamic parameter and actor reference is explicit.
-let `template-port-from-stored`: fn(nefor.mag.ActorRef, nefor.graph.StoredPort) -> nefor.mag.TemplatePort = |actor, value| => nefor.mag.TemplatePort {actor: actor, `type`: get(value, "type"), type_id: get(value, "type_id"), wire: get(value, "wire")}
+let template_port_from_stored: fn(nefor.mag.ActorRef, nefor.graph.StoredPort) -> nefor.mag.TemplatePort = |actor, value| => nefor.mag.TemplatePort {actor: actor, `type`: get(value, "type"), type_id: get(value, "type_id"), wire: get(value, "wire")}
 
-let `template-actor`: fn(String, nefor.dynamic.ValueRef<String>, nefor.graph.Actor, List<nefor.mag.ScalarParameterBinding>) -> nefor.mag.TemplateActor = |slot, `id-ref`, value, bindings| => {
-  let reference = nefor.dynamic.`local-actor-ref`(slot)
-  nefor.mag.TemplateActor {slot: slot, id: get(`id-ref`, "id"), factory: get(value, "factory"), type_arguments: get(value, "type_arguments"), params: get(value, "params"), input: `template-port-from-stored`(reference, get(value, "input")), outputs: map(((|port| => `template-port-from-stored`(reference, port)) : fn(nefor.graph.StoredPort) -> nefor.mag.TemplatePort), get(value, "outputs")), parameter_bindings: bindings}
+let template_actor: fn(String, nefor.dynamic.ValueRef<String>, nefor.graph.Actor, List<nefor.mag.ScalarParameterBinding>) -> nefor.mag.TemplateActor = |slot, id_ref, value, bindings| => {
+  let reference = nefor.dynamic.local_actor_ref(slot)
+  nefor.mag.TemplateActor {slot: slot, id: get(id_ref, "id"), factory: get(value, "factory"), type_arguments: get(value, "type_arguments"), params: get(value, "params"), input: template_port_from_stored(reference, get(value, "input")), outputs: map(((|port| => template_port_from_stored(reference, port)) : fn(nefor.graph.StoredPort) -> nefor.mag.TemplatePort), get(value, "outputs")), parameter_bindings: bindings}
 }
 
-let `actor-with-id`: fn(List<nefor.graph.Actor>, String) -> nefor.graph.Actor = |actors, id| => first(filter(((|candidate| => (=)(get(candidate, "id"), id)) : fn(nefor.graph.Actor) -> Bool), actors))
+let actor_with_id: fn(List<nefor.graph.Actor>, String) -> nefor.graph.Actor = |actors, id| => first(filter(((|candidate| => (=)(get(candidate, "id"), id)) : fn(nefor.graph.Actor) -> Bool), actors))
 
-let `dynamic-template-with-tools`<M, O>: fn(fn(M) -> nefor.actors.AuthoredModel, M, String, nefor.dynamic.ValueRef<String>, nefor.dynamic.ValueRef<Int>, nefor.dynamic.ValueRef<String>, nefor.dynamic.ValueRef<String>, nefor.dynamic.ValueRef<String>, List<String>, TypeTag<O>, Int) -> nefor.dynamic.TemplateNode<Unit, core.types.Result<nefor.contracts.AgentError, O>> = |`resolve-model`, model, `traversal-id`, `collection-ref`, `index-ref`, `worker-id`, `root-id`, system, tools, `output-type`, `max-corrections`| => {
-  let concrete = `with-tools`(`resolve-model`, model, "template", "", tools, type_tag<Unit>(), `output-type`, `max-corrections`)
+let dynamic_template_with_tools<M, O>: fn(fn(M) -> nefor.actors.AuthoredModel, M, String, nefor.dynamic.ValueRef<String>, nefor.dynamic.ValueRef<Int>, nefor.dynamic.ValueRef<String>, nefor.dynamic.ValueRef<String>, nefor.dynamic.ValueRef<String>, List<String>, TypeTag<O>, Int) -> nefor.dynamic.TemplateNode<Unit, core.types.Result<nefor.contracts.AgentError, O>> = |resolve_model, model, traversal_id, collection_ref, index_ref, worker_id, root_id, system, tools, output_type, max_corrections| => {
+  let concrete = with_tools(resolve_model, model, "template", "", tools, type_tag<Unit>(), output_type, max_corrections)
   let actors = get(concrete, "actors")
-  let entry = `actor-with-id`(actors, "template.entry")
-  let llm = `actor-with-id`(actors, "template.llm")
-  let `run-tool` = `actor-with-id`(actors, "template.run-tool")
-  let `tool-result` = `actor-with-id`(actors, "template.tool-result")
-  let suffix = nefor.dynamic.`int-to-decimal-string-ref`(`index-ref`)
-  let `entry-id` = nefor.dynamic.`concat-strings-ref`([`worker-id`, nefor.dynamic.`capture-ref`(".entry", type_tag<String>())])
-  let `llm-id` = nefor.dynamic.`concat-strings-ref`([`worker-id`, nefor.dynamic.`capture-ref`(".llm", type_tag<String>())])
-  let `run-tool-id` = nefor.dynamic.`concat-strings-ref`([`worker-id`, nefor.dynamic.`capture-ref`(".run-tool", type_tag<String>())])
-  let `tool-result-id` = nefor.dynamic.`concat-strings-ref`([`worker-id`, nefor.dynamic.`capture-ref`(".tool-result", type_tag<String>())])
-  let `result-id` = nefor.dynamic.`concat-strings-ref`([nefor.dynamic.`capture-ref`(str(`traversal-id`, ".result."), type_tag<String>()), suffix])
-  let `result-input` = nefor.dynamic.`template-port`(nefor.dynamic.`local-actor-ref`("result"), type_tag<core.types.Result<nefor.contracts.AgentError, O>>(), "nefor.dynamic.IndexInput")
-  let `result-output` = nefor.dynamic.`template-port`(nefor.dynamic.`local-actor-ref`("result"), type_tag<nefor.dynamic.DynamicEvent<core.types.Result<nefor.contracts.AgentError, O>>>(), "nefor.dynamic.Event")
-  let collect = nefor.dynamic.`template-port`(nefor.dynamic.`existing-actor-ref`(str(`traversal-id`, ".output")), type_tag<nefor.dynamic.DynamicEvent<core.types.Result<nefor.contracts.AgentError, O>>>(), "nefor.dynamic.Collect")
-  let `result-params` = pack(nefor.dynamic.DynamicIndexParams {collection: `traversal-id`, index: 0})
-  let `result-actor` = nefor.mag.TemplateActor {slot: "result", id: get(`result-id`, "id"), factory: nefor.dynamic.`dynamic-index-factory`, type_arguments: [`type-evidence`(type_tag<core.types.Result<nefor.contracts.AgentError, O>>()), `type-evidence`(type_tag<nefor.dynamic.DynamicEvent<core.types.Result<nefor.contracts.AgentError, O>>>())], params: `result-params`, input: `result-input`, outputs: [`result-output`], parameter_bindings: [nefor.mag.ScalarParameterBinding {path: ["collection"], value: get(`collection-ref`, "id")}, nefor.mag.ScalarParameterBinding {path: ["index"], value: get(`index-ref`, "id")}]}
-  let `entry-ref` = nefor.dynamic.`local-actor-ref`("entry")
-  let `llm-ref` = nefor.dynamic.`local-actor-ref`("llm")
-  let `run-tool-ref` = nefor.dynamic.`local-actor-ref`("run-tool")
-  let `tool-result-ref` = nefor.dynamic.`local-actor-ref`("tool-result")
-  let `entry-template` = `template-actor`("entry", `entry-id`, entry, [])
-  let `llm-template` = `template-actor`("llm", `llm-id`, llm, [nefor.mag.ScalarParameterBinding {path: ["system"], value: get(system, "id")}])
-  let `run-tool-template` = `template-actor`("run-tool", `run-tool-id`, `run-tool`, [nefor.mag.ScalarParameterBinding {path: ["conversation_peer"], value: get(`llm-id`, "id")}])
-  let `tool-result-template` = `template-actor`("tool-result", `tool-result-id`, `tool-result`, [])
-  let `entry-in` = get(`entry-template`, "input")
-  let `entry-out` = first(get(`entry-template`, "outputs"))
-  let `llm-in` = get(`llm-template`, "input")
-  let `llm-tool-calls` = first(get(`llm-template`, "outputs"))
-  let `llm-result` = first(`remove-at`(get(`llm-template`, "outputs"), 0))
-  let `run-in` = get(`run-tool-template`, "input")
-  let `run-out` = first(get(`run-tool-template`, "outputs"))
-  let `tool-result-in` = get(`tool-result-template`, "input")
-  let `tool-result-out` = first(get(`tool-result-template`, "outputs"))
-  let routes = [nefor.mag.TemplateRoute {from: `entry-out`, to: `llm-in`, product_position: -1}, nefor.mag.TemplateRoute {from: `llm-tool-calls`, to: `run-in`, product_position: -1}, nefor.mag.TemplateRoute {from: `run-out`, to: `tool-result-in`, product_position: -1}, nefor.mag.TemplateRoute {from: `tool-result-out`, to: `llm-in`, product_position: -1}, nefor.mag.TemplateRoute {from: `llm-result`, to: `result-input`, product_position: -1}, nefor.mag.TemplateRoute {from: `result-output`, to: collect, product_position: -1}]
-  let `unit-descriptor` = `type-evidence`(type_tag<Unit>())
-  let message = nefor.mag.TemplateMessage {to: `entry-in`, semantic_type: `unit-descriptor`, semantic_type_id: `type-id`(`unit-descriptor`), content: pack(AgentInputEnvelope {kind: "nefor.agent.Input", value: nil})}
-  let `root-segment` = nefor.dynamic.`bound-segment`(`root-id`)
-  let `worker-segment` = nefor.dynamic.`fixed-segment`("worker")
-  let `result-segment` = nefor.dynamic.`fixed-segment`("result")
-  let template = nefor.mag.DeltaTemplate {types: (core.map.empty(type_tag<String>()): Map<String, TypeDescriptor>), actors: [`entry-template`, `llm-template`, `run-tool-template`, `tool-result-template`, `result-actor`], routes: routes, messages: [message], nodes: [nefor.mag.TemplateLogicalNode {path: [`root-segment`], members: ([]: List<nefor.mag.LocalActorRef>)}, nefor.mag.TemplateLogicalNode {path: [`root-segment`, `worker-segment`], members: ([]: List<nefor.mag.LocalActorRef>)}, nefor.mag.TemplateLogicalNode {path: [`root-segment`, `worker-segment`, nefor.dynamic.`fixed-segment`("entry")], members: [nefor.mag.LocalActorRef {slot: "entry"}]}, nefor.mag.TemplateLogicalNode {path: [`root-segment`, `worker-segment`, nefor.dynamic.`fixed-segment`("llm")], members: [nefor.mag.LocalActorRef {slot: "llm"}]}, nefor.mag.TemplateLogicalNode {path: [`root-segment`, `worker-segment`, nefor.dynamic.`fixed-segment`("run-tool")], members: [nefor.mag.LocalActorRef {slot: "run-tool"}]}, nefor.mag.TemplateLogicalNode {path: [`root-segment`, `worker-segment`, nefor.dynamic.`fixed-segment`("tool-result")], members: [nefor.mag.LocalActorRef {slot: "tool-result"}]}, nefor.mag.TemplateLogicalNode {path: [`root-segment`, `result-segment`], members: [nefor.mag.LocalActorRef {slot: "result"}]}], actor_reference_relocations: ([]: List<nefor.mag.ActorReferenceRelocation>)}
-  let captures = nefor.dynamic.`merge-captures`([get(`collection-ref`, "captures"), get(`index-ref`, "captures"), get(`worker-id`, "captures"), get(`root-id`, "captures"), get(system, "captures"), get(`entry-id`, "captures"), get(`llm-id`, "captures"), get(`run-tool-id`, "captures"), get(`tool-result-id`, "captures"), get(`result-id`, "captures")])
-  let expressions = nefor.dynamic.`merge-expressions`([get(`collection-ref`, "expressions"), get(`index-ref`, "expressions"), get(`worker-id`, "expressions"), get(`root-id`, "expressions"), get(system, "expressions"), get(`entry-id`, "expressions"), get(`llm-id`, "expressions"), get(`run-tool-id`, "expressions"), get(`tool-result-id`, "expressions"), get(`result-id`, "expressions")])
-  nefor.dynamic.TemplateNode<Unit, core.types.Result<nefor.contracts.AgentError, O>> {template: template, input: `entry-in`, output: `result-output`, root: `traversal-id`, id_ref: `worker-id`, captures: captures, expressions: expressions}
+  let entry = actor_with_id(actors, "template.entry")
+  let llm = actor_with_id(actors, "template.llm")
+  let run_tool = actor_with_id(actors, "template.run-tool")
+  let tool_result = actor_with_id(actors, "template.tool-result")
+  let suffix = nefor.dynamic.int_to_decimal_string_ref(index_ref)
+  let entry_id = nefor.dynamic.concat_strings_ref([worker_id, nefor.dynamic.capture_ref(".entry", type_tag<String>())])
+  let llm_id = nefor.dynamic.concat_strings_ref([worker_id, nefor.dynamic.capture_ref(".llm", type_tag<String>())])
+  let run_tool_id = nefor.dynamic.concat_strings_ref([worker_id, nefor.dynamic.capture_ref(".run-tool", type_tag<String>())])
+  let tool_result_id = nefor.dynamic.concat_strings_ref([worker_id, nefor.dynamic.capture_ref(".tool-result", type_tag<String>())])
+  let result_id = nefor.dynamic.concat_strings_ref([nefor.dynamic.capture_ref(str(traversal_id, ".result."), type_tag<String>()), suffix])
+  let result_input = nefor.dynamic.template_port(nefor.dynamic.local_actor_ref("result"), type_tag<core.types.Result<nefor.contracts.AgentError, O>>(), "nefor.dynamic.IndexInput")
+  let result_output = nefor.dynamic.template_port(nefor.dynamic.local_actor_ref("result"), type_tag<nefor.dynamic.DynamicEvent<core.types.Result<nefor.contracts.AgentError, O>>>(), "nefor.dynamic.Event")
+  let collect = nefor.dynamic.template_port(nefor.dynamic.existing_actor_ref(str(traversal_id, ".output")), type_tag<nefor.dynamic.DynamicEvent<core.types.Result<nefor.contracts.AgentError, O>>>(), "nefor.dynamic.Collect")
+  let result_params = pack(nefor.dynamic.DynamicIndexParams {collection: traversal_id, index: 0})
+  let result_actor = nefor.mag.TemplateActor {slot: "result", id: get(result_id, "id"), factory: nefor.dynamic.dynamic_index_factory, type_arguments: [type_evidence(type_tag<core.types.Result<nefor.contracts.AgentError, O>>()), type_evidence(type_tag<nefor.dynamic.DynamicEvent<core.types.Result<nefor.contracts.AgentError, O>>>())], params: result_params, input: result_input, outputs: [result_output], parameter_bindings: [nefor.mag.ScalarParameterBinding {path: ["collection"], value: get(collection_ref, "id")}, nefor.mag.ScalarParameterBinding {path: ["index"], value: get(index_ref, "id")}]}
+  let entry_ref = nefor.dynamic.local_actor_ref("entry")
+  let llm_ref = nefor.dynamic.local_actor_ref("llm")
+  let run_tool_ref = nefor.dynamic.local_actor_ref("run-tool")
+  let tool_result_ref = nefor.dynamic.local_actor_ref("tool-result")
+  let entry_template = template_actor("entry", entry_id, entry, [])
+  let llm_template = template_actor("llm", llm_id, llm, [nefor.mag.ScalarParameterBinding {path: ["system"], value: get(system, "id")}])
+  let run_tool_template = template_actor("run-tool", run_tool_id, run_tool, [nefor.mag.ScalarParameterBinding {path: ["conversation_peer"], value: get(llm_id, "id")}])
+  let tool_result_template = template_actor("tool-result", tool_result_id, tool_result, [])
+  let entry_in = get(entry_template, "input")
+  let entry_out = first(get(entry_template, "outputs"))
+  let llm_in = get(llm_template, "input")
+  let llm_tool_calls = first(get(llm_template, "outputs"))
+  let llm_result = first(remove_at(get(llm_template, "outputs"), 0))
+  let run_in = get(run_tool_template, "input")
+  let run_out = first(get(run_tool_template, "outputs"))
+  let tool_result_in = get(tool_result_template, "input")
+  let tool_result_out = first(get(tool_result_template, "outputs"))
+  let routes = [nefor.mag.TemplateRoute {from: entry_out, to: llm_in, product_position: -1}, nefor.mag.TemplateRoute {from: llm_tool_calls, to: run_in, product_position: -1}, nefor.mag.TemplateRoute {from: run_out, to: tool_result_in, product_position: -1}, nefor.mag.TemplateRoute {from: tool_result_out, to: llm_in, product_position: -1}, nefor.mag.TemplateRoute {from: llm_result, to: result_input, product_position: -1}, nefor.mag.TemplateRoute {from: result_output, to: collect, product_position: -1}]
+  let unit_descriptor = type_evidence(type_tag<Unit>())
+  let message = nefor.mag.TemplateMessage {to: entry_in, semantic_type: unit_descriptor, semantic_type_id: type_id(unit_descriptor), content: pack(AgentInputEnvelope {kind: "nefor.agent.Input", value: nil})}
+  let root_segment = nefor.dynamic.bound_segment(root_id)
+  let worker_segment = nefor.dynamic.fixed_segment("worker")
+  let result_segment = nefor.dynamic.fixed_segment("result")
+  let template = nefor.mag.DeltaTemplate {types: (core.map.empty(type_tag<String>()): Map<String, TypeDescriptor>), actors: [entry_template, llm_template, run_tool_template, tool_result_template, result_actor], routes: routes, messages: [message], nodes: [nefor.mag.TemplateLogicalNode {path: [root_segment], members: ([]: List<nefor.mag.LocalActorRef>)}, nefor.mag.TemplateLogicalNode {path: [root_segment, worker_segment], members: ([]: List<nefor.mag.LocalActorRef>)}, nefor.mag.TemplateLogicalNode {path: [root_segment, worker_segment, nefor.dynamic.fixed_segment("entry")], members: [nefor.mag.LocalActorRef {slot: "entry"}]}, nefor.mag.TemplateLogicalNode {path: [root_segment, worker_segment, nefor.dynamic.fixed_segment("llm")], members: [nefor.mag.LocalActorRef {slot: "llm"}]}, nefor.mag.TemplateLogicalNode {path: [root_segment, worker_segment, nefor.dynamic.fixed_segment("run-tool")], members: [nefor.mag.LocalActorRef {slot: "run-tool"}]}, nefor.mag.TemplateLogicalNode {path: [root_segment, worker_segment, nefor.dynamic.fixed_segment("tool-result")], members: [nefor.mag.LocalActorRef {slot: "tool-result"}]}, nefor.mag.TemplateLogicalNode {path: [root_segment, result_segment], members: [nefor.mag.LocalActorRef {slot: "result"}]}], actor_reference_relocations: ([]: List<nefor.mag.ActorReferenceRelocation>)}
+  let captures = nefor.dynamic.merge_captures([get(collection_ref, "captures"), get(index_ref, "captures"), get(worker_id, "captures"), get(root_id, "captures"), get(system, "captures"), get(entry_id, "captures"), get(llm_id, "captures"), get(run_tool_id, "captures"), get(tool_result_id, "captures"), get(result_id, "captures")])
+  let expressions = nefor.dynamic.merge_expressions([get(collection_ref, "expressions"), get(index_ref, "expressions"), get(worker_id, "expressions"), get(root_id, "expressions"), get(system, "expressions"), get(entry_id, "expressions"), get(llm_id, "expressions"), get(run_tool_id, "expressions"), get(tool_result_id, "expressions"), get(result_id, "expressions")])
+  nefor.dynamic.TemplateNode<Unit, core.types.Result<nefor.contracts.AgentError, O>> {template: template, input: entry_in, output: result_output, root: traversal_id, id_ref: worker_id, captures: captures, expressions: expressions}
 }

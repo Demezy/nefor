@@ -7,7 +7,7 @@ let title = modules.labels.title
 
 // File inputs become immutable values in the loaded source snapshot.
 let source = read("data/note.md")
-let manifest = `read-json`("data/manifest.json")
-let `project-name`: String = get(manifest, "project")
+let manifest = read_json("data/manifest.json")
+let project_name: String = get(manifest, "project")
 
-artifact(ExampleArtifact {title: title, source: source, project: `project-name`, label: modules.labels.`number-label`(4)})
+artifact(ExampleArtifact {title: title, source: source, project: project_name, label: modules.labels.number_label(4)})

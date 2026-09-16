@@ -91,7 +91,7 @@ fn nominal_adt_descriptors_schemas_and_ids_include_owner_arguments() {
     let artifact = compile(
         r#"
         type Result<E, A> = Ok(A) | Error(E)
-artifact {text: `type-evidence`(type_tag<Result<String, Int>>()), bool: `type-evidence`(type_tag<Result<Bool, Int>>()), text_id: `type-id`(`type-evidence`(type_tag<Result<String, Int>>())), bool_id: `type-id`(`type-evidence`(type_tag<Result<Bool, Int>>())), schema: `type-schema`(type_tag<Result<String, Int>>())}
+artifact {text: type_evidence(type_tag<Result<String, Int>>()), bool: type_evidence(type_tag<Result<Bool, Int>>()), text_id: type_id(type_evidence(type_tag<Result<String, Int>>())), bool_id: type_id(type_evidence(type_tag<Result<Bool, Int>>())), schema: type_schema(type_tag<Result<String, Int>>())}
         "#,
         &root,
     )
@@ -217,10 +217,10 @@ fn raw_multiline_strings_support_scala_style_margins() {
     let root = workspace("raw-multiline-strings");
     let artifact = compile(
         r#"
-          let script = `strip-margin`("""|set -e
+          let script = strip_margin("""|set -e
                               |echo 'export PATH="$HOME/.local/bin:$PATH"'
                               |find . \( -name '*.mag' -o -name '*.md' \)""")
-artifact {script: script, `single-line`: replace(script, "\n", " ")}
+artifact {script: script, single_line: replace(script, "\n", " ")}
         "#,
         &root,
     )
@@ -230,7 +230,7 @@ artifact {script: script, `single-line`: replace(script, "\n", " ")}
         artifact,
         json!({
             "script": "set -e\necho 'export PATH=\"$HOME/.local/bin:$PATH\"'\nfind . \\( -name '*.mag' -o -name '*.md' \\)",
-            "single-line": "set -e echo 'export PATH=\"$HOME/.local/bin:$PATH\"' find . \\( -name '*.mag' -o -name '*.md' \\)"
+            "single_line": "set -e echo 'export PATH=\"$HOME/.local/bin:$PATH\"' find . \\( -name '*.mag' -o -name '*.md' \\)"
         })
     );
 }
@@ -269,8 +269,8 @@ fn direct_let_bindings_and_mutual_recursion_share_a_lexical_scope() {
     let artifact = compile(
         r#"
           let finished = "done"
-let first: fn(List<Int>) -> String = |items| => if (=)(count(items), 0) then finished else second(`remove-at`(items, 0))
-let second: fn(List<Int>) -> String = |items| => if (=)(count(items), 0) then finished else first(`remove-at`(items, 0))
+let first: fn(List<Int>) -> String = |items| => if (=)(count(items), 0) then finished else second(remove_at(items, 0))
+let second: fn(List<Int>) -> String = |items| => if (=)(count(items), 0) then finished else first(remove_at(items, 0))
 artifact(first([1, 2, 3]))
         "#,
         &root,
@@ -308,8 +308,8 @@ artifact(x)
 
     let call_through = compile(
         r#"
-          let `read-value`: fn() -> String = | | => value
-let value = `read-value`()
+          let read_value: fn() -> String = | | => value
+let value = read_value()
 artifact(value)
         "#,
         &root,
@@ -317,7 +317,7 @@ artifact(value)
     .unwrap_err()
     .to_string();
     assert!(
-        call_through.contains("value -> read-value -> value"),
+        call_through.contains("value -> read_value -> value"),
         "{call_through}"
     );
 }
@@ -451,9 +451,9 @@ fn nested_same_name_generic_binders_are_fresh_per_candidate() {
         r#"
           type Port<T> {value: T}
 type Continue<T> {value: T}
-let `store-port`<T>: fn(Port<T>) -> String = |port| => "stored"
-let `retry-gate`<T>: fn(Port<Continue<T>>) -> String = |continued| => `store-port`(continued)
-artifact(`retry-gate`(Port<Continue<Int>> {value: Continue<Int> {value: 1}}))
+let store_port<T>: fn(Port<T>) -> String = |port| => "stored"
+let retry_gate<T>: fn(Port<Continue<T>>) -> String = |continued| => store_port(continued)
+artifact(retry_gate(Port<Continue<Int>> {value: Continue<Int> {value: 1}}))
         "#,
         &root,
     )
@@ -466,10 +466,10 @@ fn ambient_generic_variables_remain_rigid_during_candidate_instantiation() {
     let root = workspace("rigid-ambient-generics");
     let error = compile(
         r#"
-          let `takes-string`: fn(fn(String) -> String) -> String = |candidate| => candidate("value")
+          let takes_string: fn(fn(String) -> String) -> String = |candidate| => candidate("value")
 let outer<T>: fn(T) -> String = |x| => {
 let local<U>: fn(U) -> T = |ignored| => x
-`takes-string`(local)
+takes_string(local)
 }
 artifact {}
         "#,
@@ -491,10 +491,10 @@ fn expected_results_resolve_return_only_overloads_and_generics() {
           let choose: fn() -> Int = | | => 7
 let choose: fn() -> String = | | => "selected"
 let produce<T>: fn() -> T = | | => ("generic": T)
-let `produce-string`: fn() -> String = | | => produce()
-let `invoke-string`: fn(fn(Unit) -> String) -> String = |producer| => producer(nil)
-let `unit-producer`<T>: fn(Unit) -> T = |ignored| => ("higher-order": T)
-artifact {overload: (choose(): String), declared: `produce-string`(), `higher-order`: `invoke-string`(`unit-producer`)}
+let produce_string: fn() -> String = | | => produce()
+let invoke_string: fn(fn(Unit) -> String) -> String = |producer| => producer(nil)
+let unit_producer<T>: fn(Unit) -> T = |ignored| => ("higher_order": T)
+artifact {overload: (choose(): String), declared: produce_string(), higher_order: invoke_string(unit_producer)}
         "#,
         &root,
     )
@@ -504,7 +504,7 @@ artifact {overload: (choose(): String), declared: `produce-string`(), `higher-or
         json!({
             "overload": "selected",
             "declared": "generic",
-            "higher-order": "higher-order",
+            "higher_order": "higher_order",
         })
     );
 }
@@ -531,8 +531,8 @@ fn expected_function_types_resolve_value_function_name_overloads() {
         r#"
           let transform = "plain"
 let transform: fn(Int) -> String = |value| => str(value)
-let `apply-one`: fn(fn(Int) -> String) -> String = |operation| => operation(7)
-artifact([(transform: String), `apply-one`(transform)])
+let apply_one: fn(fn(Int) -> String) -> String = |operation| => operation(7)
+artifact([(transform: String), apply_one(transform)])
         "#,
         &root,
     )
@@ -547,13 +547,13 @@ fn nested_scopes_preserve_all_differently_typed_overloads() {
     let artifact = compile(
         r#"
           let render: fn(Int) -> String = |value| => str(value)
-let `use-outer`: fn(String) -> String = |render| => str((render: String), render(7))
+let use_outer: fn(String) -> String = |render| => str((render: String), render(7))
 let run: fn() -> List<String> = | | => {
 let show: fn(Int) -> String = |value| => str(value)
 let show: fn(Bool) -> String = |value| => str(value)
 [show(1), show(true)]
 }
-artifact {outer: `use-outer`("value="), local: run()}
+artifact {outer: use_outer("value="), local: run()}
         "#,
         &root,
     )
@@ -571,7 +571,7 @@ fn closures_inside_strict_values_see_the_completed_peer_frame() {
     let artifact = compile(
         r#"
           type Handlers {even: fn(List<Int>) -> Bool, odd: fn(List<Int>) -> Bool}
-let handlers = Handlers {even: ((|items| => if (=)(count(items), 0) then true else get(handlers, "odd")(`remove-at`(items, 0))): fn(List<Int>) -> Bool), odd: ((|items| => if (=)(count(items), 0) then false else get(handlers, "even")(`remove-at`(items, 0))): fn(List<Int>) -> Bool)}
+let handlers = Handlers {even: ((|items| => if (=)(count(items), 0) then true else get(handlers, "odd")(remove_at(items, 0))): fn(List<Int>) -> Bool), odd: ((|items| => if (=)(count(items), 0) then false else get(handlers, "even")(remove_at(items, 0))): fn(List<Int>) -> Bool)}
 artifact(get(handlers, "even")([1, 2]))
         "#,
         &root,
@@ -588,8 +588,8 @@ fn direct_let_builds_nested_shared_scopes_and_checks_parameter_collisions() {
         r#"
           let run: fn(List<Int>) -> String = |items| => {
 let finished = "nested"
-let first: fn(List<Int>) -> String = |remaining| => if (=)(count(remaining), 0) then finished else second(`remove-at`(remaining, 0))
-let second: fn(List<Int>) -> String = |remaining| => if (=)(count(remaining), 0) then finished else first(`remove-at`(remaining, 0))
+let first: fn(List<Int>) -> String = |remaining| => if (=)(count(remaining), 0) then finished else second(remove_at(remaining, 0))
+let second: fn(List<Int>) -> String = |remaining| => if (=)(count(remaining), 0) then finished else first(remove_at(remaining, 0))
 first(items)
 }
 artifact(run([1, 2]))
@@ -602,7 +602,7 @@ artifact(run([1, 2]))
     let collision = compile(
         r#"
           let item = 1
-let `use-item`: fn(Int) -> Int = |item| => item
+let use_item: fn(Int) -> Int = |item| => item
 artifact {}
         "#,
         &root,
@@ -639,8 +639,8 @@ fn qualified_nominal_constructors_do_not_duck_type() {
         r#"
           import left.types.{}
 import right.types.{}
-let `accept-left`: fn(left.types.Payload) -> left.types.Payload = |value| => value
-artifact(`accept-left`(right.types.Payload {value: 1}))
+let accept_left: fn(left.types.Payload) -> left.types.Payload = |value| => value
+artifact(accept_left(right.types.Payload {value: 1}))
         "#,
     )
     .unwrap();
@@ -659,7 +659,7 @@ fn product_type_evidence_preserves_order_and_grouping() {
     let root = workspace("product-grouping");
     let artifact = compile(
         r#"
-          artifact {left: `type-evidence`(type_tag<((Int, String), Bool)>()), right: `type-evidence`(type_tag<(Int, (String, Bool))>()), flat: `type-evidence`(type_tag<(Int, String, Bool)>())}
+          artifact {left: type_evidence(type_tag<((Int, String), Bool)>()), right: type_evidence(type_tag<(Int, (String, Bool))>()), flat: type_evidence(type_tag<(Int, String, Bool)>())}
         "#,
         &root,
     )
@@ -697,7 +697,7 @@ fn immutable_host_inputs_expose_only_typed_projections() {
     let root = workspace("inputs");
     fs::write(
         root.join("core/input.mag"),
-        "type TypeScheme {input_tags: List<String>, outputs: List<String>}\ntype Contract {identity: String, type_scheme: TypeScheme}\nlet contracts = `host-input`(\"factory_contracts\", type_tag<List<Contract>>())",
+        "type TypeScheme {input_tags: List<String>, outputs: List<String>}\ntype Contract {identity: String, type_scheme: TypeScheme}\nlet contracts = host_input(\"factory_contracts\", type_tag<List<Contract>>())",
     )
     .unwrap();
     fs::write(
@@ -737,7 +737,7 @@ fn host_input_projection_selects_the_hidden_capability_by_type() {
         root.join("main.mag"),
         r#"
           let inputs = 1
-artifact {local: (inputs: Int), host: `host-input`("message", type_tag<String>())}
+artifact {local: (inputs: Int), host: host_input("message", type_tag<String>())}
         "#,
     )
     .unwrap();
@@ -751,7 +751,7 @@ fn host_input_projection_reports_missing_and_mistyped_values() {
     let root = workspace("input-errors");
     fs::write(
         root.join("main.mag"),
-        "artifact(`host-input`(\"count\", type_tag<Int>()))",
+        "artifact(host_input(\"count\", type_tag<Int>()))",
     )
     .unwrap();
 
@@ -778,7 +778,7 @@ fn host_input_projection_reports_missing_and_mistyped_values() {
     ] {
         fs::write(
             root.join("main.mag"),
-            format!("artifact(`host-input`(\"value\", type_tag<{ty}>()))"),
+            format!("artifact(host_input(\"value\", type_tag<{ty}>()))"),
         )
         .unwrap();
         let error = compile_file_with_inputs(&root, "main.mag", json!({"value":value}))
@@ -789,7 +789,7 @@ fn host_input_projection_reports_missing_and_mistyped_values() {
 
     fs::write(
         root.join("main.mag"),
-        "type Step {enabled: Bool, label: String}\ntype Config {steps: List<Step>}\nartifact(`host-input`(\"config\", type_tag<Config>()))",
+        "type Step {enabled: Bool, label: String}\ntype Config {steps: List<Step>}\nartifact(host_input(\"config\", type_tag<Config>()))",
     )
     .unwrap();
     let nested = compile_file_with_inputs(
@@ -804,13 +804,13 @@ fn host_input_projection_reports_missing_and_mistyped_values() {
 
 #[test]
 fn json_data_files_are_parsed_into_mag_values() {
-    let root = workspace("file-read-json");
+    let root = workspace("file-read_json");
     let file = root.join("toolsets.json");
     fs::write(&file, r#"{"read_only":["read_file","read_image"]}"#).unwrap();
     fs::write(
         root.join("main.mag"),
         r#"
-          let manifest = `read-json`("toolsets.json")
+          let manifest = read_json("toolsets.json")
 artifact(get(manifest, "read_only"))
         "#,
     )
@@ -879,7 +879,7 @@ fn checker_rejects_bad_returns_and_calls() {
     );
 
     let bad_call = compile(
-        "let `only-int`: fn(Int) -> Int = |value| => value\nartifact(`only-int`(\"no\"))",
+        "let only_int: fn(Int) -> Int = |value| => value\nartifact(only_int(\"no\"))",
         &root,
     )
     .unwrap_err()
@@ -913,7 +913,7 @@ fn factory_descriptions_use_ordinary_typed_functions() {
 type Input {prompt: String}
 type Output {answer: String}
 type FactoryDescription {factory: String, type_arguments: List<TypeDescriptor>, params: Params}
-let worker: fn(Params, TypeTag<Input>, TypeTag<Output>) -> FactoryDescription = |params, input, output| => FactoryDescription {factory: "runtime.worker", type_arguments: [`type-evidence`(input), `type-evidence`(output)], params: params}
+let worker: fn(Params, TypeTag<Input>, TypeTag<Output>) -> FactoryDescription = |params, input, output| => FactoryDescription {factory: "runtime.worker", type_arguments: [type_evidence(input), type_evidence(output)], params: params}
 artifact(worker(Params {seed: "x"}, type_tag<Input>(), type_tag<Output>()))
     "#;
     let artifact = compile(source, &root).unwrap();
@@ -927,8 +927,8 @@ artifact(worker(Params {seed: "x"}, type_tag<Input>(), type_tag<Output>()))
 fn empty_lists_retain_expected_element_types_at_runtime() {
     let root = workspace("empty-list");
     let source = r#"
-      let `accept-strings`: fn(List<String>) -> Int = |items| => count(items)
-artifact {count: `accept-strings`(([]: List<String>))}
+      let accept_strings: fn(List<String>) -> Int = |items| => count(items)
+artifact {count: accept_strings(([]: List<String>))}
     "#;
     let artifact = compile(source, &root).unwrap();
     assert_eq!(artifact["count"], 0);
@@ -938,8 +938,8 @@ artifact {count: `accept-strings`(([]: List<String>))}
 fn record_literals_do_not_construct_native_maps() {
     let root = workspace("record-map");
     let source = r#"
-      let `accept-string-map`: fn(Map<String, String>) -> Int = |value| => count(value)
-artifact {count: `accept-string-map`(Map<String, String> {kind: "task", prompt: "Audit"})}
+      let accept_string_map: fn(Map<String, String>) -> Int = |value| => count(value)
+artifact {count: accept_string_map(Map<String, String> {kind: "task", prompt: "Audit"})}
     "#;
     assert!(compile(source, &root).is_err());
 }
@@ -1154,7 +1154,7 @@ fn duplicate_visible_function_signatures_are_rejected() {
     let root = workspace("lexical-recursion");
     let error = compile(
         r#"
-          let walk: fn(List<Int>) -> Int = |items| => if (=)(count(items), 0) then 0 else walk(`remove-at`(items, 0))
+          let walk: fn(List<Int>) -> Int = |items| => if (=)(count(items), 0) then 0 else walk(remove_at(items, 0))
 let saved = walk
 let before = saved([1, 2, 3])
 let walk: fn(List<Int>) -> Int = |items| => 99
@@ -1217,28 +1217,28 @@ fn builtin_type_rules_are_total_and_assoc_checks_values() {
         r#"
           type Counter {count: Int}
 let original = Counter {count: 1}
-artifact {string: get(original, "count"), keyword: get(original, "count"), `assoc-string`: get(assoc(original, "count", 2), "count"), `assoc-keyword`: get(assoc(original, "count", 3), "count")}
+artifact {string: get(original, "count"), keyword: get(original, "count"), assoc_string: get(assoc(original, "count", 2), "count"), assoc_keyword: get(assoc(original, "count", 3), "count")}
         "#,
         &root,
     )
     .unwrap();
     assert_eq!(
         keys,
-        json!({"string":1,"keyword":1,"assoc-string":2,"assoc-keyword":3})
+        json!({"string":1,"keyword":1,"assoc_string":2,"assoc_keyword":3})
     );
 }
 
 #[test]
 fn group_by_produces_native_map_and_preserves_bucket_source_order() {
-    let root = workspace("group-by-order");
+    let root = workspace("group_by-order");
     let artifact = compile(
         r#"
-          let `first-character`: fn(String) -> String = |value| => if (=)(value, "a1") then "a" else "b"
-let grouped = `group-by`(`first-character`, ["b1", "a1", "b2"])
-let empty = `group-by`(((|value| => value): fn(String) -> String), ([]: List<String>))
-let skewed = `group-by`(((|value| => "all"): fn(Int) -> String), [1, 2, 3, 4, 5, 6, 7, 8])
-let interleaved = `group-by`(((|value| => if (=)(value, "a1") then "a" else if (=)(value, "a2") then "a" else "b"): fn(String) -> String), ["a1", "b1", "a2", "b2"])
-artifact {grouped: grouped, a: `__map-get`(grouped, "a"), b: `__map-get`(grouped, "b"), `b-concatenated`: concat(`__map-get`(grouped, "b"), ["b3"]), `b-equals-list`: (=)(`__map-get`(grouped, "b"), ["b1", "b2"]), empty: empty, skewed: `__map-get`(skewed, "all"), `interleaved-a`: `__map-get`(interleaved, "a"), `interleaved-b`: `__map-get`(interleaved, "b")}
+          let first_character: fn(String) -> String = |value| => if (=)(value, "a1") then "a" else "b"
+let grouped = group_by(first_character, ["b1", "a1", "b2"])
+let empty = group_by(((|value| => value): fn(String) -> String), ([]: List<String>))
+let skewed = group_by(((|value| => "all"): fn(Int) -> String), [1, 2, 3, 4, 5, 6, 7, 8])
+let interleaved = group_by(((|value| => if (=)(value, "a1") then "a" else if (=)(value, "a2") then "a" else "b"): fn(String) -> String), ["a1", "b1", "a2", "b2"])
+artifact {grouped: grouped, a: __map_get(grouped, "a"), b: __map_get(grouped, "b"), b_concatenated: concat(__map_get(grouped, "b"), ["b3"]), b_equals_list: (=)(__map_get(grouped, "b"), ["b1", "b2"]), empty: empty, skewed: __map_get(skewed, "all"), interleaved_a: __map_get(interleaved, "a"), interleaved_b: __map_get(interleaved, "b")}
         "#,
         &root,
     )
@@ -1250,23 +1250,23 @@ artifact {grouped: grouped, a: `__map-get`(grouped, "a"), b: `__map-get`(grouped
             "grouped": {"a": ["a1"], "b": ["b1", "b2"]},
             "a": ["a1"],
             "b": ["b1", "b2"],
-            "b-concatenated": ["b1", "b2", "b3"],
-            "b-equals-list": true,
+            "b_concatenated": ["b1", "b2", "b3"],
+            "b_equals_list": true,
             "empty": {},
             "skewed": [1, 2, 3, 4, 5, 6, 7, 8],
-            "interleaved-a": ["a1", "a2"],
-            "interleaved-b": ["b1", "b2"]
+            "interleaved_a": ["a1", "a2"],
+            "interleaved_b": ["b1", "b2"]
         })
     );
 }
 
 #[test]
 fn group_by_visits_left_to_right_and_stops_at_the_first_callback_error() {
-    let root = workspace("group-by-callback-error");
+    let root = workspace("group_by-callback-error");
     let error = compile(
         r#"
           let key: fn(String) -> String = |value| => if (=)(value, "first") then fail(str("visited:", value)) else fail(str("visited:", value))
-artifact(`group-by`(key, ["first", "second"]))
+artifact(group_by(key, ["first", "second"]))
         "#,
         &root,
     )
@@ -1279,21 +1279,21 @@ artifact(`group-by`(key, ["first", "second"]))
 
 #[test]
 fn group_by_rejects_invalid_static_calls() {
-    let root = workspace("group-by-invalid-calls");
+    let root = workspace("group_by-invalid-calls");
     for (label, source, expected) in [
         (
             "callback result",
-            "artifact(`group-by`(((|value| => value): fn(Int) -> Int), [1]))",
-            "group-by callback must return String",
+            "artifact(group_by(((|value| => value): fn(Int) -> Int), [1]))",
+            "group_by callback must return String",
         ),
         (
             "collection",
-            "artifact(`group-by`(((|value| => str(value)): fn(Int) -> String), 1))",
-            "group-by expects List",
+            "artifact(group_by(((|value| => str(value)): fn(Int) -> String), 1))",
+            "group_by expects List",
         ),
         (
             "arity",
-            "artifact(`group-by`(((|value| => str(value)): fn(Int) -> String)))",
+            "artifact(group_by(((|value| => str(value)): fn(Int) -> String)))",
             "arity: expected 2, got 1",
         ),
     ] {
@@ -1304,12 +1304,12 @@ fn group_by_rejects_invalid_static_calls() {
 
 #[test]
 fn group_by_builtin_and_non_colliding_user_overload_are_distinguishable() {
-    let root = workspace("group-by-overload");
+    let root = workspace("group_by-overload");
     let artifact = compile(
         r#"
-          let `group-by`: fn(Int) -> String = |value| => "custom"
-let grouped = `group-by`(((|value| => value): fn(String) -> String), ["builtin", "builtin"])
-artifact {custom: `group-by`(1), builtin: `__map-get`(grouped, "builtin")}
+          let group_by: fn(Int) -> String = |value| => "custom"
+let grouped = group_by(((|value| => value): fn(String) -> String), ["builtin", "builtin"])
+artifact {custom: group_by(1), builtin: __map_get(grouped, "builtin")}
         "#,
         &root,
     )
@@ -1323,15 +1323,15 @@ artifact {custom: `group-by`(1), builtin: `__map-get`(grouped, "builtin")}
 
 #[test]
 fn canonical_and_sort_by_are_typed_deterministic_builtins() {
-    let root = workspace("canonical-sort-by");
+    let root = workspace("canonical-sort_by");
     let artifact = compile(
         r#"
           type Item {id: String, rank: Int}
 type CanonicalMeta {z: Int, a: Int}
 type CanonicalInput {nodes: List<String>, meta: CanonicalMeta, kind: String}
 let items = ([Item {id: "third", rank: 30}, Item {id: "first", rank: 10}, Item {id: "second", rank: 20}]: List<Item>)
-let ordered = `sort-by`(((|item| => get(item, "id")): fn(Item) -> String), items)
-artifact {canonical: canonical(CanonicalInput {nodes: ["a", "b"], meta: CanonicalMeta {z: 2, a: 1}, kind: "edge"}), removed: `remove-at`(["a", "b", "c"], 1), `string-ok`: `conforms?`("value", `type-evidence`(type_tag<String>())), `string-bad`: `conforms?`(42, `type-evidence`(type_tag<String>())), `item-ok`: `conforms?`(Item {id: "item", rank: 1}, `type-evidence`(type_tag<Item>())), ids: map(((|item| => get(item, "id")): fn(Item) -> String), ordered)}
+let ordered = sort_by(((|item| => get(item, "id")): fn(Item) -> String), items)
+artifact {canonical: canonical(CanonicalInput {nodes: ["a", "b"], meta: CanonicalMeta {z: 2, a: 1}, kind: "edge"}), removed: remove_at(["a", "b", "c"], 1), string_ok: conforms("value", type_evidence(type_tag<String>())), string_bad: conforms(42, type_evidence(type_tag<String>())), item_ok: conforms(Item {id: "item", rank: 1}, type_evidence(type_tag<Item>())), ids: map(((|item| => get(item, "id")): fn(Item) -> String), ordered)}
         "#,
         &root,
     )
@@ -1341,21 +1341,21 @@ artifact {canonical: canonical(CanonicalInput {nodes: ["a", "b"], meta: Canonica
         json!({
             "canonical": "{\"kind\":\"edge\",\"meta\":{\"a\":1,\"z\":2},\"nodes\":[\"a\",\"b\"]}",
             "removed": ["a", "c"],
-            "string-ok": true,
-            "string-bad": false,
-            "item-ok": true,
+            "string_ok": true,
+            "string_bad": false,
+            "item_ok": true,
             "ids": ["first", "second", "third"]
         })
     );
 
     let bad_key = compile(
-        "artifact(`sort-by`(((|value| => value): fn(Int) -> Int), [2, 1]))",
+        "artifact(sort_by(((|value| => value): fn(Int) -> Int), [2, 1]))",
         &root,
     )
     .unwrap_err()
     .to_string();
     assert!(
-        bad_key.contains("sort-by callback must return String"),
+        bad_key.contains("sort_by callback must return String"),
         "{bad_key}"
     );
 
@@ -1378,7 +1378,7 @@ import nefor.node.{}
 type Success {value: Int}
 type Failure {message: String}
 let fallible = nefor.graph.identity("fallible", type_tag<core.types.Result<Failure, Success>>())
-let continuation = nefor.node.`lift-result`("continuation-result", type_tag<Failure>(), nefor.graph.identity("continuation", type_tag<Success>()))
+let continuation = nefor.node.lift_result("continuation-result", type_tag<Failure>(), nefor.graph.identity("continuation", type_tag<Success>()))
 let composed = nefor.node.`>=>`(fallible, continuation)
 artifact(composed)
         "#,
@@ -1425,7 +1425,7 @@ fn data_is_not_a_source_type_or_cast_target() {
 fn type_tags_are_typed_canonical_witnesses() {
     let root = workspace("type-tags");
     let artifact = compile(
-        "type Payload {value: Int}\nlet `tag-of`<T>: fn(T) -> TypeTag<T> = |value| => type_tag<T>()\nartifact(`tag-of`(Payload {value: 1}))",
+        "type Payload {value: Int}\nlet tag_of<T>: fn(T) -> TypeTag<T> = |value| => type_tag<T>()\nartifact(tag_of(Payload {value: 1}))",
         &root,
     )
     .unwrap();
@@ -1462,7 +1462,7 @@ fn repeated_factory_identity_strings_are_ordinary_data() {
 fn nested_callbacks_capture_enclosing_generic_binders() {
     let root = workspace("nested-generic-binders");
     let artifact = compile(
-        "let `contains?`<T>: fn(List<T>, T) -> Bool = |values, value| => (=)(count(filter(((|candidate| => (=)(candidate, value)): fn(T) -> Bool), values)), 1)\nartifact(`contains?`([1, 2], 1))",
+        "let contains<T>: fn(List<T>, T) -> Bool = |values, value| => (=)(count(filter(((|candidate| => (=)(candidate, value)): fn(T) -> Bool), values)), 1)\nartifact(contains([1, 2], 1))",
         &root,
     )
     .unwrap();
@@ -1473,7 +1473,7 @@ fn nested_callbacks_capture_enclosing_generic_binders() {
 fn generic_calls_unify_arguments_inside_the_same_nominal_type() {
     let root = workspace("nominal-generic-unification");
     let artifact = compile(
-        "type Port<T> {actor: String}\nlet `identity-port`<O>: fn(Port<O>) -> Port<O> = |port| => port\nlet `forward-port`<T>: fn(Port<T>) -> Port<T> = |port| => `identity-port`(port)\nartifact(`forward-port`(Port<Int> {actor: \"worker\"}))",
+        "type Port<T> {actor: String}\nlet identity_port<O>: fn(Port<O>) -> Port<O> = |port| => port\nlet forward_port<T>: fn(Port<T>) -> Port<T> = |port| => identity_port(port)\nartifact(forward_port(Port<Int> {actor: \"worker\"}))",
         &root,
     )
     .unwrap();
@@ -1482,10 +1482,10 @@ fn generic_calls_unify_arguments_inside_the_same_nominal_type() {
 
 #[test]
 fn type_schema_preserves_qualified_nominals_and_substitutes_generics() {
-    let root = workspace("type-schema");
+    let root = workspace("type_schema");
     fs::write(
         root.join("core/types.mag"),
-        "type Box<T> {value: T}\nlet schema = `type-schema`(type_tag<Box<List<String>>>())",
+        "type Box<T> {value: T}\nlet schema = type_schema(type_tag<Box<List<String>>>())",
     )
     .unwrap();
     fs::write(
@@ -1509,7 +1509,7 @@ fn type_schema_preserves_qualified_nominals_and_substitutes_generics() {
 
 #[test]
 fn type_schema_rejects_non_data() {
-    let root = workspace("type-schema-errors");
+    let root = workspace("type_schema-errors");
     for (ty, expected) in [
         (
             "fn(String) -> String",
@@ -1524,7 +1524,7 @@ fn type_schema_rejects_non_data() {
             "TypeTag cannot enter a concrete semantic descriptor",
         ),
     ] {
-        let source = format!("artifact(`type-schema`(type_tag<{ty}>()))");
+        let source = format!("artifact(type_schema(type_tag<{ty}>()))");
         let error = compile(&source, &root).unwrap_err().to_string();
         assert!(error.contains(expected), "{ty}: {error}");
     }
@@ -1537,8 +1537,8 @@ fn generic_list_inference_preserves_element_evidence() {
         let source = format!(
             r#"
           let values = [1, 2]
-let `element-tag`<T>: fn(List<T>) -> TypeTag<T> = |values| => type_tag<T>()
-artifact([`type-evidence`(`element-tag`({values})), `type-evidence`(type_tag<Int>())])
+let element_tag<T>: fn(List<T>) -> TypeTag<T> = |values| => type_tag<T>()
+artifact([type_evidence(element_tag({values})), type_evidence(type_tag<Int>())])
         "#
         );
         let evidence = compile(&source, &root).unwrap();
@@ -1553,14 +1553,14 @@ fn concrete_data_equality_is_recursive_and_float_bit_exact() {
         r#"
         type Comparable {a: List<Int>, b: List<Bool>}
 let mapped = map(((|x| => x): fn(Int) -> Int), [1, 2])
-artifact {list: (=)(mapped, [1, 2]), record: (=)(Comparable {b: [true, false], a: mapped}, Comparable {a: [1, 2], b: [true, false]}), ordered: not((=)([1, 2], [2, 1])), close: not((=)(1.0, 1.0000000000000002)), `signed-zero`: not((=)(0.0, -0.0)), same: (=)(-0.0, -0.0)}
+artifact {list: (=)(mapped, [1, 2]), record: (=)(Comparable {b: [true, false], a: mapped}, Comparable {a: [1, 2], b: [true, false]}), ordered: not((=)([1, 2], [2, 1])), close: not((=)(1.0, 1.0000000000000002)), signed_zero: not((=)(0.0, -0.0)), same: (=)(-0.0, -0.0)}
         "#,
         &root,
     )
     .unwrap();
     assert_eq!(
         artifact,
-        json!({"list":true,"record":true,"ordered":true,"close":true,"signed-zero":true,"same":true})
+        json!({"list":true,"record":true,"ordered":true,"close":true,"signed_zero":true,"same":true})
     );
 }
 
@@ -1570,14 +1570,14 @@ fn native_maps_and_sets_are_unordered_concrete_data() {
     let artifact = compile(
         r#"
         type IdKey {id: Int}
-let empty = `__map-empty`(type_tag<IdKey>(), type_tag<String>())
-let left = `__map-insert`(`__map-insert`(empty, IdKey {id: 2}, "two"), IdKey {id: 1}, "one")
-let right = `__map-insert`(`__map-insert`(empty, IdKey {id: 1}, "one"), IdKey {id: 2}, "two")
-let `set-empty` = `__set-empty`(type_tag<Int>())
-let a = `__set-insert`(`__set-insert`(`set-empty`, 2), 1)
-let b = `__set-insert`(`__set-insert`(`set-empty`, 1), 2)
-let keyed = `__map-insert`(`__map-empty`(type_tag<Set<Int>>(), type_tag<Bool>()), a, true)
-artifact {map: left, set: a, `map-equal`: (=)(left, right), `set-equal`: (=)(a, b), lookup: `__map-get`(left, IdKey {id: 1}), `set-key`: `__map-get`(keyed, b), `map-count`: `__map-count`(left), `set-count`: `__set-count`(a), `map-has`: `__map-contains`(left, IdKey {id: 2}), `map-missing`: `__map-contains`(left, IdKey {id: 3}), `set-has`: `__set-contains`(a, 1), `set-missing`: `__set-contains`(a, 3)}
+let empty = __map_empty(type_tag<IdKey>(), type_tag<String>())
+let left = __map_insert(__map_insert(empty, IdKey {id: 2}, "two"), IdKey {id: 1}, "one")
+let right = __map_insert(__map_insert(empty, IdKey {id: 1}, "one"), IdKey {id: 2}, "two")
+let set_empty = __set_empty(type_tag<Int>())
+let a = __set_insert(__set_insert(set_empty, 2), 1)
+let b = __set_insert(__set_insert(set_empty, 1), 2)
+let keyed = __map_insert(__map_empty(type_tag<Set<Int>>(), type_tag<Bool>()), a, true)
+artifact {map: left, set: a, map_equal: (=)(left, right), set_equal: (=)(a, b), lookup: __map_get(left, IdKey {id: 1}), set_key: __map_get(keyed, b), map_count: __map_count(left), set_count: __set_count(a), map_has: __map_contains(left, IdKey {id: 2}), map_missing: __map_contains(left, IdKey {id: 3}), set_has: __set_contains(a, 1), set_missing: __set_contains(a, 3)}
         "#,
         &root,
     )
@@ -1587,8 +1587,8 @@ artifact {map: left, set: a, `map-equal`: (=)(left, right), `set-equal`: (=)(a, 
         json!({
             "map":{"$mag":"map","entries":[[{"id":1},"one"],[{"id":2},"two"]]},
             "set":{"$mag":"set","items":[1,2]},
-            "map-equal":true,"set-equal":true,"lookup":"one","set-key":true,
-            "map-count":2,"set-count":2,"map-has":true,"map-missing":false,"set-has":true,"set-missing":false
+            "map_equal":true,"set_equal":true,"lookup":"one","set_key":true,
+            "map_count":2,"set_count":2,"map_has":true,"map_missing":false,"set_has":true,"set_missing":false
         })
     );
 }
@@ -1598,18 +1598,18 @@ fn native_collection_duplicates_and_missing_lookup_fail() {
     let root = workspace("native-duplicate-data");
     for (source, message) in [
         (
-            r#"let m = `__map-empty`(type_tag<Int>(), type_tag<String>())
-artifact(`__map-insert`(`__map-insert`(m, 1, "first"), 1, "second"))"#,
+            r#"let m = __map_empty(type_tag<Int>(), type_tag<String>())
+artifact(__map_insert(__map_insert(m, 1, "first"), 1, "second"))"#,
             "duplicate Map key",
         ),
         (
             r#"type SetItem {x: Int}
-let s = `__set-empty`(type_tag<SetItem>())
-artifact(`__set-insert`(`__set-insert`(s, SetItem {x: 1}), SetItem {x: 1}))"#,
+let s = __set_empty(type_tag<SetItem>())
+artifact(__set_insert(__set_insert(s, SetItem {x: 1}), SetItem {x: 1}))"#,
             "duplicate Set member",
         ),
         (
-            r#"artifact(`__map-get`(`__map-empty`(type_tag<Int>(), type_tag<String>()), 1))"#,
+            r#"artifact(__map_get(__map_empty(type_tag<Int>(), type_tag<String>()), 1))"#,
             "Map key not found",
         ),
         (r#"artifact {same: 1, same: 2}"#, "duplicate"),
@@ -1632,17 +1632,17 @@ fn maps_and_sets_have_no_ordered_collection_or_record_surface() {
         "get(m, \"key\")",
         "assoc(m, \"key\", 1)",
         "first(m)",
-        "`remove-at`(m, 0)",
+        "remove_at(m, 0)",
         "map(((|x| => x): fn(Int) -> Int), m)",
         "keys(s)",
         "first(s)",
-        "`remove-at`(s, 0)",
+        "remove_at(s, 0)",
         "fold(((|a, b| => a): fn(Int, Int) -> Int), 0, s)",
     ] {
         let source = format!(
             r#"
-            let m = `__map-empty`(type_tag<String>(), type_tag<Int>())
-let s = `__set-empty`(type_tag<Int>())
+            let m = __map_empty(type_tag<String>(), type_tag<Int>())
+let s = __set_empty(type_tag<Int>())
 artifact({expression})"#
         );
         assert!(compile(&source, &root).is_err(), "{expression}");
@@ -1674,8 +1674,8 @@ fn equality_rejects_behavior_in_nested_and_generic_positions() {
         "let eq<T>: fn(T, T) -> Bool = |a, b| => (=)(a, b)\nlet alias = eq\nlet f: fn(Int) -> Int = |x| => x\nartifact(alias(f, f))",
         "let eq<T>: fn(T, T) -> Bool = |a, b| => (=)(a, b)\nlet twice<T>: fn(T) -> Bool = |a| => eq(a, a)\nlet f: fn(Int) -> Int = |x| => x\nartifact(twice(f))",
         "let eq<T>: fn(T, T) -> Bool = |a, b| => (=)(a, b)\nlet f: fn(Int) -> Int = |x| => x\nartifact(if true then true else eq(f, f))",
-        "artifact(`__set-empty`(type_tag<fn(Int) -> Int>()))",
-        "artifact(`__map-empty`(type_tag<`:f`<fn(Int) -> Int>>(), type_tag<String>()))",
+        "artifact(__set_empty(type_tag<fn(Int) -> Int>()))",
+        "artifact(__map_empty(type_tag<`:f`<fn(Int) -> Int>>(), type_tag<String>()))",
     ] {
         assert!(compile(source, &root).is_err(), "accepted {source}");
     }
@@ -1776,7 +1776,7 @@ fn empty_native_collections_keep_their_wire_type() {
     let root = workspace("empty-native-wire");
     assert_eq!(
         compile(
-            r#"artifact {map: `__map-empty`(type_tag<Int>(), type_tag<Bool>()), strings: `__map-empty`(type_tag<String>(), type_tag<Int>()), set: `__set-empty`(type_tag<String>())}"#,
+            r#"artifact {map: __map_empty(type_tag<Int>(), type_tag<Bool>()), strings: __map_empty(type_tag<String>(), type_tag<Int>()), set: __set_empty(type_tag<String>())}"#,
             &root
         )
         .unwrap(),
@@ -1791,12 +1791,12 @@ fn nominal_constructor_and_product_keys_remain_distinct_data() {
     let root = workspace("native-key-constructor");
     assert_eq!(compile(r#"
         type Key = Left(Int) | Right(Int)
-let m = `__map-empty`(type_tag<Key>(), type_tag<String>())
-let m1 = `__map-insert`(m, Key.Left(1), "left")
-let m2 = `__map-insert`(m1, Key.Right(1), "right")
+let m = __map_empty(type_tag<Key>(), type_tag<String>())
+let m1 = __map_insert(m, Key.Left(1), "left")
+let m2 = __map_insert(m1, Key.Right(1), "right")
 let tuple = ([1, "a"]: (Int, String))
-let tuples = `__set-insert`(`__set-empty`(type_tag<(Int, String)>()), tuple)
-artifact {left: `__map-get`(m2, Key.Left(1)), right: `__map-get`(m2, Key.Right(1)), tuple: `__set-contains`(tuples, ([1, "a"]: (Int, String)))}"#, &root).unwrap(), json!({"left":"left","right":"right","tuple":true}));
+let tuples = __set_insert(__set_empty(type_tag<(Int, String)>()), tuple)
+artifact {left: __map_get(m2, Key.Left(1)), right: __map_get(m2, Key.Right(1)), tuple: __set_contains(tuples, ([1, "a"]: (Int, String)))}"#, &root).unwrap(), json!({"left":"left","right":"right","tuple":true}));
 }
 
 #[test]
@@ -1809,7 +1809,7 @@ fn ordinary_core_modules_expose_unordered_maps_and_sets() {
 import core.set.{}
 let map = core.map.insert((core.map.empty(type_tag<Int>()): Map<Int, String>), 1, "one")
 let set = core.set.insert(core.set.empty(type_tag<String>()), "ready")
-artifact {`map-value`: core.map.get(map, 1), `map-count`: core.map.count(map), `set-member`: core.set.`contains?`(set, "ready"), `set-count`: core.set.count(set)}
+artifact {map_value: core.map.get(map, 1), map_count: core.map.count(map), set_member: core.set.contains(set, "ready"), set_count: core.set.count(set)}
         "#,
     )
     .unwrap();
@@ -1824,7 +1824,7 @@ artifact {`map-value`: core.map.get(map, 1), `map-count`: core.map.count(map), `
             SyntaxMode::New,
         )
         .unwrap(),
-        json!({"map-value":"one", "map-count":1, "set-member":true, "set-count":1})
+        json!({"map_value":"one", "map_count":1, "set_member":true, "set_count":1})
     );
 
     for source in [
@@ -1880,9 +1880,9 @@ artifact(if true then true else {invocation})"#
 fn native_collections_support_ordinary_generic_wrappers() {
     let root = workspace("native-generic-wrappers");
     let source = r#"
-        let empty<K, V>: fn(TypeTag<K>, TypeTag<V>) -> Map<K, V> = |key, value| => `__map-empty`(key, value)
-let insert<K, V>: fn(Map<K, V>, K, V) -> Map<K, V> = |map, key, value| => `__map-insert`(map, key, value)
-let lookup<K, V>: fn(Map<K, V>, K) -> V = |map, key| => `__map-get`(map, key)
+        let empty<K, V>: fn(TypeTag<K>, TypeTag<V>) -> Map<K, V> = |key, value| => __map_empty(key, value)
+let insert<K, V>: fn(Map<K, V>, K, V) -> Map<K, V> = |map, key, value| => __map_insert(map, key, value)
+let lookup<K, V>: fn(Map<K, V>, K) -> V = |map, key| => __map_get(map, key)
 let same<T>: fn(T, T) -> Bool = |left, right| => (=)(left, right)
 let table = insert(empty(type_tag<String>(), type_tag<Int>()), ":key", 1)
 artifact {lookup: lookup(table, ":key"), table: table, keyword: (=)(":key", ":key"), equal: same(table, insert(empty(type_tag<String>(), type_tag<Int>()), ":key", 1))}

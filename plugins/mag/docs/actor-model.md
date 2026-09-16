@@ -377,7 +377,7 @@ selected provider compositor reconstructs its canonical direct-completion
 request from that command and conversation-manager's owned context. `provider`
 selects the provider actor at construction. For explicitly concrete authoring, `ResolvedModel` carries the
 provider, model, and reasoning effort and represents effort with
-`nefor.actors.reasoning-effort` or `nefor.actors.no-reasoning-effort`; the
+`nefor.actors.reasoning_effort` or `nefor.actors.no_reasoning_effort`; the
 kernel lowers that closed record once to a non-empty string or field absence.
 Raw runtime artifacts may supply the already-lowered optional string.
 Arbitrary provider-specific reasoning settings are not shipped through this
@@ -397,17 +397,17 @@ owned copy in the run context and applies it only while constructing `llm` and
 expansion, and actors added through `mag.apply` without rewriting their
 inventory specs or consulting live catalog state.
 
-`nefor.actors.agent` and `nefor.agents.dynamic-template-with-tools` accept one
+`nefor.actors.agent` and `nefor.agents.dynamic_template_with_tools` accept one
 exhaustive resolver from a
 configuration's finite model vocabulary to `AuthoredModel`, the sum of a
 concrete `ResolvedModel` and `ModelProfile`. A concrete arm uses the snapshot's
 current model, preserving the current-only behavior. An arm may instead return
-`nefor.actors.model-profile("name")`; the compiled actor then carries that
+`nefor.actors.model_profile("name")`; the compiled actor then carries that
 authored selector and lazy construction resolves it from the run snapshot's
-`profiles` map. The high-level `nefor.agents.with-tools` and
-`dynamic-with-tools` constructors use the same resolver contract, so a single
-configuration-owned `resolve-model` works in both direct and reusable graph
-forms. `resolved-agent` and the `with-resolved-tools` conveniences retain an
+`profiles` map. The high-level `nefor.agents.with_tools` and
+`dynamic_with_tools` constructors use the same resolver contract, so a single
+configuration-owned `resolve_model` works in both direct and reusable graph
+forms. `resolved_agent` and the `with_resolved_tools` conveniences retain an
 explicit concrete-only boundary where useful. An absent profile fails actor
 construction before any provider invocation. Profile names and their concrete
 provider policy belong to the configuration; Nefor treats them as opaque exact
@@ -424,7 +424,7 @@ actor's compiler-derived profile selector.
 
 Every public agent uses the `structured-output` provider boundary. Its params
 include a versioned MAG type descriptor produced by
-<code>`type-schema`(type_tag&lt;T&gt;())</code> and `max_corrections`. The bridge converts the
+<code>`type_schema`(type_tag&lt;T&gt;())</code> and `max_corrections`. The bridge converts the
 descriptor to provider-neutral JSON Schema; each provider chooses its own
 realization. The OpenAI-compatible provider uses `response_format`, while the
 ChatGPT provider uses the Responses API's `text.format`. MAG does not branch on

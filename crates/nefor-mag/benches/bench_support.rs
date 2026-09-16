@@ -23,11 +23,11 @@ pub const LEGACY_COMBINED_FINGERPRINT: &str =
 pub const LEGACY_WORKLOAD_FINGERPRINT: &str =
     "sha256:59617bf4d8755e91d7b5ea5d13574bca7efc7c79276e850fd5ce479df037deaa";
 pub const CURRENT_MAIN_A0_WORKLOAD_FINGERPRINT: &str =
-    "sha256:7d29a24174761b19a506ff31a49dd248433c3ba7f9f5308237ed24ac51bf2dd2";
+    "sha256:1fd6becf3d8ae090b9b9d64a09e5d9427d83b3aca8dccbaf5191aa7b15a907c1";
 pub const CURRENT_MAIN_A0_ORACLE_FINGERPRINT: &str =
-    "sha256:079162ffe8d364945623e43b61bcd4c57b3854c7659722a408e2bf8c794b8769";
+    "sha256:7b8f59f662590fe0422519b7f649b729c6cfa42da495979ada99fad8bc96a610";
 pub const PHASE0_WORKLOAD_FINGERPRINT: &str =
-    "sha256:658d96fa4e028e4849c60f66b2291a2f094829dbae3b6471c7cef19fa7ac0cde";
+    "sha256:623b386a3885388a8d2389f747f634b629c2badf39d7c752ac65a83987423ddd";
 pub const MAX_TARGET_MEDIAN_RATIO: f64 = 0.90;
 pub const MIN_TARGET_COUNTER_REDUCTION: f64 = 0.40;
 pub const MAX_CASE_P90_RATIO: f64 = 1.10;
@@ -890,16 +890,16 @@ pub fn counter_semantics() -> BTreeMap<String, String> {
         ),
         (
             "builtin_input_items_by_name.collection".into(),
-            "source collection length for map/group-by/indexed-map/filter/flat-map/fold/sort-by/remove-at"
+            "source collection length for map/group_by/indexed_map/filter/flat_map/fold/sort_by/remove_at"
                 .into(),
         ),
         (
             "builtin_input_items_by_name.descriptor".into(),
-            "descriptor list length for descriptor-input-assignments and descriptor-table".into(),
+            "descriptor list length for descriptor_input_assignments and descriptor_table".into(),
         ),
         (
             "builtin_copied_shifted_cloned_items_by_name".into(),
-            "actual element clones/copies for concat and remove-at, with remove-at tail shifts reported separately".into(),
+            "actual element clones/copies for concat and remove_at, with remove_at tail shifts reported separately".into(),
         ),
         (
             "runtime_value_validation_visits".into(),
@@ -1275,7 +1275,7 @@ fn target_case_and_counter(report: &Report) -> (Option<&CaseReport>, Option<&'st
         Some("Nefor graph lowering") => (
             "nefor-fan-in",
             "lower",
-            "builtin_input_items_by_name.descriptor-input-assignments",
+            "builtin_input_items_by_name.descriptor_input_assignments",
         ),
         _ => return (None, None),
     };
@@ -1395,7 +1395,7 @@ pub fn recommendation(cases: &[CaseReport]) -> Recommendation {
             "Nefor graph lowering",
             "nefor-fan-in",
             "lower",
-            "builtin_input_items_by_name.descriptor-input-assignments",
+            "builtin_input_items_by_name.descriptor_input_assignments",
         ),
     ];
     let mut ranked = candidates
@@ -2128,7 +2128,7 @@ pub fn forcing_dependency_proof_from_sources(
 ) -> Option<String> {
     let evidence = match stage {
         "forward-reachability"
-            if source.contains("nefor.graph.`forward-reachable`(analysis)")
+            if source.contains("nefor.graph.forward_reachable(analysis)")
                 && source.contains(
                     "artifact(FrontierProof {summary: summary, forced: forward_proof})",
                 ) =>
@@ -2136,7 +2136,7 @@ pub fn forcing_dependency_proof_from_sources(
             "analysis -> forward -> forward-proof"
         }
         "both-reachability"
-            if source.contains("nefor.graph.`forward-reachable`(analysis)")
+            if source.contains("nefor.graph.forward_reachable(analysis)")
                 && source.contains("let reverse = force_reverse(forward_proof)")
                 && source.contains(
                     "artifact(FrontierProof {summary: summary, forced: reverse_proof})",
@@ -2152,7 +2152,7 @@ pub fn forcing_dependency_proof_from_sources(
                 )
                 && graph_source.is_some_and(|graph_source| {
                     graph_source.contains(
-                        "let `lower-program`: fn(Graph) -> Modification = |topology| => {\n  let analysis = `analyze-for-lowering`(topology)",
+                        "let lower_program: fn(Graph) -> Modification = |topology| => {\n  let analysis = analyze_for_lowering(topology)",
                     )
                 }) =>
         {

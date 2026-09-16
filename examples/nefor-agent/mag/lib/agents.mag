@@ -9,4 +9,4 @@ let standard = named(Model, Standard, nil)
 
 let mock = named(Model, Mock, nil)
 
-let `resolve-model`: fn(Model) -> nefor.actors.AuthoredModel = |model| => match model { case Standard(value) => named(nefor.actors.AuthoredModel, ResolvedModel, nefor.actors.ResolvedModel {provider: "chatgpt", model: "gpt-5.6-sol", `reasoning-effort`: nefor.actors.`reasoning-effort`("medium")}), case Mock(value) => named(nefor.actors.AuthoredModel, ResolvedModel, nefor.actors.ResolvedModel {provider: "mock-provider", model: "mock-model", `reasoning-effort`: nefor.actors.`reasoning-effort`("medium")}) }
+let resolve_model: fn(Model) -> nefor.actors.AuthoredModel = |model| => match model { case Standard(value) => named(nefor.actors.AuthoredModel, ResolvedModel, nefor.actors.ResolvedModel {provider: "chatgpt", model: "gpt-5.6-sol", reasoning_effort: nefor.actors.reasoning_effort("medium")}), case Mock(value) => named(nefor.actors.AuthoredModel, ResolvedModel, nefor.actors.ResolvedModel {provider: "mock-provider", model: "mock-model", reasoning_effort: nefor.actors.reasoning_effort("medium")}) }

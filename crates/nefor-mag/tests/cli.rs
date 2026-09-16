@@ -129,7 +129,7 @@ fn compiles_with_caller_supplied_module_root_and_host_input() {
     fs::create_dir_all(&modules).expect("modules");
     fixture.write(
         "modules/contracts.mag",
-        "type Scheme {input_tags: List<String>, outputs: List<String>}\ntype Contract {identity: String, type_scheme: Scheme}\nlet contracts = `host-input`(\"factory_contracts\", type_tag<List<Contract>>())",
+        "type Scheme {input_tags: List<String>, outputs: List<String>}\ntype Contract {identity: String, type_scheme: Scheme}\nlet contracts = host_input(\"factory_contracts\", type_tag<List<Contract>>())",
     );
     fixture.write(
         "main.mag",
@@ -314,9 +314,9 @@ fn compiler_limits_are_overridable_from_the_cli() {
     fixture.write(
         "main.mag",
         r#"let identity: fn(Int) -> Int = |value| => value
-let `first-value` = identity(1)
-let `second-value` = identity(1)
-artifact([`first-value`, `second-value`])"#,
+let first_value = identity(1)
+let second_value = identity(1)
+artifact([first_value, second_value])"#,
     );
 
     for (flag, value) in [
@@ -440,7 +440,7 @@ fn project_roots_and_host_inputs_are_anchored_to_project() {
         r#"import value.{}
 import other.{}
 import local.{}
-artifact([value.number, other.number, local.number, `host-input`("data", type_tag<Int>())])"#,
+artifact([value.number, other.number, local.number, host_input("data", type_tag<Int>())])"#,
     );
     fixture.write("data.json", "42");
     fs::create_dir(fixture.root.join("child")).unwrap();

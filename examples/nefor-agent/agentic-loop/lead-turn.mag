@@ -9,7 +9,7 @@ import nefor.contracts.{}
 import nefor.graph.{}
 
 let start = nefor.graph.source("lead-task", type_tag<nefor.contracts.Task>(), nefor.contracts.Task {prompt: "<initial task text>"})
-let lead = nefor.agents.`with-tools`(agents.`resolve-model`, agents.standard, "lead", "", ["read_file", "read_image", "instructions", "mag-status", "mag-await", "mag-terminate", "write-review", "mag-write-file", "mag-preview", "mag-apply"], type_tag<nefor.contracts.Task>(), type_tag<nefor.contracts.TextAnswer>(), 2)
+let lead = nefor.agents.with_tools(agents.resolve_model, agents.standard, "lead", "", ["read_file", "read_image", "instructions", "mag-status", "mag-await", "mag-terminate", "write-review", "mag-write-file", "mag-preview", "mag-apply"], type_tag<nefor.contracts.Task>(), type_tag<nefor.contracts.TextAnswer>(), 2)
 let result = nefor.graph.output("lead-output", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
-let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.`add-edges`(graph, [nefor.graph.edge(start, lead), nefor.graph.edge(lead, result)])
+let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, lead), nefor.graph.edge(lead, result)])
 nefor.artifact.compile(topology)

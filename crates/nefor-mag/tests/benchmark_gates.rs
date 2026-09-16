@@ -518,25 +518,23 @@ fn batch_calibration_uses_baseline_and_freezes_positive_count() {
 
 #[test]
 fn forcing_dependency_proof_requires_the_actual_terminal_dependency() {
-    let forward = "let forward = nefor.graph.`forward-reachable`(analysis)\nartifact(FrontierProof {summary: summary, forced: forward_proof})";
+    let forward = "let forward = nefor.graph.forward_reachable(analysis)\nartifact(FrontierProof {summary: summary, forced: forward_proof})";
     assert!(forcing_dependency_proof_from_sources("forward-reachability", forward, None).is_some());
     assert!(forcing_dependency_proof_from_sources(
         "forward-reachability",
-        "let forward = nefor.graph.`forward-reachable`(analysis)\nartifact(summary)",
+        "let forward = nefor.graph.forward_reachable(analysis)\nartifact(summary)",
         None
     )
     .is_none());
 
-    let reverse = "let forward = nefor.graph.`forward-reachable`(analysis)\nlet reverse = force_reverse(forward_proof)\nartifact(FrontierProof {summary: summary, forced: reverse_proof})";
+    let reverse = "let forward = nefor.graph.forward_reachable(analysis)\nlet reverse = force_reverse(forward_proof)\nartifact(FrontierProof {summary: summary, forced: reverse_proof})";
     assert!(forcing_dependency_proof_from_sources("both-reachability", reverse, None).is_some());
 
     let lower = "let lowered = nefor.graph.lower(topology)\nlet forced = canonical(lowered)\nartifact(LowerFrontier {summary: summary, lowered: lowered, forced: forced})";
-    let graph = "let `lower-program`: fn(Graph) -> Modification = |topology| => {\n  let analysis = `analyze-for-lowering`(topology)";
+    let graph = "let lower_program: fn(Graph) -> Modification = |topology| => {\n  let analysis = analyze_for_lowering(topology)";
     assert!(forcing_dependency_proof_from_sources("lower", lower, Some(graph)).is_some());
-    assert!(forcing_dependency_proof_from_sources(
-        "lower",
-        lower,
-        Some("let `lower-program` = nil")
-    )
-    .is_none());
+    assert!(
+        forcing_dependency_proof_from_sources("lower", lower, Some("let lower_program = nil"))
+            .is_none()
+    );
 }

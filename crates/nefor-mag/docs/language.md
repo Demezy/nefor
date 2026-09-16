@@ -39,10 +39,10 @@ let describe: fn(Decision) -> String = |decision| => match decision {
 
 A case has the shape `case Constructor(binding) => expression`. Missing, repeated, foreign, or non-nominal cases are rejected while checking. Evaluation selects the case from constructor evidence retained by MAG, never from a user-authored string field. Generic ADT instantiations retain their owner and constructor identities during exhaustiveness checking. Generic binder names must be unique within one binder list; nested scopes may reuse names.
 
-Ordinary strings interpret `\n`, `\t`, `\\`, and `\"`. Triple-quoted strings are raw and may span lines; quotes, `$`, and backslashes inside them have no special meaning. <code>`strip-margin`</code> follows Scala's margin convention, removing leading whitespace through `|` while preserving line breaks:
+Ordinary strings interpret `\n`, `\t`, `\\`, and `\"`. Triple-quoted strings are raw and may span lines; quotes, `$`, and backslashes inside them have no special meaning. <code>strip_margin</code> follows Scala's margin convention, removing leading whitespace through `|` while preserving line breaks:
 
 ```mag
-let script = `strip-margin`("""|set -e
+let script = strip_margin("""|set -e
                                |echo 'export PATH="$HOME/.local/bin:$PATH"'
                                |find . \( -name '*.mag' -o -name '*.md' \)""")
 let command = replace(script, "\n", " ")
@@ -79,7 +79,7 @@ let entry<K, V>: fn(K, V) -> Entry<K, V> = |key, value| =>
   Entry<K, V> {key: key, value: value}
 ```
 
-Names containing punctuation or reserved words are enclosed in backticks, for example <code>nefor.node.`>>>`</code> or a local <code>`max-retries`</code> binding.
+Ordinary word identifiers use snake_case without quoting. Backticks are reserved for names that genuinely require escaping, such as the qualified symbolic operator <code>nefor.node.`>>>`</code> or the reserved field name <code>`type`</code>.
 
 Symbolic operators may be used as ordinary values and called with parentheses, or declared with a fixity and applied infix. Infix application requires ASCII whitespace on both sides of a symbolic operator: write `left >>> right`, never `left>>>right`, `left >>>right`, or `(left)>>> right`. Spaces, tabs, and line breaks are separators; delimiters are not. A line may continue when a newline follows the operator (`left >>>` with `right` on the next line), while an operator at the start of the next line begins a new expression and is rejected. A `//` comment does not replace the required whitespace: write a space before the comment in `left >>> // explanation`. Alphabetic infix names use the same expression-separated position (`1 add 2`) without a separate symbolic-spacing check. This rule does not affect prefix calls such as `(>>>)(left, right)`, qualified calls such as <code>nefor.node.`>>>`(left, right)</code>, `->` in types, lambda delimiters, or signed numeric literals.
 
@@ -94,13 +94,13 @@ import nefor.artifact.{}
 import nefor.contracts.{}
 import nefor.graph.{}
 
-let start = nefor.actors.`task-source`("task", "Inspect the repository.")
-let worker = nefor.agents.`with-tools`(
-  agents.`resolve-model`,
+let start = nefor.actors.task_source("task", "Inspect the repository.")
+let worker = nefor.agents.with_tools(
+  agents.resolve_model,
   agents.standard,
   "worker",
   "Inspect the repository and report the result.",
-  nefor.actors.`read-only-tools`,
+  nefor.actors.read_only_tools,
   type_tag<nefor.contracts.Task>(),
   type_tag<nefor.contracts.TextAnswer>(),
   2,
@@ -110,19 +110,19 @@ let result = nefor.graph.output(
   type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>(),
 )
 
-nefor.artifact.compile((|graph| => nefor.graph.`add-edges`(graph, [
+nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [
   nefor.graph.edge(start, worker),
   nefor.graph.edge(worker, result),
 ])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
 ```
 
-An authored program is a pure `Graph -> Graph` function. `nefor.artifact.compile` applies it to <code>nefor.graph.`empty-graph`</code>, validates the complete topology, and prepares a fresh run. Build one flat edge list; compose edge families with `concat` and `map` rather than nested lists.
+An authored program is a pure `Graph -> Graph` function. `nefor.artifact.compile` applies it to <code>nefor.graph.empty_graph</code>, validates the complete topology, and prepares a fresh run. Build one flat edge list; compose edge families with `concat` and `map` rather than nested lists.
 
 ### Sources and output
 
 `nefor.graph.source<T>` captures and emits a value checked against `T`. More generally, any exposed node whose complete input type is exactly `Unit` may be an unfed root and receives one automatic activation; feeding it through an edge suppresses that activation. An ADT or product that merely contains `Unit` still requires an explicit input.
 
-`nefor.graph.output<T>` is a concrete `T -> T` identity node and the result boundary. A graph must contain exactly one, it must be terminal, and every ordinary node must be reachable from a root and able to reach it. <code>nefor.graph.`output-for`</code> derives the compatible type from a preceding node.
+`nefor.graph.output<T>` is a concrete `T -> T` identity node and the result boundary. A graph must contain exactly one, it must be terminal, and every ordinary node must be reachable from a root and able to reach it. <code>nefor.graph.output_for</code> derives the compatible type from a preceding node.
 
 ### Semantic types and runtime wires
 
@@ -141,9 +141,9 @@ MAG programs provide only `type_tag<T>()` and connect compatible typed ports. Th
 I -> core.types.Result<nefor.contracts.AgentError, O>
 ```
 
-The whole result must be handled by a compatible downstream node or terminal output. `AgentError` preserves `last_output` and classifies the reason as provider failure or structured-output validation failure. The structured agent automatically asks the model to correct invalid output up to `max-corrections`; `0` means only the initial attempt. Exhaustion emits `AgentError` as data—it is not a successful `O` and should be routed deliberately.
+The whole result must be handled by a compatible downstream node or terminal output. `AgentError` preserves `last_output` and classifies the reason as provider failure or structured-output validation failure. The structured agent automatically asks the model to correct invalid output up to `max_corrections`; `0` means only the initial attempt. Exhaustion emits `AgentError` as data—it is not a successful `O` and should be routed deliberately.
 
-`tools` is the agent's capability boundary. Use <code>nefor.actors.`read-only-tools`</code>, <code>nefor.actors.`general-tools`</code>, or an explicit list. A tool call not in the invocation allowlist is rejected even if the tool exists globally. `da-policy` configures command policy; it does not replace the runtime approval gate.
+`tools` is the agent's capability boundary. Use <code>nefor.actors.read_only_tools</code>, <code>nefor.actors.general_tools</code>, or an explicit list. A tool call not in the invocation allowlist is rejected even if the tool exists globally. `da_policy` configures command policy; it does not replace the runtime approval gate.
 
 If a downstream reviewer can work with partial failed output, accept the full result as input. Otherwise bind the successful continuation with `nefor.node.>=>`, consume the full `Result`, or use an explicit Result unpack/repack node. `nefor.node.choose` is the corresponding branching combinator for `core.types.Either<A, B>`.
 
@@ -158,7 +158,7 @@ If a downstream reviewer can work with partial failed output, accept the full re
 - A `Unit` dependency edge expresses ordering without transferring domain data.
 - Cycles are legal if all nodes remain source-reachable and output-reachable.
 
-There is no graph mutation API. `graph`, <code>`add-edges`</code>, and <code>`remove-edges`</code> are total pure set operations over the graph being authored.
+There is no graph mutation API. `graph`, <code>add_edges</code>, and <code>remove_edges</code> are total pure set operations over the graph being authored.
 
 ## Process and shell nodes
 
@@ -171,7 +171,7 @@ import nefor.process.{}
 nefor.process.exec("search", nefor.process.ProcessExecParams {
   argv: ["rg", "-n", "TODO", "src/"],
   cwd: nefor.process.cwd,
-  timeout: nefor.contracts.`no-timeout`(),
+  timeout: nefor.contracts.no_timeout(),
 })
 ```
 
@@ -182,10 +182,10 @@ import nefor.contracts.{}
 import nefor.shell.{}
 
 nefor.shell.script("bounded-search", nefor.shell.ShellScriptParams {
-  script: `strip-margin`("""|rg -n 'TODO|FIXME' src/
+  script: strip_margin("""|rg -n 'TODO|FIXME' src/
                             |  | sort"""),
   cwd: ".",
-  timeout: nefor.contracts.`timeout-ms`(30000),
+  timeout: nefor.contracts.timeout_ms(30000),
 })
 ```
 
@@ -193,15 +193,15 @@ POSIX shell does not imply Bash. When Bash semantics are required, invoke it exp
 
 Both nodes require a non-empty `cwd`; relative paths resolve from the MAG host's inherited working directory, exposed as `nefor.process.cwd` (`"."`). They accept `Unit`; an unfed node receives one automatic activation, while an incoming `Unit` edge makes it dependency-driven. The output is `ProcessResult`, containing separate `stdout`, `stderr`, and a nominal `ProcessExited` or `ProcessSignaled` termination value. Use exhaustive `match` to distinguish the two constructors; authored MAG never compares process-termination strings. Nonzero exit is result data, not a compilation failure.
 
-Timeouts are mandatory and explicit. <code>nefor.contracts.`no-timeout`()</code> is unbounded; use it only when waiting indefinitely is intentional. <code>nefor.contracts.`timeout-ms`(N)</code> sets a positive wall-clock bound. A process that never exits keeps its run nonterminal, so an awaited run also waits indefinitely. The current API has no `bash`, `BashOptions`, `command-with-options`, or `pipe-command` compatibility surface.
+Timeouts are mandatory and explicit. <code>nefor.contracts.no_timeout()</code> is unbounded; use it only when waiting indefinitely is intentional. <code>nefor.contracts.timeout_ms(N)</code> sets a positive wall-clock bound. A process that never exits keeps its run nonterminal, so an awaited run also waits indefinitely. The current API has no `bash`, `BashOptions`, `command-with-options`, or `pipe-command` compatibility surface.
 
 ## Human approvals
 
-<code>nefor.actors.`approval-gate`</code> branches a `TextAnswer` into nominal `Approved` and `Rejected` results. Use it when human judgment is part of the graph's meaning. It is distinct from lead `write-review`, which authorizes execution of a write-capable orchestration plan before launch. See [Orchestrating MAG](orchestrating.md#author-and-launch-a-program).
+<code>nefor.actors.approval_gate</code> branches a `TextAnswer` into nominal `Approved` and `Rejected` results. Use it when human judgment is part of the graph's meaning. It is distinct from lead `write-review`, which authorizes execution of a write-capable orchestration plan before launch. See [Orchestrating MAG](orchestrating.md#author-and-launch-a-program).
 
 ## Runtime expansion
 
-Most workflows should be fully static. When runtime data determines cardinality, a producer exposes the indexed-items-plus-completion `DynamicList<T>` protocol. Consumers retain that same nominal boundary: <code>nefor.dynamic.`traverse-template`</code> materializes one worker per item, while `nefor.dynamic.context` buffers through completion and activates once with the ordered list. The operation or factory owns this interpretation; the compiler grants no privileges from type-name spelling. Fixed worker lists use `nefor.node.sequence`.
+Most workflows should be fully static. When runtime data determines cardinality, a producer exposes the indexed-items-plus-completion `DynamicList<T>` protocol. Consumers retain that same nominal boundary: <code>nefor.dynamic.traverse_template</code> materializes one worker per item, while `nefor.dynamic.context` buffers through completion and activates once with the ordered list. The operation or factory owns this interpretation; the compiler grants no privileges from type-name spelling. Fixed worker lists use `nefor.node.sequence`.
 
 Version 1 evaluates only the closed Trigger, Capture, Field, IntToDecimalString, and ConcatStrings expression forms while materializing a structural delta template. There is no general runtime expression language or post-compilation MAG function application. Operations are program metadata, not graph edges, and do not give actors authority to alter the graph. See [MAG composition semantics](../../../plugins/mag/docs/patterns.md).
 

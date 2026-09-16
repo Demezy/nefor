@@ -52,6 +52,6 @@ type ProgramEnvelope<Initial> {format: String, version: Int, kind: String, progr
 
 type DeltaEnvelope<D> {format: String, version: Int, kind: String, delta: D}
 
-let `program-envelope`<Initial>: fn(Initial, List<ProgramOperation>) -> ProgramEnvelope<Initial> = |initial, operations| => ProgramEnvelope<Initial> {format: "nefor.mag", version: 2, kind: "program", program: Program<Initial> {initial: initial, operations: operations}}
+let program_envelope<Initial>: fn(Initial, List<ProgramOperation>) -> ProgramEnvelope<Initial> = |initial, operations| => ProgramEnvelope<Initial> {format: "nefor.mag", version: 2, kind: "program", program: Program<Initial> {initial: initial, operations: operations}}
 
-let `delta-envelope`<D>: fn(D) -> DeltaEnvelope<D> = |delta| => DeltaEnvelope<D> {format: "nefor.mag", version: 2, kind: "delta", delta: delta}
+let delta_envelope<D>: fn(D) -> DeltaEnvelope<D> = |delta| => DeltaEnvelope<D> {format: "nefor.mag", version: 2, kind: "delta", delta: delta}

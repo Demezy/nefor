@@ -35,7 +35,7 @@ Version 2 defines exactly one operation, `InstantiateDeltaTemplate`, whose
 closed expression vocabulary is Trigger, Capture, Field, IntToDecimalString,
 and ConcatStrings. Its structural template names actor slots, local/existing
 actor references, typed ports, routes and product positions, typed messages,
-logical paths, scalar parameter bindings, and explicit actor-id relocation
+logical paths, scalar parameter bindings, and explicit actor_id relocation
 metadata. It contains no executable MAG, generic AST, source, bytecode,
 condition, nested operation, or generic object-construction facility.
 
@@ -63,7 +63,7 @@ Actor-specific constructors are ordinary typed functions. They select a
 factory identity, make generic arguments explicit as type descriptors, and
 call `nefor.graph.actor` with parameters whose type their own signature owns.
 Runtime registry contracts arrive through the domain-neutral typed
-`host-input` boundary and are checked again by `nefor.graph.validate` before
+`host_input` boundary and are checked again by `nefor.graph.validate` before
 lowering.
 
 ## Runtime artifact
@@ -118,7 +118,7 @@ initial graph or by expansion.
 Multi-node pipelines are full `.mag` programs: compose typed nodes through
 `nefor.node`, connect the resulting boundary to an output, then pass a
 `Graph -> Graph` function to `nefor.artifact.compile`. Each compilation
-applies that function to `empty-graph` and validates the result for a fresh
+applies that function to `empty_graph` and validates the result for a fresh
 run; it does not retrieve or mutate a stored graph.
 
 ## Module resolution

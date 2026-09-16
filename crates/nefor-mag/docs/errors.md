@@ -64,11 +64,11 @@ A structured agent's declared result is `core.types.Result<nefor.contracts.Agent
 - `OutputValidationError` reports one or more path-specific schema violations.
 - `last_output` retains the latest raw model output for diagnosis or a recovery agent.
 
-The agent requests correction up to `max-corrections`. When the budget is exhausted, `AgentError` is emitted as an ordinary typed result. Route the complete `Result` to the output or use the result combinators to handle `Ok` and `Error` deliberately. Do not claim `O` was produced and do not parse provider prose as a substitute.
+The agent requests correction up to `max_corrections`. When the budget is exhausted, `AgentError` is emitted as an ordinary typed result. Route the complete `Result` to the output or use the result combinators to handle `Ok` and `Error` deliberately. Do not claim `O` was produced and do not parse provider prose as a substitute.
 
 ## Shell failures and hangs
 
-Process and shell nodes are unbounded when their required timeout record uses `no-timeout`. A process that never exits keeps its run nonterminal, so `mag-await` also waits indefinitely. Use `timeout-ms` in the `process.exec` or `shell.script` parameter record when an operation needs a wall-clock bound. Never launch a persistent foreground server or watcher as a normal awaited run.
+Process and shell nodes are unbounded when their required timeout record uses `no_timeout`. A process that never exits keeps its run nonterminal, so `mag-await` also waits indefinitely. Use `timeout_ms` in the `process.exec` or `shell.script` parameter record when an operation needs a wall-clock bound. Never launch a persistent foreground server or watcher as a normal awaited run.
 
 A compile success proves the command node is well-formed, not that its executable, working directory, permissions, or exit status will succeed. Handle routeable command outcomes where the library exposes them; otherwise an unhandled runtime failure fails the run.
 
@@ -97,7 +97,7 @@ Use the exact `run_id` returned by a fresh `mag-apply`. Call `mag-await` once wh
 
 ## Declarative-operation errors
 
-Dynamic expansion is validated before execution and materialized atomically at each trigger. Version 1 admits only `instantiate-delta-template`, with ordered trigger, capture, field, integer-to-decimal-string, and string-concatenation expressions. Actor references, parameter bindings, relocations, routes, and logical paths must resolve within the closed template; an invalid or conflicting materialization fails the run without applying a partial delta.
+Dynamic expansion is validated before execution and materialized atomically at each trigger. Version 1 admits only `instantiate_delta_template`, with ordered trigger, capture, field, integer-to-decimal-string, and string-concatenation expressions. Actor references, parameter bindings, relocations, routes, and logical paths must resolve within the closed template; an invalid or conflicting materialization fails the run without applying a partial delta.
 
 For `nefor.node.sequence`, expected sender ids are derived from the supplied nodes. Per-sender FIFOs preserve overlapping activation cohorts, and each complete cohort emits in declared order. Unexpected senders or an incomplete drain fail rather than silently reorder results. An empty node list produces `[]` after each input activation.
 

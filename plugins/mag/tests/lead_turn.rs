@@ -544,7 +544,7 @@ async fn typed_task_contract_lowers_and_corrects_mock_provider_json() {
     );
     send_event(
         &mut stdin,
-        completed(MOCK, &second_chat, json!({ "text": "{\"task\":\"build\",\"description\":\"Implement it\",\"dependent-tasks\":[]}" })),
+        completed(MOCK, &second_chat, json!({ "text": "{\"task\":\"build\",\"description\":\"Implement it\",\"dependent_tasks\":[]}" })),
     )
     .await;
     let result = next_event_of_kind(&mut reader, "mag.run_result").await;
@@ -678,7 +678,7 @@ fn assert_dynamic_program_envelope(artifact: &Value) {
             "Trigger" => "trigger",
             "Capture" => "capture",
             "Field" => "field",
-            "IntToDecimalString" => "int-to-decimal-string",
+            "IntToDecimalString" => "int_to_decimal_string",
             "ConcatStrings" => "concat",
             other => panic!("unknown dynamic expression constructor {other}"),
         })
@@ -687,7 +687,7 @@ fn assert_dynamic_program_envelope(artifact: &Value) {
         "trigger",
         "capture",
         "field",
-        "int-to-decimal-string",
+        "int_to_decimal_string",
         "concat",
     ] {
         assert!(

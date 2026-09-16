@@ -311,16 +311,16 @@ fn counters_partition_calls_builtins_and_binding_forces() {
 
 #[test]
 fn group_by_profiles_one_builtin_call_and_one_callback_per_item() {
-    let root = temp_dir("profile-group-by");
+    let root = temp_dir("profile-group_by");
     let profile = profile(
         &root,
-        "let key: fn(Int) -> String = |value| => str(value)\nlet grouped = `group-by`(key, [1, 2, 3])\nartifact(grouped)",
+        "let key: fn(Int) -> String = |value| => str(value)\nlet grouped = group_by(key, [1, 2, 3])\nartifact(grouped)",
     );
     let counters = profile.counters;
 
-    assert_eq!(counters.builtin_calls_by_name.get("group-by"), Some(&1));
+    assert_eq!(counters.builtin_calls_by_name.get("group_by"), Some(&1));
     assert_eq!(
-        counters.builtin_input_items_by_name.get("group-by"),
+        counters.builtin_input_items_by_name.get("group_by"),
         Some(&3)
     );
     assert_eq!(counters.user_function_calls, 0);
@@ -353,7 +353,7 @@ fn named_calls_memoization_and_physical_collection_work_are_separate() {
     let root = temp_dir("profile-exclusive-work");
     let profile = profile(
         &root,
-        "type Joined {joined: List<Int>}\ntype Result {first: Int, second: Int, encoded: String}\nlet identity: fn(Int) -> Int = |value| => value\nlet `first-value` = identity(7)\nlet `second-value` = identity(7)\nlet removed = `remove-at`([1, 2, 3], 1)\nlet joined = concat(removed, [4])\nlet encoded = canonical(Joined {joined: joined})\nartifact(Result {first: `first-value`, second: `second-value`, encoded: encoded})",
+        "type Joined {joined: List<Int>}\ntype Result {first: Int, second: Int, encoded: String}\nlet identity: fn(Int) -> Int = |value| => value\nlet first_value = identity(7)\nlet second_value = identity(7)\nlet removed = remove_at([1, 2, 3], 1)\nlet joined = concat(removed, [4])\nlet encoded = canonical(Joined {joined: joined})\nartifact(Result {first: first_value, second: second_value, encoded: encoded})",
     );
     let counters = profile.counters;
 
@@ -371,11 +371,11 @@ fn named_calls_memoization_and_physical_collection_work_are_separate() {
         Some(&1)
     );
     assert_eq!(
-        counters.builtin_cloned_items_by_name.get("remove-at"),
+        counters.builtin_cloned_items_by_name.get("remove_at"),
         Some(&3)
     );
     assert_eq!(
-        counters.builtin_shifted_items_by_name.get("remove-at"),
+        counters.builtin_shifted_items_by_name.get("remove_at"),
         Some(&1)
     );
     assert_eq!(
@@ -392,7 +392,7 @@ fn descriptor_assignment_and_table_work_are_generic_and_deterministic() {
     let root = temp_dir("profile-descriptors");
     let profile = profile(
         &root,
-        "type Result {assignments: List<Int>, declarations: Int}\nlet target = `type-evidence`(type_tag<(Int, Int)>())\nlet sources = [`type-evidence`(type_tag<Int>()), `type-evidence`(type_tag<Int>())]\nlet assignments = `descriptor-input-assignments`(target, sources)\nlet table = `descriptor-table`([target])\nartifact(Result {assignments: assignments, declarations: `__map-count`(table)})",
+        "type Result {assignments: List<Int>, declarations: Int}\nlet target = type_evidence(type_tag<(Int, Int)>())\nlet sources = [type_evidence(type_tag<Int>()), type_evidence(type_tag<Int>())]\nlet assignments = descriptor_input_assignments(target, sources)\nlet table = descriptor_table([target])\nartifact(Result {assignments: assignments, declarations: __map_count(table)})",
     );
     let counters = profile.counters;
 

@@ -97,8 +97,8 @@ program.
 Both capabilities require a non-empty `cwd`. Relative paths are resolved by the
 child process from that directory; in MAG, `nefor.process.cwd` is `"."`, meaning
 the working directory inherited by the Nefor/MAG host. Both also require an
-explicit timeout record: `no-timeout` is intentionally unbounded, while
-`timeout-ms N` must use a positive millisecond value. An unbounded process that
+explicit timeout record: `no_timeout` is intentionally unbounded, while
+`timeout_ms N` must use a positive millisecond value. An unbounded process that
 never exits keeps its MAG run nonterminal.
 
 Direct tool invocations may pass optional string `stdin`. In a MAG graph a

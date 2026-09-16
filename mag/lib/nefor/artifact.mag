@@ -4,33 +4,33 @@ import nefor.graph.{}
 
 import nefor.mag.{}
 
-let `emit-program`: fn(nefor.graph.Graph) -> Artifact = |graph| => {
-  let initial = nefor.graph.`lower-program`(graph)
-  artifact(nefor.mag.`program-envelope`(initial, get(nefor.graph.`analyze-graph`(graph), "graph_operations")))
+let emit_program: fn(nefor.graph.Graph) -> Artifact = |graph| => {
+  let initial = nefor.graph.lower_program(graph)
+  artifact(nefor.mag.program_envelope(initial, get(nefor.graph.analyze_graph(graph), "graph_operations")))
 }
 
 let compile_graph_value: fn(nefor.graph.Graph) -> Artifact = |graph| => {
-  let checked = nefor.graph.validate(graph, `host-input`("factory_contracts", type_tag<List<nefor.graph.FactoryContract>>()))
-  match checked { case Valid(valid) => `emit-program`(valid), case Invalid(invalid) => fail(get(invalid, "errors")) }
+  let checked = nefor.graph.validate(graph, host_input("factory_contracts", type_tag<List<nefor.graph.FactoryContract>>()))
+  match checked { case Valid(valid) => emit_program(valid), case Invalid(invalid) => fail(get(invalid, "errors")) }
 }
 
 let compile: fn(fn(nefor.graph.Graph) -> nefor.graph.Graph) -> Artifact = |transform| =>
-  compile_graph_value(transform(nefor.graph.`empty-graph`))
+  compile_graph_value(transform(nefor.graph.empty_graph))
 
-let `output-id-taken?`<O>: fn(nefor.graph.Node<Unit, O>, String) -> Bool = |terminal, candidate| => {
+let output_id_taken<O>: fn(nefor.graph.Node<Unit, O>, String) -> Bool = |terminal, candidate| => {
   let actor_collision = not((=)(count(filter(((|actor| => (=)(get(actor, "id"), candidate)) : fn(nefor.graph.Actor) -> Bool), get(terminal, "actors"))), 0))
-  let path_collision = not((=)(count(filter(((|node| => nefor.graph.`serialized-equal?`(get(node, "path"), [candidate])) : fn(nefor.graph.LogicalNode) -> Bool), get(terminal, "nodes"))), 0))
+  let path_collision = not((=)(count(filter(((|node| => nefor.graph.serialized_equal(get(node, "path"), [candidate])) : fn(nefor.graph.LogicalNode) -> Bool), get(terminal, "nodes"))), 0))
   if actor_collision then true else path_collision
 }
 
-let `fresh-output-id`<O>: fn(nefor.graph.Node<Unit, O>, String) -> String = |terminal, candidate| =>
-  if `output-id-taken?`(terminal, candidate) then `fresh-output-id`(terminal, str(candidate, "-")) else candidate
+let fresh_output_id<O>: fn(nefor.graph.Node<Unit, O>, String) -> String = |terminal, candidate| =>
+  if output_id_taken(terminal, candidate) then fresh_output_id(terminal, str(candidate, "-")) else candidate
 
 // Close one root-capable terminal through the same ordinary output node, edge,
 // graph validation, and lowering values available to every MAG program.
 let compile_graph<O>: fn(nefor.graph.Node<Unit, O>) -> Artifact = |terminal| => {
-  let result = nefor.graph.`output-for`(`fresh-output-id`(terminal, "result"), terminal)
+  let result = nefor.graph.output_for(fresh_output_id(terminal, "result"), terminal)
   compile_graph_value(nefor.graph.graph([nefor.graph.edge(terminal, result)]))
 }
 
-let delta: fn(nefor.graph.Delta) -> Artifact = |change| => artifact(nefor.mag.`delta-envelope`(nefor.graph.`lower-delta`(change)))
+let delta: fn(nefor.graph.Delta) -> Artifact = |change| => artifact(nefor.mag.delta_envelope(nefor.graph.lower_delta(change)))

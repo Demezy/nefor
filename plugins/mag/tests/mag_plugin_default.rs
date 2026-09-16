@@ -343,7 +343,7 @@ pub mod bridge {
                 "kind": "tool.invoke", "id": "cap-1", "from": "worker",
                 "name": "read_file", "invocation": invocation,
                 "args": {"name": "read_file", "args": {"path": "src/lib.rs"},
-                         "allowlist": ["read_file"], "da-policy": {"git": "read"}}
+                         "allowlist": ["read_file"], "da_policy": {"git": "read"}}
             })));
             assert_eq!(
                 out,
@@ -351,7 +351,7 @@ pub mod bridge {
                     "kind": "custom-gate.tool.invoke", "id": "cap-1", "from": "worker",
                     "name": "read_file", "invocation": invocation,
                     "args": {"path": "src/lib.rs"}, "allowlist": ["read_file"],
-                    "da-policy": {"git": "read"}
+                    "da_policy": {"git": "read"}
                 }))]
             );
             let cancel = bridge.translate_emit(obj(json!({"kind": "tool.cancel", "id": "cap-1"})));
@@ -1149,7 +1149,7 @@ mod project_build_tests {
         // Use read-json so the artifact and deeply nested extension are ordinary observed data.
         std::fs::write(
             project.path().join("main.mag"),
-            "artifact(`read-json`(\"artifact.json\"))",
+            "artifact(read_json(\"artifact.json\"))",
         )
         .unwrap();
         std::fs::write(

@@ -35,13 +35,13 @@ fn cache_catalog_is_ordered_and_has_an_independent_identity() {
             "transitive-module-changed",
             "module-ambiguity-introduced",
             "read-target-changed",
-            "read-json-target-changed",
-            "read-json-ambiguity-introduced",
-            "host-input-changed",
+            "read_json-target-changed",
+            "read_json-ambiguity-introduced",
+            "host_input-changed",
             "compiler-options-changed",
             "broken-module-repaired",
             "entry-lex-precedes-module-ambiguity",
-            "module-ambiguity-precedes-host-input",
+            "module-ambiguity-precedes-host_input",
             "required-module-precedes-entry-error",
             "entry-deleted-after-success",
             "alternating-context-a-b-a-b",
@@ -58,7 +58,7 @@ fn cache_catalog_is_ordered_and_has_an_independent_identity() {
     );
     assert_eq!(
         cache_catalog_fingerprint(),
-        "sha256:fad04eb03770e65882b6355a8db050d6a5dde9dae5aec0f3e74edadb94d33264"
+        "sha256:508cc96c0bda2ebbc5fc5ba1ffc298cd0294962265b350c8717cf3923cccc060"
     );
 }
 

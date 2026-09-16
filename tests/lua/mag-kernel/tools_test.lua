@@ -130,7 +130,7 @@ do
   local msgs, emit = capture()
   local policy = { allow = { "ls", "grep" }, deny = { "rm", "sudo" } }
   local allowlist = { "fs/read", "grep" }
-  local inst = run_tool.construct("rt", { ["da-policy"] = policy, allowlist = allowlist }, emit)
+  local inst = run_tool.construct("rt", { ["da_policy"] = policy, allowlist = allowlist }, emit)
 
   local pending = inst.deliver(single("llm", "generic-tool.ToolCalls", {
     calls = {

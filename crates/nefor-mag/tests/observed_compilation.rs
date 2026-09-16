@@ -46,7 +46,7 @@ fn transitive_inputs_preserve_source_root_and_validate_only_consumed_files() {
     w.write("lib/a.mag", "import b.{}\nlet value = b.value");
     w.write(
         "lib/b.mag",
-        "type Loaded {text: String, json: JsonValue}\nlet value = Loaded {text: read(\"text.txt\"), json: `read-json`(\"data.json\")}",
+        "type Loaded {text: String, json: JsonValue}\nlet value = Loaded {text: read(\"text.txt\"), json: read_json(\"data.json\")}",
     );
     w.write("text.txt", "source root");
     w.write("lib/text.txt", "not the source root");
@@ -82,7 +82,7 @@ fn transitive_inputs_preserve_source_root_and_validate_only_consumed_files() {
         ),
         (
             "lib/b.mag",
-            "type Loaded {text: String, json: JsonValue}\nlet value = Loaded {text: read(\"text.txt\"), json: `read-json`(\"data.json\")}",
+            "type Loaded {text: String, json: JsonValue}\nlet value = Loaded {text: read(\"text.txt\"), json: read_json(\"data.json\")}",
             "let value = 0",
         ),
         ("text.txt", "source root", "SOURCE ROOT"),
@@ -118,7 +118,7 @@ fn observed_and_cold_failures_have_identical_diagnostics() {
         "artifact(first(([]: List<Int>)))",
         "import absent.{}\nartifact(1)",
         "artifact(read(\"../escape\"))",
-        "artifact(`read-json`(\"missing\"))",
+        "artifact(read_json(\"missing\"))",
         "artifact(read(\"missing\"))",
     ] {
         w.write("main.mag", source);
@@ -137,7 +137,7 @@ fn distinct_read_queries_keep_existing_memoization_keys() {
     let w = Workspace::new();
     w.write(
         "main.mag",
-        "type Reads {first: String, second: String, json: JsonValue}\nartifact(Reads {first: read(\"text\"), second: read(\"./text\"), json: `read-json`(\"text\")})",
+        "type Reads {first: String, second: String, json: JsonValue}\nartifact(Reads {first: read(\"text\"), second: read(\"./text\"), json: read_json(\"text\")})",
     );
     w.write("text", "42");
     let roots = [w.0.clone()];

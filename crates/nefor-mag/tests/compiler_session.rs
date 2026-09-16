@@ -68,7 +68,7 @@ fn session_and_free_apis_have_cold_memory_and_file_compile_parity() {
     let source = r#"
         import support.{}
         type Answer {answer: Int}
-        let answer = support.expose(`host-input`("answer", type_tag<Int>()))
+        let answer = support.expose(host_input("answer", type_tag<Int>()))
         artifact(Answer {answer: answer})
     "#;
     std::fs::write(root.join("main.mag"), source).unwrap();

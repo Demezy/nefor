@@ -821,10 +821,10 @@ fn collection_len(value: &Value) -> Option<u64> {
 fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
     let input_items = match name {
         "concat" => args.iter().filter_map(collection_len).sum(),
-        "remove-at" | "descriptor-table" => args.first().and_then(collection_len).unwrap_or(0),
-        "descriptor-input-assignments" => args.get(1).and_then(collection_len).unwrap_or(0),
+        "remove_at" | "descriptor_table" => args.first().and_then(collection_len).unwrap_or(0),
+        "descriptor_input_assignments" => args.get(1).and_then(collection_len).unwrap_or(0),
         "fold" => args.get(2).and_then(collection_len).unwrap_or(0),
-        "map" | "group-by" | "indexed-map" | "filter" | "flat-map" | "sort-by" => {
+        "map" | "group_by" | "indexed_map" | "filter" | "flat_map" | "sort_by" => {
             args.get(1).and_then(collection_len).unwrap_or(0)
         }
         _ => 0,
@@ -842,16 +842,16 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             || matches!(
                 name,
                 "concat"
-                    | "remove-at"
-                    | "descriptor-table"
-                    | "descriptor-input-assignments"
+                    | "remove_at"
+                    | "descriptor_table"
+                    | "descriptor_input_assignments"
                     | "fold"
                     | "map"
-                    | "group-by"
-                    | "indexed-map"
+                    | "group_by"
+                    | "indexed_map"
                     | "filter"
-                    | "flat-map"
-                    | "sort-by"
+                    | "flat_map"
+                    | "sort_by"
             )
         {
             *counters
@@ -864,7 +864,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 .builtin_copied_items_by_name
                 .entry(name.to_owned())
                 .or_default() += input_items;
-        } else if name == "remove-at" {
+        } else if name == "remove_at" {
             *counters
                 .builtin_cloned_items_by_name
                 .entry(name.to_owned())
@@ -879,7 +879,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
         }
     });
     match name {
-        "__map-empty" => {
+        "__map_empty" => {
             if !(1..=2).contains(&args.len()) {
                 return Err(MagError::Arity {
                     expected: 1,
@@ -888,14 +888,14 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             }
             Ok(Value::Map(std::sync::Arc::new(Vec::new())))
         }
-        "__set-empty" => {
+        "__set_empty" => {
             arity(args, 1)?;
             Ok(Value::Set(std::sync::Arc::new(Vec::new())))
         }
-        "__map-insert" => {
+        "__map_insert" => {
             arity(args, 3)?;
             let Value::Map(entries) = raw(&args[0]) else {
-                return Err(MagError::Type("__map-insert expects Map".into()));
+                return Err(MagError::Type("__map_insert expects Map".into()));
             };
             if entries.iter().any(|(key, _)| equal(env, key, &args[1])) {
                 return Err(MagError::Eval("duplicate Map key".into()));
@@ -904,10 +904,10 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             entries.push((args[1].clone(), args[2].clone()));
             Ok(Value::Map(std::sync::Arc::new(entries)))
         }
-        "__map-put" => {
+        "__map_put" => {
             arity(args, 3)?;
             let Value::Map(entries) = raw(&args[0]) else {
-                return Err(MagError::Type("__map-put expects Map".into()));
+                return Err(MagError::Type("__map_put expects Map".into()));
             };
             let mut entries = entries.as_ref().clone();
             if let Some((_, value)) = entries
@@ -920,10 +920,10 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             }
             Ok(Value::Map(std::sync::Arc::new(entries)))
         }
-        "__set-insert" => {
+        "__set_insert" => {
             arity(args, 2)?;
             let Value::Set(items) = raw(&args[0]) else {
-                return Err(MagError::Type("__set-insert expects Set".into()));
+                return Err(MagError::Type("__set_insert expects Set".into()));
             };
             if items.iter().any(|item| equal(env, item, &args[1])) {
                 return Err(MagError::Eval("duplicate Set member".into()));
@@ -932,10 +932,10 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             items.push(args[1].clone());
             Ok(Value::Set(std::sync::Arc::new(items)))
         }
-        "__map-get-or" => {
+        "__map_get_or" => {
             arity(args, 3)?;
             let Value::Map(entries) = raw(&args[0]) else {
-                return Err(MagError::Type("__map-get-or expects Map".into()));
+                return Err(MagError::Type("__map_get_or expects Map".into()));
             };
             Ok(entries
                 .iter()
@@ -943,13 +943,13 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 .map(|(_, value)| value.clone())
                 .unwrap_or_else(|| args[2].clone()))
         }
-        "__map-get" | "__map-contains" => {
+        "__map_get" | "__map_contains" => {
             arity(args, 2)?;
             let Value::Map(entries) = raw(&args[0]) else {
                 return Err(MagError::Type(format!("{name} expects Map")));
             };
             let found = entries.iter().find(|(key, _)| equal(env, key, &args[1]));
-            if name == "__map-contains" {
+            if name == "__map_contains" {
                 Ok(Value::Bool(found.is_some()))
             } else {
                 found
@@ -957,20 +957,20 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                     .ok_or_else(|| MagError::Eval("Map key not found".into()))
             }
         }
-        "__set-contains" => {
+        "__set_contains" => {
             arity(args, 2)?;
             let Value::Set(items) = raw(&args[0]) else {
-                return Err(MagError::Type("__set-contains expects Set".into()));
+                return Err(MagError::Type("__set_contains expects Set".into()));
             };
             Ok(Value::Bool(
                 items.iter().any(|item| equal(env, item, &args[1])),
             ))
         }
-        "__map-union-left" => {
+        "__map_union_left" => {
             arity(args, 2)?;
             let (Value::Map(left), Value::Map(right)) = (raw(&args[0]), raw(&args[1])) else {
                 return Err(MagError::Type(
-                    "__map-union-left expects Map arguments".into(),
+                    "__map_union_left expects Map arguments".into(),
                 ));
             };
             let mut entries = left.as_ref().clone();
@@ -984,11 +984,11 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             }
             Ok(Value::Map(std::sync::Arc::new(entries)))
         }
-        "__map-count" | "__set-count" => {
+        "__map_count" | "__set_count" => {
             arity(args, 1)?;
             let count = match (name, raw(&args[0])) {
-                ("__map-count", Value::Map(entries)) => entries.len(),
-                ("__set-count", Value::Set(items)) => items.len(),
+                ("__map_count", Value::Map(entries)) => entries.len(),
+                ("__set_count", Value::Set(items)) => items.len(),
                 _ => return Err(MagError::Type(format!("invalid collection for {name}"))),
             };
             Ok(Value::Int(count as i64))
@@ -1000,11 +1000,11 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
         "str" => Ok(Value::Str(
             args.iter().map(value_string).collect::<Vec<_>>().join(""),
         )),
-        "strip-margin" => {
+        "strip_margin" => {
             arity(args, 1)?;
             let value = raw(&args[0])
                 .as_str()
-                .ok_or_else(|| MagError::Type("strip-margin expects a String".into()))?;
+                .ok_or_else(|| MagError::Type("strip_margin expects a String".into()))?;
             Ok(Value::Str(strip_margin(value)))
         }
         "replace" => {
@@ -1037,23 +1037,23 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             });
             Ok(Value::Str(encoded))
         }
-        "function-name" => {
+        "function_name" => {
             arity(args, 1)?;
             match raw(&args[0]) {
                 Value::Fn(function) => function.name.clone().map(Value::Str).ok_or_else(|| {
                     MagError::Eval(
-                        "function-name requires a function bound by let; anonymous closures have no authored identity"
+                        "function_name requires a function bound by let; anonymous closures have no authored identity"
                             .into(),
                     )
                 }),
-                _ => Err(MagError::Type("function-name expects a function".into())),
+                _ => Err(MagError::Type("function_name expects a function".into())),
             }
         }
-        "conforms?" => {
+        "conforms" => {
             arity(args, 2)?;
             let ty = match raw(&args[1]) {
                 Value::TypeDescriptor(ty) => ty.to_mag_type(),
-                _ => return Err(MagError::Type("conforms? expects a TypeDescriptor".into())),
+                _ => return Err(MagError::Type("conforms expects a TypeDescriptor".into())),
             };
             let Ok(schema) = crate::schema::TypeSchema::reify(env, &ty) else {
                 return Ok(Value::Bool(false));
@@ -1073,23 +1073,23 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             };
             Ok(Value::Int(n as i64))
         }
-        "remove-at" => {
+        "remove_at" => {
             arity(args, 2)?;
             let mut values = match raw(&args[0]) {
                 Value::List(values) => values.as_ref().clone(),
-                _ => return Err(MagError::Eval("remove-at expects List".into())),
+                _ => return Err(MagError::Eval("remove_at expects List".into())),
             };
             let index = match raw(&args[1]) {
                 Value::Int(index) if *index >= 0 => *index as usize,
                 _ => {
                     return Err(MagError::Eval(
-                        "remove-at index must be non-negative Int".into(),
+                        "remove_at index must be non-negative Int".into(),
                     ))
                 }
             };
             if index >= values.len() {
                 return Err(MagError::Eval(format!(
-                    "remove-at index {index} is out of bounds for {} values",
+                    "remove_at index {index} is out of bounds for {} values",
                     values.len()
                 )));
             }
@@ -1168,18 +1168,18 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             let diagnostic = crate::json::value_to_json(env, &args[0])?;
             Err(MagError::Eval(format!("validation failed: {diagnostic}")))
         }
-        "host-input" => {
+        "host_input" => {
             arity(args, 2)?;
             let key = raw(&args[0])
                 .as_str()
-                .ok_or_else(|| MagError::Type("host-input key must be a String".into()))?;
+                .ok_or_else(|| MagError::Type("host_input key must be a String".into()))?;
             let Value::TypeTag(expected) = raw(&args[1]) else {
-                return Err(MagError::Type("host-input expects a TypeTag".into()));
+                return Err(MagError::Type("host_input expects a TypeTag".into()));
             };
             let host_inputs = env.lookup_by_type("inputs", &MagType::HostInputs)?;
             let Value::HostInputs(inputs) = raw(&host_inputs) else {
                 return Err(MagError::Type(
-                    "host-input requires compiler host inputs".into(),
+                    "host_input requires compiler host inputs".into(),
                 ));
             };
             let value = inputs
@@ -1188,23 +1188,23 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             crate::json::project_typed_value(env, value, &expected.to_mag_type())
                 .map_err(|error| MagError::Type(format!("host input {key:?}: {error}")))
         }
-        "type-evidence" => {
+        "type_evidence" => {
             arity(args, 1)?;
             match raw(&args[0]) {
                 Value::TypeTag(ty) => Ok(Value::TypeDescriptor(ty.clone())),
                 other => Err(MagError::Type(format!(
-                    "type-evidence expects TypeTag, got {}",
+                    "type_evidence expects TypeTag, got {}",
                     other.type_name()
                 ))),
             }
         }
-        "type-schema" => {
+        "type_schema" => {
             arity(args, 1)?;
             let ty = match raw(&args[0]) {
                 Value::TypeTag(ty) => ty,
                 other => {
                     return Err(MagError::Type(format!(
-                        "type-schema expects TypeTag, got {}",
+                        "type_schema expects TypeTag, got {}",
                         other.type_name()
                     )))
                 }
@@ -1212,24 +1212,24 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             let schema = crate::schema::TypeSchema::reify(env, &ty.to_mag_type())?;
             Ok(Value::TypeSchema(schema))
         }
-        "type-id" => {
+        "type_id" => {
             arity(args, 1)?;
             let Value::TypeDescriptor(ty) = raw(&args[0]) else {
-                return Err(MagError::Type("type-id expects a TypeDescriptor".into()));
+                return Err(MagError::Type("type_id expects a TypeDescriptor".into()));
             };
             Ok(Value::SemanticTypeId(ty.stable_id()))
         }
-        "value-type-id" => {
+        "value_type_id" => {
             arity(args, 2)?;
             let declared = declared_value_type(&args[1])?;
             let selected = selected_value_type(env, &args[0], declared)?;
             Ok(Value::SemanticTypeId(selected.stable_id()))
         }
-        "value-type-evidence" => {
+        "value_type_evidence" => {
             arity(args, 2)?;
             let Value::TypeDescriptor(declared) = raw(&args[1]) else {
                 return Err(MagError::Type(
-                    "value-type-evidence expects a TypeDescriptor".into(),
+                    "value_type_evidence expects a TypeDescriptor".into(),
                 ));
             };
             Ok(Value::TypeDescriptor(selected_value_type(
@@ -1240,22 +1240,22 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             arity(args, 1)?;
             Ok(Value::PackedValue(std::sync::Arc::new(args[0].clone())))
         }
-        "packed-empty-record?" => {
+        "packed_empty_record" => {
             arity(args, 1)?;
             let Value::PackedValue(value) = raw(&args[0]) else {
                 return Err(MagError::Type(
-                    "packed-empty-record? expects PackedValue".into(),
+                    "packed_empty_record expects PackedValue".into(),
                 ));
             };
             Ok(Value::Bool(
                 matches!(raw(value), Value::Fields(fields) if fields.is_empty()),
             ))
         }
-        "packed-record-has-only-key?" => {
+        "packed_record_has_only_key" => {
             arity(args, 2)?;
             let Value::PackedValue(value) = raw(&args[0]) else {
                 return Err(MagError::Type(
-                    "packed-record-has-only-key? expects PackedValue".into(),
+                    "packed_record_has_only_key expects PackedValue".into(),
                 ));
             };
             let key = args[1]
@@ -1266,18 +1266,18 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 Value::Fields(fields) if fields.len() == 1 && fields.contains_key(key)
             )))
         }
-        "packed-record-has-only-keys?" => {
+        "packed_record_has_only_keys" => {
             arity(args, 2)?;
             let Value::PackedValue(value) = raw(&args[0]) else {
                 return Err(MagError::Type(
-                    "packed-record-has-only-keys? expects PackedValue".into(),
+                    "packed_record_has_only_keys expects PackedValue".into(),
                 ));
             };
             let values = match raw(&args[1]) {
                 Value::List(values) => values,
                 _ => {
                     return Err(MagError::Type(
-                        "packed-record-has-only-keys? expects a String list".into(),
+                        "packed_record_has_only_keys expects a String list".into(),
                     ))
                 }
             };
@@ -1285,7 +1285,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 .iter()
                 .map(|value| {
                     value.as_str().ok_or_else(|| {
-                        MagError::Type("packed-record-has-only-keys? expects a String list".into())
+                        MagError::Type("packed_record_has_only_keys expects a String list".into())
                     })
                 })
                 .collect::<Result<BTreeSet<_>, _>>()?;
@@ -1296,11 +1296,11 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                         && fields.keys().all(|key| keys.contains(key.as_str()))
             )))
         }
-        "packed-field-conforms?" => {
+        "packed_field_conforms" => {
             arity(args, 3)?;
             let Value::PackedValue(value) = raw(&args[0]) else {
                 return Err(MagError::Type(
-                    "packed-field-conforms? expects PackedValue".into(),
+                    "packed_field_conforms expects PackedValue".into(),
                 ));
             };
             let key = args[1]
@@ -1308,7 +1308,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 .ok_or_else(|| MagError::Type("packed record key must be String".into()))?;
             let Value::TypeDescriptor(ty) = raw(&args[2]) else {
                 return Err(MagError::Type(
-                    "packed-field-conforms? expects TypeDescriptor".into(),
+                    "packed_field_conforms expects TypeDescriptor".into(),
                 ));
             };
             let valid = match raw(value) {
@@ -1319,7 +1319,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             };
             Ok(Value::Bool(valid))
         }
-        "descriptor-accepts?" | "descriptor-accepts-value?" => {
+        "descriptor_accepts" | "descriptor_accepts_value" => {
             arity(args, 2)?;
             let Value::TypeDescriptor(target) = raw(&args[0]) else {
                 return Err(MagError::Type(format!(
@@ -1331,24 +1331,24 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                     "{name} expects TypeDescriptor arguments"
                 )));
             };
-            Ok(Value::Bool(if name == "descriptor-accepts-value?" {
+            Ok(Value::Bool(if name == "descriptor_accepts_value" {
                 target.accepts(source)
             } else {
                 target.accepts_edge_source(source)
             }))
         }
-        "descriptor-input-covered-by?" => {
+        "descriptor_input_covered_by" => {
             arity(args, 2)?;
             let Value::TypeDescriptor(target) = raw(&args[0]) else {
                 return Err(MagError::Type(
-                    "descriptor-input-covered-by? expects a TypeDescriptor target".into(),
+                    "descriptor_input_covered_by expects a TypeDescriptor target".into(),
                 ));
             };
             let sources = match raw(&args[1]) {
                 Value::List(sources) => sources,
                 _ => {
                     return Err(MagError::Type(
-                        "descriptor-input-covered-by? expects a descriptor list".into(),
+                        "descriptor_input_covered_by expects a descriptor list".into(),
                     ))
                 }
             };
@@ -1357,22 +1357,22 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 .map(|source| match raw(source) {
                     Value::TypeDescriptor(source) => Ok(source.clone()),
                     _ => Err(MagError::Type(
-                        "descriptor-input-covered-by? expects a descriptor list".into(),
+                        "descriptor_input_covered_by expects a descriptor list".into(),
                     )),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Bool(target.input_is_covered_by(&sources)))
         }
-        "descriptor-input-assignments" => {
+        "descriptor_input_assignments" => {
             arity(args, 2)?;
             let Value::TypeDescriptor(target) = raw(&args[0]) else {
                 return Err(MagError::Type(
-                    "descriptor-input-assignments expects a TypeDescriptor target".into(),
+                    "descriptor_input_assignments expects a TypeDescriptor target".into(),
                 ));
             };
             let sources = descriptor_list(
                 &args[1],
-                "descriptor-input-assignments expects a descriptor list",
+                "descriptor_input_assignments expects a descriptor list",
             )?;
             let result = target.assign_input_sources(&sources);
             let (compatibility_checks, search_branches) = if env.profiling_enabled() {
@@ -1426,23 +1426,23 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 })
                 .map_err(|error| MagError::Type(error.to_string()))
         }
-        "descriptor-output-covered-by?" => {
+        "descriptor_output_covered_by" => {
             arity(args, 2)?;
             let Value::TypeDescriptor(target) = raw(&args[0]) else {
                 return Err(MagError::Type(
-                    "descriptor-output-covered-by? expects a TypeDescriptor target".into(),
+                    "descriptor_output_covered_by expects a TypeDescriptor target".into(),
                 ));
             };
             let handlers = descriptor_list(
                 &args[1],
-                "descriptor-output-covered-by? expects a descriptor list",
+                "descriptor_output_covered_by expects a descriptor list",
             )?;
             Ok(Value::Bool(target.output_is_covered_by(&handlers)))
         }
-        "descriptor-table" => {
+        "descriptor_table" => {
             arity(args, 1)?;
             let descriptors =
-                descriptor_list(&args[0], "descriptor-table expects a descriptor list")?;
+                descriptor_list(&args[0], "descriptor_table expects a descriptor list")?;
             let top_level = descriptors.len() as u64;
             let recursive_nodes = descriptors.iter().map(descriptor_node_count).sum::<u64>();
             let hashed_bytes = descriptors.iter().map(descriptor_hashed_bytes).sum::<u64>();
@@ -1502,7 +1502,7 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 args[1].clone()
             })
         }
-        "map" | "group-by" | "indexed-map" | "filter" | "flat-map" | "fold" | "sort-by" => {
+        "map" | "group_by" | "indexed_map" | "filter" | "flat_map" | "fold" | "sort_by" => {
             collection_builtin(env, name, args)
         }
         "read" => {
@@ -1528,11 +1528,11 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             }
             Ok(Value::Str(s))
         }
-        "read-json" => {
+        "read_json" => {
             arity(args, 1)?;
             let path = args[0]
                 .as_str()
-                .ok_or_else(|| MagError::Eval("read-json path must be a string".into()))?;
+                .ok_or_else(|| MagError::Eval("read_json path must be a string".into()))?;
             let roots = std::iter::once(env.source_dir().to_path_buf())
                 .chain(env.module_roots().iter().cloned())
                 .collect::<Vec<_>>();
@@ -1591,14 +1591,14 @@ fn collection_builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, Ma
                     .collect::<Result<_, _>>()?,
             )))
         }
-        "group-by" => {
+        "group_by" => {
             arity(args, 2)?;
             let mut groups = BTreeMap::<String, Vec<Value>>::new();
             for value in seq(&args[1])?.iter() {
                 let key = apply(env, &args[0], std::slice::from_ref(value))?;
                 let key = key
                     .as_str()
-                    .ok_or_else(|| MagError::Eval("group-by callback must return String".into()))?;
+                    .ok_or_else(|| MagError::Eval("group_by callback must return String".into()))?;
                 groups
                     .entry(key.to_owned())
                     .or_default()
@@ -1613,7 +1613,7 @@ fn collection_builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, Ma
                     .collect(),
             )))
         }
-        "indexed-map" => {
+        "indexed_map" => {
             arity(args, 2)?;
             Ok(Value::List(std::sync::Arc::new(
                 seq(&args[1])?
@@ -1634,7 +1634,7 @@ fn collection_builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, Ma
             }
             Ok(Value::List(std::sync::Arc::new(out)))
         }
-        "flat-map" => {
+        "flat_map" => {
             arity(args, 2)?;
             let mut out = vec![];
             for v in seq(&args[1])?.iter().cloned() {
@@ -1650,7 +1650,7 @@ fn collection_builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, Ma
             }
             Ok(acc)
         }
-        "sort-by" => {
+        "sort_by" => {
             arity(args, 2)?;
             let mut keyed = seq(&args[1])?
                 .iter()
@@ -1660,7 +1660,7 @@ fn collection_builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, Ma
                     let key = key
                         .as_str()
                         .ok_or_else(|| {
-                            MagError::Eval("sort-by callback must return String".into())
+                            MagError::Eval("sort_by callback must return String".into())
                         })?
                         .to_owned();
                     Ok((key, value))
@@ -2137,14 +2137,14 @@ mod tests {
         ))]));
         let error = collection_builtin(
             &env,
-            "group-by",
+            "group_by",
             &[Value::BuiltinFn("count".into()), values],
         )
         .unwrap_err();
 
         assert_eq!(
             error.to_string(),
-            "eval: group-by callback must return String"
+            "eval: group_by callback must return String"
         );
     }
 

@@ -3,178 +3,178 @@
   "cases": [
     {
       "name": "trivial",
-      "fixture_fingerprint": "sha256:38ba8f0ce02b72de28bd68adbc86c33f047e6b68cb1313fc0bbe07c92711aced",
+      "fixture_fingerprint": "sha256:8901981f2c00f327f289992a291d95e03a222ea5010490c679f954d12e94aef0",
       "artifact_hash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
     },
     {
       "name": "core-dead-locals-16",
-      "fixture_fingerprint": "sha256:73378eaf3b286892f2678ad4aab90e27c43dad1cc35daf5a361a9c4f98b8b14b",
+      "fixture_fingerprint": "sha256:9d5f1c5451d7454c12e30050a8c2ba6f221ef707efc929395165d04537581dbb",
       "artifact_hash": "4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"
     },
     {
       "name": "core-generic-calls-16",
-      "fixture_fingerprint": "sha256:df4b73e299abebca10f68e07d8799875df9eae968ef063bf534d7eba5856e041",
+      "fixture_fingerprint": "sha256:f28d44c06d8bf351405e35869bc1cb812b7bebf0e823f03f03cb1be88c7f74b3",
       "artifact_hash": "13862f084a72fbe80d353527118c5ce361f7edde5713476ca2e774a04952b03a"
     },
     {
       "name": "core-concat-growth-16",
-      "fixture_fingerprint": "sha256:185ee35e5b726deee914b2cd91764f6f53230870abfb0c138db07f52e7b51b82",
+      "fixture_fingerprint": "sha256:c954c2046e524ba10b7b2f2b94870090127ee0d66045dfeac9a1fd69dbac69e3",
       "artifact_hash": "13862f084a72fbe80d353527118c5ce361f7edde5713476ca2e774a04952b03a"
     },
     {
       "name": "core-artifact-control-16",
-      "fixture_fingerprint": "sha256:052eb0d2436b87a2da0050a9e6f2fa83c50f658d4eeecad44df26aca79bba704",
+      "fixture_fingerprint": "sha256:3ed838eb287fde752ec2795d05328ae734369a7738121defbcbf58bc1511c0a7",
       "artifact_hash": "62d7d2bfd61f6a355f091817d48728fdf63cf683e2fc3e4635c1e46371687f95"
     },
     {
       "name": "core-dead-locals-64",
-      "fixture_fingerprint": "sha256:83bfb72028beb4e366857c8386957f598a6e1b1601ae7d7885f71dc82531d4bc",
+      "fixture_fingerprint": "sha256:7267048eaf1cbc95e189faac58be0a0906ceef653e96d5f1856d36bb6f75bf4d",
       "artifact_hash": "4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"
     },
     {
       "name": "core-generic-calls-64",
-      "fixture_fingerprint": "sha256:19dbb4c2893af2a3aba64076d36097917a9e026aeb6406f2c68a7aa201a224e2",
+      "fixture_fingerprint": "sha256:dcbb2e75c3521e344cfb1a40f4f013c512dcd025c07217819c037c488ec597ee",
       "artifact_hash": "17f04565819e34d088b985a2bbc4fa57df5e17c3f138ea0d81fce741fc4ab064"
     },
     {
       "name": "core-concat-growth-64",
-      "fixture_fingerprint": "sha256:019d96be632f229273ec117890a4b8b91e52ea24aa272e0b8cf0b5ca6c61d07f",
+      "fixture_fingerprint": "sha256:7a5ca67ecc8ebd0ee518f873894b4891765be0a53a662e406227e2fb095beaaf",
       "artifact_hash": "17f04565819e34d088b985a2bbc4fa57df5e17c3f138ea0d81fce741fc4ab064"
     },
     {
       "name": "core-artifact-control-64",
-      "fixture_fingerprint": "sha256:bf89a14c698dd3f366112ad57b424cb1a18c6198912a1bf13dbb96d69488fc16",
+      "fixture_fingerprint": "sha256:ecdf49ebd146e70e4af812218ac33f6038ce4f952890bad6951dc34ec681bd15",
       "artifact_hash": "288ab17c305fc2f5c038cc0ac03eeff6f67d9954f56caaecf1a1bcb4da19975e"
     },
     {
       "name": "core-dead-locals-256",
-      "fixture_fingerprint": "sha256:e350a1abbd25ab39a3e1db908a508bf50ca08d585f622542ac386d4b3cca904d",
+      "fixture_fingerprint": "sha256:347000c57ec1d21208fa33aa6f5915721ec9cb638e5914c48d4e79b753f944f6",
       "artifact_hash": "4062edaf750fb8074e7e83e0c9028c94e32468a8b6f1614774328ef045150f93"
     },
     {
       "name": "core-generic-calls-256",
-      "fixture_fingerprint": "sha256:86e946d9a8974d5ec75bf4c885007262099d6cfa66cc22d3159e0be6fcfd7ee7",
+      "fixture_fingerprint": "sha256:25b15b47b9d2567f546330d9a1717dbce88cab54b6e17ad1fe1756ebf7e8f89d",
       "artifact_hash": "650275519041f72771cce4f5f4f26fd53d606f06227840260bbda5d0ff91ea9e"
     },
     {
       "name": "core-concat-growth-256",
-      "fixture_fingerprint": "sha256:1c720cb4d6fc0ae3c226cf0f49f20c1cde0c82da5edda4aa9a4402772816ce2d",
+      "fixture_fingerprint": "sha256:cb5bb9939cc8e8453e80bd99a9dfd36714fede182b814875ee574f7dd8c09515",
       "artifact_hash": "650275519041f72771cce4f5f4f26fd53d606f06227840260bbda5d0ff91ea9e"
     },
     {
       "name": "core-artifact-control-256",
-      "fixture_fingerprint": "sha256:97a2449c650362cb8feb92c5562949c59c9190484716aa657b50c4554986d297",
+      "fixture_fingerprint": "sha256:fac53de565b911f5848c9e5f5dc1f5e58ce70c10a672cc1658fa4b6f00113e4d",
       "artifact_hash": "33d3ab9db8c986088744f9c5f57d8d4ae7cfcfd979e5ed3182d34a2790d6c696"
     },
     {
       "name": "nefor-linear-build-2",
-      "fixture_fingerprint": "sha256:187af440e616460f4426615426217e3b79f51d7b32120a1ab86eb687d57932d1",
+      "fixture_fingerprint": "sha256:fbf888fbbe69fc5dd6468da9592ad54217f0a70603c6d794a8bd62c57f1004f9",
       "artifact_hash": "c31eff50cb161158eb3e3c5d8eb4eb98cb50ee30f71e9432dc67213a266364b8"
     },
     {
       "name": "nefor-linear-validate-2",
-      "fixture_fingerprint": "sha256:f0f650e87f861206a1114a391ee19883abca93c1a55ca7b9cec5eb120453fe47",
+      "fixture_fingerprint": "sha256:8d34c50cc2ea77171dbf0015ece0075d8d78b1982ea35457a92836d07c184144",
       "artifact_hash": "c31eff50cb161158eb3e3c5d8eb4eb98cb50ee30f71e9432dc67213a266364b8"
     },
     {
       "name": "nefor-linear-lower-2",
-      "fixture_fingerprint": "sha256:85a19fc0ebea208afdd3777d78311c0eb5302b728a272f9b7dfb9470eaa1ed75",
+      "fixture_fingerprint": "sha256:4b097cb4e9ac13fd78214dee2faae0fc9c738e144d2cf49e20d7496ce1a8ed66",
       "artifact_hash": "7ef103dfc4c479cc56518d4afe74649ddcaba911493bb70dfb8371116084640e"
     },
     {
       "name": "linear-2",
-      "fixture_fingerprint": "sha256:1af00236412a475e499d3570d0a075c69181d85cac37eac3bc90013f017f2ca4",
-      "artifact_hash": "f1c03275605d4cb2877ff9b1a6d1719f05efb85521f6faa7d6261d5ec72b1820"
+      "fixture_fingerprint": "sha256:e4c5fb82cb2720c0ca0fea1998fbd1aef388e098da634d84b07739c9aa8ff47d",
+      "artifact_hash": "6631b33bd8464a87a136c60995e6f8cf93616ed2e28451e018f333ad5048c753"
     },
     {
       "name": "nefor-linear-build-8",
-      "fixture_fingerprint": "sha256:f5988e835121f28c74d03fc786d729dfb67b93b4233eabce2b751a08545076b4",
+      "fixture_fingerprint": "sha256:ac6640b5cf7bf24acc183d9215409fb340006e1286106599f22ce9233ffaa322",
       "artifact_hash": "e419bd32ffdee3bce3c217fa359b4750e63e20ae35e56ce3cc939f9192909466"
     },
     {
       "name": "nefor-linear-validate-8",
-      "fixture_fingerprint": "sha256:dae14cbadd713df6f3fce294a47740572bd11dae40e482ffe1e5ffddbe9a0305",
+      "fixture_fingerprint": "sha256:4235cd3dba654e2b8a3a3e792e2a8d51660eda8acdbea67bb18a2340c64862a9",
       "artifact_hash": "e419bd32ffdee3bce3c217fa359b4750e63e20ae35e56ce3cc939f9192909466"
     },
     {
       "name": "nefor-linear-lower-8",
-      "fixture_fingerprint": "sha256:5417771a7591c788b055893b52b05183c967b0d7538e36b540dfafec7f2816b1",
+      "fixture_fingerprint": "sha256:017f5e2f8e73f00b356686ad8a51f730db2a615fdc69fb9fb6a5e62aeb971215",
       "artifact_hash": "18a1dac924599b99e230cca2d312e99075c5e6ed8d07574e270200c7ec6dcf4a"
     },
     {
       "name": "linear-8",
-      "fixture_fingerprint": "sha256:be67d8e116711aa88af3d3ab9dfa1d4482c4f3940ecdf873b5efc36cf083b589",
-      "artifact_hash": "93238e449ec4d3a1816c5fc5d83c7a9b2d92ebb74b2cd5aaa6fb8617cdb6e8f1"
+      "fixture_fingerprint": "sha256:7223ea8e0465fb8df86999df3206294f46d0fd613134e0d6bea04b809b61c9c8",
+      "artifact_hash": "e2e8c7ffa99dd19daa897f9786178559a9cb413ae04ffcaa88646308392d1758"
     },
     {
       "name": "nefor-linear-build-12",
-      "fixture_fingerprint": "sha256:696d4e290961267801ed12af0cf2de9b9814fa4d7ce3c90d188f1ad2648f7cff",
+      "fixture_fingerprint": "sha256:8fb81208f325fd0e16dc220e649eb0baf774e3bde668ae7e2bd73b0aa1bd8db5",
       "artifact_hash": "e3efc11fa955201efbee46c25872799e011cc873e2fc5bc665b37f57f0d99d58"
     },
     {
       "name": "nefor-linear-validate-12",
-      "fixture_fingerprint": "sha256:0288927568584b81aa128bd47f18301bee5181bcb589eb6f60e9cdad2cb9d0be",
+      "fixture_fingerprint": "sha256:0795332ca4cf5b494d7b967d7eb7928c761e11ee8fd69e51202aa24fa91f1ed1",
       "artifact_hash": "e3efc11fa955201efbee46c25872799e011cc873e2fc5bc665b37f57f0d99d58"
     },
     {
       "name": "nefor-linear-lower-12",
-      "fixture_fingerprint": "sha256:e8191db210ba054ed57102131427c52666b89f51f73faef9ebf1867a1f8f3051",
+      "fixture_fingerprint": "sha256:6af701ab4c55e63fd40a1ed25ed943ac6add122ed16833329cfc35895e24ee58",
       "artifact_hash": "eb4eaf9f0cdb08e98356691156be2893a6c0d2ba014cd4c511cda2489158d2ef"
     },
     {
       "name": "linear-12",
-      "fixture_fingerprint": "sha256:7d30e34577599c2e3c22e391f770add2be980ac552257fd8e57c12d906c051a9",
-      "artifact_hash": "8ebbe0ab3eea5c82c5cfe5c737063c69e8e97e0df0ea09e15c6837a949093fbc"
+      "fixture_fingerprint": "sha256:4bf1e245ed4393edabda28815e464315fe7394390e367e79f3d9da8731b28329",
+      "artifact_hash": "05712cbbf45b087962168f40285369900a9aa41f99344d273d50cd48e8212f45"
     },
     {
       "name": "nefor-fan-in-build-2",
-      "fixture_fingerprint": "sha256:fd7ad94b86d6ba527ee233c5135f72d358fe6be829008c3e943ea3eaa3eed082",
+      "fixture_fingerprint": "sha256:9ec6ec495aea5864222b417d5005c40376b822544108f3052657455a58e781c7",
       "artifact_hash": "01aee418d7d01b611bbd67251b664eabd6de1a4761abf9a72184c93dd6891590"
     },
     {
       "name": "nefor-fan-in-lower-2",
-      "fixture_fingerprint": "sha256:07e05156b57f65828c53a36ee4853685cd3c55269df703fdba49ad0b748745fd",
+      "fixture_fingerprint": "sha256:282314368c4c2741f675ad37b669c6fdffb6fa2a90986c3202f46e8d7e939ee1",
       "artifact_hash": "3f013b6dc4858864e5e897a9e265fef3302185123e753559e594cecdea7390ee"
     },
     {
       "name": "product-fan-in-2",
-      "fixture_fingerprint": "sha256:b6ed0283a09cd9a4d6aa6aca6957eddf2f82a469f8ea78cc96c9c6bf5e1ab4ad",
-      "artifact_hash": "e34df253cc944c09641ec3aa8e7fa6b774aa3c905c4700d909144f908b35a602"
+      "fixture_fingerprint": "sha256:a59df4c242b22ffe9c5e5160def50de7dc950f98f3dd45e098f0e545928e41ad",
+      "artifact_hash": "5e0d0949504acf360032b03cc6eb807c190824ad18a8ab17699fbe89e0f23131"
     },
     {
       "name": "nefor-fan-in-build-8",
-      "fixture_fingerprint": "sha256:fe7c7e746044b51e05ead0e6c1f0edb43d8a535410082090bdd30245fa26b9aa",
+      "fixture_fingerprint": "sha256:bf757f83fde630d0fcfce2f3affc3f210571f5a383de1b3cb9c36b9180a094af",
       "artifact_hash": "3305a801b6ca7b9847411ef83689832e6d376953bc99c35feeb7055b50c055a3"
     },
     {
       "name": "nefor-fan-in-lower-8",
-      "fixture_fingerprint": "sha256:71b5628e8a3a6a7853754333d4a49db8e3a60fd2ea8595efffe0614affad98a0",
+      "fixture_fingerprint": "sha256:27484ba37061b4dc877b7205c7d5617b2718cfac0bf6c4725e1e40ef7444ae5b",
       "artifact_hash": "414eb80c454db0a396e712e61b319f3e4498fb6490a2c6d0434b0e13f6a3e262"
     },
     {
       "name": "product-fan-in-8",
-      "fixture_fingerprint": "sha256:174357ea693ab1ed825f8a804962642bd20a4839a770438240d93b2eb6905afb",
-      "artifact_hash": "d9e463988fda9cbfb5075dda3c78c1a550e82b638cf045fd62c2afbe165895af"
+      "fixture_fingerprint": "sha256:a1ebbd9d9747eb325ef00ef93fcd37ff0ca15b1e5b21266752470847c3e05e44",
+      "artifact_hash": "41cf43becbf48e554249aec125170522ed563cd313e371893668eb84da267b37"
     },
     {
       "name": "nefor-fan-in-build-16",
-      "fixture_fingerprint": "sha256:1b6bd88985439af5828a7c8b6168ba09ada795257c286ae41daf8c208e231d8d",
+      "fixture_fingerprint": "sha256:73235d59d62badafabede2d0acc76d757c04d3cec5e59c4a82939116bdd61a93",
       "artifact_hash": "32614da0dc375d7a188fe03d266864c5ed0314e9a390ebd83f77c4e5841b7b44"
     },
     {
       "name": "nefor-fan-in-lower-16",
-      "fixture_fingerprint": "sha256:7b3466a18e7906a4a080d7050ffb1bc6ec3675141345dfb9769261bcbcec0fe2",
+      "fixture_fingerprint": "sha256:cb23093010e0a318aa6895553221dd352f6b47ae395a84c1077100f1ad62c348",
       "artifact_hash": "9ca32da6696a0d89695b774cd358cdd537a54bf49ad5fb61bacdb32c2cffe496"
     },
     {
       "name": "product-fan-in-16",
-      "fixture_fingerprint": "sha256:7e70df038779317d61ccf8f1be44e94336585fadcde050b968bf78abc2783d1e",
-      "artifact_hash": "6a1e3614f7f7cee0ad17e12bb655fe1cc49e3d816467897f7a13778816a63b18"
+      "fixture_fingerprint": "sha256:ba54e303eca072ce57aec600792cbdabfb524323c3b0530a69313b4be96ae46d",
+      "artifact_hash": "78d9685dabd84b097e972db96743b7b91c6c1f309101b0573a0fa2fdcc3c4ad5"
     },
     {
       "name": "shipped-lead-turn",
-      "fixture_fingerprint": "sha256:a5d287c601dacffab9351bacd0cd156a898ea8d30c8e7aca7b7606f95b8aedda",
-      "artifact_hash": "3c0d29dae374655c919da6bcb372abdf36ccf5ff9e02c44d3a094e409ef64961"
+      "fixture_fingerprint": "sha256:b3bd410950128b18f036dab865c4811cf8973636bc83dc29ac0ef70965ac6f53",
+      "artifact_hash": "e12cc4891c18b600b301722433927dd09860d28fdd51953e8346b7b18bde7fab"
     }
   ],
   "oracles": [
@@ -256,7 +256,7 @@
     },
     {
       "name": "evidence-artifact-identity",
-      "artifact_hash": "6513e10c489110a688d637b2eb4527e119c2e77acabd48d74d599c46de1e7a4b"
+      "artifact_hash": "df9252f902d26db4e298b63a39c5f827ef2c09d4991aa56af81373c87f86ff0c"
     },
     {
       "name": "graph-conflicting-node-definition",

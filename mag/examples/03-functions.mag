@@ -10,6 +10,6 @@ let entry<K, V>: fn(K, V) -> Entry<K, V> = |key, value| => Entry<K, V> {key: key
 let label: fn(String, Int) -> NamedValue = |name, value| => NamedValue {name: name, value: value}
 
 let names = ["one", "two", "three"]
-let entries = `indexed-map`(((|index, name| => label(name, index)): fn(Int, String) -> NamedValue), names)
+let entries = indexed_map(((|index, name| => label(name, index)): fn(Int, String) -> NamedValue), names)
 
 artifact(ExampleArtifact {entry: entry("answer", 42), entries: entries})

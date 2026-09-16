@@ -13,7 +13,7 @@ produces `[]` after its input activation.
 
 `nefor.dynamic.DynamicList<O>` is a distinct runtime effect. It emits indexed
 occurrences plus explicit completion. Consumers retain that same nominal type;
-the operation owns its interpretation. `nefor.dynamic.traverse-template`
+the operation owns its interpretation. `nefor.dynamic.traverse_template`
 instantiates one closed worker template per occurrence, while
 `nefor.dynamic.context` buffers by index and presents one ordered provider turn,
 including for zero occurrences. No runtime-sized MAG `List` value or compiler

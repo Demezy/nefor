@@ -56,14 +56,14 @@ type ProcessFailure {operation: String, error: String}
 
 type RetryDecision<T> = Continue(T) | Exhausted(T)
 
-let `no-identifier`: fn() -> OptionalIdentifier = | | => OptionalIdentifier {present: false, value: ""}
+let no_identifier: fn() -> OptionalIdentifier = | | => OptionalIdentifier {present: false, value: ""}
 
 let identifier: fn(String) -> OptionalIdentifier = |value| => OptionalIdentifier {present: true, value: value}
 
-let `no-da-policy`: fn() -> DaPolicy = | | => DaPolicy {rules: (core.map.empty(type_tag<String>()): Map<String, String>)}
+let no_da_policy: fn() -> DaPolicy = | | => DaPolicy {rules: (core.map.empty(type_tag<String>()): Map<String, String>)}
 
-let `da-policy`: fn(Map<String, String>) -> DaPolicy = |rules| => DaPolicy {rules: rules}
+let da_policy: fn(Map<String, String>) -> DaPolicy = |rules| => DaPolicy {rules: rules}
 
-let `no-timeout`: fn() -> Timeout = | | => Timeout {present: false, milliseconds: 0}
+let no_timeout: fn() -> Timeout = | | => Timeout {present: false, milliseconds: 0}
 
-let `timeout-ms`: fn(Int) -> Timeout = |milliseconds| => Timeout {present: true, milliseconds: milliseconds}
+let timeout_ms: fn(Int) -> Timeout = |milliseconds| => Timeout {present: true, milliseconds: milliseconds}

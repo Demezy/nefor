@@ -10,7 +10,7 @@
 -- `run-tool` routes `generic-tool.ToolHandle` to its `tool-result`; flagged):
 --   input   generic-tool.ToolCalls   (single; fires per ToolCalls message)
 --   output  generic-tool.ToolHandle  (one aggregated handle per batch)
---   params  { allowlist, da-policy } per-node gating threaded to the tool surface
+--   params  { allowlist, da_policy } per-node gating threaded to the tool surface
 --
 -- (The task note names the output `generic-tool.ToolResults`; the landed
 -- fixture wires `generic-tool.ToolHandle`. The fixture is the contract source,
@@ -44,7 +44,7 @@
 --   mirroring a provider turn that consumes all tool outputs together.
 --
 -- ── da-policy threading (closes task-nefor-mag-per-node-da-policies; flagged) ──
---   The MAG node authors `:da-policy {…}` and a tool allowlist; lowering places
+--   The MAG node authors `:da_policy {…}` and a tool allowlist; lowering places
 --   them in THIS actor's `params`. Per call the factory carries both in the
 --   invocation `request` (which routing forwards as the `tool.invoke` args), so
 --   the policy authored on the node reaches the exact tool invocation. Enforcing
@@ -77,7 +77,7 @@ M.declaration = {
   params = {
     model = "string?", provider = "string?", conversation_peer = "string?",
     allowlist = "table?",  -- tool-name allowlist for this node (lowered from :tools)
-    ["da-policy"] = "table?", -- per-node bash approval rules (lowered from :da-policy)
+    ["da_policy"] = "table?", -- per-node bash approval rules (lowered from :da_policy)
   },
   template = { relocations = {} },
 
@@ -100,13 +100,10 @@ function M.construct(id, params, emit, deps)
   deps = deps or {}
 
   -- Per-node gating, threaded to every tool invocation this instance makes.
-  -- Read both the authored hyphen key (JSON-lowered `:da-policy`) and an
-  -- underscore alias; likewise allowlist / tools. Opaque plain data — the
-  -- factory forwards it, tool-gate interprets it.
-  local da_policy = params["da-policy"]
-  if da_policy == nil then
-    da_policy = params.da_policy
-  end
+  -- MAG-authored params are snake_case; the tool-gate request below retains
+  -- its established external wire key. Opaque plain data — the factory
+  -- forwards it, tool-gate interprets it.
+  local da_policy = params.da_policy
   if type(da_policy) == "table" and type(da_policy.rules) == "table" then
     da_policy = da_policy.rules
   end

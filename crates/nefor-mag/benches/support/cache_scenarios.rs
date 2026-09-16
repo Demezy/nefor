@@ -118,13 +118,13 @@ pub fn definitions() -> Vec<CacheScenarioDefinition> {
             "unique-to-ambiguous",
         ),
         ("read-target-changed", "invalidation", "text-v1-to-v2"),
-        ("read-json-target-changed", "invalidation", "json-v1-to-v2"),
+        ("read_json-target-changed", "invalidation", "json-v1-to-v2"),
         (
-            "read-json-ambiguity-introduced",
+            "read_json-ambiguity-introduced",
             "invalidation",
             "unique-to-ambiguous",
         ),
-        ("host-input-changed", "context", "input-a-to-b"),
+        ("host_input-changed", "context", "input-a-to-b"),
         (
             "compiler-options-changed",
             "context",
@@ -141,7 +141,7 @@ pub fn definitions() -> Vec<CacheScenarioDefinition> {
             "success-to-two-errors",
         ),
         (
-            "module-ambiguity-precedes-host-input",
+            "module-ambiguity-precedes-host_input",
             "precedence",
             "success-to-two-errors",
         ),
@@ -391,14 +391,14 @@ impl PreparedScenario {
                 self.write("main.mag", "artifact(read(\"note.txt\"))");
                 self.write("note.txt", "v1");
             }
-            "read-json-target-changed" | "read-json-ambiguity-introduced" => {
-                self.write("main.mag", "artifact(`read-json`(\"data/value.json\"))");
+            "read_json-target-changed" | "read_json-ambiguity-introduced" => {
+                self.write("main.mag", "artifact(read_json(\"data/value.json\"))");
                 self.write("data/value.json", "{\"version\":1}");
             }
-            "host-input-changed" | "alternating-context-a-b-a-b" => {
+            "host_input-changed" | "alternating-context-a-b-a-b" => {
                 self.write(
                     "main.mag",
-                    "artifact(`host-input`(\"value\", type_tag<Int>()))",
+                    "artifact(host_input(\"value\", type_tag<Int>()))",
                 );
                 self.inputs = json!({"value": 1});
             }
@@ -408,10 +408,10 @@ impl PreparedScenario {
             "entry-lex-precedes-module-ambiguity" => {
                 self.module_chain();
             }
-            "module-ambiguity-precedes-host-input" => {
+            "module-ambiguity-precedes-host_input" => {
                 self.write(
                     "main.mag",
-                    "import a.{}\nartifact(`host-input`(\"missing\", type_tag<Int>()))",
+                    "import a.{}\nartifact(host_input(\"missing\", type_tag<Int>()))",
                 );
                 self.write("a.mag", "let value = 1");
                 self.inputs = json!({"missing": 1});
@@ -454,15 +454,15 @@ impl PreparedScenario {
                 self.compile_setup_success();
                 self.write("note.txt", "v2");
             }
-            "read-json-target-changed" => {
+            "read_json-target-changed" => {
                 self.compile_setup_success();
                 self.write("data/value.json", "{\"version\":2}");
             }
-            "read-json-ambiguity-introduced" => {
+            "read_json-ambiguity-introduced" => {
                 self.compile_setup_success();
                 self.add_ambiguous_module("data/value.json", "{\"version\":2}");
             }
-            "host-input-changed" => {
+            "host_input-changed" => {
                 self.compile_setup_success();
                 self.inputs = json!({"value": 2});
             }
@@ -480,7 +480,7 @@ impl PreparedScenario {
                 self.add_ambiguous_module("a.mag", "let value = 2");
                 self.write("main.mag", "import a.{}\nartifact(λ)");
             }
-            "module-ambiguity-precedes-host-input" => {
+            "module-ambiguity-precedes-host_input" => {
                 self.compile_setup_success();
                 self.inputs = json!({});
                 self.add_ambiguous_module("a.mag", "let value = 2");
@@ -621,13 +621,13 @@ fn assert_expected(name: &str, sample: &CacheScenarioSample) {
             assert_eq!(success_value, Some(&json!(2)))
         }
         "read-target-changed" => assert_eq!(success_value, Some(&json!("v2"))),
-        "read-json-target-changed" => assert_eq!(success_value, Some(&json!({"version":2}))),
-        "host-input-changed" | "alternating-context-a-b-a-b" => {
+        "read_json-target-changed" => assert_eq!(success_value, Some(&json!({"version":2}))),
+        "host_input-changed" | "alternating-context-a-b-a-b" => {
             assert_eq!(success_value, Some(&json!(2)))
         }
         "module-ambiguity-introduced"
-        | "read-json-ambiguity-introduced"
-        | "module-ambiguity-precedes-host-input" => assert_error_contains(sample, "ambiguous"),
+        | "read_json-ambiguity-introduced"
+        | "module-ambiguity-precedes-host_input" => assert_error_contains(sample, "ambiguous"),
         "compiler-options-changed" => assert_error_contains(sample, "budget exceeded"),
         "entry-lex-precedes-module-ambiguity" => assert_error_class(sample, "syntax"),
         "required-module-precedes-entry-error" => {

@@ -8,18 +8,18 @@ type Worktree {repository: String, path: String, branch: String, head: String}
 
 type WorktreeError {operation: String, kind: String, message: String}
 
-let `create-factory` = "nefor.factory.worktree-create"
+let create_factory = "nefor.factory.worktree-create"
 
-let `open-factory` = "nefor.factory.worktree-open"
+let open_factory = "nefor.factory.worktree-open"
 
 let create: fn(String, CreateSpec) -> nefor.graph.Node<Unit, Worktree> = |id, spec| => {
   let input = nefor.graph.port(id, type_tag<Unit>(), "mag.Unit")
   let output = nefor.graph.port(id, type_tag<Worktree>(), "nefor.worktree.Ready")
-  nefor.graph.Node<Unit, Worktree> {id: id, role: "ordinary", actors: [nefor.graph.actor(id, `create-factory`, [], spec, nefor.graph.`store-port`(input), [nefor.graph.`store-port`(output)])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.`logical-node`([id], [id])], input: input, output: output}
+  nefor.graph.Node<Unit, Worktree> {id: id, role: "ordinary", actors: [nefor.graph.actor(id, create_factory, [], spec, nefor.graph.store_port(input), [nefor.graph.store_port(output)])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.logical_node([id], [id])], input: input, output: output}
 }
 
 let open: fn(String, OpenSpec) -> nefor.graph.Node<Unit, Worktree> = |id, spec| => {
   let input = nefor.graph.port(id, type_tag<Unit>(), "mag.Unit")
   let output = nefor.graph.port(id, type_tag<Worktree>(), "nefor.worktree.Ready")
-  nefor.graph.Node<Unit, Worktree> {id: id, role: "ordinary", actors: [nefor.graph.actor(id, `open-factory`, [], spec, nefor.graph.`store-port`(input), [nefor.graph.`store-port`(output)])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.`logical-node`([id], [id])], input: input, output: output}
+  nefor.graph.Node<Unit, Worktree> {id: id, role: "ordinary", actors: [nefor.graph.actor(id, open_factory, [], spec, nefor.graph.store_port(input), [nefor.graph.store_port(output)])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.logical_node([id], [id])], input: input, output: output}
 }

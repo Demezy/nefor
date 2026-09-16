@@ -7,9 +7,9 @@ import nefor.artifact.{}
 import nefor.contracts.{}
 import nefor.graph.{}
 
-type TaskDescription {task: String, description: String, `dependent-tasks`: List<String>}
+type TaskDescription {task: String, description: String, dependent_tasks: List<String>}
 
 let start = nefor.graph.source("typed-task-input", type_tag<nefor.contracts.Task>(), nefor.contracts.Task {prompt: "Describe the build task"})
-let worker = nefor.agents.`with-tools`(agents.`resolve-model`, agents.mock, "typed-task", "Describe the requested task.", ([]: List<String>), type_tag<nefor.contracts.Task>(), type_tag<TaskDescription>(), 2)
+let worker = nefor.agents.with_tools(agents.resolve_model, agents.mock, "typed-task", "Describe the requested task.", ([]: List<String>), type_tag<nefor.contracts.Task>(), type_tag<TaskDescription>(), 2)
 let result = nefor.graph.output("typed-task-output", type_tag<core.types.Result<nefor.contracts.AgentError, TaskDescription>>())
-nefor.artifact.compile((|graph| => nefor.graph.`add-edges`(graph, [nefor.graph.edge(start, worker), nefor.graph.edge(worker, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
+nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, worker), nefor.graph.edge(worker, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)

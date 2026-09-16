@@ -1,7 +1,7 @@
 import nefor.actors.{}
 import nefor.contracts.{}
 
-let `exact-model`: fn(nefor.actors.ResolvedModel) -> nefor.actors.ResolvedModel = |model| => model
-let `resolved-model-value` = nefor.actors.ResolvedModel {provider: "mock-plugin", model: "mock-model", `reasoning-effort`: nefor.actors.`reasoning-effort`("medium")}
+let exact_model: fn(nefor.actors.ResolvedModel) -> nefor.actors.ResolvedModel = |model| => model
+let resolved_model_value = nefor.actors.ResolvedModel {provider: "mock-plugin", model: "mock-model", reasoning_effort: nefor.actors.reasoning_effort("medium")}
 
-nefor.actors.`resolved-agent`(`exact-model`, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {id: "invalid", model: `resolved-model-value`, system: "", tools: [], `da-policy`: nefor.contracts.`no-da-policy`(), `max-corrections`: 0}, type_tag<nefor.contracts.Task>(), type_tag<MissingSemanticType>())
+nefor.actors.resolved_agent(exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {id: "invalid", model: resolved_model_value, system: "", tools: [], da_policy: nefor.contracts.no_da_policy(), max_corrections: 0}, type_tag<nefor.contracts.Task>(), type_tag<MissingSemanticType>())

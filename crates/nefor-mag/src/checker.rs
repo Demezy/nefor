@@ -722,10 +722,10 @@ fn infer_builtin(
         }
     };
     match name {
-        "__map-empty" => {
+        "__map_empty" => {
             if !(1..=2).contains(&args.len()) {
                 return Err(MagError::Type(format!(
-                    "__map-empty expects 1-2 arguments, got {}",
+                    "__map_empty expects 1-2 arguments, got {}",
                     args.len()
                 )));
             }
@@ -733,7 +733,7 @@ fn infer_builtin(
                 MagType::TypeTag(key) => *key,
                 actual => {
                     return Err(MagError::Type(format!(
-                        "__map-empty expects TypeTag keys, got {actual}"
+                        "__map_empty expects TypeTag keys, got {actual}"
                     )))
                 }
             };
@@ -743,7 +743,7 @@ fn infer_builtin(
                     MagType::TypeTag(value) => *value,
                     actual => {
                         return Err(MagError::Type(format!(
-                            "__map-empty expects TypeTag values, got {actual}"
+                            "__map_empty expects TypeTag values, got {actual}"
                         )))
                     }
                 }
@@ -752,9 +752,9 @@ fn infer_builtin(
             };
             Ok(MagType::Map(Box::new(key), Box::new(value)))
         }
-        "__map-insert" | "__map-put" | "__map-get-or" | "__map-get" | "__map-contains" => {
+        "__map_insert" | "__map_put" | "__map_get_or" | "__map_get" | "__map_contains" => {
             exact(
-                if matches!(name, "__map-insert" | "__map-put" | "__map-get-or") {
+                if matches!(name, "__map_insert" | "__map_put" | "__map_get_or") {
                     3
                 } else {
                     2
@@ -767,35 +767,35 @@ fn infer_builtin(
             require_equality_admissible(env, &key)?;
             let actual_key = infer(env, locals, &args[1])?;
             compatible(env, &actual_key, &key, &mut HashMap::new()).map_err(MagError::Type)?;
-            if matches!(name, "__map-insert" | "__map-put" | "__map-get-or") {
+            if matches!(name, "__map_insert" | "__map_put" | "__map_get_or") {
                 let actual_value = infer(env, locals, &args[2])?;
                 compatible(env, &actual_value, &value, &mut HashMap::new())
                     .map_err(MagError::Type)?;
-                if name == "__map-get-or" {
+                if name == "__map_get_or" {
                     Ok(*value)
                 } else {
                     Ok(MagType::Map(key, value))
                 }
-            } else if name == "__map-get" {
+            } else if name == "__map_get" {
                 Ok(*value)
             } else {
                 Ok(MagType::Bool)
             }
         }
-        "__map-union-left" => {
+        "__map_union_left" => {
             exact(2)?;
             let left = infer(env, locals, &args[0])?;
             let right = infer(env, locals, &args[1])?;
             compatible(env, &right, &left, &mut HashMap::new()).map_err(MagError::Type)?;
             let MagType::Map(key, value) = left else {
                 return Err(MagError::Type(format!(
-                    "__map-union-left expects Map, got {left}"
+                    "__map_union_left expects Map, got {left}"
                 )));
             };
             require_equality_admissible(env, &key)?;
             Ok(MagType::Map(key, value))
         }
-        "__map-count" => {
+        "__map_count" => {
             exact(1)?;
             match infer(env, locals, &args[0])? {
                 MagType::Map(key, _) => {
@@ -803,24 +803,24 @@ fn infer_builtin(
                     Ok(MagType::Int)
                 }
                 actual => Err(MagError::Type(format!(
-                    "__map-count expects Map, got {actual}"
+                    "__map_count expects Map, got {actual}"
                 ))),
             }
         }
-        "__set-empty" => {
+        "__set_empty" => {
             exact(1)?;
             let item = match infer(env, locals, &args[0])? {
                 MagType::TypeTag(item) => *item,
                 actual => {
                     return Err(MagError::Type(format!(
-                        "__set-empty expects TypeTag, got {actual}"
+                        "__set_empty expects TypeTag, got {actual}"
                     )))
                 }
             };
             require_equality_admissible(env, &item)?;
             Ok(MagType::Set(Box::new(item)))
         }
-        "__set-insert" | "__set-contains" => {
+        "__set_insert" | "__set_contains" => {
             exact(2)?;
             let target = infer(env, locals, &args[0])?;
             let MagType::Set(item) = target else {
@@ -829,13 +829,13 @@ fn infer_builtin(
             require_equality_admissible(env, &item)?;
             let actual = infer(env, locals, &args[1])?;
             compatible(env, &actual, &item, &mut HashMap::new()).map_err(MagError::Type)?;
-            if name == "__set-insert" {
+            if name == "__set_insert" {
                 Ok(MagType::Set(item))
             } else {
                 Ok(MagType::Bool)
             }
         }
-        "__set-count" => {
+        "__set_count" => {
             exact(1)?;
             match infer(env, locals, &args[0])? {
                 MagType::Set(item) => {
@@ -843,7 +843,7 @@ fn infer_builtin(
                     Ok(MagType::Int)
                 }
                 actual => Err(MagError::Type(format!(
-                    "__set-count expects Set, got {actual}"
+                    "__set_count expects Set, got {actual}"
                 ))),
             }
         }
@@ -913,36 +913,36 @@ fn infer_builtin(
                 .map_err(MagError::Type)?;
             Ok(MagType::Bool)
         }
-        "host-input" => {
+        "host_input" => {
             exact(2)?;
             let key = infer(env, locals, &args[0])?;
             compatible(env, &key, &MagType::String, &mut HashMap::new()).map_err(MagError::Type)?;
             match infer(env, locals, &args[1])? {
                 MagType::TypeTag(expected) => Ok(*expected),
                 actual => Err(MagError::Type(format!(
-                    "host-input expects TypeTag, got {actual}"
+                    "host_input expects TypeTag, got {actual}"
                 ))),
             }
         }
-        "type-evidence" => {
+        "type_evidence" => {
             exact(1)?;
             match infer(env, locals, &args[0])? {
                 MagType::TypeTag(_) => Ok(MagType::TypeDescriptor),
                 actual => Err(MagError::Type(format!(
-                    "type-evidence expects TypeTag, got {actual}"
+                    "type_evidence expects TypeTag, got {actual}"
                 ))),
             }
         }
-        "type-schema" => {
+        "type_schema" => {
             exact(1)?;
             match infer(env, locals, &args[0])? {
                 MagType::TypeTag(_) => Ok(MagType::TypeSchema),
                 actual => Err(MagError::Type(format!(
-                    "type-schema expects TypeTag, got {actual}"
+                    "type_schema expects TypeTag, got {actual}"
                 ))),
             }
         }
-        "type-id" => {
+        "type_id" => {
             exact(1)?;
             let descriptor = infer(env, locals, &args[0])?;
             compatible(
@@ -954,7 +954,7 @@ fn infer_builtin(
             .map_err(MagError::Type)?;
             Ok(MagType::SemanticTypeId)
         }
-        "value-type-id" => {
+        "value_type_id" => {
             exact(2)?;
             let actual = infer(env, locals, &args[0])?;
             match infer(env, locals, &args[1])? {
@@ -965,13 +965,13 @@ fn infer_builtin(
                 MagType::TypeDescriptor => {}
                 _ => {
                     return Err(MagError::Type(
-                        "value-type-id expects TypeTag or TypeDescriptor evidence".into(),
+                        "value_type_id expects TypeTag or TypeDescriptor evidence".into(),
                     ))
                 }
             }
             Ok(MagType::SemanticTypeId)
         }
-        "value-type-evidence" => {
+        "value_type_evidence" => {
             exact(2)?;
             let _ = infer(env, locals, &args[0])?;
             let evidence = infer(env, locals, &args[1])?;
@@ -1001,16 +1001,16 @@ fn infer_builtin(
             let _ = infer(env, locals, &args[0])?;
             Ok(MagType::String)
         }
-        "function-name" => {
+        "function_name" => {
             exact(1)?;
             match infer(env, locals, &args[0])? {
                 MagType::Function(_, _) => Ok(MagType::String),
                 actual => Err(MagError::Type(format!(
-                    "function-name expects a function, got {actual}"
+                    "function_name expects a function, got {actual}"
                 ))),
             }
         }
-        "conforms?" => {
+        "conforms" => {
             exact(2)?;
             let _ = infer(env, locals, &args[0])?;
             let evidence = infer(env, locals, &args[1])?;
@@ -1033,17 +1033,15 @@ fn infer_builtin(
             let _ = infer(env, locals, &args[0])?;
             Ok(MagType::PackedValue)
         }
-        "packed-empty-record?" => {
+        "packed_empty_record" => {
             exact(1)?;
             let value = infer(env, locals, &args[0])?;
             compatible(env, &value, &MagType::PackedValue, &mut HashMap::new())
                 .map_err(MagError::Type)?;
             Ok(MagType::Bool)
         }
-        "packed-record-has-only-key?"
-        | "packed-record-has-only-keys?"
-        | "packed-field-conforms?" => {
-            exact(if name == "packed-field-conforms?" {
+        "packed_record_has_only_key" | "packed_record_has_only_keys" | "packed_field_conforms" => {
+            exact(if name == "packed_field_conforms" {
                 3
             } else {
                 2
@@ -1052,13 +1050,13 @@ fn infer_builtin(
             compatible(env, &value, &MagType::PackedValue, &mut HashMap::new())
                 .map_err(MagError::Type)?;
             let key = infer(env, locals, &args[1])?;
-            let expected_key = if name == "packed-record-has-only-keys?" {
+            let expected_key = if name == "packed_record_has_only_keys" {
                 MagType::List(Box::new(MagType::String))
             } else {
                 MagType::String
             };
             compatible(env, &key, &expected_key, &mut HashMap::new()).map_err(MagError::Type)?;
-            if name == "packed-field-conforms?" {
+            if name == "packed_field_conforms" {
                 let descriptor = infer(env, locals, &args[2])?;
                 compatible(
                     env,
@@ -1070,11 +1068,11 @@ fn infer_builtin(
             }
             Ok(MagType::Bool)
         }
-        "descriptor-accepts?"
-        | "descriptor-accepts-value?"
-        | "descriptor-input-covered-by?"
-        | "descriptor-input-assignments"
-        | "descriptor-output-covered-by?" => {
+        "descriptor_accepts"
+        | "descriptor_accepts_value"
+        | "descriptor_input_covered_by"
+        | "descriptor_input_assignments"
+        | "descriptor_output_covered_by" => {
             exact(2)?;
             let descriptor = infer(env, locals, &args[0])?;
             compatible(
@@ -1084,20 +1082,20 @@ fn infer_builtin(
                 &mut HashMap::new(),
             )
             .map_err(MagError::Type)?;
-            let expected = if matches!(name, "descriptor-accepts?" | "descriptor-accepts-value?") {
+            let expected = if matches!(name, "descriptor_accepts" | "descriptor_accepts_value") {
                 MagType::TypeDescriptor
             } else {
                 MagType::List(Box::new(MagType::TypeDescriptor))
             };
             let value = infer(env, locals, &args[1])?;
             compatible(env, &value, &expected, &mut HashMap::new()).map_err(MagError::Type)?;
-            if name == "descriptor-input-assignments" {
+            if name == "descriptor_input_assignments" {
                 Ok(MagType::List(Box::new(MagType::Int)))
             } else {
                 Ok(MagType::Bool)
             }
         }
-        "descriptor-table" => {
+        "descriptor_table" => {
             exact(1)?;
             let descriptors = infer(env, locals, &args[0])?;
             compatible(
@@ -1127,7 +1125,7 @@ fn infer_builtin(
             }
             Ok(MagType::String)
         }
-        "read-json" => {
+        "read_json" => {
             exact(1)?;
             let path = infer(env, locals, &args[0])?;
             compatible(env, &path, &MagType::String, &mut HashMap::new())
@@ -1138,7 +1136,7 @@ fn infer_builtin(
             exact(1)?;
             Ok(MagType::Artifact)
         }
-        "strip-margin" => {
+        "strip_margin" => {
             exact(1)?;
             let value = infer(env, locals, &args[0])?;
             compatible(env, &value, &MagType::String, &mut HashMap::new())
@@ -1161,7 +1159,7 @@ fn infer_builtin(
             compatible(env, &a, &b, &mut HashMap::new()).map_err(MagError::Type)?;
             Ok(a)
         }
-        "remove-at" => {
+        "remove_at" => {
             exact(2)?;
             let collection = infer(env, locals, &args[0])?;
             let index = infer(env, locals, &args[1])?;
@@ -1169,7 +1167,7 @@ fn infer_builtin(
             match collection {
                 MagType::List(_) => Ok(collection),
                 actual => Err(MagError::Type(format!(
-                    "remove-at expects List, got {actual}"
+                    "remove_at expects List, got {actual}"
                 ))),
             }
         }
@@ -1191,7 +1189,7 @@ fn infer_builtin(
                 actual => Err(MagError::Type(format!("first expects List, got {actual}"))),
             }
         }
-        "map" | "filter" | "flat-map" | "sort-by" | "group-by" => {
+        "map" | "filter" | "flat_map" | "sort_by" | "group_by" => {
             exact(2)?;
             let fun = infer(env, locals, &args[0])?;
             let collection = infer(env, locals, &args[1])?;
@@ -1213,10 +1211,10 @@ fn infer_builtin(
                 compatible(env, &result, &MagType::Bool, &mut HashMap::new())
                     .map_err(MagError::Type)?;
                 Ok(MagType::List(Box::new(item)))
-            } else if name == "sort-by" || name == "group-by" {
+            } else if name == "sort_by" || name == "group_by" {
                 compatible(env, &result, &MagType::String, &mut HashMap::new())
                     .map_err(MagError::Type)?;
-                if name == "group-by" {
+                if name == "group_by" {
                     Ok(MagType::Map(
                         Box::new(MagType::String),
                         Box::new(MagType::List(Box::new(item))),
@@ -1224,32 +1222,32 @@ fn infer_builtin(
                 } else {
                     Ok(MagType::List(Box::new(item)))
                 }
-            } else if name == "flat-map" {
+            } else if name == "flat_map" {
                 match *result {
                     MagType::List(_) => Ok(*result),
                     actual => Err(MagError::Type(format!(
-                        "flat-map callback must return List, got {actual}"
+                        "flat_map callback must return List, got {actual}"
                     ))),
                 }
             } else {
                 Ok(MagType::List(result))
             }
         }
-        "indexed-map" => {
+        "indexed_map" => {
             exact(2)?;
             let fun = infer(env, locals, &args[0])?;
             let collection = infer(env, locals, &args[1])?;
             let item = match collection {
                 MagType::List(t) => *t,
-                _ => return Err(MagError::Type("indexed-map expects List".into())),
+                _ => return Err(MagError::Type("indexed_map expects List".into())),
             };
             let (params, result) = match fun {
                 MagType::Function(p, r) => (p, r),
-                _ => return Err(MagError::Type("indexed-map expects function".into())),
+                _ => return Err(MagError::Type("indexed_map expects function".into())),
             };
             if params.len() != 2 {
                 return Err(MagError::Type(
-                    "indexed-map callback expects 2 parameters".into(),
+                    "indexed_map callback expects 2 parameters".into(),
                 ));
             }
             compatible(env, &MagType::Int, &params[0], &mut HashMap::new())
@@ -1294,26 +1292,26 @@ type CheckedScope = HashMap<String, Vec<CheckedCandidate>>;
 const TYPE_BINDER_SCOPE_KEY: &str = "\0type-binders";
 
 pub(crate) const BUILTIN_NAMES: &[&str] = &[
-    "__map-empty",
-    "__map-insert",
-    "__map-put",
-    "__map-get",
-    "__map-get-or",
-    "__map-contains",
-    "__map-count",
-    "__map-union-left",
-    "__set-empty",
-    "__set-insert",
-    "__set-contains",
-    "__set-count",
+    "__map_empty",
+    "__map_insert",
+    "__map_put",
+    "__map_get",
+    "__map_get_or",
+    "__map_contains",
+    "__map_count",
+    "__map_union_left",
+    "__set_empty",
+    "__set_insert",
+    "__set_contains",
+    "__set_count",
     "str",
-    "strip-margin",
+    "strip_margin",
     "replace",
     "map",
-    "group-by",
-    "indexed-map",
+    "group_by",
+    "indexed_map",
     "filter",
-    "flat-map",
+    "flat_map",
     "fold",
     "concat",
     "get",
@@ -1322,35 +1320,35 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "count",
     "first",
     "canonical",
-    "function-name",
-    "sort-by",
-    "remove-at",
-    "conforms?",
+    "function_name",
+    "sort_by",
+    "remove_at",
+    "conforms",
     "or",
     "not",
     "=",
     "fail",
-    "type-evidence",
+    "type_evidence",
     "read",
-    "read-json",
+    "read_json",
     "require",
     "artifact",
-    "type-schema",
-    "type-id",
-    "value-type-id",
-    "value-type-evidence",
+    "type_schema",
+    "type_id",
+    "value_type_id",
+    "value_type_evidence",
     "pack",
-    "packed-empty-record?",
-    "packed-record-has-only-key?",
-    "packed-record-has-only-keys?",
-    "packed-field-conforms?",
-    "descriptor-accepts?",
-    "descriptor-accepts-value?",
-    "descriptor-input-covered-by?",
-    "descriptor-input-assignments",
-    "descriptor-output-covered-by?",
-    "descriptor-table",
-    "host-input",
+    "packed_empty_record",
+    "packed_record_has_only_key",
+    "packed_record_has_only_keys",
+    "packed_field_conforms",
+    "descriptor_accepts",
+    "descriptor_accepts_value",
+    "descriptor_input_covered_by",
+    "descriptor_input_assignments",
+    "descriptor_output_covered_by",
+    "descriptor_table",
+    "host_input",
 ];
 
 fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagType> {
@@ -1364,45 +1362,45 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
     let descriptor = MagType::TypeDescriptor;
     let packed = MagType::PackedValue;
     let mut signatures = match name {
-        "__map-empty" => vec![
+        "__map_empty" => vec![
             function(vec![tag(var("key"))], map(var("key"), var("value"))),
             function(
                 vec![tag(var("key")), tag(var("value"))],
                 map(var("key"), var("value")),
             ),
         ],
-        "__map-insert" => vec![function(
+        "__map_insert" => vec![function(
             vec![map(var("key"), var("value")), var("key"), var("value")],
             map(var("key"), var("value")),
         )],
-        "__map-put" => vec![function(
+        "__map_put" => vec![function(
             vec![map(var("key"), var("value")), var("key"), var("value")],
             map(var("key"), var("value")),
         )],
-        "__map-get-or" => vec![function(
+        "__map_get_or" => vec![function(
             vec![map(var("key"), var("value")), var("key"), var("value")],
             var("value"),
         )],
-        "__map-get" => vec![function(
+        "__map_get" => vec![function(
             vec![map(var("key"), var("value")), var("key")],
             var("value"),
         )],
-        "__map-contains" => vec![function(
+        "__map_contains" => vec![function(
             vec![map(var("key"), var("value")), var("key")],
             MagType::Bool,
         )],
-        "__map-count" => vec![function(vec![map(var("key"), var("value"))], MagType::Int)],
-        "__map-union-left" => vec![function(
+        "__map_count" => vec![function(vec![map(var("key"), var("value"))], MagType::Int)],
+        "__map_union_left" => vec![function(
             vec![map(var("key"), var("value")), map(var("key"), var("value"))],
             map(var("key"), var("value")),
         )],
-        "__set-empty" => vec![function(vec![tag(var("item"))], set(var("item")))],
-        "__set-insert" => vec![function(
+        "__set_empty" => vec![function(vec![tag(var("item"))], set(var("item")))],
+        "__set_insert" => vec![function(
             vec![set(var("item")), var("item")],
             set(var("item")),
         )],
-        "__set-contains" => vec![function(vec![set(var("item")), var("item")], MagType::Bool)],
-        "__set-count" => vec![function(vec![set(var("item"))], MagType::Int)],
+        "__set_contains" => vec![function(vec![set(var("item")), var("item")], MagType::Bool)],
+        "__set_count" => vec![function(vec![set(var("item"))], MagType::Int)],
         "str" => candidate
             .and_then(|candidate| match candidate {
                 MagType::Function(params, _) => {
@@ -1411,7 +1409,7 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
                 _ => None,
             })
             .unwrap_or_default(),
-        "strip-margin" => vec![function(vec![MagType::String], MagType::String)],
+        "strip_margin" => vec![function(vec![MagType::String], MagType::String)],
         "replace" => vec![function(
             vec![MagType::String, MagType::String, MagType::String],
             MagType::String,
@@ -1421,7 +1419,7 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
             function(vec![MagType::String], MagType::Int),
         ],
         "first" => vec![function(vec![list(var("item"))], var("item"))],
-        "remove-at" => vec![function(
+        "remove_at" => vec![function(
             vec![list(var("item")), MagType::Int],
             list(var("item")),
         )],
@@ -1434,14 +1432,14 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
         ],
         "not" => vec![function(vec![MagType::Bool], MagType::Bool)],
         "=" => vec![function(vec![var("value"), var("value")], MagType::Bool)],
-        "host-input" => vec![function(
+        "host_input" => vec![function(
             vec![MagType::String, tag(var("value"))],
             var("value"),
         )],
-        "type-evidence" => vec![function(vec![tag(var("value"))], descriptor)],
-        "type-schema" => vec![function(vec![tag(var("value"))], MagType::TypeSchema)],
-        "type-id" => vec![function(vec![descriptor], MagType::SemanticTypeId)],
-        "value-type-id" => vec![
+        "type_evidence" => vec![function(vec![tag(var("value"))], descriptor)],
+        "type_schema" => vec![function(vec![tag(var("value"))], MagType::TypeSchema)],
+        "type_id" => vec![function(vec![descriptor], MagType::SemanticTypeId)],
+        "value_type_id" => vec![
             function(
                 vec![var("value"), tag(var("value"))],
                 MagType::SemanticTypeId,
@@ -1451,44 +1449,44 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
                 MagType::SemanticTypeId,
             ),
         ],
-        "value-type-evidence" => vec![function(
+        "value_type_evidence" => vec![function(
             vec![var("value"), descriptor.clone()],
             descriptor.clone(),
         )],
         "canonical" => vec![function(vec![var("value")], MagType::String)],
-        "function-name" => vec![function(
+        "function_name" => vec![function(
             vec![function(vec![var("input")], var("output"))],
             MagType::String,
         )],
-        "conforms?" => vec![function(vec![var("value"), descriptor], MagType::Bool)],
+        "conforms" => vec![function(vec![var("value"), descriptor], MagType::Bool)],
         "fail" => vec![function(vec![var("value")], MagType::Never)],
         "pack" => vec![function(vec![var("value")], packed.clone())],
-        "packed-empty-record?" => vec![function(vec![packed.clone()], MagType::Bool)],
-        "packed-record-has-only-key?" => vec![function(
+        "packed_empty_record" => vec![function(vec![packed.clone()], MagType::Bool)],
+        "packed_record_has_only_key" => vec![function(
             vec![packed.clone(), MagType::String],
             MagType::Bool,
         )],
-        "packed-record-has-only-keys?" => vec![function(
+        "packed_record_has_only_keys" => vec![function(
             vec![packed.clone(), list(MagType::String)],
             MagType::Bool,
         )],
-        "packed-field-conforms?" => vec![function(
+        "packed_field_conforms" => vec![function(
             vec![packed, MagType::String, descriptor],
             MagType::Bool,
         )],
-        "descriptor-accepts?" | "descriptor-accepts-value?" => vec![function(
+        "descriptor_accepts" | "descriptor_accepts_value" => vec![function(
             vec![descriptor.clone(), descriptor.clone()],
             MagType::Bool,
         )],
-        "descriptor-input-covered-by?" | "descriptor-output-covered-by?" => vec![function(
+        "descriptor_input_covered_by" | "descriptor_output_covered_by" => vec![function(
             vec![descriptor.clone(), list(descriptor.clone())],
             MagType::Bool,
         )],
-        "descriptor-input-assignments" => vec![function(
+        "descriptor_input_assignments" => vec![function(
             vec![descriptor.clone(), list(descriptor.clone())],
             list(MagType::Int),
         )],
-        "descriptor-table" => vec![function(
+        "descriptor_table" => vec![function(
             vec![list(descriptor.clone())],
             map(MagType::String, descriptor.clone()),
         )],
@@ -1496,7 +1494,7 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
             function(vec![MagType::String], MagType::String),
             function(vec![MagType::String, var("fallback")], MagType::String),
         ],
-        "read-json" => vec![function(vec![MagType::String], MagType::JsonValue)],
+        "read_json" => vec![function(vec![MagType::String], MagType::JsonValue)],
         "require" => vec![function(vec![MagType::String], MagType::Unit)],
         "artifact" => vec![function(vec![var("value")], MagType::Artifact)],
         "or" => vec![function(vec![var("value"), var("value")], var("value"))],
@@ -1513,7 +1511,7 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
             ],
             list(var("result")),
         )],
-        "group-by" => vec![function(
+        "group_by" => vec![function(
             vec![
                 function(vec![var("item")], MagType::String),
                 list(var("item")),
@@ -1527,21 +1525,21 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
             ],
             list(var("item")),
         )],
-        "flat-map" => vec![function(
+        "flat_map" => vec![function(
             vec![
                 function(vec![var("item")], list(var("result"))),
                 list(var("item")),
             ],
             list(var("result")),
         )],
-        "sort-by" => vec![function(
+        "sort_by" => vec![function(
             vec![
                 function(vec![var("item")], MagType::String),
                 list(var("item")),
             ],
             list(var("item")),
         )],
-        "indexed-map" => vec![function(
+        "indexed_map" => vec![function(
             vec![
                 function(vec![MagType::Int, var("item")], var("result")),
                 list(var("item")),
@@ -2848,10 +2846,10 @@ fn compile_builtin_call(
     expressions: &[Expr],
     expected: Option<&MagType>,
 ) -> Result<CheckedExpr, MagError> {
-    if name == "__map-empty" && expressions.len() == 1 {
+    if name == "__map_empty" && expressions.len() == 1 {
         let Some(MagType::Map(key_type, _)) = expected else {
             return Err(MagError::Type(
-                "one-argument __map-empty requires an expected Map type".into(),
+                "one-argument __map_empty requires an expected Map type".into(),
             ));
         };
         require_equality_admissible(env, key_type)?;
@@ -2956,7 +2954,7 @@ fn compile_builtin_call(
     }
     if matches!(
         name,
-        "map" | "filter" | "flat-map" | "sort-by" | "group-by" | "indexed-map"
+        "map" | "filter" | "flat_map" | "sort_by" | "group_by" | "indexed_map"
     ) {
         return compile_collection_builtin(env, scopes, name, id, expressions, expected);
     }
@@ -3002,21 +3000,21 @@ fn compile_collection_builtin(
     };
     let callback_result = match name {
         "filter" => MagType::Bool,
-        "sort-by" | "group-by" => MagType::String,
+        "sort_by" | "group_by" => MagType::String,
         "map" => match expected {
             Some(MagType::List(result)) => (**result).clone(),
             _ => MagType::Var("\0builtin.result".into()),
         },
-        "flat-map" => expected
+        "flat_map" => expected
             .cloned()
             .unwrap_or_else(|| MagType::List(Box::new(MagType::Var("\0builtin.result".into())))),
-        "indexed-map" => match expected {
+        "indexed_map" => match expected {
             Some(MagType::List(result)) => (**result).clone(),
             _ => MagType::Var("\0builtin.result".into()),
         },
         _ => unreachable!(),
     };
-    let callback_params = if name == "indexed-map" {
+    let callback_params = if name == "indexed_map" {
         vec![MagType::Int, (**item).clone()]
     } else {
         vec![(**item).clone()]
@@ -3025,7 +3023,7 @@ fn compile_collection_builtin(
     let callback =
         compile_expr(env, scopes, &expressions[0], Some(&callback_expected)).map_err(|error| {
             match name {
-                "sort-by" | "group-by" => {
+                "sort_by" | "group_by" => {
                     MagError::Type(format!("{name} callback must return String: {error}"))
                 }
                 "filter" => MagError::Type(format!("filter callback must return Bool: {error}")),
@@ -3036,10 +3034,10 @@ fn compile_collection_builtin(
         unreachable!("callback expectation guarantees a function")
     };
     let output = match name {
-        "filter" | "sort-by" => collection.ty.clone(),
-        "group-by" => MagType::Map(Box::new(MagType::String), Box::new(collection.ty.clone())),
-        "flat-map" => (**result).clone(),
-        "map" | "indexed-map" => MagType::List(result.clone()),
+        "filter" | "sort_by" => collection.ty.clone(),
+        "group_by" => MagType::Map(Box::new(MagType::String), Box::new(collection.ty.clone())),
+        "flat_map" => (**result).clone(),
+        "map" | "indexed_map" => MagType::List(result.clone()),
         _ => unreachable!(),
     };
     let callee_type = MagType::Function(
@@ -3802,6 +3800,18 @@ mod builtin_signature_tests {
                 assert!(
                     collides_with_builtin(&env, name, &signature),
                     "visible builtin {name} does not recognize signature {signature}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn visible_word_builtins_use_canonical_snake_case() {
+        for &name in BUILTIN_NAMES {
+            if name.chars().any(char::is_alphanumeric) {
+                assert!(
+                    !name.contains('-') && !name.contains('?'),
+                    "noncanonical builtin {name}"
                 );
             }
         }

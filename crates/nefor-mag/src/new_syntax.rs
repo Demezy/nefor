@@ -848,9 +848,7 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(word) if word == "false" => Ok(authored::Expr::Bool(false)),
             TokenKind::Ident(word) if word == "if" => self.parse_if(expected),
             TokenKind::Ident(word) if word == "match" => self.parse_match(expected),
-            TokenKind::Ident(word) if word == "type_tag" || word == "type-tag" => {
-                self.parse_type_tag()
-            }
+            TokenKind::Ident(word) if word == "type_tag" => self.parse_type_tag(),
             TokenKind::Ident(word) if word == "named" => self.parse_named(),
             TokenKind::Ident(word) => self.parse_name_expression(word, expected),
             TokenKind::Operator(word) if word == "|" => self.parse_lambda(expected, token.span),
@@ -2372,6 +2370,7 @@ mod tests {
         assert!(parse("require \"support\"\n").is_err());
         assert!(parse("let x = 1; let y = 2\n").is_err());
         assert!(parse("let x = 1\n+ 2\n").is_err());
+        assert!(parse("artifact(type-tag<String>())\n").is_err());
     }
 
     #[test]
