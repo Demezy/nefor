@@ -46,6 +46,24 @@ artifact(join("nary:", "left" choose "right"))
 }
 
 #[test]
+fn imported_arrow_operator_is_infix_only_in_expression_context() {
+    let root = workspace("arrow-term-operator");
+    fs::write(
+        root.join("operators.mag"),
+        "let (->): Int -> Int -> Int = |left| => |right| => left\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.mag"),
+        "import operators.{`->`}\ninfixr 4 (->)\nlet identity: Int -> Int = |value| => value\nartifact(identity(1 -> 2))\n",
+    )
+    .unwrap();
+
+    let artifact = compile_file_with_syntax(&root, "main.mag", SyntaxMode::New).unwrap();
+    assert_eq!(artifact, serde_json::json!(1));
+}
+
+#[test]
 fn generic_adt_match_and_expression_block_use_existing_semantics() {
     let artifact = compile_with_syntax(
         r#"

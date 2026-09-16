@@ -81,6 +81,8 @@ let entry<K, V>: fn(K, V) -> Entry<K, V> = |key, value| =>
 
 Names containing punctuation or reserved words are enclosed in backticks, for example <code>nefor.node.`>>>`</code> or a local <code>`max-retries`</code> binding.
 
+Symbolic operators may be used as ordinary values and called with parentheses, or declared with a fixity and applied infix. Infix application requires ASCII whitespace on both sides of a symbolic operator: write `left >>> right`, never `left>>>right`, `left >>>right`, or `(left)>>> right`. Spaces, tabs, and line breaks are separators; delimiters are not. A line may continue when a newline follows the operator (`left >>>` with `right` on the next line), while an operator at the start of the next line begins a new expression and is rejected. A `//` comment does not replace the required whitespace: write a space before the comment in `left >>> // explanation`. Alphabetic infix names use the same expression-separated position (`1 add 2`) without a separate symbolic-spacing check. This rule does not affect prefix calls such as `(>>>)(left, right)`, qualified calls such as <code>nefor.node.`>>>`(left, right)</code>, `->` in types, lambda delimiters, or signed numeric literals.
+
 ## A complete graph
 
 ```mag

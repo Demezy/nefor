@@ -377,6 +377,10 @@ fn token_can_end_expression(kind: &TokenKind) -> bool {
     )
 }
 
+fn is_infix_separator_byte(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
+}
+
 fn is_operator_byte(byte: u8) -> bool {
     matches!(
         byte,
@@ -696,7 +700,7 @@ impl<'a> Parser<'a> {
         let first = self.parse_ascription(expected)?;
         let mut operands = vec![first];
         let mut operators = Vec::new();
-        while let Some((operator, span)) = self.take_infix_operator() {
+        while let Some((operator, span)) = self.take_infix_operator()? {
             self.newlines();
             operators.push((operator, span));
             operands.push(self.parse_ascription(None)?);
@@ -1541,24 +1545,53 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| self.here("internal parser error: infix expression produced no value"))
     }
 
-    fn take_infix_operator(&mut self) -> Option<(String, ByteSpan)> {
+    fn take_infix_operator(&mut self) -> Result<Option<(String, ByteSpan)>, MagError> {
         let token = self.peek().clone();
-        let name = match &token.kind {
+        let (name, symbolic) = match &token.kind {
             TokenKind::Operator(op) if !matches!(op.as_str(), "=" | "|" | ">" | "<") => {
-                self.resolve_name(op)
+                (self.resolve_name(op), true)
             }
+            TokenKind::Arrow => (self.resolve_name("->"), true),
             TokenKind::Ident(name)
                 if !matches!(
                     name.as_str(),
                     "then" | "else" | "case" | "let" | "type" | "import" | "as"
                 ) =>
             {
-                self.resolve_name(name)
+                (self.resolve_name(name), name.bytes().all(is_operator_byte))
             }
-            _ => return None,
+            _ => return Ok(None),
         };
+        if symbolic {
+            self.require_symbolic_infix_spacing(&token)?;
+        }
         self.bump();
-        Some((name, token.span))
+        Ok(Some((name, token.span)))
+    }
+
+    fn require_symbolic_infix_spacing(&self, token: &Token) -> Result<(), MagError> {
+        let separated_left = token.span.start > 0
+            && is_infix_separator_byte(self.source.text.as_bytes()[token.span.start - 1]);
+        let separated_right = token.span.end < self.source.text.len()
+            && is_infix_separator_byte(self.source.text.as_bytes()[token.span.end]);
+        if separated_left && separated_right {
+            return Ok(());
+        }
+        let side = match (separated_left, separated_right) {
+            (false, false) => "before and after",
+            (false, true) => "before",
+            (true, false) => "after",
+            (true, true) => unreachable!(),
+        };
+        let operator = &self.source.text[token.span.start..token.span.end];
+        Err(self.error(
+            "MAG2012",
+            format!(
+                "symbolic infix operator '{operator}' requires whitespace {side} it; write infix operators with spaces on both sides"
+            ),
+            token.span,
+            None,
+        ))
     }
 
     fn parse_generic_names(&mut self) -> Result<Vec<String>, MagError> {
@@ -2351,6 +2384,30 @@ mod tests {
     }
 
     #[test]
+    fn arrow_is_type_syntax_and_can_be_an_imported_term_operator() {
+        let module =
+            parse("import operators.{`->`}\ninfixr 4 (->)\nlet value: Result = left -> right\n")
+                .unwrap();
+        let authored::Form::Block(authored::BlockItem::Let {
+            value: authored::Expr::Ascribe { value, .. },
+            ..
+        }) = module.forms.last().unwrap()
+        else {
+            panic!("arrow infix binding")
+        };
+        let authored::Expr::Call { callee, .. } = value.as_ref() else {
+            panic!("arrow infix application")
+        };
+        assert!(matches!(
+            callee.as_ref(),
+            authored::Expr::Call { callee, .. }
+                if matches!(callee.as_ref(), authored::Expr::Name(name) if name == "operators.->")
+        ));
+        assert!(parse("let f: Int -> Int = |value| => value\n").is_ok());
+        assert!(parse("let arrow = (->)\n").is_ok());
+    }
+
+    #[test]
     fn lexical_binders_win_over_import_aliases_and_named_calls_do_not_erase_labels() {
         let module = parse(
             "import support.{value as imported}\nlet f: Int -> Int = |imported| => imported\n",
@@ -2396,6 +2453,18 @@ mod tests {
     }
 
     #[test]
+    fn lexer_keeps_symbolic_operator_boundaries_for_spacing_diagnostics() {
+        let source = SourceSnapshot::named("surface.mag", "1+2 3 + 4");
+        let tokens = Lexer::new(&source).tokenize().unwrap();
+        let operators = tokens
+            .iter()
+            .filter(|token| matches!(&token.kind, TokenKind::Operator(name) if name == "+"))
+            .map(|token| token.span)
+            .collect::<Vec<_>>();
+        assert_eq!(operators, [ByteSpan::new(1, 2), ByteSpan::new(6, 7)]);
+    }
+
+    #[test]
     fn lexes_raw_strings_signed_numbers_comments_and_newlines() {
         let module =
             parse("// comment\nlet a = -12\nlet b = -2.5\nlet s = \"\"\"x\\ny\"\"\"\n").unwrap();
@@ -2413,12 +2482,43 @@ mod tests {
     }
 
     #[test]
-    fn subtraction_does_not_depend_on_whitespace() {
-        let compact = parse("let value = 1-2\n").unwrap();
-        let spaced = parse("let value = 1 - 2\n").unwrap();
-        assert_eq!(compact, spaced);
+    fn symbolic_infix_operators_require_whitespace_on_both_sides() {
+        for (source, side, column) in [
+            ("let value = 1- 2\n", "before", 14),
+            ("let value = 1 -2\n", "after", 15),
+            ("let value = 1-2\n", "before and after", 14),
+            ("let value = (1)+ 2\n", "before", 16),
+            ("let value = 1 +(2)\n", "after", 15),
+        ] {
+            let MagError::Syntax(diagnostic) = parse(source).unwrap_err() else {
+                panic!("expected syntax diagnostic for {source:?}")
+            };
+            assert_eq!(diagnostic.code, "MAG2012");
+            assert!(diagnostic.message.contains(side), "{}", diagnostic.message);
+            assert!(diagnostic.message.contains("spaces on both sides"));
+            assert_eq!(diagnostic.location.start.column, column);
+            assert_eq!(diagnostic.span.end - diagnostic.span.start, 1);
+        }
+    }
+
+    #[test]
+    fn infix_spacing_accepts_horizontal_and_trailing_operator_newline_separation() {
         assert!(parse("let value = 1 - -2\n").is_ok());
         assert!(parse("let value = f(-2)\n").is_ok());
+        assert!(parse("let value = 1 +\n  2\n").is_ok());
+        assert!(parse("let value = 1 + // right operand follows the comment\n  2\n").is_ok());
+        assert!(parse("let value = 1\n  + 2\n").is_err());
+        assert!(parse("let value = 1 +// comment\n  2\n").is_err());
+    }
+
+    #[test]
+    fn alphabetic_infix_and_symbolic_prefix_forms_keep_their_meaning() {
+        assert!(parse(
+            "infixl 5 add\nlet add: Int -> Int -> Int = |left| => |right| => left\nlet value = 1 add 2\n",
+        )
+        .is_ok());
+        assert!(parse("let value = (+)(1, 2)\n").is_ok());
+        assert!(parse("let value = nefor.node.`>>>`(left, right)\n").is_ok());
     }
 
     #[test]
