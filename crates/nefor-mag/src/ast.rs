@@ -258,7 +258,7 @@ impl Value {
             Self::TypeTag(_) => "type-tag",
             Self::TypeDescriptor(_) => "type-descriptor",
             Self::TypeSchema(_) => "type_schema",
-            Self::SemanticTypeId(_) => "semantic-type_id",
+            Self::SemanticTypeId(_) => "semantic_type_id",
             Self::PackedValue(_) => "packed-value",
             Self::JsonValue(_) => "json-value",
             Self::HostInputs(_) => "host_inputs",

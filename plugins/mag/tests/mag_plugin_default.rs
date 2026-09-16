@@ -343,7 +343,7 @@ pub mod bridge {
                 "kind": "tool.invoke", "id": "cap-1", "from": "worker",
                 "name": "read_file", "invocation": invocation,
                 "args": {"name": "read_file", "args": {"path": "src/lib.rs"},
-                         "allowlist": ["read_file"], "da_policy": {"git": "read"}}
+                         "allowlist": ["read_file"], "da-policy": {"git": "read"}}
             })));
             assert_eq!(
                 out,
@@ -351,7 +351,7 @@ pub mod bridge {
                     "kind": "custom-gate.tool.invoke", "id": "cap-1", "from": "worker",
                     "name": "read_file", "invocation": invocation,
                     "args": {"path": "src/lib.rs"}, "allowlist": ["read_file"],
-                    "da_policy": {"git": "read"}
+                    "da-policy": {"git": "read"}
                 }))]
             );
             let cancel = bridge.translate_emit(obj(json!({"kind": "tool.cancel", "id": "cap-1"})));
