@@ -545,7 +545,7 @@ import nefor.graph.{}
 import nefor.node.{}
 let first = nefor.graph.source("first", "first")
 let second = nefor.graph.source("second", "second")
-let workers = nefor.node.sequence("workers", [first, second])
+let workers = nefor.node.sequence([first, second])
 let result = nefor.graph.output_for("result", workers)
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(workers, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#,
     )
@@ -572,9 +572,14 @@ nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edg
         .iter()
         .map(|node| node.get("path").cloned().expect("logical node path"))
         .collect::<Vec<_>>();
-    assert!(sequence_paths.contains(&json!(["workers"])));
-    assert!(sequence_paths.contains(&json!(["workers", "first"])));
-    assert!(sequence_paths.contains(&json!(["workers", "second"])));
+    let sequence_root = sequence_paths
+        .iter()
+        .find(|path| path.as_array().is_some_and(|segments| segments.len() == 1))
+        .and_then(|path| path[0].as_str())
+        .expect("sequence root path");
+    assert!(sequence_paths.contains(&json!([sequence_root])));
+    assert!(sequence_paths.contains(&json!([sequence_root, "first"])));
+    assert!(sequence_paths.contains(&json!([sequence_root, "second"])));
 
     fs::write(
         temp_root.join("node-sequence-sources.mag"),
@@ -583,7 +588,7 @@ import nefor.graph.{}
 import nefor.node.{}
 let first = nefor.graph.source("first", "first")
 let second = nefor.graph.source("second", "second")
-let workers = nefor.node.sequence("workers", [first, second])
+let workers = nefor.node.sequence([first, second])
 let result = nefor.graph.output_for("result", workers)
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(workers, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#,
     )
@@ -612,7 +617,9 @@ nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edg
         1,
         "the completed graph must bootstrap exactly one outer Unit root"
     );
-    assert_eq!(source_messages[0]["to"], "workers.input");
+    assert!(source_messages[0]["to"]
+        .as_str()
+        .is_some_and(|target| target.ends_with(".input")));
     assert_eq!(
         source_messages[0]["content"]["value"]["kind"],
         "nefor.graph.Value"

@@ -735,6 +735,8 @@ let collector_factory = nefor.node.collector_factory
 
 let product_split_factory = nefor.node.product_split_factory
 
+let product_first_factory = nefor.node.product_first_factory
+
 let product_join_factory = nefor.node.product_join_factory
 
 let discard_factory = nefor.node.discard_factory
@@ -744,6 +746,8 @@ type SequenceEmptyParams = nefor.node.SequenceEmptyParams
 type CollectorParams = nefor.node.CollectorParams
 
 type ProductSplitParams = nefor.node.ProductSplitParams
+
+type ProductFirstParams = nefor.node.ProductFirstParams
 
 type ProductJoinParams = nefor.node.ProductJoinParams
 
@@ -771,6 +775,12 @@ let then = nefor.node.then
 
 let `*>` = nefor.node.`*>`
 
+let keep_left = nefor.node.keep_left
+
+let before = nefor.node.before
+
+let `<*` = nefor.node.`<*`
+
 let fanout = nefor.node.fanout
 
 let `&&&` = nefor.node.`&&&`
@@ -795,6 +805,8 @@ let `+++` = nefor.node.`+++`
 
 let sequence_empty = nefor.node.sequence_empty
 
+let sequence_id = nefor.node.sequence_id
+
 let sequence_nonempty = nefor.node.sequence_nonempty
 
 let sequence = nefor.node.sequence
@@ -815,7 +827,11 @@ let lift = nefor.result.lift
 
 let and_then = nefor.result.and_then
 
+let result_map_named = nefor.result.map_named
+
 let result_map = nefor.result.map
+
+let map_error_named = nefor.result.map_error_named
 
 let map_error = nefor.result.map_error
 

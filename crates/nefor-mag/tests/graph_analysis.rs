@@ -351,14 +351,15 @@ let output_contract = nefor.graph.FactoryContract {identity: "nefor.factory.outp
 let valid_graph = nefor.graph.graph([nefor.graph.edge(start, result)])
 let first_child = nefor.graph.source("first-child", nefor.contracts.Text {content: "first"})
 let second_child = nefor.graph.source("second-child", nefor.contracts.Text {content: "second"})
-let sequence = nefor.node.sequence("ordered-sequence", [first_child, second_child])
-let is_collector: fn(nefor.graph.Actor) -> Bool = |candidate| => (=)(get(candidate, "id"), "ordered-sequence.collector")
+let sequence = nefor.node.sequence([first_child, second_child])
+let is_collector: fn(nefor.graph.Actor) -> Bool = |candidate| => (=)(get(candidate, "id"), str(get(sequence, "id"), ".collector"))
 let collector = first(filter(is_collector, get(sequence, "actors")))
 let actor_id: fn(nefor.graph.Actor) -> String = |candidate| => get(candidate, "id")
 artifact {
   duplicate_actor: validation_message(nefor.graph.validate(duplicate_actor_graph, host_input("factory_contracts", type_tag<List<nefor.graph.FactoryContract>>()))),
   no_output: validation_message(nefor.graph.validate(no_output, host_input("factory_contracts", type_tag<List<nefor.graph.FactoryContract>>()))),
   first_contract: validation_message(nefor.graph.validate(valid_graph, [first_contract, second_contract, output_contract])),
+  sequence_id: get(sequence, "id"),
   sequence_actors: map(actor_id, get(sequence, "actors")),
   collector_params: get(collector, "params")
 }
@@ -378,13 +379,14 @@ artifact {
         .as_str()
         .unwrap()
         .contains("rejects input wire"));
+    let sequence_id = artifact["sequence_id"].as_str().unwrap();
     assert_eq!(
         artifact["sequence_actors"],
         json!([
-            "ordered-sequence.input",
+            format!("{sequence_id}.input"),
             "first-child",
             "second-child",
-            "ordered-sequence.collector"
+            format!("{sequence_id}.collector")
         ])
     );
     assert_eq!(
@@ -528,11 +530,14 @@ import core.types.{}
 import nefor
 let input = identity("input", type_tag<core.types.Result<String, Int>>())
 let mapper = identity("mapper", type_tag<String>())
-artifact(get(map_error("mapped", input, mapper), "id"))
+artifact(get(map_error(input, mapper), "id"))
 "#,
         json!({}),
     );
-    assert_eq!(mapped, json!("mapped"));
+    assert_eq!(
+        mapped,
+        json!("nefor.node.composite:5:input16:result.map_error6:mapper")
+    );
 }
 
 #[test]
@@ -555,6 +560,20 @@ artifact {exact: nefor.graph.unit_input(exact), sum: nefor.graph.unit_input(sum)
         artifact,
         json!({"exact": true, "sum": false, "product": false})
     );
+}
+
+#[test]
+fn sequence_requires_a_nonempty_compile_time_list() {
+    let error = run_error(
+        "empty-structural-sequence",
+        r#"
+import nefor.graph.{}
+import nefor.node.{}
+let empty = nefor.node.sequence(([]: List<nefor.graph.Node<String, Int>>))
+artifact(get(empty, "id"))
+"#,
+    );
+    assert!(error.contains("first expects a non-empty List"), "{error}");
 }
 
 #[test]
@@ -794,6 +813,7 @@ let explicit_compose = nefor.node.compose("compose", int_identity, int_identity_
 let operator_compose = nefor.node.`>>>`(int_identity, int_identity_2)
 let explicit_then = nefor.node.then("then", int_identity, unit_source)
 let operator_then = nefor.node.`*>`(int_identity, unit_source)
+let operator_before = nefor.node.`<*`(int_identity, unit_source)
 let explicit_fanout = nefor.node.fanout("fanout", int_identity, int_identity_2)
 let operator_fanout = nefor.node.`&&&`(int_identity, int_identity_2)
 let explicit_parallel = nefor.node.parallel("parallel", int_identity, string_identity)
@@ -802,15 +822,19 @@ let explicit_choose = nefor.node.choose("choose", int_identity, string_identity)
 let operator_choose = nefor.node.`+++`(int_identity, string_identity)
 let first_source = nefor.graph.source("first", 1)
 let second_source = nefor.graph.source("second", 2)
-let nonempty_sequence = nefor.node.sequence("sequence", [first_source, second_source])
-let empty_sequence = nefor.node.sequence<Int>("empty-sequence", ([]: List<nefor.graph.Node<Unit, Int>>))
+let nonempty_sequence = nefor.node.sequence([first_source, second_source])
+let repeated_sequence = nefor.node.sequence([first_source, second_source])
+let reordered_sequence = nefor.node.sequence([second_source, first_source])
+let collision_sequence_left = nefor.node.sequence([nefor.graph.source("a", 1), nefor.graph.source("bsequencec", 2)])
+let collision_sequence_right = nefor.node.sequence([nefor.graph.source("asequenceb", 1), nefor.graph.source("c", 2)])
+let empty_sequence = nefor.node.sequence_empty("empty-sequence", type_tag<Unit>(), type_tag<Int>())
 
 let result_input = nefor.graph.identity("result-input", type_tag<core.types.Result<String, Int>>())
 let result_value = nefor.graph.identity("result-value", type_tag<Int>())
 let lifted = nefor.result.lift("lifted", type_tag<String>(), result_value)
-let mapped = nefor.result.map("mapped", result_input, result_value)
+let mapped = nefor.result.map(result_input, result_value)
 let error_mapper = nefor.node.discard("error-mapper", type_tag<String>())
-let mapped_error = nefor.result.map_error("mapped-error", result_input, error_mapper)
+let mapped_error = nefor.result.map_error(result_input, error_mapper)
 let bound = nefor.result.and_then("bound", result_input, lifted)
 let operator_bound = nefor.result.`>=>`(result_input, lifted)
 let colliding_left = nefor.node.composite_id("a&&&b", "&&&", "c")
@@ -829,11 +853,12 @@ artifact {
   source_type: type_id(type_evidence(get(get(source, "output"), "type"))),
   capture_type: type_id(type_evidence(get(captured, "type"))),
   compose_ids: [get(explicit_compose, "id"), get(operator_compose, "id")],
-  then_ids: [get(explicit_then, "id"), get(operator_then, "id")],
+  then_ids: [get(explicit_then, "id"), get(operator_then, "id"), get(operator_before, "id")],
   fanout_ids: [get(explicit_fanout, "id"), get(operator_fanout, "id")],
   parallel_ids: [get(explicit_parallel, "id"), get(operator_parallel, "id")],
   choose_ids: [get(explicit_choose, "id"), get(operator_choose, "id")],
   sequence_inputs: [type_id(type_evidence(get(get(nonempty_sequence, "input"), "type"))), type_id(type_evidence(get(get(empty_sequence, "input"), "type")))],
+  sequence_ids: [get(nonempty_sequence, "id"), get(repeated_sequence, "id"), get(reordered_sequence, "id"), get(collision_sequence_left, "id"), get(collision_sequence_right, "id")],
   result_ids: [get(lifted, "id"), get(mapped, "id"), get(mapped_error, "id"), get(bound, "id"), get(operator_bound, "id")],
   map_error_output_matches: (=)(canonical(type_id(type_evidence(get(get(mapped_error, "output"), "type")))), canonical(type_id(type_evidence(type_tag<core.types.Result<Unit, Int>>())))),
   composite_collision_check: [colliding_left, colliding_right],
@@ -852,7 +877,11 @@ artifact {
     );
     assert_eq!(
         artifact["then_ids"],
-        json!(["then", "nefor.node.composite:3:int2:*>11:unit-source"])
+        json!([
+            "then",
+            "nefor.node.composite:3:int2:*>11:unit-source",
+            "nefor.node.composite:3:int2:<*11:unit-source"
+        ])
     );
     assert_eq!(
         artifact["fanout_ids"],
@@ -870,12 +899,15 @@ artifact {
         artifact["sequence_inputs"][0],
         artifact["sequence_inputs"][1]
     );
+    assert_eq!(artifact["sequence_ids"][0], artifact["sequence_ids"][1]);
+    assert_ne!(artifact["sequence_ids"][0], artifact["sequence_ids"][2]);
+    assert_ne!(artifact["sequence_ids"][3], artifact["sequence_ids"][4]);
     assert_eq!(
         artifact["result_ids"],
         json!([
             "lifted",
-            "mapped",
-            "mapped-error",
+            "nefor.node.composite:12:result-input10:result.map12:result-value",
+            "nefor.node.composite:12:result-input16:result.map_error12:error-mapper",
             "bound",
             "nefor.node.composite:12:result-input3:>=>6:lifted"
         ])
@@ -926,7 +958,7 @@ let runtime = agent_shaped("runtime")
 let configs = agent_shaped("configs")
 let workers = [runtime, configs]
 let task = nefor.graph.source("task", nefor.contracts.Task {{prompt: "Investigate"}})
-let work = nefor.node.then("task-traces", task, nefor.node.sequence("traces", {nodes}))
+let work = nefor.node.then("task-traces", task, nefor.node.sequence({nodes}))
 let actual_id = str(type_id(type_evidence(get(get(work, "output"), "type"))))
 let expected_id = str(type_id(type_evidence(type_tag<List<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>>())))
 artifact((=)(actual_id, expected_id))

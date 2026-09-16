@@ -760,7 +760,7 @@ pub mod kernel {
     import nefor.node.{}
     let first = nefor.graph.source("first", nefor.contracts.Task {prompt: "first task"})
     let second = nefor.graph.source("second", nefor.contracts.Task {prompt: "second task"})
-    let tasks = nefor.node.sequence("tasks", [first, second])
+    let tasks = nefor.node.sequence([first, second])
     let result = nefor.graph.output_for("result", tasks)
     nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(tasks, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
     "#;
@@ -770,7 +770,9 @@ pub mod kernel {
                 Some(1),
                 "only the completed sequence root receives initial activation"
             );
-            assert_eq!(modification["messages"][0]["to"], "tasks.input");
+            assert!(modification["messages"][0]["to"]
+                .as_str()
+                .is_some_and(|target| target.ends_with(".input")));
 
             let begun = host
                 .begin_run("task-source-sequence", "task-source-sequence", None)
@@ -795,6 +797,97 @@ pub mod kernel {
                     {"prompt": "second task"}
                 ]))
             );
+        }
+
+        #[test]
+        fn shared_input_sequence_and_left_sequencing_retain_runtime_values() {
+            for (run_id, source, expected) in [
+                (
+                    "shared-input-sequence",
+                    r#"
+import nefor.artifact.{}
+import nefor.graph.{}
+import nefor.node.{}
+let start = nefor.graph.source("shared", "shared value")
+let left = nefor.graph.identity("left", type_tag<String>())
+let right = nefor.graph.identity("right", type_tag<String>())
+let operation = nefor.node.`>>>`(start, nefor.node.sequence([left, right]))
+nefor.artifact.compile_graph(operation)
+"#,
+                    serde_json::json!(["shared value", "shared value"]),
+                ),
+                (
+                    "retain-left-sequencing",
+                    r#"
+import nefor.artifact.{}
+import nefor.graph.{}
+import nefor.node.{}
+let left = nefor.graph.source("left", "retained")
+let right = nefor.graph.source("right", "discarded")
+let operation = nefor.node.`<*`(left, right)
+nefor.artifact.compile_graph(operation)
+"#,
+                    serde_json::json!("retained"),
+                ),
+                (
+                    "explicit-empty-sequence",
+                    r#"
+import nefor.artifact.{}
+import nefor.node.{}
+let operation = nefor.node.sequence_empty("empty", type_tag<Unit>(), type_tag<String>())
+nefor.artifact.compile_graph(operation)
+"#,
+                    serde_json::json!([]),
+                ),
+            ] {
+                let host = shipped_host();
+                let modification = compile_mag_source(&host, run_id, source);
+                let begun = host.begin_run(run_id, run_id, None).expect("begin run");
+                assert!(begun.ok, "begin failed: {:?}", begun.error);
+                host.drain_emits().expect("drain begin event");
+                let outcome = host.start(run_id, &modification).expect("start run");
+                assert!(outcome.ok, "start failed: {:?}", outcome.error);
+                let completion = host
+                    .take_run_complete(run_id)
+                    .expect("read completion")
+                    .expect("composition completed");
+                assert_eq!(
+                    completion.result.as_ref().map(|result| &result["value"]),
+                    Some(&expected)
+                );
+            }
+        }
+
+        #[test]
+        fn result_mapping_preserves_the_unmapped_runtime_branch() {
+            for (run_id, operation, expected) in [
+                (
+                    "result-map-error-branch",
+                    "let start = nefor.graph.source(\"start\", named(core.types.Result<String, Int>, Error, \"failed\"))\nlet mapper = nefor.graph.identity(\"mapper\", type_tag<Int>())\nlet operation = nefor.result.map(start, mapper)",
+                    serde_json::json!({"constructor": "Error", "value": "failed"}),
+                ),
+                (
+                    "result-map-error-ok-branch",
+                    "let start = nefor.graph.source(\"start\", named(core.types.Result<String, Int>, Ok, 7))\nlet mapper = nefor.graph.identity(\"mapper\", type_tag<String>())\nlet operation = nefor.result.map_error(start, mapper)",
+                    serde_json::json!({"constructor": "Ok", "value": 7}),
+                ),
+            ] {
+                let host = shipped_host();
+                let source = format!(
+                    "import core.types.{{}}\nimport nefor.artifact.{{}}\nimport nefor.graph.{{}}\nimport nefor.result.{{}}\n{operation}\nnefor.artifact.compile_graph(operation)"
+                );
+                let modification = compile_mag_source(&host, run_id, &source);
+                let begun = host.begin_run(run_id, run_id, None).expect("begin run");
+                assert!(begun.ok, "begin failed: {:?}", begun.error);
+                host.drain_emits().expect("drain begin event");
+                let outcome = host.start(run_id, &modification).expect("start run");
+                assert!(outcome.ok, "start failed: {:?}", outcome.error);
+                let completion = host
+                    .take_run_complete(run_id)
+                    .expect("read completion")
+                    .expect("result composition completed");
+                assert_eq!(completion.result.as_ref().map(|result| &result["value"]), Some(&expected));
+            }
         }
 
         fn unit_root_program(definitions: &str) -> String {
@@ -830,10 +923,10 @@ nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edg
                     r#"
 let one = nefor.shell.script("one", params)
 let two = nefor.shell.script("two", params)
-let inner = nefor.node.sequence("inner", [one, two])
-let sequence = nefor.node.sequence("sequence", [inner])
+let inner = nefor.node.sequence([one, two])
+let sequence = nefor.node.sequence([inner])
 let operation = nefor.node.named("outer", sequence)"#,
-                    "sequence.input",
+                    ".input",
                 ),
                 (
                     "unit-root-dependent",
@@ -851,7 +944,12 @@ let operation = nefor.node.then("ordered", nefor.shell.script("dependency", para
                 );
                 let messages = modification["messages"].as_array().unwrap();
                 assert_eq!(messages.len(), 1, "{name}: {messages:?}");
-                assert_eq!(messages[0]["to"], expected);
+                let target = messages[0]["to"].as_str().unwrap();
+                if expected.starts_with('.') {
+                    assert!(target.ends_with(expected), "{name}: {target}");
+                } else {
+                    assert_eq!(target, expected);
+                }
                 assert_eq!(
                     messages[0]["semantic_type"],
                     serde_json::json!({"kind": "primitive", "name": "Unit"})
@@ -1628,7 +1726,7 @@ let mapper_input = nefor.graph.port("map-error", type_tag<Failure>(), "stub.In")
 let mapper_output = nefor.graph.port("map-error", type_tag<String>(), "stub.Out")
 let mapper_actor = nefor.graph.actor("map-error", "nefor.factory.stub", [], core.map.insert(core.map.empty(type_tag<String>()), "value", "mapped"), nefor.graph.store_port(mapper_input), [nefor.graph.store_port(mapper_output)])
 let mapper = nefor.graph.node("map-error", "ordinary", [mapper_actor], ([]: List<nefor.graph.StoredRoute>), ([]: List<nefor.graph.Message>), mapper_input, mapper_output)
-let mapped = nefor.result.map_error("mapped", start, mapper)
+let mapped = nefor.result.map_error(start, mapper)
 let result = nefor.graph.output_for("result", mapped)
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(mapped, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
 "#
