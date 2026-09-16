@@ -15,6 +15,7 @@ M.declaration = {
     inputs = { { wire = INPUT, type = value } },
     outputs = { { wire = UNIT, type = unit } },
   },
+  template = { relocations = {} },
   params = {},
   inputs = { value = INPUT },
   outputs = { UNIT },

@@ -60,7 +60,7 @@ let no_identifier: fn() -> OptionalIdentifier = | | => OptionalIdentifier {prese
 
 let identifier: fn(String) -> OptionalIdentifier = |value| => OptionalIdentifier {present: true, value: value}
 
-let no_tool_approval_policy: fn() -> ToolApprovalPolicy = | | => ToolApprovalPolicy {rules: (core.map.empty(type_tag<String>()): Map<String, String>)}
+let no_tool_approval_policy: fn() -> ToolApprovalPolicy = | | => ToolApprovalPolicy {rules: (core.map.empty<String, String>(): Map<String, String>)}
 
 let tool_approval_policy: fn(Map<String, String>) -> ToolApprovalPolicy = |rules| => ToolApprovalPolicy {rules: rules}
 

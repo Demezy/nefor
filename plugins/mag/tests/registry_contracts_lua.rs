@@ -150,6 +150,71 @@ fn registry_exposes_qualified_serializable_contracts() {
 }
 
 #[test]
+fn template_factory_contract_is_closed_to_single_result_workers() {
+    let lua = Lua::new();
+    let package: mlua::Table = lua.globals().get("package").expect("package");
+    let current: String = package.get("path").expect("package.path");
+    let root = kernel_dir();
+    package
+        .set("path", package_path(&root, &current))
+        .expect("set package.path");
+
+    lua.load(
+        r#"
+        local supported = {
+          require("factories.adapter").declaration,
+          require("factories.adt-pack").declaration,
+          require("factories.adt-unpack").declaration,
+          require("factories.collector").declaration,
+          require("factories.discard").declaration,
+          require("factories.dynamic-index").declaration,
+          require("factories.llm").declaration,
+          require("factories.output").declaration,
+          require("factories.process").exec.declaration,
+          require("factories.process").script.declaration,
+          require("factories.product-first").declaration,
+          require("factories.product-join").declaration,
+          require("factories.product-split").declaration,
+          require("factories.run-tool").declaration,
+          require("factories.sequence-empty").declaration,
+          require("factories.source").declaration,
+          require("factories.structured-output").declaration,
+          require("factories.stub").declaration,
+          require("factories.tool-result").declaration,
+          require("factories.worktree-create").declaration,
+          require("factories.worktree-open").declaration,
+        }
+        for _, declaration in ipairs(supported) do
+          assert(type(declaration.template) == "table", declaration.name)
+          assert(type(declaration.template.relocations) == "table", declaration.name)
+        end
+
+        local unsupported = {
+          require("factories.dynamic-all").declaration,
+          require("factories.dynamic-each").declaration,
+          require("factories.dynamic-output").declaration,
+          require("factories.human").declaration,
+          require("factories.retry-gate").declaration,
+          require("factories.sink").declaration,
+        }
+        for _, declaration in ipairs(unsupported) do
+          assert(declaration.template == nil, declaration.name)
+        end
+
+        local structured = require("factories.structured-output").declaration.template
+        assert(structured.parameter_equals.dynamic == false)
+
+        local relocations = require("factories.run-tool").declaration.template.relocations
+        assert(#relocations == 1)
+        assert(relocations[1].shape == "actor_id")
+        assert(#relocations[1].path == 1 and relocations[1].path[1] == "conversation_peer")
+        "#,
+    )
+    .exec()
+    .expect("template factory contract assertions");
+}
+
+#[test]
 fn registry_requires_compiler_specialization_for_generic_factories() {
     let lua = Lua::new();
     install_semantic_type(&lua);

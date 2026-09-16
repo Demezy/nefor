@@ -1,9 +1,8 @@
-// Ordinary, explicitly maintained facade over every direct authored export in
-// the shipped nefor.* modules. Collisions use stable module prefixes; the
+// Ordinary, explicitly maintained authoring facade over the shipped nefor.*
+// modules. Low-level dynamic-template and reference machinery stays in its
+// implementation modules. Collisions use stable module prefixes; the
 // shell-owned timeout_ms spelling is also the facade's authoring shorthand.
 import nefor.actors.{}
-
-import nefor.agents.{}
 
 import nefor.artifact.{}
 
@@ -83,11 +82,8 @@ type ApprovalConfig = nefor.actors.ApprovalConfig
 
 type RetryGateConfig = nefor.actors.RetryGateConfig
 
-let agent_with_schema = nefor.actors.agent_with_schema
 
 let agent = nefor.actors.agent
-
-let dynamic_agent = nefor.actors.dynamic_agent
 
 let read_only_tools = nefor.actors.read_only_tools
 
@@ -96,18 +92,6 @@ let general_tools = nefor.actors.general_tools
 let retry_gate = nefor.actors.retry_gate
 
 let approval_gate = nefor.actors.approval_gate
-
-type AgentInputEnvelope = nefor.agents.AgentInputEnvelope
-
-type DynamicTemplateConfig<M> = nefor.agents.DynamicTemplateConfig<M>
-
-let template_port_from_stored = nefor.agents.template_port_from_stored
-
-let template_actor = nefor.agents.template_actor
-
-let actor_with_id = nefor.agents.actor_with_id
-
-let dynamic_template = nefor.agents.dynamic_template
 
 let emit_program = nefor.artifact.emit_program
 
@@ -189,81 +173,11 @@ type DynamicList<T> = nefor.dynamic.DynamicList<T>
 
 type Indexed<T> = nefor.dynamic.Indexed<T>
 
-type DynamicCount = nefor.dynamic.DynamicCount
-
-type DynamicEvent<T> = nefor.dynamic.DynamicEvent<T>
-
-type DynamicParams = nefor.dynamic.DynamicParams
-
-type DynamicIndexParams = nefor.dynamic.DynamicIndexParams
-
-type DynamicContextParams = nefor.dynamic.DynamicContextParams
-
-type CaptureValueIdentity = nefor.dynamic.CaptureValueIdentity
-
-type CaptureIdentity = nefor.dynamic.CaptureIdentity
-
-type FieldIdentity = nefor.dynamic.FieldIdentity
-
-type DecimalIdentity = nefor.dynamic.DecimalIdentity
-
-type ConcatIdentity = nefor.dynamic.ConcatIdentity
-
-let dynamic_each_factory = nefor.dynamic.dynamic_each_factory
-
-let dynamic_output_factory = nefor.dynamic.dynamic_output_factory
-
-let dynamic_index_factory = nefor.dynamic.dynamic_index_factory
-
-let dynamic_all_factory = nefor.dynamic.dynamic_all_factory
-
-type ValueRef<T> = nefor.dynamic.ValueRef<T>
-
-type TemplateNode<I, O> = nefor.dynamic.TemplateNode<I, O>
-
-let expression_id = nefor.dynamic.expression_id
-
-type OrderedExpressions = nefor.dynamic.OrderedExpressions
-
-let stored_expression_id = nefor.dynamic.stored_expression_id
-
-let insert_expression = nefor.dynamic.insert_expression
-
-let unique_expressions = nefor.dynamic.unique_expressions
-
-let merge_expressions = nefor.dynamic.merge_expressions
-
-let merge_captures = nefor.dynamic.merge_captures
-
-let trigger_ref = nefor.dynamic.trigger_ref
-
-let capture_ref = nefor.dynamic.capture_ref
-
-let field_ref = nefor.dynamic.field_ref
-
-let int_to_decimal_string_ref = nefor.dynamic.int_to_decimal_string_ref
-
-let concat_strings_ref = nefor.dynamic.concat_strings_ref
-
-let local_actor_ref = nefor.dynamic.local_actor_ref
-
-let existing_actor_ref = nefor.dynamic.existing_actor_ref
-
-let template_port = nefor.dynamic.template_port
-
-let fixed_segment = nefor.dynamic.fixed_segment
-
-let bound_segment = nefor.dynamic.bound_segment
-
-let actor_id_relocation = nefor.dynamic.actor_id_relocation
-
-let actor_id_list_relocation = nefor.dynamic.actor_id_list_relocation
-
 let indexed_result = nefor.dynamic.indexed_result
 
 let context = nefor.dynamic.context
 
-let traverse_template = nefor.dynamic.traverse_template
+let traverse = nefor.dynamic.traverse
 
 type Port<T> = nefor.graph.Port<T>
 
@@ -380,8 +294,6 @@ let stored_message = nefor.graph.stored_message
 let message = nefor.graph.message
 
 let typed_message = nefor.graph.typed_message
-
-let instantiate_delta_template = nefor.graph.instantiate_delta_template
 
 let operation_port = nefor.graph.operation_port
 
@@ -672,50 +584,6 @@ let delta_message = nefor.graph.delta_message
 let delta_message_front = nefor.graph.delta_message_front
 
 let lower_delta = nefor.graph.lower_delta
-
-type TypedCapture = nefor.mag.TypedCapture
-
-type Trigger = nefor.mag.Trigger
-
-type Capture = nefor.mag.Capture
-
-type Field = nefor.mag.Field
-
-type IntToDecimalString = nefor.mag.IntToDecimalString
-
-type ConcatStrings = nefor.mag.ConcatStrings
-
-type Expression = nefor.mag.Expression
-
-type LocalActorRef = nefor.mag.LocalActorRef
-
-type ExistingActorRef = nefor.mag.ExistingActorRef
-
-type ActorRef = nefor.mag.ActorRef
-
-type TemplatePort = nefor.mag.TemplatePort
-
-type ScalarParameterBinding = nefor.mag.ScalarParameterBinding
-
-type ActorReferenceRelocation = nefor.mag.ActorReferenceRelocation
-
-type TemplateActor = nefor.mag.TemplateActor
-
-type TemplateRoute = nefor.mag.TemplateRoute
-
-type TemplateMessage = nefor.mag.TemplateMessage
-
-type FixedPathSegment = nefor.mag.FixedPathSegment
-
-type BoundPathSegment = nefor.mag.BoundPathSegment
-
-type PathSegment = nefor.mag.PathSegment
-
-type TemplateLogicalNode = nefor.mag.TemplateLogicalNode
-
-type DeltaTemplate = nefor.mag.DeltaTemplate
-
-type InstantiateDeltaTemplate = nefor.mag.InstantiateDeltaTemplate
 
 type ProgramOperation = nefor.mag.ProgramOperation
 

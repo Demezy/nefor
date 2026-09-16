@@ -30,13 +30,17 @@ type TemplateActor {slot: String, id: String, factory: String, type_arguments: L
 
 type TemplateRoute {from: TemplatePort, to: TemplatePort, product_position: Int}
 
-type TemplateMessage {to: TemplatePort, semantic_type: TypeDescriptor, semantic_type_id: SemanticTypeId, content: PackedValue}
+type TemplatePayload = Static(PackedValue) | Expression(String)
+
+type TemplateMessage {to: TemplatePort, semantic_type: TypeDescriptor, semantic_type_id: SemanticTypeId, content: TemplatePayload}
 
 type FixedPathSegment {value: String}
 
 type BoundPathSegment {value: String}
 
-type PathSegment = FixedPathSegment(FixedPathSegment) | BoundPathSegment(BoundPathSegment)
+type TriggerPathSegment {}
+
+type PathSegment = TriggerPathSegment(TriggerPathSegment) | FixedPathSegment(FixedPathSegment) | BoundPathSegment(BoundPathSegment)
 
 type TemplateLogicalNode {path: List<PathSegment>, members: List<LocalActorRef>}
 

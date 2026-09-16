@@ -20,6 +20,7 @@ M.declaration = {
     },
     params = { owner = owner, left_payload = first, right_payload = second },
   },
+  template = { relocations = {} },
   params = { owner = "table", left_payload = "table", right_payload = "table",
     left_constructor = "string", right_constructor = "string" },
   inputs = { value = "nefor.adt.Value" },

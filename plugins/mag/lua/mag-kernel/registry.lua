@@ -60,6 +60,7 @@ local function accepts_semantic(target, source)
 end
 
 local function product_input_covered(target, sources)
+  if #sources == 0 then return false end
   if #sources == 1 and type_node.equal(target, sources[1]) then return true end
   local host = nefor and nefor.semantic_type
   if type(host) ~= "table" or type(host.input_covered_by) ~= "function" then
@@ -126,8 +127,22 @@ local function validate_declaration(decl)
         end
       end
     end
+    if decl.template.parameter_equals ~= nil then
+      if type(decl.template.parameter_equals) ~= "table" then
+        return nil, "declaration.template.parameter_equals must be an object"
+      end
+      for key, value in pairs(decl.template.parameter_equals) do
+        if type(key) ~= "string" or key == "" or not (decl.params or {})[key]
+            or (type(value) ~= "string" and type(value) ~= "number"
+              and type(value) ~= "boolean") then
+          return nil, "declaration.template.parameter_equals must name declared scalar parameters"
+        end
+      end
+    end
     for key in pairs(decl.template) do
-      if key ~= "relocations" then return nil, "declaration.template has unknown field " .. tostring(key) end
+      if key ~= "relocations" and key ~= "parameter_equals" then
+        return nil, "declaration.template has unknown field " .. tostring(key)
+      end
     end
   end
 
@@ -682,9 +697,35 @@ function registry:validate_modification(modification, resolve, existing_specs)
       end
     end
   end
+  -- Initial typed messages are real input sources, including whole products.
+  -- Validate newly authored/affected boundaries, not previously activated
+  -- message-only actors whose one-shot input is no longer in this delta.
+  local affected = {}
+  for _, actor in ipairs((modification and modification.actors) or {}) do
+    affected[actor.id] = true
+    for _, destinations in pairs(actor.routes or {}) do
+      for _, destination in ipairs(destinations) do affected[destination.actor] = true end
+    end
+  end
+  for _, id in ipairs((modification and modification.kills) or {}) do
+    for _, actor in ipairs(existing_specs or {}) do
+      if actor.id == id then
+        for _, destinations in pairs(actor.routes or {}) do
+          for _, destination in ipairs(destinations) do affected[destination.actor] = true end
+        end
+      end
+    end
+  end
+  for _, message in ipairs((modification and modification.messages) or {}) do
+    affected[message.to] = true
+    if message.semantic_type then
+      incoming[message.to] = incoming[message.to] or {}
+      table.insert(incoming[message.to], message.semantic_type)
+    end
+  end
   for id, target in pairs(post_specs) do
     local input_type = type(target.input) == "table" and target.input.type or nil
-    if type(input_type) == "table" and input_type.kind == "product" and
+    if affected[id] and type(input_type) == "table" and input_type.kind == "product" and
         not product_input_covered(input_type, incoming[id] or {}) then
       table.insert(errors, string.format(
         "actor %q: product input incoming route types must exactly cover its component multiset",

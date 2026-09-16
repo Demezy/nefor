@@ -2,7 +2,6 @@ import core.types.{}
 // A downstream reviewer deliberately accepts the builder's whole result union,
 // so a failed builder can preserve partial output and still continue the graph.
 import agents.{}
-import nefor.agents.{}
 import nefor.artifact.{}
 import nefor.contracts.{}
 import nefor.graph.{}
@@ -13,5 +12,5 @@ type ReviewReport {assessment: String}
 let start = nefor.graph.source("recovery-input", nefor.contracts.Task {prompt: "Implement the change"})
 let builder = agents.agent<nefor.contracts.Task, BuildReport>("builder", agents.AgentConfig {model: agents.mock, system: "Build the requested change.", tools: ([]: List<String>), tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 0})
 let reviewer = agents.agent<core.types.Result<nefor.contracts.AgentError, BuildReport>, ReviewReport>("reviewer", agents.AgentConfig {model: agents.mock, system: "Review the builder result, including retained partial output.", tools: ([]: List<String>), tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 0})
-let result = nefor.graph.output("recovery-output", type_tag<core.types.Result<nefor.contracts.AgentError, ReviewReport>>())
+let result = nefor.graph.output<core.types.Result<nefor.contracts.AgentError, ReviewReport>>("recovery-output")
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, builder), nefor.graph.edge(builder, reviewer), nefor.graph.edge(reviewer, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)

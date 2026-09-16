@@ -1271,6 +1271,99 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             let schema = crate::schema::TypeSchema::reify(env, &ty.to_mag_type())?;
             Ok(Value::TypeSchema(schema))
         }
+        "type_constructor" => {
+            arity(args, 1)?;
+            let Value::TypeDescriptor(ty) = raw(&args[0]) else {
+                return Err(MagError::Type(
+                    "type_constructor expects a TypeDescriptor".into(),
+                ));
+            };
+            let name = match ty {
+                ConcreteType::Named { name, .. } | ConcreteType::Adt { name, .. } => name.clone(),
+                _ => String::new(),
+            };
+            Ok(Value::Str(name))
+        }
+        "type_arguments" => {
+            arity(args, 1)?;
+            let Value::TypeDescriptor(ty) = raw(&args[0]) else {
+                return Err(MagError::Type(
+                    "type_arguments expects a TypeDescriptor".into(),
+                ));
+            };
+            let arguments: &[ConcreteType] = match ty {
+                ConcreteType::Named { arguments, .. } | ConcreteType::Adt { arguments, .. } => {
+                    arguments
+                }
+                _ => &[],
+            };
+            Ok(Value::List(std::sync::Arc::new(
+                arguments
+                    .iter()
+                    .cloned()
+                    .map(Value::TypeDescriptor)
+                    .collect(),
+            )))
+        }
+        "type_components" => {
+            arity(args, 1)?;
+            let Value::TypeDescriptor(ty) = raw(&args[0]) else {
+                return Err(MagError::Type(
+                    "type_components expects a TypeDescriptor".into(),
+                ));
+            };
+            use crate::types::ConcreteNamedBody;
+            let components: Vec<&ConcreteType> = match ty {
+                ConcreteType::Named {
+                    arguments, body, ..
+                } => arguments
+                    .iter()
+                    .chain(match body {
+                        ConcreteNamedBody::Fields { fields } => fields.values().collect::<Vec<_>>(),
+                        ConcreteNamedBody::Alias { ty } => vec![ty.as_ref()],
+                    })
+                    .collect(),
+                ConcreteType::Adt {
+                    arguments,
+                    constructors,
+                    ..
+                } => arguments
+                    .iter()
+                    .chain(constructors.iter().map(|c| &c.payload))
+                    .collect(),
+                ConcreteType::List { item } | ConcreteType::Set { item } => vec![item.as_ref()],
+                ConcreteType::Map { key, value } => vec![key.as_ref(), value.as_ref()],
+                ConcreteType::Product { items } => items.iter().collect(),
+                _ => vec![],
+            };
+            Ok(Value::List(std::sync::Arc::new(
+                components
+                    .into_iter()
+                    .cloned()
+                    .map(Value::TypeDescriptor)
+                    .collect(),
+            )))
+        }
+        "list_type" => {
+            arity(args, 1)?;
+            let Value::TypeDescriptor(item) = raw(&args[0]) else {
+                return Err(MagError::Type("list_type expects a TypeDescriptor".into()));
+            };
+            Ok(Value::TypeDescriptor(ConcreteType::List {
+                item: Box::new(item.clone()),
+            }))
+        }
+        "descriptor_schema" => {
+            arity(args, 1)?;
+            let Value::TypeDescriptor(ty) = raw(&args[0]) else {
+                return Err(MagError::Type(
+                    "descriptor_schema expects a TypeDescriptor".into(),
+                ));
+            };
+            Ok(Value::TypeSchema(crate::schema::TypeSchema::from_concrete(
+                ty,
+            )?))
+        }
         "type_id" => {
             arity(args, 1)?;
             let Value::TypeDescriptor(ty) = raw(&args[0]) else {
@@ -1309,6 +1402,92 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
             Ok(Value::Bool(
                 matches!(raw(value), Value::Fields(fields) if fields.is_empty()),
             ))
+        }
+        "packed_path_strings" => {
+            arity(args, 3)?;
+            let Value::PackedValue(value) = raw(&args[0]) else {
+                return Err(MagError::Type(
+                    "packed_path_strings expects PackedValue".into(),
+                ));
+            };
+            let Value::List(path) = raw(&args[1]) else {
+                return Err(MagError::Type(
+                    "packed_path_strings expects a String path".into(),
+                ));
+            };
+            let path = path
+                .iter()
+                .map(|segment| {
+                    segment.as_str().ok_or_else(|| {
+                        MagError::Type("packed_path_strings expects a String path".into())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let Value::Bool(expect_list) = raw(&args[2]) else {
+                return Err(MagError::Type(
+                    "packed_path_strings expects Bool as its third argument".into(),
+                ));
+            };
+
+            let mut selected = value.as_ref();
+            for (index, segment) in path.iter().enumerate() {
+                let Value::Fields(fields) = raw(selected) else {
+                    let parent = if index == 0 {
+                        "<root>".to_owned()
+                    } else {
+                        path[..index].join(".")
+                    };
+                    return Err(MagError::Eval(format!(
+                        "packed_path_strings cannot traverse {parent}: expected record, got {}",
+                        raw(selected).type_name()
+                    )));
+                };
+                selected = fields.get(*segment).ok_or_else(|| {
+                    MagError::Eval(format!(
+                        "packed_path_strings path {} has no field {segment:?}",
+                        if index == 0 {
+                            "<root>".to_owned()
+                        } else {
+                            path[..index].join(".")
+                        }
+                    ))
+                })?;
+            }
+
+            let selected_path = if path.is_empty() {
+                "<root>".to_owned()
+            } else {
+                path.join(".")
+            };
+            let strings = if *expect_list {
+                let Value::List(values) = raw(selected) else {
+                    return Err(MagError::Eval(format!(
+                        "packed_path_strings expected List<String> at {selected_path}, got {}",
+                        raw(selected).type_name()
+                    )));
+                };
+                values
+                    .iter()
+                    .map(|value| {
+                        value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                            MagError::Eval(format!(
+                                "packed_path_strings expected List<String> at {selected_path}, got list containing {}",
+                                raw(value).type_name()
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                vec![selected.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                    MagError::Eval(format!(
+                        "packed_path_strings expected String at {selected_path}, got {}",
+                        raw(selected).type_name()
+                    ))
+                })?]
+            };
+            Ok(Value::List(std::sync::Arc::new(
+                strings.into_iter().map(Value::Str).collect(),
+            )))
         }
         "packed_record_has_only_key" => {
             arity(args, 2)?;

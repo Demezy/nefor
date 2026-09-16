@@ -20,6 +20,7 @@ M.declaration = {
       { wire = RIGHT, type = right },
     },
   },
+  template = { relocations = {} },
   params = {},
   inputs = { value = INPUT },
   outputs = { LEFT, RIGHT },

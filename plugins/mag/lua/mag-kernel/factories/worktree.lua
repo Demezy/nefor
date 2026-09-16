@@ -29,6 +29,7 @@ local function declaration(config)
       },
     },
     params = params,
+    template = { relocations = {} },
     inputs = { input = "mag.Unit" },
     outputs = { READY, FAILED },
     signals = { "kill" },

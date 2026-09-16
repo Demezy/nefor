@@ -769,7 +769,7 @@ function M:fire(dest_id, arrival, legacy_tag, legacy_message)
     })
   end
   self:publish_arrival(arrival)
-  local ports = self:machines_for(dest_id)
+  local ports = self:machines_for(dest_id, arrival)
   for port, machine in pairs(ports) do
     if machine:accepts(arrival.protocol_wire) then
       for _, activation in ipairs(machine:offer(
@@ -821,7 +821,7 @@ end
 -- factory's declared inputs. Product ports get sender-bound slots derived from
 -- the current routes topology (derive_slots). Built on first use, by which
 -- time upstream actors and their routes are in the inventory.
-function M:machines_for(id)
+function M:machines_for(id, arrival)
   local existing = self.machines[id]
   if existing then
     return existing
@@ -839,7 +839,7 @@ function M:machines_for(id)
             and "product" or "single",
         } or nil
       if semantic and actor.input.type and actor.input.type.kind == "product" then
-        slots = self:derive_slots(id)
+        slots = self:derive_slots(id, arrival)
       elseif shape.classify(in_shape) == "product" then
         slots = self:derive_legacy_slots(id, in_shape)
       end
@@ -876,7 +876,7 @@ end
 -- edges, two sender-bound slots — where keying by the bare type could not tell
 -- them apart (docs/ir.md, Firing). Because ids are signed and routes are
 -- directional, the binding is a static fact of the topology.
-function M:derive_slots(dest_id)
+function M:derive_slots(dest_id, arrival)
   local edges = {}
   local whole_edges = 0
   local destination_actor = self.inventory.get(dest_id)
@@ -907,7 +907,11 @@ function M:derive_slots(dest_id)
   -- invariant was broken; fail loudly rather than parking a partial product.
   local component_count = destination_actor and destination_actor.input and
     destination_actor.input.type and #(destination_actor.input.type.items or {}) or 0
-  if (#edges == 0 and whole_edges == 0) or
+  -- A checked initial message is an input source too. Its whole-product
+  -- evidence can activate a newly materialized worker without a static edge.
+  local whole_arrival = typed_value.is_trusted(arrival)
+    and arrival.product_position == -1 and arrival.type_id == input_type_id
+  if (#edges == 0 and whole_edges == 0 and not whole_arrival) or
       (#edges > 0 and #edges ~= component_count) then
     error(string.format(
       "actor '%s': product input derives %d component slot(s) and %d whole edge(s), but the shape has %d component(s)",

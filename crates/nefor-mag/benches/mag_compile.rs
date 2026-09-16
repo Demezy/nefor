@@ -1369,7 +1369,7 @@ fn linear_graph(size: usize, stage: &str) -> String {
     for index in 0..size {
         source.push_str(&format!("let n{index} = pass(\"n{index}\")\n"));
     }
-    source.push_str("let out = nefor.graph.output(\"out\", type_tag<Int>())\nlet topology = nefor.graph.add_edges(nefor.graph.empty_graph, [");
+    source.push_str("let out = nefor.graph.output<Int>(\"out\")\nlet topology = nefor.graph.add_edges(nefor.graph.empty_graph, [");
     source.push_str("nefor.graph.edge(start, n0), ");
     for index in 0..size - 1 {
         source.push_str(&format!("nefor.graph.edge(n{index}, n{}), ", index + 1));
@@ -1386,7 +1386,7 @@ fn fan_in_graph(size: usize, stage: &str) -> String {
         ));
     }
     let types = (0..size).map(|_| "Int").collect::<Vec<_>>().join(", ");
-    source.push_str(&format!("let out = nefor.graph.output(\"out\", type_tag<({types})>())\nlet topology = nefor.graph.add_edges(nefor.graph.empty_graph, ["));
+    source.push_str(&format!("let out = nefor.graph.output<({types})>(\"out\")\nlet topology = nefor.graph.add_edges(nefor.graph.empty_graph, ["));
     for index in 0..size {
         source.push_str(&format!("nefor.graph.edge(s{index}, out), "));
     }
@@ -1407,7 +1407,7 @@ fn broad_frontier_graph(width: usize, depth: usize, stage: &str) -> (String, Str
         }
     }
     let types = (0..width).map(|_| "Int").collect::<Vec<_>>().join(", ");
-    source.push_str(&format!("let out = nefor.graph.output(\"out\", type_tag<({types})>())\nlet topology = nefor.graph.add_edges(nefor.graph.empty_graph, ["));
+    source.push_str(&format!("let out = nefor.graph.output<({types})>(\"out\")\nlet topology = nefor.graph.add_edges(nefor.graph.empty_graph, ["));
     for chain in 0..width {
         source.push_str(&format!("nefor.graph.edge(s{chain}, n{chain}_0), "));
         for level in 0..depth - 1 {
@@ -1487,7 +1487,7 @@ let right_input = nefor.graph.port("same", type_tag<Int>(), "nefor.graph.Value")
 let right_output = nefor.graph.port("same", type_tag<Int>(), "different")
 let right_actor = nefor.graph.actor("same", "nefor.factory.output", [type_evidence(type_tag<Int>())], nefor.graph.OutputParams {}, nefor.graph.store_port(right_input), [nefor.graph.store_port(right_output)])
 let right = nefor.graph.node("same", "ordinary", [right_actor], ([]: List<nefor.graph.StoredRoute>), ([]: List<nefor.graph.Message>), right_input, right_output)
-let out = nefor.graph.output("out", type_tag<Int>())
+let out = nefor.graph.output<Int>("out")
 let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, left), nefor.graph.edge(start, right), nefor.graph.edge(left, out)])
 nefor.artifact.compile(topology)"#);
     source

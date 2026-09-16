@@ -1,7 +1,6 @@
 import core.types.{}
 import agents.{}
 import nefor.actors.{}
-import nefor.agents.{}
 import nefor.artifact.{}
 import nefor.contracts.{}
 import nefor.dynamic.{}
@@ -13,30 +12,20 @@ type Task {task: String, description: String, dependent_tasks: List<String>}
 type WorkerResult {task: String, description: String}
 type Summary {content: String}
 
-let occurrence = nefor.dynamic.trigger_ref(type_tag<nefor.dynamic.Indexed<Task>>())
-let occurrence_collection = nefor.dynamic.field_ref(occurrence, "collection", type_tag<String>())
-let occurrence_index = nefor.dynamic.field_ref(occurrence, "index", type_tag<Int>())
-let occurrence_value = nefor.dynamic.field_ref(occurrence, "value", type_tag<Task>())
-let occurrence_text = nefor.dynamic.field_ref(occurrence_value, "description", type_tag<String>())
-let occurrence_index_text = nefor.dynamic.int_to_decimal_string_ref(occurrence_index)
-let worker_id = nefor.dynamic.concat_strings_ref([nefor.dynamic.capture_ref("expand.worker."), occurrence_index_text])
-let worker_root = nefor.dynamic.concat_strings_ref([nefor.dynamic.capture_ref("expand-"), occurrence_index_text])
-let worker_system = nefor.dynamic.concat_strings_ref([nefor.dynamic.capture_ref("Complete this task: "), occurrence_text])
-let worker_template = agents.dynamic_template<WorkerResult>("expand", agents.DynamicTemplateConfig {model: agents.mock, tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2}, occurrence_collection, occurrence_index, worker_id, worker_root, worker_system)
-
 let start = nefor.graph.source("task", nefor.contracts.Task {prompt: "Plan this request"})
-let planner = agents.dynamic_agent<nefor.contracts.Task, Task>("planner", agents.AgentConfig {model: agents.mock, system: "Return the ordered task plan.", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2})
-let workers = nefor.dynamic.traverse_template("expand", worker_template, type_tag<Task>(), type_tag<core.types.Result<nefor.contracts.AgentError, WorkerResult>>())
+let planner = agents.agent<nefor.contracts.Task, nefor.dynamic.DynamicList<Task>>("planner", agents.AgentConfig {model: agents.mock, system: "Return the ordered task plan.", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2})
+let worker = agents.agent<Task, WorkerResult>("worker", agents.AgentConfig {model: agents.mock, system: "Complete the task. Use its description field as the assignment.", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2})
+let workers = nefor.dynamic.traverse("expand", worker)
 
 // Dynamic cardinality ends at an effect-aware context node. It waits for the
 // explicit completion event and sends one ordered provider turn downstream;
 // no runtime-sized MAG List value is invented.
-let summary_context = nefor.dynamic.context("summary-input", type_tag<core.types.Result<nefor.contracts.AgentError, WorkerResult>>())
+let summary_context = nefor.dynamic.context<core.types.Result<nefor.contracts.AgentError, WorkerResult>>("summary-input")
 let summarizer = agents.agent<nefor.contracts.ProviderInput, Summary>("summarizer", agents.AgentConfig {model: agents.mock, system: "Summarize the ordered worker results.", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2})
 let summarize = nefor.node.`>>>`(summary_context, summarizer)
 
 let planned = nefor.node.`>>>`(start, planner)
-let ran = nefor.result.`>=>`(planned, nefor.result.lift("workers-result", type_tag<nefor.contracts.AgentError>(), workers))
+let ran = nefor.result.`>=>`(planned, nefor.result.lift<nefor.dynamic.DynamicList<Task>, nefor.contracts.AgentError, nefor.dynamic.DynamicList<core.types.Result<nefor.contracts.AgentError, WorkerResult>>>("workers-result", workers))
 let workflow = nefor.result.`>=>`(ran, summarize)
 let result = nefor.graph.output_for("result", workflow)
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(workflow, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)

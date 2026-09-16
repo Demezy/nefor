@@ -13,5 +13,5 @@ type ShellScriptActorParams {script: String, cwd: String, timeout: nefor.contrac
 let script: fn(String, ShellScriptParams) -> nefor.graph.Node<Unit, nefor.contracts.ProcessResult> = |name, params| => {
   let input = nefor.graph.port(name, type_tag<Unit>(), "nefor.process.Input")
   let output = nefor.graph.port(name, type_tag<nefor.contracts.ProcessResult>(), "nefor.process.Result")
-  nefor.graph.Node<Unit, nefor.contracts.ProcessResult> {id: name, role: "ordinary", actors: [nefor.graph.actor(name, factory, [], ShellScriptActorParams {script: get(params, "script"), cwd: get(params, "cwd"), timeout: get(params, "timeout")}, nefor.graph.store_port(input), [nefor.graph.store_port(output)])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.logical_node([name], [name])], input: input, output: output}
+  nefor.graph.Node<Unit, nefor.contracts.ProcessResult> {id: name, role: "ordinary", actors: [nefor.graph.closed_actor(name, factory, [], ShellScriptActorParams {script: get(params, "script"), cwd: get(params, "cwd"), timeout: get(params, "timeout")}, nefor.graph.store_port(input), [nefor.graph.store_port(output)], [])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.logical_node([name], [name])], input: input, output: output}
 }

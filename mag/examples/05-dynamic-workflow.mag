@@ -1,40 +1,41 @@
-import core.types.{}
 import agents.{}
-import nefor.actors.{}
-import nefor.agents.{}
-import nefor.contracts.{}
-import nefor.dynamic.{}
-import nefor.graph.{}
-import nefor.node.{}
-import nefor.result.{}
+import core.types.{Result}
+import nefor
 
 type WorkItem {task: String}
 type WorkResult {summary: String}
 type FinalSummary {summary: String}
 
-let occurrence = nefor.dynamic.trigger_ref(type_tag<nefor.dynamic.Indexed<WorkItem>>())
-let occurrence_collection = nefor.dynamic.field_ref(occurrence, "collection", type_tag<String>())
-let occurrence_index = nefor.dynamic.field_ref(occurrence, "index", type_tag<Int>())
-let occurrence_value = nefor.dynamic.field_ref(occurrence, "value", type_tag<WorkItem>())
-let occurrence_text = nefor.dynamic.field_ref(occurrence_value, "task", type_tag<String>())
-let occurrence_index_text = nefor.dynamic.int_to_decimal_string_ref(occurrence_index)
-let worker_id = nefor.dynamic.concat_strings_ref([nefor.dynamic.capture_ref("worker."), occurrence_index_text])
-let worker_root = nefor.dynamic.concat_strings_ref([nefor.dynamic.capture_ref("workers-"), occurrence_index_text])
-let worker_system = nefor.dynamic.concat_strings_ref([nefor.dynamic.capture_ref("Complete this work item: "), occurrence_text])
-let worker_template = agents.dynamic_template<WorkResult>("workers", agents.DynamicTemplateConfig {model: agents.mock, tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 1}, occurrence_collection, occurrence_index, worker_id, worker_root, worker_system)
-
-let task = nefor.graph.source("task", nefor.contracts.Task {prompt: "Split this request into independent work."})
-let planner = agents.dynamic_agent<nefor.contracts.Task, WorkItem>("planner", agents.AgentConfig {model: agents.mock, system: "Return the ordered work items as JSON.", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 1})
-let workers = nefor.dynamic.traverse_template("workers", worker_template, type_tag<WorkItem>(), type_tag<core.types.Result<nefor.contracts.AgentError, WorkResult>>())
-let result_context = nefor.dynamic.context("result-context", type_tag<core.types.Result<nefor.contracts.AgentError, WorkResult>>())
-let integrator = agents.agent<nefor.contracts.ProviderInput, FinalSummary>("integrator", agents.AgentConfig {model: agents.mock, system: "Integrate all ordered worker results into one summary.", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 1})
-let integrate = nefor.node.`>>>`(result_context, integrator)
+let task = source("task", Task {prompt: "Split this request into independent work."})
+let planner = agents.agent<Task, DynamicList<WorkItem>>("planner", agents.AgentConfig {
+  model: agents.mock,
+  system: "Return the ordered work items as JSON.",
+  tools: [],
+  tool_approval_policy: no_tool_approval_policy(),
+  max_corrections: 1
+})
+let worker = agents.agent<WorkItem, WorkResult>("worker", agents.AgentConfig {
+  model: agents.mock,
+  system: "Consume the typed WorkItem input, complete it, and return one WorkResult.",
+  tools: [],
+  tool_approval_policy: no_tool_approval_policy(),
+  max_corrections: 1
+})
+let workers = traverse("workers", worker)
+let result_context = context<Result<AgentError, WorkResult>>("result-context")
+let integrator = agents.agent<ProviderInput, FinalSummary>("integrator", agents.AgentConfig {
+  model: agents.mock,
+  system: "Integrate all ordered worker results into one summary.",
+  tools: [],
+  tool_approval_policy: no_tool_approval_policy(),
+  max_corrections: 1
+})
+let integrate = compose("integrate", result_context, integrator)
 
 // The top-level graph is still assembled entirely from ordinary nodes:
 // >=> continues successful values and preserves AgentError as data.
-let planned = nefor.node.`>>>`(task, planner)
-let ran = nefor.result.`>=>`(planned, nefor.result.lift("workers-result", type_tag<nefor.contracts.AgentError>(), workers))
-let workflow = nefor.result.`>=>`(ran, integrate)
-let result = nefor.graph.output_for("result", workflow)
+let planned = compose("planned", task, planner)
+let ran = and_then("ran", planned, lift<DynamicList<WorkItem>, AgentError, DynamicList<Result<AgentError, WorkResult>>>("workers-result", workers))
+let workflow = and_then("workflow", ran, integrate)
 
-nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(workflow, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
+compile_graph(workflow)

@@ -27,6 +27,7 @@ M.declaration = {
     conversation_id = "string?",
     turn_id = "string?", submission_ids = "table?", input_cause = "string?",
   },
+  template = { relocations = {} },
   inputs = { provider_input = "generic-provider.ProviderOut" },
   outputs = { "generic-tool.ToolCalls", RESULT },
   signals = { "kill", "drain", "steer" },

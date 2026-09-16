@@ -19,10 +19,10 @@ end
 local function exact_fields(value, allowed, label)
   if type(value) ~= "table" then return nil, label .. " must be an object" end
   for key in pairs(value) do
-    if not allowed[key] then return nil, label .. " has unknown field " .. tostring(key) end
+    if allowed[key] == nil then return nil, label .. " has unknown field " .. tostring(key) end
   end
   for key, required in pairs(allowed) do
-    if required and value[key] == nil then return nil, label .. " requires " .. key end
+    if required == true and value[key] == nil then return nil, label .. " requires " .. key end
   end
   return true
 end
@@ -62,6 +62,7 @@ local CONSTRUCTORS = {
   existing_actor = "ExistingActorRef",
   fixed_path = "FixedPathSegment",
   bound_path = "BoundPathSegment",
+  trigger_path = "TriggerPathSegment",
 }
 
 local function constructor_ids()
@@ -113,6 +114,32 @@ local function validate_path(path, label)
   return true
 end
 
+local function paths_overlap(left, right)
+  for index = 1, math.min(#left, #right) do
+    if left[index] ~= right[index] then return false end
+  end
+  return true
+end
+
+local function get_path(root, path)
+  local current = root
+  for _, part in ipairs(path) do
+    if type(current) ~= "table" then return nil, false end
+    current = current[part]
+    if current == nil then return nil, false end
+  end
+  return current, true
+end
+
+local function same_port(left, right, constructors)
+  local left_ref, left_kind = actor_ref(left.actor, constructors)
+  local right_ref, right_kind = actor_ref(right.actor, constructors)
+  if left_kind ~= "local" or right_kind ~= "local"
+      or left_ref.slot ~= right_ref.slot then return false end
+  return left.wire == right.wire and left.type_id == right.type_id
+      and type_id(left.type) == type_id(right.type)
+end
+
 local function contract_relocations(registry, factory)
   local declaration = registry:declaration(factory)
   if not declaration then return nil, "unknown template factory " .. tostring(factory) end
@@ -132,7 +159,7 @@ local function contract_relocations(registry, factory)
     end
     allowed[nefor.json.encode({ path = relocation.path, shape = relocation.shape })] = true
   end
-  return allowed
+  return allowed, nil, template.parameter_equals or {}
 end
 
 function M.preflight(initial, operations, registry)
@@ -284,9 +311,15 @@ function M.preflight(initial, operations, registry)
           or not dense_list(actor.outputs) or not dense_list(actor.parameter_bindings) then
         return nil, actor_label .. " contains a non-closed collection"
       end
-      local allowed_relocations
-      allowed_relocations, err = contract_relocations(registry, actor.factory)
+      local allowed_relocations, required_parameters
+      allowed_relocations, err, required_parameters = contract_relocations(registry, actor.factory)
       if not allowed_relocations then return nil, actor_label .. ": " .. err end
+      for parameter, expected in pairs(required_parameters) do
+        if actor.params[parameter] ~= expected then
+          return nil, actor_label .. " factory template contract requires params."
+            .. parameter .. " = " .. tostring(expected)
+        end
+      end
       slots[actor.slot], actor_by_slot[actor.slot] = true, actor
       relocations_by_slot[actor.slot] = { allowed = allowed_relocations, seen = {} }
     end
@@ -300,16 +333,31 @@ function M.preflight(initial, operations, registry)
         if not ok then return nil, err end
         if local_slot(output.actor, constructors) ~= actor.slot then return nil, actor_label .. " output must belong to its actor" end
       end
+      local bound_paths = {}
       for index, binding in ipairs(actor.parameter_bindings) do
         ok, err = exact_fields(binding, {path=true,value=true}, string.format("%s.parameter_bindings[%d]", actor_label,index))
         if not ok then return nil, err end
         ok, err = validate_path(binding.path, actor_label .. " parameter path")
         if not ok then return nil, err end
+        local previous, present = get_path(actor.params, binding.path)
+        if not present then return nil, actor_label .. " parameter binding path is absent" end
+        for _, path in ipairs(bound_paths) do
+          if paths_overlap(path, binding.path) then return nil, actor_label .. " parameter bindings overlap" end
+        end
+        bound_paths[#bound_paths + 1] = binding.path
+        local declaration = registry:declaration(actor.factory)
+        for parameter in pairs(declaration.template.parameter_equals or {}) do
+          if binding.path[1] == parameter then return nil, actor_label .. " parameter binding overrides a factory constraint" end
+        end
         if not expressions[binding.value] then return nil, actor_label .. " parameter binding expression is absent" end
         local bound_descriptor=descriptors[binding.value]
         if type(bound_descriptor)~="table" or bound_descriptor.kind~="primitive"
             or (bound_descriptor.name~="String" and bound_descriptor.name~="Int") then
           return nil,actor_label.." parameter binding must be a String or Int scalar"
+        end
+        if (bound_descriptor.name == "String" and type(previous) ~= "string")
+            or (bound_descriptor.name == "Int" and (type(previous) ~= "number" or previous % 1 ~= 0)) then
+          return nil,actor_label.." parameter binding type differs from its parameter"
         end
       end
     end
@@ -331,6 +379,27 @@ function M.preflight(initial, operations, registry)
       if not state.allowed[key] or state.seen[key] then
         return nil, relocation_label .. " is undeclared or duplicate for its factory"
       end
+      for _, binding in ipairs(actor_by_slot[slot].parameter_bindings) do
+        if paths_overlap(binding.path, relocation.path) then
+          return nil, relocation_label .. " overlaps a scalar parameter binding"
+        end
+      end
+      local referenced, present = get_path(actor_by_slot[slot].params, relocation.path)
+      if not present then return nil, relocation_label .. " path is absent from actor params" end
+      if relocation.shape == "actor_id" then
+        if not nonempty(referenced) or not slots[referenced] then
+          return nil, relocation_label .. " must name one local actor slot"
+        end
+      else
+        if not dense_list(referenced) then
+          return nil, relocation_label .. " must name a dense list of local actor slots"
+        end
+        for _, referenced_slot in ipairs(referenced) do
+          if not nonempty(referenced_slot) or not slots[referenced_slot] then
+            return nil, relocation_label .. " names an unknown local actor slot"
+          end
+        end
+      end
       state.seen[key] = true
     end
     for slot, state in pairs(relocations_by_slot) do
@@ -338,14 +407,70 @@ function M.preflight(initial, operations, registry)
         if not state.seen[key] then return nil, "template actor " .. slot .. " omits required factory relocation " .. key end
       end
     end
+    local product_routes = {}
     for index, route in ipairs(template.routes) do
       local route_label=string.format("%s.template.routes[%d]",label,index)
       ok,err=exact_fields(route,{from=true,to=true,product_position=true},route_label)
       if not ok then return nil,err end
       ok,err=validate_port(route.from,slots,constructors,route_label..".from"); if not ok then return nil,err end
       ok,err=validate_port(route.to,slots,constructors,route_label..".to"); if not ok then return nil,err end
+      local from_slot = local_slot(route.from.actor, constructors)
+      if not from_slot then return nil,route_label.." may only originate at a local actor" end
+      local source_output = false
+      for _, output in ipairs(actor_by_slot[from_slot].outputs) do
+        if same_port(route.from, output, constructors) then source_output = true break end
+      end
+      if not source_output then return nil,route_label..".from is not a declared actor output" end
+      local to_ref, to_kind = actor_ref(route.to.actor, constructors)
+      if to_kind == "local" then
+        if not same_port(route.to, actor_by_slot[to_ref.slot].input, constructors) then
+          return nil,route_label..".to is not the declared actor input"
+        end
+      elseif to_kind == "existing" then
+        local target = initial_actors[to_ref.id]
+        local input = target and target.input
+        if type(input) ~= "table" or input.wire ~= route.to.wire
+            or input.type_id ~= route.to.type_id or type_id(input.type) ~= type_id(route.to.type) then
+          return nil,route_label..".to is not a declared initial actor input"
+        end
+      else
+        return nil,route_label.." has an invalid target actor reference"
+      end
       if type(route.product_position)~="number" or route.product_position%1~=0 or route.product_position < -1 then
         return nil,route_label.." product_position must be an integer >= -1"
+      end
+      if route.product_position == -1 and type(semantic_host.accepts) == "function"
+          and not semantic_host.accepts(route.to.type, route.from.type) then
+        return nil,route_label.." source type is incompatible with its target"
+      end
+      local target_body = route.to.type
+      if target_body.kind == "named" then target_body = target_body.body end
+      if route.product_position == -1 and target_body and target_body.kind == "product"
+          and route.to.type_id ~= route.from.type_id then
+        return nil,route_label.." product component route requires a product position"
+      end
+      if route.product_position >= 0 then
+        local descriptor = route.to.type
+        if descriptor.kind == "named" then descriptor = descriptor.body end
+        local components = type(descriptor) == "table" and descriptor.kind == "product"
+          and descriptor.items or nil
+        local component = type(components) == "table" and components[route.product_position + 1] or nil
+        if not component or type_id(component) ~= route.from.type_id then
+          return nil,route_label.." product position does not match the routed source type"
+        end
+        local key = (to_kind == "local" and "local:" .. to_ref.slot or "existing:" .. to_ref.id)
+          .. "/" .. route.to.wire
+        local state = product_routes[key]
+        if not state then state = {components=#components,seen={}}; product_routes[key]=state end
+        if state.components ~= #components or state.seen[route.product_position] then
+          return nil,route_label.." has duplicate or inconsistent product routing"
+        end
+        state.seen[route.product_position] = true
+      end
+    end
+    for _, state in pairs(product_routes) do
+      for position = 0, state.components - 1 do
+        if not state.seen[position] then return nil,"template has an incomplete product route" end
       end
     end
     for index,message in ipairs(template.messages) do
@@ -353,30 +478,102 @@ function M.preflight(initial, operations, registry)
       ok,err=exact_fields(message,{to=true,semantic_type=true,semantic_type_id=true,content=true},message_label)
       if not ok then return nil,err end
       ok,err=validate_port(message.to,slots,constructors,message_label..".to"); if not ok then return nil,err end
+      local to_slot = local_slot(message.to.actor, constructors)
+      if not to_slot or not same_port(message.to, actor_by_slot[to_slot].input, constructors) then
+        return nil,message_label..".to must be a declared local actor input"
+      end
       ok,err=validate_typed(message.semantic_type,message.semantic_type_id,message_label); if not ok then return nil,err end
+      if message.semantic_type_id ~= message.to.type_id
+          or type_id(message.semantic_type) ~= type_id(message.to.type) then
+        return nil,message_label.." semantic type must exactly match its target port"
+      end
+      ok,err=exact_fields(message.content,{constructor=true,value=true},message_label..".content")
+      if not ok then return nil,err end
+      if message.content.constructor == "Expression" then
+        if not nonempty(message.content.value) or not expressions[message.content.value] then
+          return nil,message_label.." expression payload references an unknown expression"
+        end
+        if type_id(descriptors[message.content.value]) ~= message.semantic_type_id then
+          return nil,message_label.." expression payload semantic type does not match the message"
+        end
+      elseif message.content.constructor == "Static" then
+        local content = message.content.value
+        ok,err=exact_fields(content,{kind=true,value=false},message_label..".content.value")
+        if not ok then return nil,err end
+        if content.kind ~= message.to.wire then
+          return nil,message_label.." static payload wire does not match its target port"
+        end
+        local validation = semantic_host.validate_value(message.semantic_type, content.value)
+        if not validation.ok then return nil,message_label.." static payload value is malformed" end
+      else
+        return nil,message_label.." content has an unknown TemplatePayload constructor"
+      end
     end
+    local member_owners = {}
     for index,node in ipairs(template.nodes) do
       local node_label=string.format("%s.template.nodes[%d]",label,index)
       ok,err=exact_fields(node,{path=true,members=true},node_label); if not ok then return nil,err end
       if not dense_list(node.path) or #node.path==0 or not dense_list(node.members) then return nil,node_label.." has malformed lists" end
-      for _,segment in ipairs(node.path) do
+      for part,segment in ipairs(node.path) do
         ok,err=exact_fields(segment,{constructor=true,value=true},node_label..".path segment"); if not ok then return nil,err end
-        ok,err=exact_fields(segment.value,{value=true},node_label..".path segment value"); if not ok then return nil,err end
-        if segment.constructor ~= constructors.fixed_path
-            and segment.constructor ~= constructors.bound_path then
-          return nil,node_label.." path segment has an unknown constructor"
-        end
-        if not nonempty(segment.value.value) then return nil,node_label.." path segment must be non-empty" end
-        if segment.constructor == constructors.bound_path and not expressions[segment.value.value] then
-          return nil,node_label.." bound path segment references an unknown expression"
+        if segment.constructor == constructors.trigger_path then
+          ok,err=exact_fields(segment.value,{},node_label..".trigger path"); if not ok then return nil,err end
+          if part ~= 1 then return nil,node_label.." trigger path must be the first segment" end
+          local owners = 0
+          for _, owner in ipairs((initial and initial.nodes) or {}) do
+            for _, member in ipairs(owner.members or {}) do
+              if member == operation.on_actor then owners = owners + 1 end
+            end
+          end
+          if owners ~= 1 then return nil,node_label.." trigger actor must have one logical owner" end
+        else
+          ok,err=exact_fields(segment.value,{value=true},node_label..".path segment value"); if not ok then return nil,err end
+          if segment.constructor ~= constructors.fixed_path
+              and segment.constructor ~= constructors.bound_path then
+            return nil,node_label.." path segment has an unknown constructor"
+          end
+          if not nonempty(segment.value.value) then return nil,node_label.." path segment must be non-empty" end
+          if segment.constructor == constructors.bound_path then
+            if not expressions[segment.value.value] then
+              return nil,node_label.." bound path segment references an unknown expression"
+            end
+            if type_id(descriptors[segment.value.value]) ~= type_id({kind="primitive",name="String"}) then
+              return nil,node_label.." bound path segment must produce String"
+            end
+          end
         end
       end
       for _,member in ipairs(node.members) do
         ok,err=exact_fields(member,{slot=true},node_label..".member"); if not ok then return nil,err end
         if not slots[member.slot] then return nil,node_label.." names an unknown member slot" end
+        if member_owners[member.slot] then return nil,node_label.." repeats a logical member slot" end
+        member_owners[member.slot] = true
       end
     end
-    owned[#owned+1]=plain_data.copy(operation)
+    for slot in pairs(slots) do
+      if not member_owners[slot] then return nil,"template actor "..slot.." has no logical owner" end
+    end
+    -- Resolve the explicit trigger-path reference from the immutable initial
+    -- hierarchy. Node naming/composition may relocate that owner without
+    -- changing opaque executable identities or rewriting the template.
+    local normalized = plain_data.copy(operation)
+    for _, node in ipairs(normalized.template.nodes) do
+      if node.path[1].constructor == constructors.trigger_path then
+        local path = {}
+        for _, owner in ipairs(initial.nodes) do
+          for _, member in ipairs(owner.members) do
+            if member == operation.on_actor then
+              for _, segment in ipairs(owner.path) do
+                path[#path + 1] = {constructor=constructors.fixed_path,value={value=segment}}
+              end
+            end
+          end
+        end
+        for index = 2, #node.path do path[#path + 1] = node.path[index] end
+        node.path = path
+      end
+    end
+    owned[#owned+1]=normalized
   end
   return owned
 end
@@ -392,16 +589,6 @@ local function set_path(root, path, value)
   if current[leaf]==nil then return nil,"parameter path leaf is absent" end
   current[leaf]=plain_data.copy(value)
   return true
-end
-
-local function get_path(root,path)
-  local current=root
-  for _,part in ipairs(path) do
-    if type(current)~="table" then return nil,false end
-    current=current[part]
-    if current==nil then return nil,false end
-  end
-  return current,true
 end
 
 local function ref_id(ref, ids, constructors)
@@ -495,8 +682,21 @@ function M.materialize(operation, trigger_value)
   for index,message in ipairs(template.messages) do
     local to=port_value(message.to,ids,constructors)
     types[message.semantic_type_id]=plain_data.copy(message.semantic_type)
+    local content
+    if message.content.constructor == "Static" then
+      content = plain_data.copy(message.content.value)
+    else
+      local value = values[message.content.value]
+      local host = nefor and nefor.semantic_type
+      local validation = type(host) == "table" and type(host.validate_value) == "function"
+        and host.validate_value(message.semantic_type, value) or nil
+      if type(validation) ~= "table" or not validation.ok then
+        return nil,"message expression produced a malformed semantic value"
+      end
+      content = {kind=to.wire,value=plain_data.copy(value)}
+    end
     messages[index]={to=to.actor,semantic_type=plain_data.copy(message.semantic_type),
-      semantic_type_id=message.semantic_type_id,content=plain_data.copy(message.content)}
+      semantic_type_id=message.semantic_type_id,content=content}
   end
   local nodes={}
   for index,node in ipairs(template.nodes) do

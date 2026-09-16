@@ -9,5 +9,5 @@ let input = nefor.graph.port("join", type_tag<(nefor.contracts.Text, nefor.contr
 let output = nefor.graph.port("join", type_tag<nefor.contracts.Text>(), "test.Value")
 let worker = nefor.graph.actor("join", "test.product", [type_evidence(type_tag<nefor.contracts.Text>())], nil, nefor.graph.store_port(input), [nefor.graph.store_port(output)])
 let join = nefor.graph.node("join", "ordinary", [worker], ([]: List<nefor.graph.StoredRoute>), ([]: List<nefor.graph.Message>), input, output)
-let result = nefor.graph.output("result", type_tag<nefor.contracts.Text>())
+let result = nefor.graph.output<nefor.contracts.Text>("result")
 nefor.artifact.compile((|base| => nefor.graph.add_edges(base, [nefor.graph.edge(left, join), nefor.graph.edge(middle, join), nefor.graph.edge(right, join), nefor.graph.edge(join, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)

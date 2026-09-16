@@ -1,404 +1,102 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "identity": {
-    "source": "examples/nefor-agent/agentic-loop/dynamic-tasks.mag",
-    "source_sha256": "b2d82c9b531ff0878b1c3b5381cc8b706ebe07ebaebfeb011aaa3f627b6eb960",
-    "compiled_artifact_hash": "sha256:3e8b48493a5aa88352cd4fcebc77cb56d94885386fa244682e323c9697c54425"
+    "source": "examples/nefor-agent/agentic-loop/dynamic-tasks.mag"
   },
-  "item_delta_zero": {
+  "item_delta": {
     "actors": [
       {
-        "id": "expand.worker.0.entry",
+        "slot": "worker.entry",
         "factory": "nefor.factory.adapter",
-        "system": null,
-        "dynamic": null
+        "system": null
       },
       {
-        "id": "expand.worker.0.llm",
+        "slot": "worker.llm",
         "factory": "nefor.factory.structured-output",
-        "system": "Complete this task: repeated",
-        "dynamic": null
+        "system": "Complete the task. Use its description field as the assignment."
       },
       {
-        "id": "expand.worker.0.run-tool",
+        "slot": "worker.run-tool",
         "factory": "nefor.factory.run-tool",
-        "system": null,
-        "dynamic": null
+        "system": null
       },
       {
-        "id": "expand.worker.0.tool-result",
+        "slot": "worker.tool-result",
         "factory": "nefor.factory.tool-result",
-        "system": null,
-        "dynamic": null
+        "system": null
       },
       {
-        "id": "expand.result.0",
+        "slot": "traverse.result",
         "factory": "nefor.factory.dynamic-index",
-        "system": null,
-        "dynamic": {
-          "collection": "<runtime>",
-          "index": 0
-        }
+        "system": null
       }
     ],
     "routes": [
       {
-        "from": "expand.worker.0.entry",
+        "from": "worker.entry",
         "from_wire": "generic-provider.ProviderOut",
-        "to": "expand.worker.0.llm",
+        "to": "worker.llm",
         "to_wire": "generic-provider.ProviderOut",
         "product_position": -1
       },
       {
-        "from": "expand.worker.0.llm",
+        "from": "worker.llm",
         "from_wire": "generic-tool.ToolCalls",
-        "to": "expand.worker.0.run-tool",
+        "to": "worker.run-tool",
         "to_wire": "generic-tool.ToolCalls",
         "product_position": -1
       },
       {
-        "from": "expand.worker.0.llm",
+        "from": "worker.llm",
         "from_wire": "nefor.agent.Result",
-        "to": "expand.result.0",
+        "to": "traverse.result",
         "to_wire": "nefor.dynamic.IndexInput",
         "product_position": -1
       },
       {
-        "from": "expand.worker.0.run-tool",
+        "from": "worker.run-tool",
         "from_wire": "generic-tool.ToolHandle",
-        "to": "expand.worker.0.tool-result",
+        "to": "worker.tool-result",
         "to_wire": "generic-tool.ToolHandle",
         "product_position": -1
       },
       {
-        "from": "expand.worker.0.tool-result",
+        "from": "worker.tool-result",
         "from_wire": "generic-provider.ProviderOut",
-        "to": "expand.worker.0.llm",
+        "to": "worker.llm",
         "to_wire": "generic-provider.ProviderOut",
         "product_position": -1
-      },
-      {
-        "from": "expand.result.0",
-        "from_wire": "nefor.dynamic.Event",
-        "to": "expand.output",
-        "to_wire": "nefor.dynamic.Collect",
-        "product_position": -1
       }
     ],
-    "nodes": [
-      {
-        "members": [],
-        "path": [
-          "expand-0"
-        ]
-      },
-      {
-        "members": [],
-        "path": [
-          "expand-0",
-          "worker"
-        ]
-      },
-      {
-        "members": [
-          "expand.worker.0.entry"
-        ],
-        "path": [
-          "expand-0",
-          "worker",
-          "entry"
-        ]
-      },
-      {
-        "members": [
-          "expand.worker.0.llm"
-        ],
-        "path": [
-          "expand-0",
-          "worker",
-          "llm"
-        ]
-      },
-      {
-        "members": [
-          "expand.worker.0.run-tool"
-        ],
-        "path": [
-          "expand-0",
-          "worker",
-          "run-tool"
-        ]
-      },
-      {
-        "members": [
-          "expand.worker.0.tool-result"
-        ],
-        "path": [
-          "expand-0",
-          "worker",
-          "tool-result"
-        ]
-      },
-      {
-        "members": [
-          "expand.result.0"
-        ],
-        "path": [
-          "expand-0",
-          "result"
-        ]
-      }
-    ],
-    "messages": [
-      {
-        "to": "expand.worker.0.entry",
-        "kind": "nefor.agent.Input"
-      }
-    ],
-    "kills": [],
-    "result": null
+    "message": {
+      "to": "worker.entry",
+      "kind": "nefor.agent.Input"
+    }
   },
   "scenarios": {
     "zero": {
       "planner_items": 0,
-      "worker_ids": [],
       "terminal_status": "completed",
       "terminal_content": "empty"
     },
     "one": {
       "planner_items": 1,
-      "worker_ids": [
-        "expand.worker.0.llm"
-      ],
       "terminal_status": "completed",
       "terminal_content": "one done"
     },
     "multiple": {
       "planner_items": 2,
-      "worker_ids": [
-        "expand.worker.0.llm",
-        "expand.worker.1.llm"
-      ],
-      "worker_systems": [
-        "Complete this task: repeated",
-        "Complete this task: repeated"
-      ],
-      "completion_order": [
-        "expand.worker.1.llm",
-        "expand.worker.0.llm"
-      ],
-      "summary_order": [
-        "done first",
-        "done second"
-      ],
+      "worker_system": "Complete the task. Use its description field as the assignment.",
+      "completion_order": [1, 0],
+      "summary_order": ["done first", "done second"],
       "terminal_status": "completed",
       "terminal_content": "done"
     },
     "invalid": {
       "planner_attempts": 3,
-      "worker_ids": [],
       "terminal_status": "completed",
       "terminal_variant": "nefor.contracts.AgentError"
     },
-    "actor_killed_before_terminal_result": false,
-    "application_trace": [
-      "mag.run_started",
-      "mag.nodes_declared",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "conversation.provider.invoke.request",
-      "mag.modification_applied",
-      "mag.nodes_declared",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "conversation.provider.invoke.request",
-      "mag.modification_applied",
-      "mag.nodes_declared",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "mag.actor_spawned",
-      "conversation.provider.invoke.request",
-      "mag.modification_applied",
-      "conversation.provider.invoke.request",
-      "mag.run_complete",
-      "mag.run_result"
-    ]
-  },
-  "item_delta_one": {
-    "actors": [
-      {
-        "id": "expand.worker.1.entry",
-        "factory": "nefor.factory.adapter",
-        "system": null,
-        "dynamic": null
-      },
-      {
-        "id": "expand.worker.1.llm",
-        "factory": "nefor.factory.structured-output",
-        "system": "Complete this task: repeated",
-        "dynamic": null
-      },
-      {
-        "id": "expand.worker.1.run-tool",
-        "factory": "nefor.factory.run-tool",
-        "system": null,
-        "dynamic": null
-      },
-      {
-        "id": "expand.worker.1.tool-result",
-        "factory": "nefor.factory.tool-result",
-        "system": null,
-        "dynamic": null
-      },
-      {
-        "id": "expand.result.1",
-        "factory": "nefor.factory.dynamic-index",
-        "system": null,
-        "dynamic": {
-          "collection": "<runtime>",
-          "index": 1
-        }
-      }
-    ],
-    "routes": [
-      {
-        "from": "expand.worker.1.entry",
-        "from_wire": "generic-provider.ProviderOut",
-        "to": "expand.worker.1.llm",
-        "to_wire": "generic-provider.ProviderOut",
-        "product_position": -1
-      },
-      {
-        "from": "expand.worker.1.llm",
-        "from_wire": "generic-tool.ToolCalls",
-        "to": "expand.worker.1.run-tool",
-        "to_wire": "generic-tool.ToolCalls",
-        "product_position": -1
-      },
-      {
-        "from": "expand.worker.1.llm",
-        "from_wire": "nefor.agent.Result",
-        "to": "expand.result.1",
-        "to_wire": "nefor.dynamic.IndexInput",
-        "product_position": -1
-      },
-      {
-        "from": "expand.worker.1.run-tool",
-        "from_wire": "generic-tool.ToolHandle",
-        "to": "expand.worker.1.tool-result",
-        "to_wire": "generic-tool.ToolHandle",
-        "product_position": -1
-      },
-      {
-        "from": "expand.worker.1.tool-result",
-        "from_wire": "generic-provider.ProviderOut",
-        "to": "expand.worker.1.llm",
-        "to_wire": "generic-provider.ProviderOut",
-        "product_position": -1
-      },
-      {
-        "from": "expand.result.1",
-        "from_wire": "nefor.dynamic.Event",
-        "to": "expand.output",
-        "to_wire": "nefor.dynamic.Collect",
-        "product_position": -1
-      }
-    ],
-    "nodes": [
-      {
-        "members": [],
-        "path": [
-          "expand-1"
-        ]
-      },
-      {
-        "members": [],
-        "path": [
-          "expand-1",
-          "worker"
-        ]
-      },
-      {
-        "members": [
-          "expand.worker.1.entry"
-        ],
-        "path": [
-          "expand-1",
-          "worker",
-          "entry"
-        ]
-      },
-      {
-        "members": [
-          "expand.worker.1.llm"
-        ],
-        "path": [
-          "expand-1",
-          "worker",
-          "llm"
-        ]
-      },
-      {
-        "members": [
-          "expand.worker.1.run-tool"
-        ],
-        "path": [
-          "expand-1",
-          "worker",
-          "run-tool"
-        ]
-      },
-      {
-        "members": [
-          "expand.worker.1.tool-result"
-        ],
-        "path": [
-          "expand-1",
-          "worker",
-          "tool-result"
-        ]
-      },
-      {
-        "members": [
-          "expand.result.1"
-        ],
-        "path": [
-          "expand-1",
-          "result"
-        ]
-      }
-    ],
-    "messages": [
-      {
-        "to": "expand.worker.1.entry",
-        "kind": "nefor.agent.Input"
-      }
-    ],
-    "kills": [],
-    "result": null
+    "actor_killed_before_terminal_result": false
   }
 }

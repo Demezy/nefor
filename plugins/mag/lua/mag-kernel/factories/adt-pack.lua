@@ -15,6 +15,7 @@ M.declaration = {
     outputs = {{ wire = "nefor.adt.Value", type = owner }},
     params = { owner = owner, payload = payload },
   },
+  template = { relocations = {} },
   params = { owner = "table", payload = "table", constructor = "string" },
   inputs = { value = "nefor.adt.Payload" },
   outputs = { "nefor.adt.Value" },

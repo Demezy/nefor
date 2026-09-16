@@ -78,6 +78,7 @@ local function declaration(name, identity, params_type)
       },
     },
     params = params_type,
+    template = { relocations = {} },
     inputs = { input = INPUTS },
     outputs = { RESULT_WIRE, FAILURE_WIRE },
     signals = { "kill" },

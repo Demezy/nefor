@@ -397,15 +397,16 @@ owned copy in the run context and applies it only while constructing `llm` and
 expansion, and actors added through `mag.apply` without rewriting their
 inventory specs or consulting live catalog state.
 
-`nefor.actors.agent`, `nefor.actors.dynamic_agent`, and
-`nefor.agents.dynamic_template` accept one exhaustive resolver from a
+`nefor.actors.agent<M, I, O>` accepts one exhaustive resolver from a
 configuration's finite model vocabulary to `AuthoredModel`, the sum of a
 concrete `ResolvedModel` and `ModelProfile`. A concrete arm uses the snapshot's
 current model, preserving the current-only behavior. An arm may instead return
 `nefor.actors.model_profile("name")`; the compiled actor then carries that
 authored selector and lazy construction resolves it from the run snapshot's
 `profiles` map. A configuration can close over that resolver with its own
-concise generic constructors; Nefor does not define a second model vocabulary
+concise generic constructor. Selecting `DynamicList<Item>` as its output chooses
+the runtime collection producer protocol; ordinary workers pass to `traverse`
+without a separate agent template API. Nefor does not define a second model vocabulary
 or concrete-only shortcut family. An absent profile fails actor construction
 before any provider invocation. Profile names and their concrete
 provider policy belong to the configuration; Nefor treats them as opaque exact
@@ -417,6 +418,28 @@ retain authored concrete-model behavior, while a profile-authored actor requires
 a snapshot and authoritative `subagent` executions fail closed if the snapshot
 is absent. A live `mag.apply` cannot replace the target run's snapshot or an
 actor's compiler-derived profile selector.
+
+### Ordinary workers and runtime traversal
+
+`traverse<I, O>(id, worker)` accepts a closed, operation-free ordinary
+`Node<I, O>`, including deterministic compositions and agents. Each authored
+actor carries an explicit templateability contract. Arbitrary low-level actors
+default to unsupported; audited constructors declare complete parameter
+relocations, with scalar `conversation_peer` and list `expected_senders`
+references relocated by identity rather than by string replacement.
+
+The internal template receives each occurrence's complete item through a checked
+expression-bound message on the exact worker input wire. Records, products,
+sums, and Unit retain their semantic evidence. Compilation checks the closed
+worker boundary, routes, product assignments, hierarchy, and relocations;
+runtime preflight independently checks serialized templates against factory
+contracts. Streaming workers and nested operations remain explicitly unsupported.
+
+Template hierarchy uses an explicit trigger-path reference, resolved against the
+trigger actor's immutable logical owner. Naming or wrapping a traversal therefore
+moves its occurrence children with it without parsing or rewriting actor IDs.
+Every occurrence has fresh traversal/collection/index-qualified actor identities,
+then returns through one indexed-result actor to the ordered completion consumer.
 
 ### Structured output boundary
 
@@ -462,3 +485,21 @@ starts at a non-continuation graph activation and spans any tool-result rounds
 and structured correction retries. If the same live actor receives another
 activation after a completed final output, that is a fresh logical turn:
 correction count and `last_output` reset.
+
+### Traversal verification scope
+
+The ordinary-worker traversal integration test executes identity workers over
+record, product, sum and Unit inputs, composition, fanout, sequence, `choose`,
+and Result binding/error mapping. The branch cases exercise both constructors.
+Lead-turn tests separately exercise agent workers with deterministic providers,
+including ordered completion and retained-artifact restart. Process and worktree
+factories have component coverage; they are not directly executed inside traversal
+by these integration tests.
+
+The MAG `audited_relocations` whitelist and Lua factory declarations are maintained
+at separate validation boundaries. Registry tests check Lua qualification and
+selected relocation contracts, not equality with the MAG whitelist. Changes to
+qualification must review both declarations; do not treat those tests as an
+automated cross-layer correspondence audit. Likewise, the one-import facade test
+checks its shell and error-mapping examples, not completeness of the manually
+maintained facade export inventory.

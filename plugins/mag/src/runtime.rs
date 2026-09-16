@@ -1759,10 +1759,24 @@ fn unpack_operations(operations: &mut [Value]) -> Result<(), String> {
             }
         }
         if let Some(template) = operation.get_mut("template") {
-            unpack_modification(
-                template,
-                &format!("mag.execute program.operations[{operation_index}].template"),
-            )?;
+            let context = format!("mag.execute program.operations[{operation_index}].template");
+            for (index, actor) in template.get_mut("actors").and_then(Value::as_array_mut).into_iter().flatten().enumerate() {
+                let params = actor.get_mut("params").ok_or_else(|| format!("{context}.actors[{index}].params is required"))?;
+                unpack_packed(params, &format!("{context}.actors[{index}].params"))?;
+            }
+            for (index, message) in template.get_mut("messages").and_then(Value::as_array_mut).into_iter().flatten().enumerate() {
+                let label = format!("{context}.messages[{index}].content");
+                let content = message.get_mut("content").ok_or_else(|| format!("{label} is required"))?;
+                let payload = exact_object(content, &["constructor", "value"], &label)?;
+                match payload.get("constructor").and_then(Value::as_str) {
+                    Some("Static") => {
+                        let value = content.get_mut("value").ok_or_else(|| format!("{label}.value is required"))?;
+                        unpack_packed(value, &format!("{label}.value"))?;
+                    }
+                    Some("Expression") if payload.get("value").and_then(Value::as_str).is_some() => {}
+                    _ => return Err(format!("{label} must be a Static packed payload or Expression reference")),
+                }
+            }
         }
     }
     Ok(())

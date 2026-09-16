@@ -96,8 +96,9 @@ pub mod kernel {
             let book = repository.join("mag/book/02. nefor/00. Nefor MAG in Five Minutes.md");
             let markdown = std::fs::read_to_string(&book).expect("read Nefor guide");
             let source = markdown
-                .split_once("```mag\n")
-                .and_then(|(_, rest)| rest.split_once("\n```").map(|(source, _)| source))
+                .split("```mag\n")
+                .nth(2)
+                .and_then(|rest| rest.split_once("\n```").map(|(source, _)| source))
                 .expect("Nefor guide contains one complete MAG program");
             let workspace = repository
                 .join("tmp")
@@ -174,6 +175,194 @@ pub mod kernel {
         }
 
         #[test]
+        fn ordinary_deterministic_workers_execute_as_traversal_templates() {
+            let host = shipped_host();
+            let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let source_dir = std::env::temp_dir().join(format!(
+                "mag-kernel-traverse-workers-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&source_dir);
+            std::fs::create_dir_all(&source_dir).expect("create traversal test workspace");
+
+            for (name, worker, output_type, expected_factory) in [
+                (
+                    "identity",
+                    "nefor.graph.identity<String>(\"worker\")",
+                    "String",
+                    "nefor.factory.output",
+                ),
+                (
+                    "record-input",
+                    "nefor.graph.identity<Payload>(\"worker\")",
+                    "Payload",
+                    "nefor.factory.output",
+                ),
+                (
+                    "product-input",
+                    "nefor.graph.identity<(String, Int)>(\"worker\")",
+                    "(String, Int)",
+                    "nefor.factory.output",
+                ),
+                (
+                    "sum-input",
+                    "nefor.graph.identity<Choice>(\"worker\")",
+                    "Choice",
+                    "nefor.factory.output",
+                ),
+                (
+                    "unit-input",
+                    "nefor.graph.identity<Unit>(\"worker\")",
+                    "Unit",
+                    "nefor.factory.output",
+                ),
+                (
+                    "composed",
+                    "nefor.node.compose(\"worker\", nefor.graph.identity<String>(\"first\"), nefor.graph.identity<String>(\"second\"))",
+                    "String",
+                    "nefor.factory.output",
+                ),
+                (
+                    "product",
+                    "nefor.node.fanout(\"worker\", nefor.graph.identity<String>(\"left\"), nefor.graph.identity<String>(\"right\"))",
+                    "(String, String)",
+                    "nefor.factory.product-join",
+                ),
+                (
+                    "choose",
+                    "nefor.node.choose(\"worker\", nefor.graph.identity<String>(\"left\"), nefor.graph.identity<Int>(\"right\"))",
+                    "core.types.Either<String, Int>",
+                    "nefor.factory.adt-unpack",
+                ),
+                (
+                    "result-bind",
+                    "nefor.result.and_then(\"worker\", nefor.graph.identity<core.types.Result<String, Int>>(\"input\"), nefor.result.lift<Int, String, Int>(\"lift\", nefor.graph.identity<Int>(\"value\")))",
+                    "core.types.Result<String, Int>",
+                    "nefor.factory.adt-unpack",
+                ),
+                (
+                    "result-map-error",
+                    "nefor.result.map_error(nefor.graph.identity<core.types.Result<String, Int>>(\"input\"), nefor.graph.identity<String>(\"error\"))",
+                    "core.types.Result<String, Int>",
+                    "nefor.factory.adt-unpack",
+                ),
+                (
+                    "sequence",
+                    "nefor.node.sequence([nefor.graph.identity<String>(\"first\"), nefor.graph.identity<String>(\"second\")])",
+                    "List<String>",
+                    "nefor.factory.collector",
+                ),
+            ] {
+                let input_type = match name {
+                    "choose" => "core.types.Either<String, Int>",
+                    "result-bind" | "result-map-error" => "core.types.Result<String, Int>",
+                    "record-input" => "Payload",
+                    "product-input" => "(String, Int)",
+                    "sum-input" => "Choice",
+                    "unit-input" => "Unit",
+                    _ => "String",
+                };
+                let input_values = match name {
+                    "choose" => serde_json::json!([{"constructor":"Left","value":"alpha"},{"constructor":"Right","value":9}]),
+                    "result-bind" | "result-map-error" => serde_json::json!([{"constructor":"Error","value":"alpha"},{"constructor":"Ok","value":9}]),
+                    "record-input" => serde_json::json!([{"text":"alpha","nested":[1,2]}, {"text":"beta","nested":[]}]),
+                    "product-input" => serde_json::json!([["alpha",7],["beta",9]]),
+                    "sum-input" => serde_json::json!([{"constructor":"Text","value":"alpha"},{"constructor":"Count","value":9}]),
+                    "unit-input" => serde_json::json!([null,null]),
+                    _ => serde_json::json!(["alpha","beta"]),
+                };
+                let provider_values = if name == "product-input" {
+                    serde_json::json!([{"0":"alpha","1":7},{"0":"beta","1":9}])
+                } else { input_values.clone() };
+                let source = format!(
+                    r#"
+import core.types.{{}}
+import nefor.actors.{{}}
+import nefor.artifact.{{}}
+import nefor.contracts.{{}}
+import nefor.dynamic.{{}}
+import nefor.graph.{{}}
+import nefor.node.{{}}
+import nefor.result.{{}}
+type Payload {{text: String, nested: List<Int>}}
+type Choice = Text(String) | Count(Int)
+let exact_model: fn(nefor.actors.ResolvedModel) -> nefor.actors.AuthoredModel = |model| => named(nefor.actors.AuthoredModel, ResolvedModel, model)
+let configured_model = nefor.actors.ResolvedModel {{provider: "test-provider", model: "test-model", reasoning_effort: nefor.actors.no_reasoning_effort}}
+let start = nefor.graph.source("task", nefor.contracts.Task {{prompt: "produce strings"}})
+let planner = nefor.actors.agent<nefor.actors.ResolvedModel, nefor.contracts.Task, nefor.dynamic.DynamicList<{input_type}>>("planner", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {{model: configured_model, system: "Return strings.", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 0}})
+let planned = nefor.node.`>>>`(start, planner)
+let worker = {worker}
+let traversal = nefor.dynamic.traverse("traversal", worker)
+let lifted = nefor.result.lift<nefor.dynamic.DynamicList<{input_type}>, nefor.contracts.AgentError, nefor.dynamic.DynamicList<{output_type}>>("lifted", traversal)
+let completed = nefor.result.`>=>`(planned, lifted)
+let contextual = nefor.result.map(completed, nefor.dynamic.context<{output_type}>("completed-context"))
+nefor.artifact.compile_graph(contextual)
+"#
+                );
+                std::fs::write(source_dir.join("main.mag"), source)
+                    .expect("write traversal test program");
+                let contracts = host.registry_contracts().expect("runtime contracts");
+                let artifact =
+                    nefor_mag::compile_file_with_inputs_and_module_roots_and_options_and_syntax(
+                        &source_dir,
+                        "main.mag",
+                        serde_json::json!({"factory_contracts": contracts}),
+                        &[
+                            manifest.join("../../mag/lib"),
+                            manifest.join("../../examples/nefor-agent/mag/lib"),
+                        ],
+                        nefor_mag::CompilerOptions::default(),
+                        nefor_mag::SyntaxMode::New,
+                    )
+                    .unwrap_or_else(|error| panic!("compile {name} traversal worker: {error}"));
+                let decoded = crate::artifact_program(&artifact)
+                    .unwrap_or_else(|error| panic!("decode {name} traversal program: {error}"));
+                let operation = decoded
+                    .operations
+                    .iter()
+                    .find(|operation| operation["id"] == "traversal.expand")
+                    .unwrap_or_else(|| panic!("{name} traversal operation"));
+                let template_actors = operation["template"]["actors"]
+                    .as_array()
+                    .expect("traversal template actors");
+                assert!(
+                    template_actors
+                        .iter()
+                        .any(|actor| actor["factory"] == expected_factory),
+                    "{name} traversal must lower its ordinary worker, not a hand-authored empty template: {template_actors:?}"
+                );
+                assert!(
+                    !operation["template"]["routes"]
+                        .as_array()
+                        .expect("traversal template routes")
+                        .is_empty(),
+                    "{name} traversal must connect the ordinary worker to its indexed result"
+                );
+                assert!(host.begin_run(name, name, None).unwrap().ok);
+                host.drain_emits().unwrap();
+                let started = host.start_program(name, &decoded.initial, &decoded.operations).unwrap();
+                assert!(started.ok, "{name} start: {:?}", started.error);
+                let emitted = host.drain_emits().unwrap();
+                let request = tool_invoke(&emitted, "test-provider");
+                host.bus_response(request["id"].as_str().unwrap(),
+                    Some(&serde_json::json!({"text":serde_json::json!({"value":provider_values}).to_string()})), None, Some("async")).unwrap();
+                let completion = host.take_run_complete(name).unwrap();
+                let failure = host.take_run_failed(name).unwrap();
+                let _events = host.drain_emits().unwrap();
+                assert!(completion.is_some(), "{name} did not complete: {failure:?}");
+                let result = completion.unwrap().result.unwrap();
+                let ordered = &result["value"]["value"]["content"]["value"];
+                let expected = if name == "product" || name == "sequence" {
+                    serde_json::json!([["alpha", "alpha"], ["beta", "beta"]])
+                } else { input_values };
+                assert_eq!(ordered, &expected, "{name}: {result}");
+                host.end_run(name, TeardownReason::RunComplete).unwrap();
+            }
+
+            std::fs::remove_dir_all(source_dir).expect("remove traversal test workspace");
+        }
+
+        #[test]
         fn inline_actor_type_arguments_must_be_dense_lists() {
             let host = shipped_host();
             for (run_id, type_arguments) in [
@@ -232,7 +421,7 @@ pub mod kernel {
     }
 
     let make_agent<I, O>: fn(String, TypeTag<I>, TypeTag<O>) -> nefor.graph.Node<I, core.types.Result<nefor.contracts.AgentError, O>> = |id, input_type, output_type| =>
-      nefor.actors.agent(id, exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: resolved, system: "", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2, }, input_type, output_type)
+      nefor.actors.agent<nefor.actors.ResolvedModel, I, O>(id, exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: resolved, system: "", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2, })
 
     let left_task = nefor.graph.source("left-task", nefor.contracts.Task {prompt: "left"})
     let middle_task = nefor.graph.source("middle-task", nefor.contracts.Task {prompt: "middle"})
@@ -241,7 +430,7 @@ pub mod kernel {
     let middle = make_agent("middle", type_tag<nefor.contracts.Task>(), type_tag<nefor.contracts.TextAnswer>())
     let right = make_agent("right", type_tag<nefor.contracts.Task>(), type_tag<nefor.contracts.TextAnswer>())
     let synthesis = make_agent("synthesis", type_tag<(core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>, core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>, core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>)>(), type_tag<nefor.contracts.TextAnswer>())
-    let result = nefor.graph.output("result", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
+    let result = nefor.graph.output<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>("result")
     let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.add_edges(graph, [
       nefor.graph.edge(left_task, left),
       nefor.graph.edge(middle_task, middle),
@@ -268,15 +457,14 @@ pub mod kernel {
             let direct = r#"
     import core.types.{}
     import nefor.actors.{}
-    import nefor.agents.{}
     import nefor.artifact.{}
     import nefor.contracts.{}
     import nefor.graph.{}
     let exact_model: fn(nefor.actors.ResolvedModel) -> nefor.actors.AuthoredModel = |model| => named(nefor.actors.AuthoredModel, ResolvedModel, model)
     let resolved = nefor.actors.ResolvedModel {provider: "authored-provider", model: "authored-model", reasoning_effort: nefor.actors.reasoning_effort("authored-effort")}
     let start = nefor.graph.source("task", nefor.contracts.Task {prompt: "answer"})
-    let worker = nefor.actors.agent("worker", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: resolved, system: "", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2}, type_tag<nefor.contracts.Task>(), type_tag<nefor.contracts.TextAnswer>())
-    let result = nefor.graph.output("result", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
+    let worker = nefor.actors.agent<nefor.actors.ResolvedModel, nefor.contracts.Task, nefor.contracts.TextAnswer>("worker", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: resolved, system: "", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2})
+    let result = nefor.graph.output<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>("result")
     nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, worker), nefor.graph.edge(worker, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
     "#;
             let structured = direct
@@ -285,12 +473,16 @@ pub mod kernel {
                     "import nefor.actors.{}\n    type Answer {answer: String}",
                 )
                 .replace(
-                    "type_tag<nefor.contracts.TextAnswer>())",
-                    "type_tag<Answer>())",
+                    "nefor.actors.agent<nefor.actors.ResolvedModel, nefor.contracts.Task, nefor.contracts.TextAnswer>",
+                    "nefor.actors.agent<nefor.actors.ResolvedModel, nefor.contracts.Task, Answer>",
                 )
                 .replace(
-                    "type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>()",
-                    "type_tag<core.types.Result<nefor.contracts.AgentError, Answer>>()",
+                    "nefor.actors.agent<Model, nefor.contracts.Task, nefor.contracts.TextAnswer>",
+                    "nefor.actors.agent<Model, nefor.contracts.Task, Answer>",
+                )
+                .replace(
+                    "nefor.graph.output<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>",
+                    "nefor.graph.output<core.types.Result<nefor.contracts.AgentError, Answer>>",
                 );
             for (run_id, source, factory) in [
                 ("snapshot-direct", direct.to_owned(), "nefor.factory.llm"),
@@ -503,7 +695,6 @@ pub mod kernel {
             let direct = r#"
     import core.types.{}
     import nefor.actors.{}
-    import nefor.agents.{}
     import nefor.artifact.{}
     import nefor.contracts.{}
     import nefor.graph.{}
@@ -514,8 +705,8 @@ pub mod kernel {
       case Fast(value) => named(nefor.actors.AuthoredModel, ModelProfile, nefor.actors.model_profile("fast")),
     }
     let start = nefor.graph.source("task", nefor.contracts.Task {prompt: "answer"})
-    let worker = nefor.actors.agent("worker", resolve_model, nefor.actors.AgentConfig<Model> {model: fast, system: "", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2}, type_tag<nefor.contracts.Task>(), type_tag<nefor.contracts.TextAnswer>())
-    let result = nefor.graph.output("result", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
+    let worker = nefor.actors.agent<Model, nefor.contracts.Task, nefor.contracts.TextAnswer>("worker", resolve_model, nefor.actors.AgentConfig<Model> {model: fast, system: "", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2})
+    let result = nefor.graph.output<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>("result")
     nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, worker), nefor.graph.edge(worker, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
     "#;
             let structured = direct
@@ -524,12 +715,16 @@ pub mod kernel {
                     "import nefor.actors.{}\n    type Answer {answer: String}",
                 )
                 .replace(
-                    "type_tag<nefor.contracts.TextAnswer>())",
-                    "type_tag<Answer>())",
+                    "nefor.actors.agent<nefor.actors.ResolvedModel, nefor.contracts.Task, nefor.contracts.TextAnswer>",
+                    "nefor.actors.agent<nefor.actors.ResolvedModel, nefor.contracts.Task, Answer>",
                 )
                 .replace(
-                    "type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>()",
-                    "type_tag<core.types.Result<nefor.contracts.AgentError, Answer>>()",
+                    "nefor.actors.agent<Model, nefor.contracts.Task, nefor.contracts.TextAnswer>",
+                    "nefor.actors.agent<Model, nefor.contracts.Task, Answer>",
+                )
+                .replace(
+                    "nefor.graph.output<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>",
+                    "nefor.graph.output<core.types.Result<nefor.contracts.AgentError, Answer>>",
                 );
             for (run_id, source, factory) in [
                 ("profile-direct", direct.to_owned(), "nefor.factory.llm"),
@@ -714,7 +909,7 @@ pub mod kernel {
     import nefor.contracts.{}
     import nefor.graph.{}
     let start = nefor.graph.source("task-input", nefor.contracts.Task {prompt: "runtime prompt"})
-    let result = nefor.graph.output("result", type_tag<nefor.contracts.Task>())
+    let result = nefor.graph.output<nefor.contracts.Task>("result")
     nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
     "#;
             let modification = compile_mag_source(&host, "task-source-runtime", source);
@@ -809,8 +1004,8 @@ import nefor.artifact.{}
 import nefor.graph.{}
 import nefor.node.{}
 let start = nefor.graph.source("shared", "shared value")
-let left = nefor.graph.identity("left", type_tag<String>())
-let right = nefor.graph.identity("right", type_tag<String>())
+let left = nefor.graph.identity<String>("left")
+let right = nefor.graph.identity<String>("right")
 let operation = nefor.node.`>>>`(start, nefor.node.sequence([left, right]))
 nefor.artifact.compile_graph(operation)
 "#,
@@ -834,7 +1029,7 @@ nefor.artifact.compile_graph(operation)
                     r#"
 import nefor.artifact.{}
 import nefor.node.{}
-let operation = nefor.node.sequence_empty("empty", type_tag<Unit>(), type_tag<String>())
+let operation = nefor.node.sequence_empty<Unit, String>("empty")
 nefor.artifact.compile_graph(operation)
 "#,
                     serde_json::json!([]),
@@ -863,12 +1058,12 @@ nefor.artifact.compile_graph(operation)
             for (run_id, operation, expected) in [
                 (
                     "result-map-error-branch",
-                    "let start = nefor.graph.source(\"start\", named(core.types.Result<String, Int>, Error, \"failed\"))\nlet mapper = nefor.graph.identity(\"mapper\", type_tag<Int>())\nlet operation = nefor.result.map(start, mapper)",
+                    "let start = nefor.graph.source(\"start\", named(core.types.Result<String, Int>, Error, \"failed\"))\nlet mapper = nefor.graph.identity<Int>(\"mapper\")\nlet operation = nefor.result.map(start, mapper)",
                     serde_json::json!({"constructor": "Error", "value": "failed"}),
                 ),
                 (
                     "result-map-error-ok-branch",
-                    "let start = nefor.graph.source(\"start\", named(core.types.Result<String, Int>, Ok, 7))\nlet mapper = nefor.graph.identity(\"mapper\", type_tag<String>())\nlet operation = nefor.result.map_error(start, mapper)",
+                    "let start = nefor.graph.source(\"start\", named(core.types.Result<String, Int>, Ok, 7))\nlet mapper = nefor.graph.identity<String>(\"mapper\")\nlet operation = nefor.result.map_error(start, mapper)",
                     serde_json::json!({"constructor": "Ok", "value": 7}),
                 ),
             ] {
@@ -987,13 +1182,29 @@ nefor.artifact.delta(nefor.graph.delta_message(nefor.graph.node_delta(command), 
 
             let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             for (name, definitions, expected) in [
-                ("text", "let operation = nefor.graph.identity(\"missing\", type_tag<nefor.contracts.Text>())", ["root validation failed", "nefor.contracts.Text"]),
-                ("product", "let operation = nefor.graph.identity(\"missing\", type_tag<(Unit, Unit)>())", ["root validation failed", "product"]),
-                ("non-unit", "let operation = nefor.graph.identity(\"missing\", type_tag<nefor.contracts.Text>())", ["root validation failed", "Text"]),
-                ("internal", r#"
+                (
+                    "text",
+                    "let operation = nefor.graph.identity<nefor.contracts.Text>(\"missing\")",
+                    ["root validation failed", "nefor.contracts.Text"],
+                ),
+                (
+                    "product",
+                    "let operation = nefor.graph.identity<(Unit, Unit)>(\"missing\")",
+                    ["root validation failed", "product"],
+                ),
+                (
+                    "non-unit",
+                    "let operation = nefor.graph.identity<nefor.contracts.Text>(\"missing\")",
+                    ["root validation failed", "Text"],
+                ),
+                (
+                    "internal",
+                    r#"
 let command = nefor.shell.script("command", params)
-let hidden = nefor.graph.identity("hidden", type_tag<Unit>())
-let operation = nefor.graph.node_with_operations_and_nodes("wrapper", "ordinary", concat(get(command, "actors"), get(hidden, "actors")), get(command, "routes"), [], [], concat(get(command, "nodes"), get(hidden, "nodes")), get(command, "input"), get(command, "output"))"#, ["input coverage failed", "hidden.nefor.graph.Value"]),
+let hidden = nefor.graph.identity<Unit>("hidden")
+let operation = nefor.graph.node_with_operations_and_nodes("wrapper", "ordinary", concat(get(command, "actors"), get(hidden, "actors")), get(command, "routes"), [], [], concat(get(command, "nodes"), get(hidden, "nodes")), get(command, "input"), get(command, "output"))"#,
+                    ["input coverage failed", "hidden.nefor.graph.Value"],
+                ),
             ] {
                 let error = nefor_mag::compile_with_inputs_and_module_roots_and_options_and_syntax(
                     &unit_root_program(definitions),
@@ -1002,9 +1213,14 @@ let operation = nefor.graph.node_with_operations_and_nodes("wrapper", "ordinary"
                     &[manifest.join("../../mag/lib")],
                     nefor_mag::CompilerOptions::default(),
                     nefor_mag::SyntaxMode::New,
-                ).expect_err(name).to_string();
+                )
+                .expect_err(name)
+                .to_string();
                 for fragment in expected {
-                    assert!(error.contains(fragment), "{name}: missing {fragment:?}: {error}");
+                    assert!(
+                        error.contains(fragment),
+                        "{name}: missing {fragment:?}: {error}"
+                    );
                 }
             }
 
@@ -1421,7 +1637,7 @@ let operation = nefor.node.then("ordered", nefor.shell.script("dependency", para
     let start = nefor.graph.source("start", nefor.contracts.Text {content: "ordinary"})
     let input = nefor.graph.port("echo", type_tag<nefor.contracts.Text>(), "stub.In")
     let output = nefor.graph.port("echo", type_tag<nefor.contracts.Text>(), "stub.Out")
-    let actor = nefor.graph.actor("echo", "nefor.factory.stub", [], core.map.empty(type_tag<String>()), nefor.graph.store_port(input), [nefor.graph.store_port(output)])
+    let actor = nefor.graph.actor("echo", "nefor.factory.stub", [], core.map.empty<String, String>(), nefor.graph.store_port(input), [nefor.graph.store_port(output)])
     let echo = nefor.graph.node("echo", "ordinary", [actor], ([]: List<nefor.graph.StoredRoute>), ([]: List<nefor.graph.Message>), input, output)
     let result = nefor.graph.output_for("result", echo)
     nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, echo), nefor.graph.edge(echo, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
@@ -1469,7 +1685,7 @@ let operation = nefor.node.then("ordered", nefor.shell.script("dependency", para
     let start = nefor.graph.source("start", nefor.contracts.Text {content: "valid"})
     let input = nefor.graph.port("broken", type_tag<nefor.contracts.Text>(), "stub.In")
     let output = nefor.graph.port("broken", type_tag<nefor.contracts.Text>(), "stub.Out")
-    let actor = nefor.graph.actor("broken", "nefor.factory.stub", [], core.map.insert(core.map.empty(type_tag<String>()), "value", "not-a-Text-record"), nefor.graph.store_port(input), [nefor.graph.store_port(output)])
+    let actor = nefor.graph.actor("broken", "nefor.factory.stub", [], core.map.insert(core.map.empty<String, String>(), "value", "not-a-Text-record"), nefor.graph.store_port(input), [nefor.graph.store_port(output)])
     let broken = nefor.graph.node("broken", "ordinary", [actor], ([]: List<nefor.graph.StoredRoute>), ([]: List<nefor.graph.Message>), input, output)
     let result = nefor.graph.output_for("result", broken)
     nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, broken), nefor.graph.edge(broken, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
@@ -1506,9 +1722,8 @@ let operation = nefor.node.then("ordered", nefor.shell.script("dependency", para
     import nefor.contracts.{}
     import nefor.graph.{}
 
-    let pair_type = type_tag<(nefor.contracts.Text, nefor.contracts.Text)>()
     let start = nefor.graph.source("start", (nefor.contracts.Text {content: "left"}, nefor.contracts.Text {content: "right"}))
-    let result = nefor.graph.output("result", pair_type)
+    let result = nefor.graph.output<(nefor.contracts.Text, nefor.contracts.Text)>("result")
     nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
                 "#,
             );
@@ -1549,7 +1764,7 @@ let operation = nefor.node.then("ordered", nefor.shell.script("dependency", para
 
     let left = nefor.graph.source("left", Left {content: "first"})
     let right = nefor.graph.source("right", Right {count: 2})
-    let result = nefor.graph.output("result", type_tag<(Left, Right)>())
+    let result = nefor.graph.output<(Left, Right)>("result")
     nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(left, result), nefor.graph.edge(right, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
                 "#,
             );
@@ -1591,7 +1806,7 @@ let operation = nefor.node.then("ordered", nefor.shell.script("dependency", para
     let branch<T>: fn(String, TypeTag<T>) -> nefor.graph.Node<T, T> = |id, `type`| => {
       let input = nefor.graph.port(id, `type`, "stub.In")
       let output = nefor.graph.port(id, `type`, "stub.Out")
-      let actor = nefor.graph.actor(id, "nefor.factory.stub", [], core.map.empty(type_tag<String>()), nefor.graph.store_port(input), [nefor.graph.store_port(output)])
+      let actor = nefor.graph.actor(id, "nefor.factory.stub", [], core.map.empty<String, String>(), nefor.graph.store_port(input), [nefor.graph.store_port(output)])
       nefor.graph.node(id, "ordinary", [actor], ([]: List<nefor.graph.StoredRoute>), ([]: List<nefor.graph.Message>), input, output)
     }
 
@@ -1599,7 +1814,7 @@ let operation = nefor.node.then("ordered", nefor.shell.script("dependency", para
     let left = branch("left", type_tag<Left>())
     let right = branch("right", type_tag<Right>())
     let selected = nefor.node.choose("selected", left, right)
-    let result = nefor.graph.output("result", type_tag<core.types.Either<Left, Right>>())
+    let result = nefor.graph.output<core.types.Either<Left, Right>>("result")
     nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, selected), nefor.graph.edge(selected, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
                 "#,
             );
@@ -1669,7 +1884,7 @@ import nefor.node.{{}}
 import nefor.result.{{}}
 type Failure {{message: String}}
 let start = nefor.graph.source("start", named(core.types.Result<Failure, String>, {constructor}, {payload}))
-let continuation = nefor.result.lift("continued", type_tag<Failure>(), nefor.graph.identity("right", type_tag<String>()))
+let continuation = nefor.result.lift<String, Failure, String>("continued", nefor.graph.identity<String>("right"))
 let bound = nefor.result.`>=>`(start, continuation)
 let result = nefor.graph.output_for("result", bound)
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(bound, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
@@ -1724,7 +1939,7 @@ type Failure {{message: String}}
 let start = nefor.graph.source("start", named(core.types.Result<Failure, String>, {constructor}, {payload}))
 let mapper_input = nefor.graph.port("map-error", type_tag<Failure>(), "stub.In")
 let mapper_output = nefor.graph.port("map-error", type_tag<String>(), "stub.Out")
-let mapper_actor = nefor.graph.actor("map-error", "nefor.factory.stub", [], core.map.insert(core.map.empty(type_tag<String>()), "value", "mapped"), nefor.graph.store_port(mapper_input), [nefor.graph.store_port(mapper_output)])
+let mapper_actor = nefor.graph.actor("map-error", "nefor.factory.stub", [], core.map.insert(core.map.empty<String, String>(), "value", "mapped"), nefor.graph.store_port(mapper_input), [nefor.graph.store_port(mapper_output)])
 let mapper = nefor.graph.node("map-error", "ordinary", [mapper_actor], ([]: List<nefor.graph.StoredRoute>), ([]: List<nefor.graph.Message>), mapper_input, mapper_output)
 let mapped = nefor.result.map_error(start, mapper)
 let result = nefor.graph.output_for("result", mapped)
@@ -2030,8 +2245,8 @@ import nefor.graph.{}
 let exact_model: fn(nefor.actors.ResolvedModel) -> nefor.actors.AuthoredModel = |selected| => named(nefor.actors.AuthoredModel, ResolvedModel, selected)
 let configured_model = nefor.actors.ResolvedModel {provider: "mock-provider", model: "mock-model", reasoning_effort: nefor.actors.reasoning_effort("medium")}
 let start = nefor.graph.source("task", nefor.contracts.Task {prompt: "test"})
-let worker = nefor.actors.agent("worker", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: configured_model, system: "Answer.", tools: ([]: List<String>), tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 0}, type_tag<nefor.contracts.Task>(), type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
-let result = nefor.graph.output("result", type_tag<core.types.Result<nefor.contracts.AgentError, core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>> >())
+let worker = nefor.actors.agent<nefor.actors.ResolvedModel, nefor.contracts.Task, core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>("worker", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: configured_model, system: "Answer.", tools: ([]: List<String>), tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 0})
+let result = nefor.graph.output<core.types.Result<nefor.contracts.AgentError, core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>> >("result")
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, worker), nefor.graph.edge(worker, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
 "#,
         )

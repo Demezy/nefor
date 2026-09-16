@@ -13,7 +13,7 @@ import nefor.actors        // open every direct export and permit nefor.actors.n
 import nefor.graph.{}      // qualified-only
 import nefor.node.{named, rename as rename_node} // selected local names
 import nefor.shell as shell // static namespace alias; only shell.name is permitted
-import nefor.actors.{agent_with_schema as _} // suppress an automatic spelling from an open import
+import nefor.actors.{adapter_factory as `_`} // suppress an automatic spelling from an open import
 ```
 
 Imports compose order-independently. Suppressions affect only automatic names from a bare import, not explicit selectors. Namespace roots, namespace aliases, builtins, local declarations, and opened or selected exports share one collision domain; collisions are errors, never source-order choices. Use qualified-only imports, narrower selectors, selector or namespace renames, or `as _` to repair them. `import m.*` is not syntax.
@@ -65,6 +65,33 @@ Native `Map<K, V>` and `Set<T>` values have no literal syntax. Import `core.map.
 
 Artifact serialization is deterministic but does not make collection order observable. String-keyed maps become canonically keyed JSON objects; other maps and sets use reserved `$mag` envelopes whose entries are sorted only while serializing.
 
+## Checked type evidence
+
+`type_tag<T>()` produces a checked `TypeTag<T>` witness. `type_evidence(tag)`
+returns its opaque `TypeDescriptor`, `type_id(descriptor)` its semantic identity,
+and `type_schema(tag)` its validation schema. These low-level APIs retain their
+witness arguments; ordinary library constructors such as `identity<T>(id)`
+select types through explicit generic arguments instead.
+
+Descriptor operations do not forge witnesses or cast values:
+
+- `type_constructor(descriptor)` returns the qualified nominal owner name, or
+  an empty string for a non-nominal type.
+- `type_arguments(descriptor)` returns the nominal owner's generic arguments,
+  or an empty list for a non-nominal type.
+- `type_components(descriptor)` returns immediate nested descriptors: nominal
+  arguments followed by record fields (name order), a newtype's underlying
+  type, or ADT payloads (constructor order); collection items, map key/value,
+  and product components retain their structural order. Primitives have none.
+- `list_type(descriptor)` constructs the descriptor of the ordinary native
+  `List` type. `descriptor_schema(descriptor)` derives its validation schema.
+  Neither operation converts a value into a runtime `DynamicList` protocol.
+
+The internal relocation checker uses `packed_path_strings(packed, path, list)`
+to inspect a record path containing a String or, when `list` is true, a
+`List<String>`. Missing paths and wrong shapes fail during compilation; the
+operation does not reinterpret arbitrary packed values as typed application data.
+
 ## Bindings and lexical blocks
 
 Bindings use `let`, with an optional type annotation:
@@ -106,7 +133,6 @@ Symbolic operators may be used as ordinary values and called with parentheses, o
 import core.types.{}
 import agents.{}
 import nefor.actors.{}
-import nefor.agents.{}
 import nefor.artifact.{}
 import nefor.contracts.{}
 import nefor.graph.{}
@@ -209,7 +235,7 @@ Timeouts are mandatory and explicit. <code>nefor.contracts.no_timeout()</code> i
 
 ## Runtime expansion
 
-Most workflows should be fully static. When runtime data determines cardinality, a producer exposes the indexed-items-plus-completion `DynamicList<T>` protocol. Consumers retain that same nominal boundary: <code>nefor.dynamic.traverse_template</code> materializes one worker per item, while `nefor.dynamic.context` buffers through completion and activates once with the ordered list. The operation or factory owns this interpretation; the compiler grants no privileges from type-name spelling. Fixed worker lists use `nefor.node.sequence`.
+Most workflows should be fully static. When runtime data determines cardinality, a producer exposes the indexed-items-plus-completion `DynamicList<T>` protocol. Consumers retain that same nominal boundary: <code>nefor.dynamic.traverse</code> materializes one worker per item, while `nefor.dynamic.context` buffers through completion and activates once with the ordered list. The operation or factory owns this interpretation; the compiler grants no privileges from type-name spelling. Fixed worker lists use `nefor.node.sequence`.
 
 Version 1 evaluates only the closed Trigger, Capture, Field, IntToDecimalString, and ConcatStrings expression forms while materializing a structural delta template. There is no general runtime expression language or post-compilation MAG function application. Operations are program metadata, not graph edges, and do not give actors authority to alter the graph. See [MAG composition semantics](../../../plugins/mag/docs/patterns.md).
 

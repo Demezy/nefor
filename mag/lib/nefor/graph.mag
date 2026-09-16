@@ -14,7 +14,11 @@ type Port<T> {actor: String, `type`: TypeTag<T>, wire: String}
 
 type StoredPort {actor: String, `type`: TypeDescriptor, type_id: SemanticTypeId, wire: String}
 
-type Actor {id: String, factory: String, type_arguments: List<TypeDescriptor>, params: PackedValue, input: StoredPort, outputs: List<StoredPort>}
+type Relocation {path: List<String>, shape: String}
+
+type Templateability = Unsupported(String) | Closed(List<Relocation>)
+
+type Actor {templateability: Templateability, id: String, factory: String, type_arguments: List<TypeDescriptor>, params: PackedValue, input: StoredPort, outputs: List<StoredPort>}
 
 type StoredRoute {id: String, from: StoredPort, to: StoredPort}
 
@@ -100,7 +104,10 @@ let store_port<T>: fn(Port<T>) -> StoredPort = |value| => {
   StoredPort {actor: get(value, "actor"), `type`: descriptor, type_id: type_id(descriptor), wire: get(value, "wire")}
 }
 
-let actor<P>: fn(String, String, List<TypeDescriptor>, P, StoredPort, List<StoredPort>) -> Actor = |id, factory, type_arguments, params, input, outputs| => Actor {id: id, factory: factory, type_arguments: type_arguments, params: pack(params), input: input, outputs: outputs}
+let actor<P>: fn(String, String, List<TypeDescriptor>, P, StoredPort, List<StoredPort>) -> Actor = |id, factory, type_arguments, params, input, outputs| => Actor {templateability: Templateability.Unsupported("arbitrary actor constructor has no closed single-result contract"), id: id, factory: factory, type_arguments: type_arguments, params: pack(params), input: input, outputs: outputs}
+
+// Only audited constructors may assert a closed per-occurrence contract.
+let closed_actor<P>: fn(String, String, List<TypeDescriptor>, P, StoredPort, List<StoredPort>, List<Relocation>) -> Actor = |id, factory, type_arguments, params, input, outputs, relocations| => Actor {templateability: Templateability.Closed(relocations), id: id, factory: factory, type_arguments: type_arguments, params: pack(params), input: input, outputs: outputs}
 
 let actor_ids: fn(List<Actor>) -> List<String> = |actors| => map(((|candidate| => get(candidate, "id")) : fn(Actor) -> String), actors)
 
@@ -153,16 +160,17 @@ let source<T>: fn(String, T) -> Node<Unit, T> = |id, value| => {
   let `type` = type_tag<T>()
   let input = port(id, type_tag<Unit>(), "mag.Unit")
   let output = port(id, `type`, "nefor.graph.Value")
-  let source_actor = actor(id, source_factory, [type_evidence(`type`)], SourceParams<T> {value: value, value_type: value_type_id(value, `type`)}, store_port(input), [store_port(output)])
+  let source_actor = closed_actor(id, source_factory, [type_evidence(`type`)], SourceParams<T> {value: value, value_type: value_type_id(value, `type`)}, store_port(input), [store_port(output)], [])
   node(id, "source", [source_actor], ([]: List<StoredRoute>), ([]: List<Message>), input, output)
 }
 
 let output_factory = "nefor.factory.output"
 
-let output<T>: fn(String, TypeTag<T>) -> Node<T, T> = |id, `type`| => {
+let output<T>: fn(String) -> Node<T, T> = |id| => {
+  let `type` = type_tag<T>()
   let input = port(id, `type`, "nefor.graph.Value")
   let result = port(id, `type`, "nefor.graph.Value")
-  let output_actor = actor(id, output_factory, [type_evidence(`type`)], OutputParams {}, store_port(input), [store_port(result)])
+  let output_actor = closed_actor(id, output_factory, [type_evidence(`type`)], OutputParams {}, store_port(input), [store_port(result)], [])
   node(id, "output", [output_actor], ([]: List<StoredRoute>), ([]: List<Message>), input, result)
 }
 
@@ -170,14 +178,15 @@ let output<T>: fn(String, TypeTag<T>) -> Node<T, T> = |id, `type`| => {
 // node combinators. The runtime factory already forwards one typed value; the
 // distinct role keeps this reusable internal node out of the graph's terminal
 // output semantics.
-let identity<T>: fn(String, TypeTag<T>) -> Node<T, T> = |id, `type`| => {
+let identity<T>: fn(String) -> Node<T, T> = |id| => {
+  let `type` = type_tag<T>()
   let input = port(id, `type`, "nefor.graph.Value")
   let result = port(id, `type`, "nefor.graph.Value")
-  let identity_actor = actor(id, output_factory, [type_evidence(`type`)], OutputParams {}, store_port(input), [store_port(result)])
+  let identity_actor = closed_actor(id, output_factory, [type_evidence(`type`)], OutputParams {}, store_port(input), [store_port(result)], [])
   node(id, "ordinary", [identity_actor], ([]: List<StoredRoute>), ([]: List<Message>), input, result)
 }
 
-let output_for<I, T>: fn(String, Node<I, T>) -> Node<T, T> = |id, from| => output(id, get(get(from, "output"), "type"))
+let output_for<I, T>: fn(String, Node<I, T>) -> Node<T, T> = |id, from| => output<T>(id)
 
 let same_edge: fn(Edge, Edge) -> Bool = |left, right| => if (=)(get(get(left, "from"), "id"), get(get(right, "from"), "id")) then if (=)(get(get(left, "to"), "id"), get(get(right, "to"), "id")) then serialized_equal(get(left, "route"), get(right, "route")) else false else false
 
@@ -222,11 +231,11 @@ let insert_ordered_node: fn(OrderedNodes, StoredNode) -> OrderedNodes = |state, 
   if core.set.contains(get(state, "seen"), id) then state else OrderedNodes {seen: core.set.insert(get(state, "seen"), id), values: concat(get(state, "values"), [candidate])}
 }
 
-let ordered_nodes: fn(List<StoredNode>) -> List<StoredNode> = |values| => get(fold(insert_ordered_node, OrderedNodes {seen: core.set.empty(type_tag<String>()), values: ([]: List<StoredNode>)}, values), "values")
+let ordered_nodes: fn(List<StoredNode>) -> List<StoredNode> = |values| => get(fold(insert_ordered_node, OrderedNodes {seen: core.set.empty<String>(), values: ([]: List<StoredNode>)}, values), "values")
 
 let insert_ordered_string: fn(OrderedStrings, String) -> OrderedStrings = |state, candidate| => if core.set.contains(get(state, "seen"), candidate) then state else OrderedStrings {seen: core.set.insert(get(state, "seen"), candidate), values: concat(get(state, "values"), [candidate])}
 
-let ordered_strings: fn(List<String>) -> List<String> = |values| => get(fold(insert_ordered_string, OrderedStrings {seen: core.set.empty(type_tag<String>()), values: ([]: List<String>)}, values), "values")
+let ordered_strings: fn(List<String>) -> List<String> = |values| => get(fold(insert_ordered_string, OrderedStrings {seen: core.set.empty<String>(), values: ([]: List<String>)}, values), "values")
 
 let external_routes: fn(Graph) -> List<StoredRoute> = |value| => map(((|candidate| => get(candidate, "route")) : fn(Edge) -> StoredRoute), get(value, "edges"))
 
@@ -297,7 +306,7 @@ let graph_operations: fn(Graph) -> List<nefor.mag.ProgramOperation> = |value| =>
 
 let graph_logical_nodes: fn(Graph) -> List<LogicalNode> = |value| => get(graph_projection(value), "logical_nodes")
 
-let string_set: fn(List<String>) -> Set<String> = |values| => fold(((|set, value| => if core.set.contains(set, value) then set else core.set.insert(set, value)) : fn(Set<String>, String) -> Set<String>), core.set.empty(type_tag<String>()), values)
+let string_set: fn(List<String>) -> Set<String> = |values| => fold(((|set, value| => if core.set.contains(set, value) then set else core.set.insert(set, value)) : fn(Set<String>, String) -> Set<String>), core.set.empty<String>(), values)
 
 let logical_paths_valid: fn(Graph) -> Bool = |value| => {
   let nodes = graph_logical_nodes(value)
@@ -327,7 +336,7 @@ let output_shape_valid: fn(GraphAnalysis, StoredNode) -> Bool = |analysis, candi
 
 let enqueue_unvisited: fn(ReachabilityState, String) -> ReachabilityState = |state, id| => if core.set.contains(get(state, "visited"), id) then state else ReachabilityState {visited: core.set.insert(get(state, "visited"), id), frontier: concat(get(state, "frontier"), [id])}
 
-let initial_reachability_state: fn(List<String>) -> ReachabilityState = |ids| => fold(enqueue_unvisited, ReachabilityState {visited: core.set.empty(type_tag<String>()), frontier: ([]: List<String>)}, ids)
+let initial_reachability_state: fn(List<String>) -> ReachabilityState = |ids| => fold(enqueue_unvisited, ReachabilityState {visited: core.set.empty<String>(), frontier: ([]: List<String>)}, ids)
 
 let next_forward_frontier: fn(GraphAnalysis, ReachabilityState) -> ReachabilityState = |analysis, state| => {
   let next = flat_map(((|id| => map(((|candidate| => node_id(get(candidate, "to"))) : fn(Edge) -> String), __map_get_or(get(analysis, "edges_by_from_node"), id, ([]: List<Edge>)))) : fn(String) -> List<String>), get(state, "frontier"))
@@ -575,14 +584,14 @@ let descriptor_assignment_index: fn(List<StoredRoute>, List<String>, Map<String,
     let descriptor_routes = __map_get_or(routes_by_descriptor, descriptor_key, ([]: List<StoredRoute>))
     let positions = descriptor_input_assignments(get(get(first(descriptor_routes), "to"), "type"), sources)
     core.map.insert(out, descriptor_key, group_by(assigned_route_id, zip_route_assignments(routes, positions)))
-  }) : fn(Map<String, Map<String, List<AssignedRoute>>>, String) -> Map<String, Map<String, List<AssignedRoute>>>), (core.map.empty(type_tag<String>()): Map<String, Map<String, List<AssignedRoute>>>), descriptor_keys)
+  }) : fn(Map<String, Map<String, List<AssignedRoute>>>, String) -> Map<String, Map<String, List<AssignedRoute>>>), (core.map.empty<String, _>(): Map<String, Map<String, List<AssignedRoute>>>), descriptor_keys)
 
 let assigned_input_bucket: fn(List<StoredRoute>) -> List<AssignedRoute> = |routes| => if (=)(count(routes), 0) then ([]: List<AssignedRoute>) else (((| | => {
   let sources = map(((|candidate| => get(get(candidate, "from"), "type")) : fn(StoredRoute) -> TypeDescriptor), routes)
   let routes_by_descriptor = group_by(route_destination_descriptor_key, routes)
   let assignments_by_descriptor = descriptor_assignment_index(routes, ordered_strings(map(route_destination_descriptor_key, routes)), routes_by_descriptor, sources)
   map(((|candidate| => {
-      let assignments_by_id = __map_get_or(assignments_by_descriptor, route_destination_descriptor_key(candidate), (core.map.empty(type_tag<String>()): Map<String, List<AssignedRoute>>))
+      let assignments_by_id = __map_get_or(assignments_by_descriptor, route_destination_descriptor_key(candidate), (core.map.empty<String, _>(): Map<String, List<AssignedRoute>>))
       first(__map_get_or(assignments_by_id, route_id(candidate), ([]: List<AssignedRoute>)))
     }) : fn(StoredRoute) -> AssignedRoute), routes)
 }) : fn() -> List<AssignedRoute>))()
@@ -620,7 +629,7 @@ let lower_destination: fn(AssignedRoute) -> LowerDestination = |assigned| => {
 
 let actor_routes: fn(List<AssignedRoute>) -> Map<String, List<LowerDestination>> = |routes| => {
   let routes_by_wire = group_by(assigned_route_source_wire, routes)
-  fold(((|out, wire| => core.map.insert(out, wire, map(lower_destination, __map_get_or(routes_by_wire, wire, ([]: List<AssignedRoute>))))) : fn(Map<String, List<LowerDestination>>, String) -> Map<String, List<LowerDestination>>), (core.map.empty(type_tag<String>()): Map<String, List<LowerDestination>>), ordered_strings(map(assigned_route_source_wire, routes)))
+  fold(((|out, wire| => core.map.insert(out, wire, map(lower_destination, __map_get_or(routes_by_wire, wire, ([]: List<AssignedRoute>))))) : fn(Map<String, List<LowerDestination>>, String) -> Map<String, List<LowerDestination>>), (core.map.empty<String, _>(): Map<String, List<LowerDestination>>), ordered_strings(map(assigned_route_source_wire, routes)))
 }
 
 let lower_actor_with_routes: fn(List<AssignedRoute>, Actor) -> LowerActor = |routes, value| => LowerActor {id: get(value, "id"), factory: get(value, "factory"), type_arguments: get(value, "type_arguments"), input: get(value, "input"), outputs: get(value, "outputs"), params: get(value, "params"), routes: actor_routes(routes)}
@@ -679,3 +688,5 @@ let lower_delta: fn(Delta) -> LowerDelta = |value| => {
   let routes_by_source = group_by(assigned_route_source_actor, routes)
   LowerDelta {actors: map(((|candidate| => lower_actor_with_routes(__map_get_or(routes_by_source, actor_id(candidate), ([]: List<AssignedRoute>)), candidate)) : fn(Actor) -> LowerActor), actors), messages: map(lower_message, concat(authored_messages, bootstrap_messages(unit_ports, get(value, "routes"), authored_messages))), kills: get(value, "kills"), types: descriptor_table(delta_descriptors(value)), nodes: get(value, "nodes")}
 }
+
+let with_templateability: fn(Actor, Templateability) -> Actor = |actor, capability| => Actor {id: get(actor, "id"), factory: get(actor, "factory"), type_arguments: get(actor, "type_arguments"), params: get(actor, "params"), input: get(actor, "input"), outputs: get(actor, "outputs"), templateability: capability}

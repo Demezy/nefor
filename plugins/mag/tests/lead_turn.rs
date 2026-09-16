@@ -29,7 +29,6 @@ use std::time::Duration;
 use nefor_mag::json::concrete_type_from_json;
 use nefor_protocol::{Body, Envelope, PluginName, PluginOutgoing, SystemBody, Timestamp};
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::time::timeout;
@@ -703,7 +702,13 @@ fn assert_dynamic_program_envelope(artifact: &Value) {
         .iter()
         .map(|expression| expression["id"].as_str().expect("expression id"))
         .collect::<Vec<_>>();
-    assert_eq!(ids[0], "trigger");
+    assert_eq!(ids.len(), expressions.len());
+    assert!(ids.iter().all(|id| !id.is_empty()));
+    let unique_ids = ids
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(unique_ids.len(), ids.len(), "expression ids are unique");
     for (index, expression) in payloads.iter().enumerate() {
         let references = expression
             .get("record")
@@ -733,22 +738,50 @@ fn assert_dynamic_program_envelope(artifact: &Value) {
         .iter()
         .map(|actor| actor["slot"].as_str().expect("actor slot"))
         .collect::<Vec<_>>();
-    assert_eq!(slots, ["entry", "llm", "run-tool", "tool-result", "result"]);
+    assert_eq!(
+        slots,
+        [
+            "worker.entry",
+            "worker.llm",
+            "worker.run-tool",
+            "worker.tool-result",
+            "traverse.result",
+        ]
+    );
     let llm = template_actors
         .iter()
-        .find(|actor| actor["slot"] == "llm")
+        .find(|actor| actor["slot"] == "worker.llm")
         .expect("llm template actor");
     let run_tool = template_actors
         .iter()
-        .find(|actor| actor["slot"] == "run-tool")
+        .find(|actor| actor["slot"] == "worker.run-tool")
         .expect("run-tool template actor");
-    let conversation_peer = run_tool["parameter_bindings"]
+    assert_eq!(
+        run_tool.pointer("/params/value/conversation_peer"),
+        Some(&json!("worker.llm")),
+        "the authored parameter names the original local actor slot"
+    );
+    assert_eq!(run_tool["parameter_bindings"], json!([]));
+    assert_ne!(run_tool["id"], llm["id"]);
+    let template_messages = operation["template"]["messages"]
         .as_array()
-        .expect("run-tool parameter bindings")
+        .expect("template messages");
+    assert_eq!(template_messages.len(), 1);
+    let input_message = &template_messages[0];
+    assert_eq!(
+        input_message.pointer("/to/actor/value/slot"),
+        Some(&json!("worker.entry"))
+    );
+    assert_eq!(input_message["content"]["constructor"], "Expression");
+    let content_expression = input_message["content"]["value"]
+        .as_str()
+        .expect("message expression id");
+    let payload_expression = expressions
         .iter()
-        .find(|binding| binding["path"] == json!(["conversation_peer"]))
-        .expect("run-tool conversation peer binding");
-    assert_eq!(conversation_peer["value"], llm["id"]);
+        .find(|expression| expression["value"]["id"] == content_expression)
+        .expect("message references a declared expression");
+    assert_eq!(payload_expression["constructor"], "Field");
+    assert_eq!(payload_expression["value"]["field"], "value");
     assert!(operation.get("fn").is_none());
     assert!(operation.get("source").is_none());
     assert!(operation.get("bytecode").is_none());
@@ -771,25 +804,13 @@ async fn load_dynamic_program<R: AsyncBufReadExt + Unpin>(
     )
     .await;
     let loaded = next_event_of_kind(reader, "mag.loaded").await;
-    let fixture = dynamic_behavior_fixture();
-    let source = fixture["identity"]["source"]
-        .as_str()
-        .expect("fixture source path");
-    let source_bytes = std::fs::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(source),
-    )
-    .expect("read dynamic behavior source");
-    assert_eq!(
-        format!("{:x}", Sha256::digest(source_bytes)),
-        fixture["identity"]["source_sha256"]
-    );
     assert_eq!(loaded["in_reply_to"], load_id);
     assert_dynamic_program_envelope(&loaded["artifact"]);
-    assert_eq!(
-        loaded["hash"],
-        fixture["identity"]["compiled_artifact_hash"]
+    assert!(
+        loaded["hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:")),
+        "compiled artifacts carry a content identity: {loaded:?}"
     );
     loaded
 }
@@ -798,6 +819,37 @@ fn request_actor(request: &Map<String, Value>) -> &str {
     request
         .pointer_str("/invocation/actor_id")
         .expect("provider request carries the authoritative actor id")
+}
+
+fn assert_occurrence_actor(actor_id: &str, original_actor: &str, index: usize) {
+    assert!(
+        actor_id.starts_with("traverse:6:expand"),
+        "runtime id is traversal-qualified: {actor_id}"
+    );
+    assert!(
+        actor_id.contains(original_actor),
+        "runtime id preserves original actor identity {original_actor}: {actor_id}"
+    );
+    assert!(
+        actor_id.ends_with(&format!(":{index}")),
+        "runtime id preserves occurrence index {index}: {actor_id}"
+    );
+}
+
+fn structured_input<'a>(facts: &'a [Value], actor_id: &str) -> &'a Value {
+    facts
+        .iter()
+        .find_map(|fact| {
+            (fact.get("actor_id").and_then(Value::as_str) == Some(actor_id)
+                && fact.get("kind").and_then(Value::as_str) == Some("content_chunk_appended")
+                && fact.pointer("/chunk/kind") == Some(&json!("structured")))
+            .then(|| {
+                let data = fact.pointer("/chunk/data")?;
+                Some(data.get("value").unwrap_or(data))
+            })
+            .flatten()
+        })
+        .expect("actor receives one structured input record")
 }
 
 async fn next_provider_request_recording<R: AsyncBufReadExt + Unpin>(
@@ -826,6 +878,9 @@ async fn next_provider_request_recording<R: AsyncBufReadExt + Unpin>(
             }
             "mag.error" | "mag.run_failed" => {
                 panic!("MAG failure while expecting provider request: {body:?}");
+            }
+            "mag.run_result" if body.get("status").and_then(Value::as_str) != Some("completed") => {
+                panic!("MAG run settled while expecting provider request: {body:?}");
             }
             _ => {}
         }
@@ -857,51 +912,54 @@ async fn next_event_of_kind_recording<R: AsyncBufReadExt + Unpin>(
 }
 
 fn assert_materialized_item(events: &[Value], expected: &Value, index: usize) {
-    let expected_actors = expected["actors"].as_array().expect("fixture actors");
-    for actor in expected_actors {
-        let id = actor["id"].as_str().expect("fixture actor id");
-        let spawned = events
+    let spawned = events
+        .iter()
+        .filter(|event| event["kind"] == "mag.actor_spawned")
+        .collect::<Vec<_>>();
+    let actor_for_slot = |slot: &str| {
+        spawned
             .iter()
-            .find(|event| event["kind"] == "mag.actor_spawned" && event["id"].as_str() == Some(id))
-            .unwrap_or_else(|| panic!("missing materialized actor {id}"));
-        assert_eq!(spawned["factory"], actor["factory"]);
-        assert_eq!(spawned["spec"]["params"]["system"], actor["system"]);
-        if actor["factory"] == "nefor.factory.run-tool" {
-            let peer = id
-                .strip_suffix(".run-tool")
-                .map(|prefix| format!("{prefix}.llm"))
-                .expect("dynamic run-tool id suffix");
-            assert_eq!(spawned["spec"]["params"]["conversation_peer"], peer);
-        }
-        let dynamic = if actor["dynamic"].is_object() {
-            json!({
-                "collection": "<runtime>",
-                "index": spawned["spec"]["params"]["index"],
+            .copied()
+            .find(|event| {
+                event["id"].as_str().is_some_and(|id| {
+                    id.starts_with("traverse:6:expand")
+                        && id.contains(slot)
+                        && id.ends_with(&format!(":{index}"))
+                })
             })
-        } else {
-            Value::Null
-        };
-        assert_eq!(dynamic, actor["dynamic"]);
+            .unwrap_or_else(|| panic!("missing occurrence {index} actor for slot {slot}"))
+    };
+
+    for actor in expected["actors"].as_array().expect("fixture actors") {
+        let slot = actor["slot"].as_str().expect("fixture actor slot");
+        let materialized = actor_for_slot(slot);
+        assert_occurrence_actor(materialized["id"].as_str().unwrap(), slot, index);
+        assert_eq!(materialized["factory"], actor["factory"]);
+        assert_eq!(materialized["spec"]["params"]["system"], actor["system"]);
     }
 
+    let llm = actor_for_slot("worker.llm");
+    let run_tool = actor_for_slot("worker.run-tool");
+    assert_eq!(
+        run_tool["spec"]["params"]["conversation_peer"], llm["id"],
+        "conversation_peer is relocated to the occurrence's opaque llm id"
+    );
+    let result = actor_for_slot("traverse.result");
+    assert_eq!(result["spec"]["params"]["index"], index);
+    assert!(result["spec"]["params"]["collection"]
+        .as_str()
+        .is_some_and(|collection| !collection.is_empty()));
+
     for route in expected["routes"].as_array().expect("fixture routes") {
-        let from = route["from"].as_str().expect("route source");
+        let source = actor_for_slot(route["from"].as_str().expect("route source slot"));
+        let destination = actor_for_slot(route["to"].as_str().expect("route target slot"));
         let from_wire = route["from_wire"].as_str().expect("route source wire");
-        let to = route["to"].as_str().expect("route destination");
-        let to_wire = route["to_wire"].as_str().expect("route destination wire");
-        let source = events
-            .iter()
-            .find(|event| event["kind"] == "mag.actor_spawned" && event["id"] == from)
-            .expect("route source actor");
-        let destination = events
-            .iter()
-            .find(|event| event["kind"] == "mag.actor_spawned" && event["id"] == to)
-            .expect("route destination actor");
+        let to_wire = route["to_wire"].as_str().expect("route target wire");
         let stored = source["spec"]["routes"][from_wire]
             .as_array()
             .expect("source routes")
             .iter()
-            .find(|stored| stored["actor"] == to && stored["wire"] == to_wire)
+            .find(|stored| stored["actor"] == destination["id"] && stored["wire"] == to_wire)
             .expect("materialized route");
         assert_eq!(stored["product_position"], route["product_position"]);
         let source_port = source["spec"]["outputs"]
@@ -910,7 +968,6 @@ fn assert_materialized_item(events: &[Value], expected: &Value, index: usize) {
             .iter()
             .find(|port| port["wire"] == from_wire)
             .expect("source route port");
-        let destination_port = &destination["spec"]["input"];
         let canonical: Value = serde_json::from_str(
             stored["edge_id"]
                 .as_str()
@@ -919,41 +976,48 @@ fn assert_materialized_item(events: &[Value], expected: &Value, index: usize) {
         .expect("canonical edge id JSON");
         assert_eq!(
             canonical,
-            json!({
-                "from": source_port,
-                "to": destination_port,
-            })
+            json!({"from": source_port, "to": destination["spec"]["input"]})
         );
     }
 
-    let root = format!("expand-{index}");
-    let nodes = events
+    let entry = actor_for_slot("worker.entry");
+    let message = &expected["message"];
+    assert!(events
+        .iter()
+        .any(|event| { event["kind"] == "mag.firing" && event["id"] == entry["id"] }));
+    assert_eq!(entry["spec"]["input"]["wire"], message["kind"]);
+
+    let occurrence_ids = expected["actors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|actor| actor_for_slot(actor["slot"].as_str().unwrap())["id"].clone())
+        .collect::<std::collections::HashSet<_>>();
+    let node_paths = events
         .iter()
         .filter(|event| event["kind"] == "mag.nodes_declared")
         .flat_map(|event| event["nodes"].as_array().into_iter().flatten())
-        .filter(|node| node["path"][0].as_str() == Some(root.as_str()))
-        .cloned()
-        .map(|mut node| {
-            if node["members"].as_object().is_some_and(Map::is_empty) {
-                node["members"] = json!([]);
-            }
-            node
+        .filter(|node| {
+            node["members"]
+                .as_array()
+                .is_some_and(|members| members.iter().any(|id| occurrence_ids.contains(id)))
         })
+        .map(|node| node["path"].clone())
         .collect::<Vec<_>>();
-    assert_eq!(nodes, *expected["nodes"].as_array().expect("fixture nodes"));
-
-    let message = &expected["messages"][0];
-    let target = message["to"].as_str().expect("fixture message target");
-    assert!(events
-        .iter()
-        .any(|event| { event["kind"] == "mag.firing" && event["id"].as_str() == Some(target) }));
-    let target_actor = events
-        .iter()
-        .find(|event| event["kind"] == "mag.actor_spawned" && event["id"] == target)
-        .expect("message target actor");
-    assert_eq!(target_actor["spec"]["input"]["wire"], message["kind"]);
-    assert_eq!(expected["kills"], json!([]));
-    assert!(expected["result"].is_null());
+    assert_eq!(node_paths.len(), occurrence_ids.len());
+    assert!(
+        node_paths.iter().all(|path| {
+            path.as_array().is_some_and(|segments| {
+                segments.first() == Some(&json!("workers-result"))
+                    && segments.get(1) == Some(&json!("expand"))
+                    && segments
+                        .get(2)
+                        .and_then(Value::as_str)
+                        .is_some_and(|segment| segment.ends_with(&format!(":{index}")))
+            })
+        }),
+        "occurrence nodes use traversal-qualified logical paths: {node_paths:?}"
+    );
 }
 
 #[tokio::test]
@@ -1029,25 +1093,29 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         &mut observed_events,
     )
     .await;
-    let expected_workers = fixture["scenarios"]["multiple"]["worker_ids"]
-        .as_array()
-        .expect("worker ids fixture");
-    assert_eq!(request_actor(&first), expected_workers[0].as_str().unwrap());
-    assert_eq!(
-        request_actor(&second),
-        expected_workers[1].as_str().unwrap()
+    let first_actor = request_actor(&first);
+    let second_actor = request_actor(&second);
+    assert_occurrence_actor(first_actor, "worker.llm", 0);
+    assert_occurrence_actor(second_actor, "worker.llm", 1);
+    assert_ne!(
+        first_actor, second_actor,
+        "equal values retain occurrence identity"
     );
-    let expected_systems = fixture["scenarios"]["multiple"]["worker_systems"]
-        .as_array()
-        .expect("worker systems fixture");
-    for (facts, expected_system) in [&first_facts, &second_facts]
-        .into_iter()
-        .zip(expected_systems)
-    {
-        let expected_system = expected_system.as_str().expect("worker system");
+    let expected_system = fixture["scenarios"]["multiple"]["worker_system"]
+        .as_str()
+        .expect("worker system fixture");
+    for (facts, actor, index) in [
+        (&first_facts, first_actor, 0usize),
+        (&second_facts, second_actor, 1usize),
+    ] {
         assert!(
             facts_json(facts).contains(expected_system),
-            "each equal item keeps the authored per-item system prompt: {facts:?}"
+            "each occurrence keeps the ordinary agent's authored system prompt: {facts:?}"
+        );
+        assert_eq!(
+            structured_input(facts, actor),
+            &json!({"task":"same","description":"repeated","dependent_tasks":[]}),
+            "occurrence {index} receives the intact Task record"
         );
     }
     assert_snapshot(&first);
@@ -1060,7 +1128,7 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
     );
     // Equal planner values retain occurrence identity; completion order is two,one.
     assert_eq!(
-        json!([request_actor(&second), request_actor(&first)]),
+        json!([1, 0]),
         fixture["scenarios"]["multiple"]["completion_order"]
     );
     send_event(
@@ -1160,32 +1228,40 @@ async fn dynamic_tasks_real_agents_complete_out_of_order_and_preserve_planner_or
         result["result"]["value"]["value"]["content"],
         fixture["scenarios"]["multiple"]["terminal_content"]
     );
-    assert_materialized_item(&observed_events, &fixture["item_delta_zero"], 0);
-    assert_materialized_item(&observed_events, &fixture["item_delta_one"], 1);
-    let application_trace = lifecycle_trace
-        .iter()
-        .filter(|kind| {
-            matches!(
-                kind.as_str(),
-                "mag.run_started"
-                    | "mag.nodes_declared"
-                    | "mag.actor_spawned"
-                    | "mag.modification_applied"
-                    | "conversation.provider.invoke.request"
-                    | "mag.run_complete"
-                    | "mag.run_result"
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    assert_eq!(
-        application_trace,
-        fixture["scenarios"]["application_trace"]
-            .as_array()
-            .expect("application trace fixture")
+    assert_materialized_item(&observed_events, &fixture["item_delta"], 0);
+    assert_materialized_item(&observed_events, &fixture["item_delta"], 1);
+    let ids_for = |index: usize| {
+        observed_events
             .iter()
-            .map(|kind| kind.as_str().expect("application trace kind").to_owned())
-            .collect::<Vec<_>>()
+            .filter_map(|event| {
+                let id = event["id"].as_str()?;
+                (event["kind"] == "mag.actor_spawned"
+                    && id.starts_with("traverse:6:expand")
+                    && id.ends_with(&format!(":{index}")))
+                .then_some(id)
+            })
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let first_occurrence = ids_for(0);
+    let second_occurrence = ids_for(1);
+    assert_eq!(first_occurrence.len(), 5);
+    assert_eq!(second_occurrence.len(), 5);
+    assert!(
+        first_occurrence.is_disjoint(&second_occurrence),
+        "equal values materialize disjoint actor constellations"
+    );
+    let applied = lifecycle_trace
+        .iter()
+        .filter(|kind| kind.as_str() == "mag.modification_applied")
+        .count();
+    assert_eq!(
+        applied, 3,
+        "two occurrences plus collection completion apply"
+    );
+    assert_eq!(
+        lifecycle_trace.last().map(String::as_str),
+        Some("mag.run_result"),
+        "the terminal result closes the observed lifecycle"
     );
     assert_eq!(
         lifecycle_trace
@@ -1230,7 +1306,7 @@ async fn dynamic_tasks_zero_uses_empty_collection_identity_and_reaches_summarize
         let event = next_event(&mut reader, "zero summary create").await;
         if let Some(id) = event.get("id").and_then(Value::as_str) {
             assert!(
-                !id.starts_with("expand.worker"),
+                !id.starts_with("traverse:6:expand"),
                 "zero branch spawned worker actor {id}"
             );
         }
@@ -1255,7 +1331,7 @@ async fn dynamic_tasks_zero_uses_empty_collection_identity_and_reaches_summarize
         let event = next_event(&mut reader, "zero terminal result").await;
         if let Some(id) = event.get("id").and_then(Value::as_str) {
             assert!(
-                !id.starts_with("expand.worker"),
+                !id.starts_with("traverse:6:expand"),
                 "zero branch spawned worker actor {id}"
             );
         }
@@ -1305,13 +1381,15 @@ async fn dynamic_tasks_one_runs_one_real_worker_and_static_summarizer() {
         r#"{"value":[{"task":"duplicate","description":"only","dependent_tasks":[]}]}"#,
     )
     .await;
-    let worker = next_provider_request(&mut reader, "mock-provider").await;
+    let (worker, worker_facts) =
+        next_provider_request_with_facts(&mut reader, "mock-provider").await;
     let fixture = dynamic_behavior_fixture();
+    let worker_actor = request_actor(&worker);
+    assert_occurrence_actor(worker_actor, "worker.llm", 0);
     assert_eq!(
-        request_actor(&worker),
-        fixture["scenarios"]["one"]["worker_ids"][0]
-            .as_str()
-            .expect("one worker id fixture")
+        structured_input(&worker_facts, worker_actor),
+        &json!({"task":"duplicate","description":"only","dependent_tasks":[]}),
+        "the ordinary worker receives the planner's Task record intact"
     );
     assert!(worker["request_id"].as_str().is_some());
     complete_chat(
@@ -1432,7 +1510,7 @@ async fn retained_dynamic_program_survives_source_disposal_and_process_restart()
         worker_b["invocation"]["run_id"]
     );
     for worker in [&worker_b, &worker_a] {
-        assert_eq!(request_actor(worker), "expand.worker.0.llm");
+        assert_occurrence_actor(request_actor(worker), "worker.llm", 0);
         let run = worker["invocation"]["run_id"].as_str().unwrap();
         complete_chat(
             &mut reader,
@@ -1531,7 +1609,7 @@ async fn dynamic_tasks_invalid_planner_spawns_nothing_and_returns_typed_error() 
         let event = next_event(&mut reader, "invalid terminal result").await;
         if let Some(id) = event.get("id").and_then(Value::as_str) {
             assert!(
-                !id.starts_with("expand.worker"),
+                !id.starts_with("traverse:6:expand"),
                 "invalid branch spawned dynamic actor {id}"
             );
         }

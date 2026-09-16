@@ -1016,6 +1016,54 @@ fn infer_builtin(
                 ))),
             }
         }
+        "type_constructor" => {
+            exact(1)?;
+            let descriptor = infer(env, locals, &args[0])?;
+            compatible(
+                env,
+                &descriptor,
+                &MagType::TypeDescriptor,
+                &mut HashMap::new(),
+            )
+            .map_err(MagError::Type)?;
+            Ok(MagType::String)
+        }
+        "type_arguments" | "type_components" => {
+            exact(1)?;
+            let descriptor = infer(env, locals, &args[0])?;
+            compatible(
+                env,
+                &descriptor,
+                &MagType::TypeDescriptor,
+                &mut HashMap::new(),
+            )
+            .map_err(MagError::Type)?;
+            Ok(MagType::List(Box::new(MagType::TypeDescriptor)))
+        }
+        "list_type" => {
+            exact(1)?;
+            let descriptor = infer(env, locals, &args[0])?;
+            compatible(
+                env,
+                &descriptor,
+                &MagType::TypeDescriptor,
+                &mut HashMap::new(),
+            )
+            .map_err(MagError::Type)?;
+            Ok(MagType::TypeDescriptor)
+        }
+        "descriptor_schema" => {
+            exact(1)?;
+            let descriptor = infer(env, locals, &args[0])?;
+            compatible(
+                env,
+                &descriptor,
+                &MagType::TypeDescriptor,
+                &mut HashMap::new(),
+            )
+            .map_err(MagError::Type)?;
+            Ok(MagType::TypeSchema)
+        }
         "type_id" => {
             exact(1)?;
             let descriptor = infer(env, locals, &args[0])?;
@@ -1113,6 +1161,23 @@ fn infer_builtin(
             compatible(env, &value, &MagType::PackedValue, &mut HashMap::new())
                 .map_err(MagError::Type)?;
             Ok(MagType::Bool)
+        }
+        "packed_path_strings" => {
+            exact(3)?;
+            let value = infer(env, locals, &args[0])?;
+            compatible(env, &value, &MagType::PackedValue, &mut HashMap::new())
+                .map_err(MagError::Type)?;
+            let path = infer(env, locals, &args[1])?;
+            compatible(
+                env,
+                &path,
+                &MagType::List(Box::new(MagType::String)),
+                &mut HashMap::new(),
+            )
+            .map_err(MagError::Type)?;
+            let list = infer(env, locals, &args[2])?;
+            compatible(env, &list, &MagType::Bool, &mut HashMap::new()).map_err(MagError::Type)?;
+            Ok(MagType::List(Box::new(MagType::String)))
         }
         "packed_record_has_only_key" | "packed_record_has_only_keys" | "packed_field_conforms" => {
             exact(if name == "packed_field_conforms" {
@@ -1408,11 +1473,17 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "require",
     "artifact",
     "type_schema",
+    "type_constructor",
+    "type_arguments",
+    "type_components",
+    "list_type",
+    "descriptor_schema",
     "type_id",
     "value_type_id",
     "value_type_evidence",
     "pack",
     "packed_empty_record",
+    "packed_path_strings",
     "packed_record_has_only_key",
     "packed_record_has_only_keys",
     "packed_field_conforms",
@@ -1512,6 +1583,12 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
         )],
         "type_evidence" => vec![function(vec![tag(var("value"))], descriptor)],
         "type_schema" => vec![function(vec![tag(var("value"))], MagType::TypeSchema)],
+        "type_constructor" => vec![function(vec![descriptor], MagType::String)],
+        "type_arguments" | "type_components" => {
+            vec![function(vec![descriptor], list(MagType::TypeDescriptor))]
+        }
+        "list_type" => vec![function(vec![descriptor], MagType::TypeDescriptor)],
+        "descriptor_schema" => vec![function(vec![descriptor], MagType::TypeSchema)],
         "type_id" => vec![function(vec![descriptor], MagType::SemanticTypeId)],
         "value_type_id" => vec![
             function(
@@ -1536,6 +1613,10 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
         "fail" => vec![function(vec![var("value")], MagType::Never)],
         "pack" => vec![function(vec![var("value")], packed.clone())],
         "packed_empty_record" => vec![function(vec![packed.clone()], MagType::Bool)],
+        "packed_path_strings" => vec![function(
+            vec![packed.clone(), list(MagType::String), MagType::Bool],
+            list(MagType::String),
+        )],
         "packed_record_has_only_key" => vec![function(
             vec![packed.clone(), MagType::String],
             MagType::Bool,

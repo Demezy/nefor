@@ -1,6 +1,6 @@
 // Native sets are unordered immutable data. Duplicate insertion fails during
 // eager MAG evaluation rather than silently becoming idempotent.
-let empty<T>: fn(TypeTag<T>) -> Set<T> = |item_type| => __set_empty(item_type)
+let empty<T>: fn() -> Set<T> = | | => __set_empty(type_tag<T>())
 
 let insert<T>: fn(Set<T>, T) -> Set<T> = |set, item| => __set_insert(set, item)
 

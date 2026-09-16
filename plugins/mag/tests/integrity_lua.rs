@@ -108,7 +108,8 @@ fn synchronous_initial_output_drains_declarative_operations_before_start_returns
             type_arguments={},params={value="child"},input={actor=local_ref("spawned"),type=S,type_id="String",wire="stub.In"},
             outputs={{actor=local_ref("spawned"),type=S,type_id="String",wire="stub.Out"}},parameter_bindings={}}},
             routes={},messages={{to={actor=local_ref("spawned"),type=S,type_id="String",wire="stub.In"},
-              semantic_type=S,semantic_type_id="String",content={kind="stub.In",value="go"}}},
+              semantic_type=S,semantic_type_id="String",content={constructor="Static",
+                value={kind="stub.In",value="go"}}}},
             nodes={{path={bound("trigger")},members={{slot="spawned"}}}},actor_reference_relocations={}}
         }
         local second=require("plain-data").copy(operation)
@@ -157,11 +158,9 @@ fn synchronous_initial_output_drains_declarative_operations_before_start_returns
           },kills={},nodes={{path={"result"},members={"result"}},{path={"source"},members={"source"}}},
           result={from=port("result","stub.Out")}
         },{failing})
-        assert(failed_start.ok,failed_start.error)
-        assert(kernel.take_run_complete("failure-wins")==nil,"success escaped before operation failure")
-        local operation_failure=kernel.take_run_failed("failure-wins")
-        assert(operation_failure, "operation failure was not retained")
-        assert(operation_failure.error:match("operation"),operation_failure.error)
+        assert(not failed_start.ok)
+        assert(failed_start.error:match("declared initial actor input"),failed_start.error)
+        assert(kernel.take_run_complete("failure-wins")==nil,"rejected operation produced a result")
         "#);
 }
 

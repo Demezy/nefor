@@ -230,8 +230,8 @@ import nefor.graph.{}
 let exact_model: fn(nefor.actors.ResolvedModel) -> nefor.actors.AuthoredModel = |model| => named(nefor.actors.AuthoredModel, ResolvedModel, model)
 let resolved = nefor.actors.ResolvedModel {provider: "provider", model: "test-model", reasoning_effort: nefor.actors.reasoning_effort("medium")}
 let start = nefor.graph.source("task", nefor.contracts.Task {prompt: "read fixture"})
-let answer = nefor.actors.agent("answer", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: resolved, system: "Read fixture.txt, then answer.", tools: ["read_file", "python-read"], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 0}, type_tag<nefor.contracts.Task>(), type_tag<nefor.contracts.TextAnswer>())
-let output = nefor.graph.output("result", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
+let answer = nefor.actors.agent<nefor.actors.ResolvedModel, nefor.contracts.Task, nefor.contracts.TextAnswer>("answer", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: resolved, system: "Read fixture.txt, then answer.", tools: ["read_file", "python-read"], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 0})
+let output = nefor.graph.output<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>("result")
 let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.add_edges(graph, [
   nefor.graph.edge(start, answer),
   nefor.graph.edge(answer, output),
@@ -450,8 +450,8 @@ import nefor.graph.{}
 let exact_model: fn(nefor.actors.ResolvedModel) -> nefor.actors.AuthoredModel = |model| => named(nefor.actors.AuthoredModel, ResolvedModel, model)
 let resolved = nefor.actors.ResolvedModel {provider: "provider", model: "test-model", reasoning_effort: nefor.actors.reasoning_effort("medium")}
 let start = nefor.graph.source("task", nefor.contracts.Task {prompt: "research"})
-let answer = nefor.actors.agent("answer", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: resolved, system: "Research, then answer.", tools: ["web_search"], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 0}, type_tag<nefor.contracts.Task>(), type_tag<nefor.contracts.TextAnswer>())
-let output = nefor.graph.output("result", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
+let answer = nefor.actors.agent<nefor.actors.ResolvedModel, nefor.contracts.Task, nefor.contracts.TextAnswer>("answer", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: resolved, system: "Research, then answer.", tools: ["web_search"], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 0})
+let output = nefor.graph.output<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>("result")
 let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.add_edges(graph, [
   nefor.graph.edge(start, answer),
   nefor.graph.edge(answer, output),

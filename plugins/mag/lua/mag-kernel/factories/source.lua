@@ -14,6 +14,7 @@ M.declaration = {
     outputs = { { wire = VALUE, type = variable } },
   },
   params = { value = "data", value_type = "semantic-type-id" },
+  template = { relocations = {} },
   inputs = { start = kinds.Unit },
   outputs = { VALUE },
   signals = {},

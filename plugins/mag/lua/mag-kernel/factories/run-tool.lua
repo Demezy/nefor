@@ -79,7 +79,9 @@ M.declaration = {
     allowlist = "table?",  -- tool-name allowlist for this node (lowered from :tools)
     tool_approval_policy = "table?", -- per-node rules; forwarded on the established external key
   },
-  template = { relocations = {} },
+  template = { relocations = {
+    { path = { "conversation_peer" }, shape = "actor_id" },
+  } },
 
   inputs = {
     calls = "generic-tool.ToolCalls",

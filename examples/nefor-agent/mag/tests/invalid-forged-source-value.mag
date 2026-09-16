@@ -8,5 +8,5 @@ let legitimate = nefor.graph.source("start", "valid")
 let original = first(get(legitimate, "actors"))
 let forged_actor = nefor.graph.Actor {id: get(original, "id"), factory: get(original, "factory"), type_arguments: get(original, "type_arguments"), params: ForgedParams {value: 42}, input: get(original, "input"), outputs: get(original, "outputs")}
 let forged = nefor.graph.node("start", "source", [forged_actor], ([]: List<nefor.graph.StoredRoute>), get(legitimate, "messages"), get(legitimate, "input"), get(legitimate, "output"))
-let result = nefor.graph.output("result", type_tag<String>())
+let result = nefor.graph.output<String>("result")
 nefor.artifact.compile((|base| => nefor.graph.add_edges(base, [nefor.graph.edge(forged, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)

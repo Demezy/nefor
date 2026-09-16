@@ -109,6 +109,66 @@ artifact {text: type_evidence(type_tag<Result<String, Int>>()), bool: type_evide
 }
 
 #[test]
+fn type_descriptor_operations_preserve_nested_arguments_aliases_and_schemas() {
+    let root = workspace("descriptor-operations");
+    let artifact = compile(
+        r#"
+        type Box<T> {value: T}
+type Pair<Left, Right> {left: Left, right: Right}
+type Alias<T> = Box<T>
+let pair = type_evidence(type_tag<Pair<String, Box<Int>>>() )
+let alias = type_evidence(type_tag<Alias<Bool>>())
+let listed = list_type(alias)
+artifact {
+  constructor: type_constructor(pair),
+  arguments: type_arguments(pair),
+  alias_constructor: type_constructor(alias),
+  alias_arguments: type_arguments(alias),
+  primitive_constructor: type_constructor(type_evidence(type_tag<String>())),
+  primitive_arguments: type_arguments(type_evidence(type_tag<String>())),
+  components: type_components(pair),
+  list_components: type_components(listed),
+  primitive_components: type_components(type_evidence(type_tag<String>())),
+  listed: listed,
+  descriptor_schema: descriptor_schema(listed),
+  tag_schema: type_schema(type_tag<List<Box<Bool>>>()),
+}
+        "#,
+        &root,
+    )
+    .unwrap();
+
+    assert_eq!(artifact["constructor"], "main.Pair");
+    assert_eq!(artifact["arguments"][0]["name"], "String");
+    assert_eq!(artifact["arguments"][1]["name"], "main.Box");
+    assert_eq!(artifact["arguments"][1]["arguments"][0]["name"], "Int");
+    assert_eq!(artifact["alias_constructor"], "main.Box");
+    assert_eq!(artifact["alias_arguments"][0]["name"], "Bool");
+    assert_eq!(artifact["primitive_constructor"], "");
+    assert_eq!(artifact["primitive_arguments"], json!([]));
+    assert_eq!(artifact["primitive_components"], json!([]));
+    assert_eq!(artifact["components"].as_array().unwrap().len(), 4);
+    assert_eq!(artifact["components"][0], artifact["arguments"][0]);
+    assert_eq!(artifact["components"][2], artifact["arguments"][0]);
+    assert_eq!(artifact["components"][3], artifact["arguments"][1]);
+    assert_eq!(
+        artifact["list_components"],
+        json!([artifact["listed"]["item"]])
+    );
+    assert_eq!(artifact["listed"]["kind"], "list");
+    assert_eq!(artifact["listed"]["item"]["name"], "main.Box");
+    assert_eq!(artifact["descriptor_schema"], artifact["tag_schema"]);
+
+    let error = compile(
+        "artifact(type_schema(type_evidence(type_tag<String>())))",
+        &root,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("type_schema expects TypeTag"), "{error}");
+}
+
+#[test]
 fn nominal_adt_checker_enforces_ownership_exhaustiveness_and_branch_uniformity() {
     let root = workspace("nominal-adt-errors");
     let declarations = r#"
@@ -209,6 +269,56 @@ artifact(pack(PackedInput {type: "sha256:user-authored", value: Nested {nested: 
                 "value": {"nested": true}
             }
         })
+    );
+}
+
+#[test]
+fn packed_path_strings_traverses_nominal_records_and_checks_the_selected_shape() {
+    let root = workspace("packed-path-strings");
+    let artifact = compile(
+        r#"type References {one: String, many: List<String>}
+type Params {references: References}
+let params = pack(Params {references: References {one: "actor.one", many: ["actor.two", "actor.three"]}})
+artifact {
+  one: packed_path_strings(params, ["references", "one"], false),
+  many: packed_path_strings(params, ["references", "many"], true),
+}"#,
+        &root,
+    )
+    .unwrap();
+
+    assert_eq!(
+        artifact,
+        json!({
+            "one": ["actor.one"],
+            "many": ["actor.two", "actor.three"],
+        })
+    );
+
+    let missing = compile(
+        r#"type Params {reference: String}
+let params = pack(Params {reference: "actor.one"})
+artifact(packed_path_strings(params, ["missing"], false))"#,
+        &root,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        missing.contains("packed_path_strings path <root> has no field \"missing\""),
+        "{missing}"
+    );
+
+    let wrong_shape = compile(
+        r#"type Params {reference: String}
+let params = pack(Params {reference: "actor.one"})
+artifact(packed_path_strings(params, ["reference"], true))"#,
+        &root,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        wrong_shape.contains("packed_path_strings expected List<String> at reference, got string"),
+        "{wrong_shape}"
     );
 }
 
@@ -1492,8 +1602,8 @@ import nefor.node.{}
 import nefor.result.{}
 type Success {value: Int}
 type Failure {message: String}
-let fallible = nefor.graph.identity("fallible", type_tag<core.types.Result<Failure, Success>>())
-let continuation = nefor.result.lift("continuation-result", type_tag<Failure>(), nefor.graph.identity("continuation", type_tag<Success>()))
+let fallible = nefor.graph.identity<core.types.Result<Failure, Success>>("fallible")
+let continuation = nefor.result.lift<Success, Failure, Success>("continuation-result", nefor.graph.identity<Success>("continuation"))
 let composed = nefor.result.`>=>`(fallible, continuation)
 artifact(composed)
         "#,
@@ -1926,8 +2036,8 @@ fn ordinary_core_modules_expose_unordered_maps_and_sets() {
         r#"
         import core.map.{}
 import core.set.{}
-let map = core.map.insert((core.map.empty(type_tag<Int>()): Map<Int, String>), 1, "one")
-let set = core.set.insert(core.set.empty(type_tag<String>()), "ready")
+let map = core.map.insert((core.map.empty<Int, String>(): Map<Int, String>), 1, "one")
+let set = core.set.insert(core.set.empty<String>(), "ready")
 artifact {map_value: core.map.get(map, 1), map_count: core.map.count(map), set_member: core.set.contains(set, "ready"), set_count: core.set.count(set)}
         "#,
     )
@@ -1948,10 +2058,10 @@ artifact {map_value: core.map.get(map, 1), map_count: core.map.count(map), set_m
 
     for source in [
         r#"import core.map.{}
-let map = core.map.insert((core.map.empty(type_tag<Int>()): Map<Int, String>), 1, "one")
+let map = core.map.insert((core.map.empty<Int, String>(): Map<Int, String>), 1, "one")
 artifact(core.map.insert(map, 1, "again"))"#,
         r#"import core.set.{}
-let set = core.set.insert(core.set.empty(type_tag<String>()), "ready")
+let set = core.set.insert(core.set.empty<String>(), "ready")
 artifact(core.set.insert(set, "ready"))"#,
     ] {
         fs::write(root.join("main.mag"), source).unwrap();

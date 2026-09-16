@@ -249,7 +249,7 @@ fn assert_only_necessary_backticks(label: &str, source: &str) {
             .chars()
             .all(|character| character == '_' || character.is_ascii_alphanumeric());
         assert!(
-            !ordinary || identifier == "type",
+            !ordinary || matches!(identifier, "type" | "_"),
             "{label} backtick-quotes ordinary identifier {identifier:?}"
         );
         assert!(
@@ -416,11 +416,12 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
     let guide = fs::read_to_string(&guide_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", guide_path.display()));
     let canonical = guide
-        .split_once("```mag\n")
-        .and_then(|(_, rest)| rest.split_once("\n```").map(|(source, _)| source))
+        .split("```mag\n")
+        .nth(2)
+        .and_then(|rest| rest.split_once("\n```").map(|(source, _)| source))
         .expect("the Nefor MAG guide contains a complete canonical MAG fence");
     assert!(
-        canonical.contains("nefor.graph.source(\"development-task\", nefor.contracts.Task"),
+        canonical.contains("source(\"development-task\", Task"),
         "the canonical example must use the generic inferred source constructor"
     );
     assert!(
@@ -428,12 +429,12 @@ async fn shipped_mag_corpus_compiles_with_runtime_contracts() {
         "the first MAG fence must use its configuration-owned agent constructor"
     );
     assert!(
-        canonical.contains("let verification<I>: fn(VerificationConfig"),
-        "the canonical example must construct its verification workflow inside a reusable function"
+        canonical.contains("let fixed_checks = sequence([build_check, test_check])"),
+        "the canonical example must express fixed ordered verification through sequence"
     );
     assert!(
-        canonical.contains("nefor.dynamic.traverse_template(\"followups\", worker_template"),
-        "the canonical example must derive dynamic workers through a node boundary"
+        canonical.contains("let workers = traverse(\"followups\", followup_worker)"),
+        "the canonical example must traverse an ordinary typed worker node"
     );
     fs::write(temp_root.join("canonical-agent.mag"), canonical)
         .expect("write exact canonical agent regression");
@@ -460,7 +461,7 @@ import nefor.artifact.{}
 import nefor.contracts.{}
 import nefor.graph.{}
 let start = nefor.graph.source("task-input", nefor.contracts.Task {prompt: "preserve this prompt"})
-let result = nefor.graph.output("result", type_tag<nefor.contracts.Task>())
+let result = nefor.graph.output<nefor.contracts.Task>("result")
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#,
     )
     .expect("write task source regression");
@@ -518,7 +519,7 @@ import nefor.actors.{}
 import nefor.contracts.{}
 import nefor.graph.{}
 let start = nefor.graph.source("start", nefor.contracts.Task {prompt: "retry"})
-let gate = nefor.actors.retry_gate("retry", nefor.actors.RetryGateConfig {max_retries: 3}, type_tag<nefor.contracts.Task>())
+let gate = nefor.actors.retry_gate<nefor.contracts.Task>("retry", nefor.actors.RetryGateConfig {max_retries: 3})
 let result = nefor.graph.output_for("result", gate)
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, gate), nefor.graph.edge(gate, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#,
     )
@@ -662,10 +663,10 @@ nefor.artifact.delta(nefor.graph.node_delta(start))"#,
 import nefor.graph.{}
 import nefor.node.{}
 let start = nefor.graph.source("start", "shared")
-let fork_left = nefor.graph.identity("fork-left", type_tag<String>())
-let fork_right = nefor.graph.identity("fork-right", type_tag<String>())
-let map_left = nefor.graph.identity("map-left", type_tag<String>())
-let map_right = nefor.graph.identity("map-right", type_tag<String>())
+let fork_left = nefor.graph.identity<String>("fork-left")
+let fork_right = nefor.graph.identity<String>("fork-right")
+let map_left = nefor.graph.identity<String>("map-left")
+let map_right = nefor.graph.identity<String>("map-right")
 let forked = nefor.node.fanout("forked", fork_left, fork_right)
 let mapped = nefor.node.parallel("mapped", map_left, map_right)
 let workflow = nefor.node.`>>>`(forked, mapped)
@@ -707,8 +708,8 @@ nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edg
 import nefor.graph.{}
 import nefor.node.{}
 let start = nefor.graph.source("start", "shared")
-let first = nefor.node.rename("duplicate", nefor.graph.identity("first", type_tag<String>()))
-let second = nefor.node.rename("duplicate", nefor.graph.identity("second", type_tag<String>()))
+let first = nefor.node.rename("duplicate", nefor.graph.identity<String>("first"))
+let second = nefor.node.rename("duplicate", nefor.graph.identity<String>("second"))
 let workflow = nefor.node.`>>>`(first, second)
 let result = nefor.graph.output_for("result", workflow)
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, workflow), nefor.graph.edge(workflow, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#,
@@ -746,8 +747,8 @@ import nefor.node.{}
 type LeftValue {value: String}
 type RightValue {value: Int}
 let start = nefor.graph.source("start", named(core.types.Either<LeftValue, RightValue>, Left, LeftValue {value: "left"}))
-let left = nefor.graph.identity("left", type_tag<LeftValue>())
-let right = nefor.graph.identity("right", type_tag<RightValue>())
+let left = nefor.graph.identity<LeftValue>("left")
+let right = nefor.graph.identity<RightValue>("right")
 let selected = nefor.node.choose("selected", left, right)
 let result = nefor.graph.output_for("result", selected)
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, selected), nefor.graph.edge(selected, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#,

@@ -52,7 +52,7 @@ fn mag_in_five_minutes_program_compiles() {
     let source = first_mag_fence(&path);
 
     let module_root = crate_root.join("../../mag/lib");
-    compile_with_inputs_and_module_roots_and_options_and_syntax(
+    let artifact = compile_with_inputs_and_module_roots_and_options_and_syntax(
         &source,
         &crate_root,
         serde_json::json!({}),
@@ -61,4 +61,18 @@ fn mag_in_five_minutes_program_compiles() {
         SyntaxMode::New,
     )
     .unwrap_or_else(|error| panic!("MAG in Five Minutes failed: {error}"));
+    let markdown = std::fs::read_to_string(&path).unwrap();
+    let documented: serde_json::Value = serde_json::from_str(
+        markdown
+            .split_once("```json\n")
+            .unwrap()
+            .1
+            .split_once("\n```")
+            .unwrap()
+            .0,
+    )
+    .unwrap();
+    for (key, value) in documented.as_object().unwrap() {
+        assert_eq!(&artifact[key], value, "documented evidence artifact {key}");
+    }
 }

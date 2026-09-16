@@ -1021,7 +1021,7 @@ mod tests {
                     "template": {
                         "types": {},
                         "actors": [{"slot": "worker", "factory": "stub", "params": packed(authored.clone())}],
-                        "messages": [{"to": {}, "content": packed(authored.clone())}],
+                        "messages": [{"to": {}, "content": {"constructor": "Static", "value": packed(authored.clone())}}],
                         "kills": [], "nodes": []
                     }
                 }]
@@ -1049,7 +1049,7 @@ mod tests {
         );
         assert_eq!(
             decoded.operations[0]["template"]["messages"][0]["content"],
-            authored
+            serde_json::json!({"constructor": "Static", "value": authored})
         );
     }
 

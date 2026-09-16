@@ -2,7 +2,7 @@ import core.types.{}
 
 // Native maps are unordered immutable data. Their storage order is never
 // observable; deterministic ordering exists only at artifact serialization.
-let empty<K, V>: fn(TypeTag<K>) -> Map<K, V> = |key_type| => __map_empty(key_type)
+let empty<K, V>: fn() -> Map<K, V> = | | => __map_empty(type_tag<K>())
 
 // insert requires a new key. put is the explicit replacement/upsert operation.
 let insert<K, V>: fn(Map<K, V>, K, V) -> Map<K, V> = |map, key, value| => __map_insert(map, key, value)
