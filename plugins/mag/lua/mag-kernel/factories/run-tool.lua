@@ -10,7 +10,7 @@
 -- `run-tool` routes `generic-tool.ToolHandle` to its `tool-result`; flagged):
 --   input   generic-tool.ToolCalls   (single; fires per ToolCalls message)
 --   output  generic-tool.ToolHandle  (one aggregated handle per batch)
---   params  { allowlist, da_policy } per-node gating threaded to the tool surface
+--   params  { allowlist, tool_approval_policy } per-node gating threaded to the tool surface
 --
 -- (The task note names the output `generic-tool.ToolResults`; the landed
 -- fixture wires `generic-tool.ToolHandle`. The fixture is the contract source,
@@ -43,8 +43,8 @@
 --   per call: the next node (`tool-result`) fires once with the whole batch,
 --   mirroring a provider turn that consumes all tool outputs together.
 --
--- ── da-policy threading (closes task-nefor-mag-per-node-da-policies; flagged) ──
---   The MAG node authors `:da_policy {…}` and a tool allowlist; lowering places
+-- ── tool approval policy threading ───────────────────────────────────────────
+--   The MAG node authors `tool_approval_policy` and a tool allowlist; lowering places
 --   them in THIS actor's `params`. Per call the factory carries both in the
 --   invocation `request` (which routing forwards as the `tool.invoke` args), so
 --   the policy authored on the node reaches the exact tool invocation. Enforcing
@@ -77,7 +77,7 @@ M.declaration = {
   params = {
     model = "string?", provider = "string?", conversation_peer = "string?",
     allowlist = "table?",  -- tool-name allowlist for this node (lowered from :tools)
-    ["da_policy"] = "table?", -- per-node bash approval rules (lowered from :da_policy)
+    tool_approval_policy = "table?", -- per-node rules; forwarded on the established external key
   },
   template = { relocations = {} },
 
@@ -103,9 +103,9 @@ function M.construct(id, params, emit, deps)
   -- MAG-authored params are snake_case; the tool-gate request below retains
   -- its established external wire key. Opaque plain data — the factory
   -- forwards it, tool-gate interprets it.
-  local da_policy = params.da_policy
-  if type(da_policy) == "table" and type(da_policy.rules) == "table" then
-    da_policy = da_policy.rules
+  local tool_approval_policy = params.tool_approval_policy
+  if type(tool_approval_policy) == "table" and type(tool_approval_policy.rules) == "table" then
+    tool_approval_policy = tool_approval_policy.rules
   end
   local allowlist = params.allowlist
   if allowlist == nil then
@@ -203,7 +203,7 @@ function M.construct(id, params, emit, deps)
           name = call_name,
           args = call_args,
           allowlist = allowlist,
-          ["da-policy"] = da_policy,
+          ["da-policy"] = tool_approval_policy,
         },
         -- Opaque correlation ref, echoed back on the reply: which batch + slot,
         -- plus the model's call id / name for the assembled result entry.

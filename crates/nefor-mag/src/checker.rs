@@ -2,7 +2,7 @@ use crate::ast::{
     BindingId, CheckedBinding, CheckedBlock, CheckedExpr, CheckedExprKind, CheckedFn,
     CheckedMatchArm, CheckedParam, ConstructorDecl, ConstructorDeclarationId, TypeDeclBody, Value,
 };
-use crate::authored::{BlockItem, Expr, Function, Type};
+use crate::authored::{BlockItem, Expr, Function, Type, TypeArgument};
 use crate::env::Env;
 use crate::error::MagError;
 use crate::types::MagType;
@@ -32,17 +32,26 @@ fn record_equality_variables(variables: impl IntoIterator<Item = String>) {
     });
 }
 
-type Locals = HashMap<String, Vec<MagType>>;
+#[derive(Clone)]
+struct LocalCandidate {
+    ty: MagType,
+    generic_binders: Vec<String>,
+}
+
+type Locals = HashMap<String, Vec<LocalCandidate>>;
 
 fn add_local(locals: &mut Locals, name: impl Into<String>, ty: MagType) -> Result<(), MagError> {
     let name = name.into();
     let overloads = locals.entry(name.clone()).or_default();
-    if overloads.contains(&ty) {
+    if overloads.iter().any(|candidate| candidate.ty == ty) {
         return Err(MagError::Type(format!(
             "duplicate visible overload {name}: {ty}"
         )));
     }
-    overloads.push(ty);
+    overloads.push(LocalCandidate {
+        ty,
+        generic_binders: Vec::new(),
+    });
     Ok(())
 }
 
@@ -150,9 +159,9 @@ fn infer_fn_signature(env: &Env, outer: &Locals, expression: &Expr) -> Result<Ma
     let scoped_type_vars = outer
         .values()
         .flatten()
-        .flat_map(|ty| {
+        .flat_map(|candidate| {
             let mut vars = HashSet::new();
-            collect_vars(ty, &mut vars);
+            collect_vars(&candidate.ty, &mut vars);
             vars
         })
         .collect();
@@ -228,6 +237,7 @@ pub fn check_resolved_call(
     env: &Env,
     function: &crate::ast::FnValue,
     resolved: &MagType,
+    explicit_bindings: &BTreeMap<String, MagType>,
 ) -> Result<(MagType, HashMap<String, MagType>), MagError> {
     let MagType::Function(resolved_params, result) = resolved else {
         return Err(MagError::Type(format!(
@@ -241,7 +251,10 @@ pub fn check_resolved_call(
             resolved_params.len()
         )));
     }
-    let mut substitution = HashMap::new();
+    let mut substitution = explicit_bindings
+        .iter()
+        .map(|(name, ty)| (name.clone(), ty.clone()))
+        .collect::<HashMap<_, _>>();
     let mut order = (0..function.param_types.len()).collect::<Vec<_>>();
     order.sort_by_key(|index| contains_union(&function.param_types[*index]));
     for index in order {
@@ -272,19 +285,19 @@ fn infer(env: &Env, locals: &mut Locals, expr: &Expr) -> Result<MagType, MagErro
         Expr::Float(_) => Ok(MagType::Float),
         Expr::Str(_) | Expr::Keyword(_) => Ok(MagType::String),
         Expr::Name(name) => match locals.get(name).map(Vec::as_slice) {
-            Some([ty]) => Ok(ty.clone()),
-            Some(types) => {
-                let data = types
+            Some([candidate]) => Ok(candidate.ty.clone()),
+            Some(candidates) => {
+                let data = candidates
                     .iter()
-                    .filter(|ty| !matches!(ty, MagType::Function(_, _)))
+                    .filter(|candidate| !matches!(candidate.ty, MagType::Function(_, _)))
                     .collect::<Vec<_>>();
                 match data.as_slice() {
-                    [ty] => Ok((*ty).clone()),
+                    [candidate] => Ok(candidate.ty.clone()),
                     _ => Err(MagError::Type(format!(
                         "ambiguous overload {name}; candidates: {}",
-                        types
+                        candidates
                             .iter()
-                            .map(ToString::to_string)
+                            .map(|candidate| candidate.ty.to_string())
                             .collect::<Vec<_>>()
                             .join(", ")
                     ))),
@@ -335,15 +348,17 @@ fn infer(env: &Env, locals: &mut Locals, expr: &Expr) -> Result<MagType, MagErro
         Expr::Match { value, arms } => infer_match(env, locals, value, arms),
         Expr::Ascribe { target, value } => {
             let mut vars = HashSet::new();
-            for ty in locals.values().flatten() {
-                collect_vars(ty, &mut vars);
+            for candidate in locals.values().flatten() {
+                collect_vars(&candidate.ty, &mut vars);
             }
             let target = resolve_type(env, target, &vars)?;
             match value.as_ref() {
                 Expr::Name(name) if locals.get(name).is_some_and(|types| types.len() > 1) => {
                     let matches = locals[name]
                         .iter()
-                        .filter(|ty| compatible(env, ty, &target, &mut HashMap::new()).is_ok())
+                        .filter(|candidate| {
+                            compatible(env, &candidate.ty, &target, &mut HashMap::new()).is_ok()
+                        })
                         .collect::<Vec<_>>();
                     match matches.as_slice() {
                         [_] => {}
@@ -368,8 +383,8 @@ fn infer(env: &Env, locals: &mut Locals, expr: &Expr) -> Result<MagType, MagErro
         }
         Expr::Annotate { target, value } => {
             let mut vars = HashSet::new();
-            for ty in locals.values().flatten() {
-                collect_vars(ty, &mut vars);
+            for candidate in locals.values().flatten() {
+                collect_vars(&candidate.ty, &mut vars);
             }
             let target = resolve_type(env, target, &vars)?;
             if matches!(value.as_ref(), Expr::Construct { .. }) {
@@ -385,15 +400,19 @@ fn infer(env: &Env, locals: &mut Locals, expr: &Expr) -> Result<MagType, MagErro
         }
         Expr::TypeTag(target) => {
             let mut vars = HashSet::new();
-            for ty in locals.values().flatten() {
-                collect_vars(ty, &mut vars);
+            for candidate in locals.values().flatten() {
+                collect_vars(&candidate.ty, &mut vars);
             }
             Ok(MagType::TypeTag(Box::new(resolve_type(
                 env, target, &vars,
             )?)))
         }
         Expr::Function(_) => infer_fn_signature(env, locals, expr),
-        Expr::Call { callee, args } => infer_call(env, locals, callee, args),
+        Expr::Call {
+            callee,
+            type_args,
+            args,
+        } => infer_call(env, locals, callee, type_args.as_deref(), args),
         Expr::Invalid(error) => Err(error.clone().into_mag_error()),
     }
 }
@@ -443,6 +462,7 @@ fn infer_call(
     env: &Env,
     locals: &mut Locals,
     callee: &Expr,
+    explicit_type_args: Option<&[TypeArgument]>,
     args: &[Expr],
 ) -> Result<MagType, MagError> {
     if let Expr::Name(name) = callee {
@@ -454,12 +474,13 @@ fn infer_call(
             .get(name)
             .into_iter()
             .flatten()
-            .filter_map(|candidate| match candidate {
-                MagType::Function(params, result) => {
-                    let mut variables = HashSet::new();
-                    collect_vars(candidate, &mut variables);
-                    Some((variables.is_empty(), params.clone(), (**result).clone()))
-                }
+            .filter_map(|candidate| match &candidate.ty {
+                MagType::Function(params, result) => Some((
+                    candidate.generic_binders.is_empty(),
+                    candidate.generic_binders.clone(),
+                    params.clone(),
+                    (**result).clone(),
+                )),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -469,6 +490,7 @@ fn infer_call(
             };
             Some((
                 function.type_params.is_empty(),
+                function.type_params.clone(),
                 function.param_types.clone(),
                 function.return_type.clone(),
             ))
@@ -478,25 +500,51 @@ fn infer_call(
             }
         }
         if !signatures.is_empty() {
+            if explicit_type_args.is_some()
+                && signatures
+                    .iter()
+                    .all(|(_, binders, _, _)| binders.is_empty())
+            {
+                return Err(MagError::Type(format!(
+                    "{name} is not a generic function and does not accept explicit type arguments"
+                )));
+            }
             let argument_types = args
                 .iter()
                 .map(|argument| infer(env, locals, argument))
                 .collect::<Result<Vec<_>, _>>()?;
+            let mut visible_vars = HashSet::new();
+            for candidate in locals.values().flatten() {
+                collect_vars(&candidate.ty, &mut visible_vars);
+            }
             let mut matching = signatures
                 .iter()
-                .filter_map(|(concrete, params, result)| {
+                .filter_map(|(concrete, binders, params, result)| {
                     if params.len() != argument_types.len() {
                         return None;
                     }
                     let mut substitution = HashMap::new();
+                    if let Some(type_args) = explicit_type_args {
+                        if binders.len() != type_args.len() {
+                            return None;
+                        }
+                        for (binder, argument) in binders.iter().zip(type_args) {
+                            if let TypeArgument::Explicit(argument) = argument {
+                                let ty = resolve_type(env, argument, &visible_vars).ok()?;
+                                substitution.insert(binder.clone(), ty);
+                            }
+                        }
+                    }
                     let mut order = (0..params.len()).collect::<Vec<_>>();
                     order.sort_by_key(|index| contains_union(&params[*index]));
+                    let bindable = binders.iter().cloned().collect::<HashSet<_>>();
                     for index in order {
-                        compatible(
+                        compatible_with_bindable(
                             env,
                             &argument_types[index],
                             &substitute(&params[index], &substitution),
                             &mut substitution,
+                            &bindable,
                         )
                         .ok()?;
                     }
@@ -515,15 +563,22 @@ fn infer_call(
             }
             return match matching.as_slice() {
                 [(_, result)] => Ok(result.clone()),
-                [] if builtin => infer_builtin(env, locals, name, args),
+                [] if builtin && explicit_type_args.is_none() => {
+                    infer_builtin(env, locals, name, args)
+                }
                 [] => Err(MagError::Type(format!("no overload {name} matches call"))),
                 _ => Err(MagError::Type(format!(
                     "ambiguous overload {name} for call"
                 ))),
             };
-        } else if builtin {
+        } else if builtin && explicit_type_args.is_none() {
             return infer_builtin(env, locals, name, args);
         }
+    }
+    if explicit_type_args.is_some() {
+        return Err(MagError::Type(
+            "explicit type arguments require an immediate call to a named generic function".into(),
+        ));
     }
     let callable = infer(env, locals, callee)?;
     let MagType::Function(params, result) = callable else {
@@ -563,8 +618,8 @@ fn infer_construct(
     payload: &Expr,
 ) -> Result<MagType, MagError> {
     let mut vars = HashSet::new();
-    for ty in locals.values().flatten() {
-        collect_vars(ty, &mut vars);
+    for candidate in locals.values().flatten() {
+        collect_vars(&candidate.ty, &mut vars);
     }
     let owner = resolve_type(env, owner, &vars)?;
     let (_, payload_type) = instantiated_constructor(env, &owner, constructor)?;
@@ -1635,7 +1690,7 @@ fn check_equality_specialization(
                 check_equality_specialization(env, expression, &expression.ty, &substitutions)?;
             }
         }
-        CheckedExprKind::Call { callee, args } => {
+        CheckedExprKind::Call { callee, args, .. } => {
             let signature = substitute(&callee.ty, &substitutions);
             check_equality_specialization(env, callee, &signature, &substitutions)?;
             if let MagType::Function(params, _) = signature {
@@ -1690,7 +1745,7 @@ fn check_equality_specialization(
 
 fn collect_called_bindings(expression: &CheckedExpr, calls: &mut Vec<(BindingId, MagType)>) {
     match &expression.kind {
-        CheckedExprKind::Call { callee, args } => {
+        CheckedExprKind::Call { callee, args, .. } => {
             if let CheckedExprKind::BindingRef(id) = callee.kind {
                 calls.push((id, callee.ty.clone()));
             }
@@ -2103,8 +2158,14 @@ fn visible_types(_env: &Env, scopes: &[CheckedScope], current: &CheckedScope) ->
         for (name, candidates) in scope {
             let entry = types.entry(name.clone()).or_default();
             for candidate in candidates {
-                if !entry.contains(&candidate.ty) {
-                    entry.push(candidate.ty.clone());
+                if !entry
+                    .iter()
+                    .any(|local: &LocalCandidate| local.ty == candidate.ty)
+                {
+                    entry.push(LocalCandidate {
+                        ty: candidate.ty.clone(),
+                        generic_binders: candidate.generic_binders.clone(),
+                    });
                 }
             }
         }
@@ -2156,7 +2217,11 @@ fn compile_expr(
         Expr::Annotate { target, value } => compile_annotate(env, scopes, target, value)?,
         Expr::TypeTag(target) => compile_type_tag(env, scopes, target)?,
         Expr::Function(function) => compile_function(env, scopes, None, function, expected, None)?,
-        Expr::Call { callee, args } => compile_call(env, scopes, callee, args, expected)?,
+        Expr::Call {
+            callee,
+            type_args,
+            args,
+        } => compile_call(env, scopes, callee, type_args.as_deref(), args, expected)?,
         Expr::Invalid(error) => return Err(error.clone().into_mag_error()),
     };
     if let Some(expected) = expected {
@@ -2343,6 +2408,7 @@ fn compile_call(
     env: &Env,
     scopes: &[CheckedScope],
     callee_expression: &Expr,
+    explicit_type_args: Option<&[TypeArgument]>,
     expressions: &[Expr],
     expected: Option<&MagType>,
 ) -> Result<CheckedExpr, MagError> {
@@ -2358,6 +2424,7 @@ fn compile_call(
                 scopes,
                 name,
                 &function_candidates,
+                explicit_type_args,
                 expressions,
                 expected,
             );
@@ -2366,8 +2433,18 @@ fn compile_call(
             }
         }
         if let Some(id) = builtin_id(env, name) {
+            if explicit_type_args.is_some() {
+                return Err(MagError::Type(format!(
+                    "{name} is not a generic function and does not accept explicit type arguments"
+                )));
+            }
             return compile_builtin_call(env, scopes, name, id, expressions, expected);
         }
+    }
+    if explicit_type_args.is_some() {
+        return Err(MagError::Type(
+            "explicit type arguments require an immediate call to a named generic function".into(),
+        ));
     }
     let callee = compile_expr(env, scopes, callee_expression, None)?;
     let MagType::Function(params, result) = &callee.ty else {
@@ -2399,6 +2476,7 @@ fn compile_call(
         CheckedExprKind::Call {
             callee: Box::new(callee),
             args,
+            type_bindings: BTreeMap::new(),
         },
     ))
 }
@@ -2635,18 +2713,44 @@ fn compile_ascribe(
         }
         // An explicit ascription owns a possible newtype conversion, while
         // ordinary result-only overloads and generics still need target context.
-        Expr::Call { callee, args } if newtype_underlying(env, &target).is_some() => {
+        Expr::Call {
+            callee,
+            type_args,
+            args,
+        } if newtype_underlying(env, &target).is_some() => {
             let underlying = newtype_underlying(env, &target).ok_or_else(|| {
                 MagError::Type(format!("missing newtype target for ascription to {target}"))
             })?;
-            compile_call(env, scopes, callee, args, Some(&underlying))
-                .or_else(|_| compile_call(env, scopes, callee, args, None))?
+            compile_call(
+                env,
+                scopes,
+                callee,
+                type_args.as_deref(),
+                args,
+                Some(&underlying),
+            )
+            .or_else(|_| compile_call(env, scopes, callee, type_args.as_deref(), args, None))?
         }
-        Expr::Call { callee, args } if contains_newtype(env, &target) => {
-            compile_call(env, scopes, callee, args, None)?
+        Expr::Call {
+            callee,
+            type_args,
+            args,
+        } if contains_newtype(env, &target) => {
+            compile_call(env, scopes, callee, type_args.as_deref(), args, None)?
         }
-        Expr::Call { callee, args } => compile_call(env, scopes, callee, args, Some(&target))
-            .or_else(|_| compile_call(env, scopes, callee, args, None))?,
+        Expr::Call {
+            callee,
+            type_args,
+            args,
+        } => compile_call(
+            env,
+            scopes,
+            callee,
+            type_args.as_deref(),
+            args,
+            Some(&target),
+        )
+        .or_else(|_| compile_call(env, scopes, callee, type_args.as_deref(), args, None))?,
         source => compile_expr(env, scopes, source, source_expected)?,
     };
     if (contains_newtype(env, &value.ty) || contains_newtype(env, &target))
@@ -2755,11 +2859,49 @@ fn compile_overloaded_call(
     scopes: &[CheckedScope],
     name: &str,
     candidates: &[CheckedCandidate],
+    explicit_type_args: Option<&[TypeArgument]>,
     expressions: &[Expr],
     expected_result: Option<&MagType>,
 ) -> Result<CheckedExpr, MagError> {
+    let specialized_candidates;
+    let candidates = if let Some(arguments) = explicit_type_args {
+        if candidates
+            .iter()
+            .all(|candidate| candidate.generic_binders.is_empty())
+        {
+            return Err(MagError::Type(format!(
+                "{name} is not a generic function and does not accept explicit type arguments"
+            )));
+        }
+        specialized_candidates = candidates
+            .iter()
+            .filter(|candidate| candidate.generic_binders.len() == arguments.len())
+            .cloned()
+            .collect::<Vec<_>>();
+        if specialized_candidates.is_empty() {
+            let mut arities = candidates
+                .iter()
+                .map(|candidate| candidate.generic_binders.len())
+                .collect::<Vec<_>>();
+            arities.sort_unstable();
+            arities.dedup();
+            return Err(MagError::Type(format!(
+                "generic call {name} has no overload with exactly {} type arguments; declared arities: {}",
+                arguments.len(),
+                arities
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        specialized_candidates.as_slice()
+    } else {
+        candidates
+    };
     if let [candidate] = candidates {
-        let (candidate_type, bindable) = instantiate_candidate(candidate);
+        let (candidate_type, bindable, holes, type_bindings) =
+            instantiate_call_candidate(env, scopes, name, candidate, explicit_type_args)?;
         let MagType::Function(params, result) = &candidate_type else {
             unreachable!()
         };
@@ -2770,11 +2912,25 @@ fn compile_overloaded_call(
             });
         }
         let (args, mut substitution) =
-            compile_call_args(env, scopes, expressions, params, &bindable)?;
+            compile_call_args(env, scopes, expressions, params, &bindable).map_err(|error| {
+                if holes.is_empty() {
+                    error
+                } else {
+                    MagError::Type(format!(
+                        "conflicting inference for explicit type argument hole in {name} at {}: {error}",
+                        holes
+                            .iter()
+                            .map(|(index, binder, _)| format!("position {} ({binder})", index + 1))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                }
+            })?;
         let output = substitute(result, &substitution);
         if let Some(expected) = expected_result {
             constrain_result(env, &output, expected, &mut substitution, &bindable)?;
         }
+        validate_inferred_holes(name, &holes, &substitution)?;
         validate_equality_requirements(
             env,
             &instantiated_equality_requirements(env, candidate),
@@ -2788,6 +2944,10 @@ fn compile_overloaded_call(
                 .collect(),
             Box::new(output.clone()),
         );
+        let type_bindings: BTreeMap<String, MagType> = type_bindings
+            .into_iter()
+            .map(|(name, ty)| (name, substitute(&ty, &substitution)))
+            .collect();
         return Ok(checked(
             output,
             CheckedExprKind::Call {
@@ -2796,58 +2956,97 @@ fn compile_overloaded_call(
                     CheckedExprKind::BindingRef(candidate.id),
                 )),
                 args,
+                type_bindings,
             },
         ));
     }
     let mut matches = Vec::new();
+    let mut explicit_failures = Vec::new();
     for candidate in candidates {
-        let (candidate_type, bindable) = instantiate_candidate(candidate);
+        let (candidate_type, bindable, holes, type_bindings) =
+            match instantiate_call_candidate(env, scopes, name, candidate, explicit_type_args) {
+                Ok(instantiated) => instantiated,
+                Err(error) => {
+                    if explicit_type_args.is_some() {
+                        explicit_failures.push(error);
+                    }
+                    continue;
+                }
+            };
         let MagType::Function(params, result) = &candidate_type else {
             continue;
         };
         if params.len() != expressions.len() {
             continue;
         }
-        if let Ok((args, mut substitution)) =
-            compile_call_args(env, scopes, expressions, params, &bindable)
-        {
-            let output = substitute(result, &substitution);
-            if let Some(expected) = expected_result {
-                if constrain_result(env, &output, expected, &mut substitution, &bindable).is_err() {
-                    continue;
+        let (args, mut substitution) = match compile_call_args(
+            env,
+            scopes,
+            expressions,
+            params,
+            &bindable,
+        ) {
+            Ok(checked) => checked,
+            Err(error) => {
+                if !holes.is_empty() {
+                    explicit_failures.push(MagError::Type(format!(
+                            "conflicting inference for explicit type argument hole in {name} at {}: {error}",
+                            holes
+                                .iter()
+                                .map(|(index, binder, _)| {
+                                    format!("position {} ({binder})", index + 1)
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )));
                 }
-            }
-            if validate_equality_requirements(
-                env,
-                &instantiated_equality_requirements(env, candidate),
-                &substitution,
-            )
-            .is_err()
-            {
                 continue;
             }
-            let output = substitute(result, &substitution);
-            let callee_type = MagType::Function(
-                params
-                    .iter()
-                    .map(|parameter| substitute(parameter, &substitution))
-                    .collect(),
-                Box::new(output.clone()),
-            );
-            matches.push((candidate, args, output, callee_type));
+        };
+        let output = substitute(result, &substitution);
+        if let Some(expected) = expected_result {
+            if constrain_result(env, &output, expected, &mut substitution, &bindable).is_err() {
+                continue;
+            }
         }
+        if let Err(error) = validate_inferred_holes(name, &holes, &substitution) {
+            explicit_failures.push(error);
+            continue;
+        }
+        if validate_equality_requirements(
+            env,
+            &instantiated_equality_requirements(env, candidate),
+            &substitution,
+        )
+        .is_err()
+        {
+            continue;
+        }
+        let output = substitute(result, &substitution);
+        let callee_type = MagType::Function(
+            params
+                .iter()
+                .map(|parameter| substitute(parameter, &substitution))
+                .collect(),
+            Box::new(output.clone()),
+        );
+        let type_bindings: BTreeMap<String, MagType> = type_bindings
+            .into_iter()
+            .map(|(name, ty)| (name, substitute(&ty, &substitution)))
+            .collect();
+        matches.push((candidate, args, output, callee_type, type_bindings));
     }
     if matches.len() > 1 {
         let concrete = matches
             .iter()
-            .filter(|(candidate, _, _, _)| candidate.generic_binders.is_empty())
+            .filter(|(candidate, _, _, _, _)| candidate.generic_binders.is_empty())
             .count();
         if concrete == 1 {
-            matches.retain(|(candidate, _, _, _)| candidate.generic_binders.is_empty());
+            matches.retain(|(candidate, _, _, _, _)| candidate.generic_binders.is_empty());
         }
     }
     match matches.as_slice() {
-        [(candidate, args, result, callee_type)] => {
+        [(candidate, args, result, callee_type, type_bindings)] => {
             let callee = checked(
                 callee_type.clone(),
                 CheckedExprKind::BindingRef(candidate.id),
@@ -2857,10 +3056,14 @@ fn compile_overloaded_call(
                 CheckedExprKind::Call {
                     callee: Box::new(callee),
                     args: args.clone(),
+                    type_bindings: type_bindings.clone(),
                 },
             ))
         }
-        [] => Err(MagError::Type(format!("no overload {name} matches call"))),
+        [] => match explicit_failures.into_iter().next() {
+            Some(error) => Err(error),
+            None => Err(MagError::Type(format!("no overload {name} matches call"))),
+        },
         _ => Err(MagError::Type(format!(
             "ambiguous overload {name} for call"
         ))),
@@ -2981,6 +3184,7 @@ fn compile_builtin_call(
                     CheckedExprKind::BindingRef(id),
                 )),
                 args: vec![key],
+                type_bindings: BTreeMap::new(),
             },
         ));
     }
@@ -3016,6 +3220,7 @@ fn compile_builtin_call(
                     CheckedExprKind::BindingRef(id),
                 )),
                 args: vec![target, key],
+                type_bindings: BTreeMap::new(),
             },
         ));
     }
@@ -3042,6 +3247,7 @@ fn compile_builtin_call(
                     CheckedExprKind::BindingRef(id),
                 )),
                 args: vec![data],
+                type_bindings: BTreeMap::new(),
             },
         ));
     }
@@ -3062,6 +3268,7 @@ fn compile_builtin_call(
                     CheckedExprKind::BindingRef(id),
                 )),
                 args,
+                type_bindings: BTreeMap::new(),
             },
         ));
     }
@@ -3089,6 +3296,7 @@ fn compile_builtin_call(
         CheckedExprKind::Call {
             callee: Box::new(checked(callee_type, CheckedExprKind::BindingRef(id))),
             args,
+            type_bindings: BTreeMap::new(),
         },
     ))
 }
@@ -3162,6 +3370,7 @@ fn compile_collection_builtin(
         CheckedExprKind::Call {
             callee: Box::new(checked(callee_type, CheckedExprKind::BindingRef(id))),
             args: vec![callback, collection],
+            type_bindings: BTreeMap::new(),
         },
     ))
 }
@@ -3198,6 +3407,7 @@ fn compile_fold_builtin(
         CheckedExprKind::Call {
             callee: Box::new(checked(callee_type, CheckedExprKind::BindingRef(id))),
             args: vec![callback, init, collection],
+            type_bindings: BTreeMap::new(),
         },
     ))
 }
@@ -3527,6 +3737,93 @@ fn instantiated_equality_requirements(env: &Env, candidate: &CheckedCandidate) -
         .iter()
         .map(|requirement| substitute(requirement, &substitutions))
         .collect()
+}
+
+type InferredTypeArgumentHole = (usize, String, String);
+type InstantiatedCallCandidate = (
+    MagType,
+    HashSet<String>,
+    Vec<InferredTypeArgumentHole>,
+    BTreeMap<String, MagType>,
+);
+
+fn instantiate_call_candidate(
+    env: &Env,
+    scopes: &[CheckedScope],
+    name: &str,
+    candidate: &CheckedCandidate,
+    explicit_type_args: Option<&[TypeArgument]>,
+) -> Result<InstantiatedCallCandidate, MagError> {
+    let Some(arguments) = explicit_type_args else {
+        let (ty, bindable) = instantiate_candidate(candidate);
+        let bindings = candidate
+            .generic_binders
+            .iter()
+            .enumerate()
+            .map(|(index, binder)| {
+                (
+                    binder.clone(),
+                    MagType::Var(format!("\0binding{}.{index}", candidate.id.0)),
+                )
+            })
+            .collect();
+        return Ok((ty, bindable, Vec::new(), bindings));
+    };
+    if arguments.len() != candidate.generic_binders.len() {
+        return Err(MagError::Type(format!(
+            "generic call {name} expects exactly {} type arguments, got {}",
+            candidate.generic_binders.len(),
+            arguments.len()
+        )));
+    }
+    let mut substitutions = HashMap::new();
+    let mut bindable = HashSet::new();
+    let mut holes = Vec::new();
+    for (index, (binder, argument)) in candidate.generic_binders.iter().zip(arguments).enumerate() {
+        let ty = match argument {
+            TypeArgument::Explicit(ty) => parse_checked_type(env, scopes, ty)?,
+            TypeArgument::Infer => {
+                let variable = format!("\0binding{}.{}", candidate.id.0, index);
+                bindable.insert(variable.clone());
+                holes.push((index, binder.clone(), variable.clone()));
+                MagType::Var(variable)
+            }
+        };
+        substitutions.insert(binder.clone(), ty);
+    }
+    let bindings = substitutions
+        .iter()
+        .map(|(name, ty)| (name.clone(), ty.clone()))
+        .collect();
+    Ok((
+        substitute(&candidate.ty, &substitutions),
+        bindable,
+        holes,
+        bindings,
+    ))
+}
+
+fn validate_inferred_holes(
+    name: &str,
+    holes: &[InferredTypeArgumentHole],
+    substitution: &HashMap<String, MagType>,
+) -> Result<(), MagError> {
+    let unresolved = holes
+        .iter()
+        .filter_map(|(index, binder, variable)| {
+            let resolved = substitute(&MagType::Var(variable.clone()), substitution);
+            (!internal_type_variables(&resolved).is_empty())
+                .then(|| format!("position {} ({binder})", index + 1))
+        })
+        .collect::<Vec<_>>();
+    if unresolved.is_empty() {
+        Ok(())
+    } else {
+        Err(MagError::Type(format!(
+            "cannot infer explicit type argument hole for {name} at {}",
+            unresolved.join(", ")
+        )))
+    }
 }
 
 fn instantiate_candidate(candidate: &CheckedCandidate) -> (MagType, HashSet<String>) {

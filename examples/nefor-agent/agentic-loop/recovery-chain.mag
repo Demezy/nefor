@@ -10,8 +10,8 @@ import nefor.graph.{}
 type BuildReport {summary: String}
 type ReviewReport {assessment: String}
 
-let start = nefor.graph.source("recovery-input", type_tag<nefor.contracts.Task>(), nefor.contracts.Task {prompt: "Implement the change"})
-let builder = nefor.agents.with_tools(agents.resolve_model, agents.mock, "builder", "Build the requested change.", ([]: List<String>), type_tag<nefor.contracts.Task>(), type_tag<BuildReport>(), 0)
-let reviewer = nefor.agents.with_tools(agents.resolve_model, agents.mock, "reviewer", "Review the builder result, including retained partial output.", ([]: List<String>), type_tag<core.types.Result<nefor.contracts.AgentError, BuildReport>>(), type_tag<ReviewReport>(), 0)
+let start = nefor.graph.source("recovery-input", nefor.contracts.Task {prompt: "Implement the change"})
+let builder = agents.agent<nefor.contracts.Task, BuildReport>("builder", agents.AgentConfig {model: agents.mock, system: "Build the requested change.", tools: ([]: List<String>), tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 0})
+let reviewer = agents.agent<core.types.Result<nefor.contracts.AgentError, BuildReport>, ReviewReport>("reviewer", agents.AgentConfig {model: agents.mock, system: "Review the builder result, including retained partial output.", tools: ([]: List<String>), tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 0})
 let result = nefor.graph.output("recovery-output", type_tag<core.types.Result<nefor.contracts.AgentError, ReviewReport>>())
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, builder), nefor.graph.edge(builder, reviewer), nefor.graph.edge(reviewer, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)

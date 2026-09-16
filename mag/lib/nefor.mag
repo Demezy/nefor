@@ -1,0 +1,856 @@
+// Ordinary, explicitly maintained facade over every direct authored export in
+// the shipped nefor.* modules. Collisions use stable module prefixes; the
+// shell-owned timeout_ms spelling is also the facade's authoring shorthand.
+import nefor.actors.{}
+
+import nefor.agents.{}
+
+import nefor.artifact.{}
+
+import nefor.contracts.{}
+
+import nefor.dynamic.{}
+
+import nefor.graph.{}
+
+import nefor.mag.{}
+
+import nefor.node.{}
+
+import nefor.path.{}
+
+import nefor.process.{}
+
+import nefor.result.{}
+
+import nefor.shell.{}
+
+import nefor.toolsets.{}
+
+import nefor.worktree.{}
+
+let adapter_factory = nefor.actors.adapter_factory
+
+let llm_factory = nefor.actors.llm_factory
+
+let structured_output_factory = nefor.actors.structured_output_factory
+
+let run_tool_factory = nefor.actors.run_tool_factory
+
+let tool_result_factory = nefor.actors.tool_result_factory
+
+let retry_gate_factory = nefor.actors.retry_gate_factory
+
+let human_factory = nefor.actors.human_factory
+
+type AdapterParams = nefor.actors.AdapterParams
+
+type OptionalReasoningEffort = nefor.actors.OptionalReasoningEffort
+
+type OptionalModelProfile = nefor.actors.OptionalModelProfile
+
+let reasoning_effort = nefor.actors.reasoning_effort
+
+let no_reasoning_effort = nefor.actors.no_reasoning_effort
+
+type ModelProfile = nefor.actors.ModelProfile
+
+let model_profile = nefor.actors.model_profile
+
+let no_model_profile = nefor.actors.no_model_profile
+
+let selected_model_profile = nefor.actors.selected_model_profile
+
+type ResolvedModel = nefor.actors.ResolvedModel
+
+type AuthoredModel = nefor.actors.AuthoredModel
+
+type LlmParams = nefor.actors.LlmParams
+
+type StructuredOutputParams = nefor.actors.StructuredOutputParams
+
+type RunToolParams = nefor.actors.RunToolParams
+
+type ToolResultParams = nefor.actors.ToolResultParams
+
+type RetryGateParams = nefor.actors.RetryGateParams
+
+type HumanParams = nefor.actors.HumanParams
+
+type AgentConfig<M> = nefor.actors.AgentConfig<M>
+
+type ApprovalConfig = nefor.actors.ApprovalConfig
+
+type RetryGateConfig = nefor.actors.RetryGateConfig
+
+let agent_with_schema = nefor.actors.agent_with_schema
+
+let agent = nefor.actors.agent
+
+let dynamic_agent = nefor.actors.dynamic_agent
+
+let read_only_tools = nefor.actors.read_only_tools
+
+let general_tools = nefor.actors.general_tools
+
+let retry_gate = nefor.actors.retry_gate
+
+let approval_gate = nefor.actors.approval_gate
+
+type AgentInputEnvelope = nefor.agents.AgentInputEnvelope
+
+type DynamicTemplateConfig<M> = nefor.agents.DynamicTemplateConfig<M>
+
+let template_port_from_stored = nefor.agents.template_port_from_stored
+
+let template_actor = nefor.agents.template_actor
+
+let actor_with_id = nefor.agents.actor_with_id
+
+let dynamic_template = nefor.agents.dynamic_template
+
+let emit_program = nefor.artifact.emit_program
+
+let compile_graph_value = nefor.artifact.compile_graph_value
+
+let compile = nefor.artifact.compile
+
+let output_id_taken = nefor.artifact.output_id_taken
+
+let fresh_output_id = nefor.artifact.fresh_output_id
+
+let compile_graph = nefor.artifact.compile_graph
+
+let artifact_delta = nefor.artifact.delta
+
+type Task = nefor.contracts.Task
+
+type ProviderInput = nefor.contracts.ProviderInput
+
+type TextAnswer = nefor.contracts.TextAnswer
+
+type ToolCall = nefor.contracts.ToolCall
+
+type ToolCalls = nefor.contracts.ToolCalls
+
+type ToolHandle = nefor.contracts.ToolHandle
+
+type ToolResult = nefor.contracts.ToolResult
+
+type Approved = nefor.contracts.Approved
+
+type Rejected = nefor.contracts.Rejected
+
+type ApprovalDecision = nefor.contracts.ApprovalDecision
+
+type Text = nefor.contracts.Text
+
+type OutputViolation = nefor.contracts.OutputViolation
+
+type OptionalIdentifier = nefor.contracts.OptionalIdentifier
+
+type ProviderError = nefor.contracts.ProviderError
+
+type OutputValidationError = nefor.contracts.OutputValidationError
+
+type AgentErrorReason = nefor.contracts.AgentErrorReason
+
+type AgentError = nefor.contracts.AgentError
+
+type ToolApprovalPolicy = nefor.contracts.ToolApprovalPolicy
+
+type Timeout = nefor.contracts.Timeout
+
+type ProcessExited = nefor.contracts.ProcessExited
+
+type ProcessSignaled = nefor.contracts.ProcessSignaled
+
+type ProcessTermination = nefor.contracts.ProcessTermination
+
+type ProcessResult = nefor.contracts.ProcessResult
+
+type ProcessFailure = nefor.contracts.ProcessFailure
+
+type RetryDecision<T> = nefor.contracts.RetryDecision<T>
+
+let no_identifier = nefor.contracts.no_identifier
+
+let identifier = nefor.contracts.identifier
+
+let no_tool_approval_policy = nefor.contracts.no_tool_approval_policy
+
+let tool_approval_policy = nefor.contracts.tool_approval_policy
+
+let no_timeout = nefor.contracts.no_timeout
+
+let contracts_timeout_ms = nefor.contracts.timeout_ms
+
+type DynamicList<T> = nefor.dynamic.DynamicList<T>
+
+type Indexed<T> = nefor.dynamic.Indexed<T>
+
+type DynamicCount = nefor.dynamic.DynamicCount
+
+type DynamicEvent<T> = nefor.dynamic.DynamicEvent<T>
+
+type DynamicParams = nefor.dynamic.DynamicParams
+
+type DynamicIndexParams = nefor.dynamic.DynamicIndexParams
+
+type DynamicContextParams = nefor.dynamic.DynamicContextParams
+
+type CaptureValueIdentity = nefor.dynamic.CaptureValueIdentity
+
+type CaptureIdentity = nefor.dynamic.CaptureIdentity
+
+type FieldIdentity = nefor.dynamic.FieldIdentity
+
+type DecimalIdentity = nefor.dynamic.DecimalIdentity
+
+type ConcatIdentity = nefor.dynamic.ConcatIdentity
+
+let dynamic_each_factory = nefor.dynamic.dynamic_each_factory
+
+let dynamic_output_factory = nefor.dynamic.dynamic_output_factory
+
+let dynamic_index_factory = nefor.dynamic.dynamic_index_factory
+
+let dynamic_all_factory = nefor.dynamic.dynamic_all_factory
+
+type ValueRef<T> = nefor.dynamic.ValueRef<T>
+
+type TemplateNode<I, O> = nefor.dynamic.TemplateNode<I, O>
+
+let expression_id = nefor.dynamic.expression_id
+
+type OrderedExpressions = nefor.dynamic.OrderedExpressions
+
+let stored_expression_id = nefor.dynamic.stored_expression_id
+
+let insert_expression = nefor.dynamic.insert_expression
+
+let unique_expressions = nefor.dynamic.unique_expressions
+
+let merge_expressions = nefor.dynamic.merge_expressions
+
+let merge_captures = nefor.dynamic.merge_captures
+
+let trigger_ref = nefor.dynamic.trigger_ref
+
+let capture_ref = nefor.dynamic.capture_ref
+
+let field_ref = nefor.dynamic.field_ref
+
+let int_to_decimal_string_ref = nefor.dynamic.int_to_decimal_string_ref
+
+let concat_strings_ref = nefor.dynamic.concat_strings_ref
+
+let local_actor_ref = nefor.dynamic.local_actor_ref
+
+let existing_actor_ref = nefor.dynamic.existing_actor_ref
+
+let template_port = nefor.dynamic.template_port
+
+let fixed_segment = nefor.dynamic.fixed_segment
+
+let bound_segment = nefor.dynamic.bound_segment
+
+let actor_id_relocation = nefor.dynamic.actor_id_relocation
+
+let actor_id_list_relocation = nefor.dynamic.actor_id_list_relocation
+
+let indexed_result = nefor.dynamic.indexed_result
+
+let context = nefor.dynamic.context
+
+let traverse_template = nefor.dynamic.traverse_template
+
+type Port<T> = nefor.graph.Port<T>
+
+type StoredPort = nefor.graph.StoredPort
+
+type Actor = nefor.graph.Actor
+
+type StoredRoute = nefor.graph.StoredRoute
+
+type Message = nefor.graph.Message
+
+type LogicalNode = nefor.graph.LogicalNode
+
+type StoredNode = nefor.graph.StoredNode
+
+type Node<I, O> = nefor.graph.Node<I, O>
+
+type Edge = nefor.graph.Edge
+
+type Graph = nefor.graph.Graph
+
+type GraphAnalysis = nefor.graph.GraphAnalysis
+
+type GraphProjection = nefor.graph.GraphProjection
+
+type LoweringAnalysis = nefor.graph.LoweringAnalysis
+
+type OrderedNodes = nefor.graph.OrderedNodes
+
+type OrderedStrings = nefor.graph.OrderedStrings
+
+type ReachabilityState = nefor.graph.ReachabilityState
+
+type IndexedPosition = nefor.graph.IndexedPosition
+
+type FactoryTypeScheme = nefor.graph.FactoryTypeScheme
+
+type FactoryContract = nefor.graph.FactoryContract
+
+type SourceParams<T> = nefor.graph.SourceParams<T>
+
+type OutputParams = nefor.graph.OutputParams
+
+type LowerDestination = nefor.graph.LowerDestination
+
+type AssignedRoute = nefor.graph.AssignedRoute
+
+type LowerActor = nefor.graph.LowerActor
+
+type LowerMessage = nefor.graph.LowerMessage
+
+type ResultBoundary = nefor.graph.ResultBoundary
+
+type RouteIdentity = nefor.graph.RouteIdentity
+
+type MessageContent<T> = nefor.graph.MessageContent<T>
+
+type EdgeIdentity = nefor.graph.EdgeIdentity
+
+type PortAddressIdentity = nefor.graph.PortAddressIdentity
+
+type RouteSourceDescription = nefor.graph.RouteSourceDescription
+
+type RouteHandlerDescription = nefor.graph.RouteHandlerDescription
+
+type OperationDescription = nefor.graph.OperationDescription
+
+type OutputCoverageDescription = nefor.graph.OutputCoverageDescription
+
+type InputCoverageDescription = nefor.graph.InputCoverageDescription
+
+type RouteAssignmentIdentity = nefor.graph.RouteAssignmentIdentity
+
+type RootValidationDescription = nefor.graph.RootValidationDescription
+
+type Modification = nefor.graph.Modification
+
+type Delta = nefor.graph.Delta
+
+type LowerDelta = nefor.graph.LowerDelta
+
+let port = nefor.graph.port
+
+let store_port = nefor.graph.store_port
+
+let actor = nefor.graph.actor
+
+let actor_ids = nefor.graph.actor_ids
+
+let logical_node = nefor.graph.logical_node
+
+let prefix_logical_node = nefor.graph.prefix_logical_node
+
+let prefix_logical_nodes = nefor.graph.prefix_logical_nodes
+
+let attach_logical_members = nefor.graph.attach_logical_members
+
+let node_with_operations_and_nodes = nefor.graph.node_with_operations_and_nodes
+
+let graph_node = nefor.graph.node
+
+let node_with_operations = nefor.graph.node_with_operations
+
+let with_operation = nefor.graph.with_operation
+
+let store_node = nefor.graph.store_node
+
+let stored_route = nefor.graph.stored_route
+
+let edge = nefor.graph.edge
+
+let stored_message = nefor.graph.stored_message
+
+let message = nefor.graph.message
+
+let typed_message = nefor.graph.typed_message
+
+let instantiate_delta_template = nefor.graph.instantiate_delta_template
+
+let operation_port = nefor.graph.operation_port
+
+let source_factory = nefor.graph.source_factory
+
+let source = nefor.graph.source
+
+let output_factory = nefor.graph.output_factory
+
+let output = nefor.graph.output
+
+let identity = nefor.graph.identity
+
+let output_for = nefor.graph.output_for
+
+let same_edge = nefor.graph.same_edge
+
+let edge_key = nefor.graph.edge_key
+
+let edge_in = nefor.graph.edge_in
+
+let same_edge_definition = nefor.graph.same_edge_definition
+
+let insert_edge = nefor.graph.insert_edge
+
+let insert_edge_definition = nefor.graph.insert_edge_definition
+
+let normalize_edges = nefor.graph.normalize_edges
+
+let serialized_equal = nefor.graph.serialized_equal
+
+let empty_graph = nefor.graph.empty_graph
+
+let graph_graph = nefor.graph.graph
+
+let add_edges = nefor.graph.add_edges
+
+let remove_edges = nefor.graph.remove_edges
+
+let port_address_key = nefor.graph.port_address_key
+
+let full_port_key = nefor.graph.full_port_key
+
+let node_id = nefor.graph.node_id
+
+let actor_id = nefor.graph.actor_id
+
+let route_id = nefor.graph.route_id
+
+let contract_id = nefor.graph.contract_id
+
+let nodes_from_edge = nefor.graph.nodes_from_edge
+
+let insert_ordered_node = nefor.graph.insert_ordered_node
+
+let ordered_nodes = nefor.graph.ordered_nodes
+
+let insert_ordered_string = nefor.graph.insert_ordered_string
+
+let ordered_strings = nefor.graph.ordered_strings
+
+let external_routes = nefor.graph.external_routes
+
+let graph_projection = nefor.graph.graph_projection
+
+let analyze_for_lowering = nefor.graph.analyze_for_lowering
+
+let analyze_graph = nefor.graph.analyze_graph
+
+let graph_nodes = nefor.graph.graph_nodes
+
+let graph_routes = nefor.graph.graph_routes
+
+let graph_actors = nefor.graph.graph_actors
+
+let unit_input = nefor.graph.unit_input
+
+let input_needs_bootstrap = nefor.graph.input_needs_bootstrap
+
+let bootstrap_message = nefor.graph.bootstrap_message
+
+let bootstrap_messages = nefor.graph.bootstrap_messages
+
+let graph_messages = nefor.graph.graph_messages
+
+let graph_operations = nefor.graph.graph_operations
+
+let graph_logical_nodes = nefor.graph.graph_logical_nodes
+
+let string_set = nefor.graph.string_set
+
+let logical_paths_valid = nefor.graph.logical_paths_valid
+
+let logical_members_valid = nefor.graph.logical_members_valid
+
+let role = nefor.graph.role
+
+let indexed_count = nefor.graph.indexed_count
+
+let incoming_count = nefor.graph.incoming_count
+
+let outgoing_count = nefor.graph.outgoing_count
+
+let root_shape_valid = nefor.graph.root_shape_valid
+
+let output_shape_valid = nefor.graph.output_shape_valid
+
+let enqueue_unvisited = nefor.graph.enqueue_unvisited
+
+let initial_reachability_state = nefor.graph.initial_reachability_state
+
+let next_forward_frontier = nefor.graph.next_forward_frontier
+
+let walk_forward = nefor.graph.walk_forward
+
+let forward_reachable = nefor.graph.forward_reachable
+
+let next_reverse_frontier = nefor.graph.next_reverse_frontier
+
+let walk_reverse = nefor.graph.walk_reverse
+
+let reverse_reachable = nefor.graph.reverse_reachable
+
+let factory_contract = nefor.graph.factory_contract
+
+let contains_string = nefor.graph.contains_string
+
+let all_strings_in = nefor.graph.all_strings_in
+
+let one_port = nefor.graph.one_port
+
+let empty_packed_map = nefor.graph.empty_packed_map
+
+let source_params_valid = nefor.graph.source_params_valid
+
+let source_value_valid = nefor.graph.source_value_valid
+
+let one_type_argument = nefor.graph.one_type_argument
+
+let concrete_source = nefor.graph.concrete_source
+
+let composite_source = nefor.graph.composite_source
+
+let concrete_output = nefor.graph.concrete_output
+
+let boundary_valid = nefor.graph.boundary_valid
+
+let actor_output_wires = nefor.graph.actor_output_wires
+
+let actor_contract_errors = nefor.graph.actor_contract_errors
+
+let has_node_conflicts = nefor.graph.has_node_conflicts
+
+let actor_ids_valid = nefor.graph.actor_ids_valid
+
+let same_port_address = nefor.graph.same_port_address
+
+let port_is_output = nefor.graph.port_is_output
+
+let port_is_input = nefor.graph.port_is_input
+
+let port_address = nefor.graph.port_address
+
+let describe_route_source = nefor.graph.describe_route_source
+
+let describe_message_source = nefor.graph.describe_message_source
+
+let describe_route_handler = nefor.graph.describe_route_handler
+
+let describe_operation_handler = nefor.graph.describe_operation_handler
+
+let actor_input_sources = nefor.graph.actor_input_sources
+
+let output_handlers = nefor.graph.output_handlers
+
+let actor_input_source_types = nefor.graph.actor_input_source_types
+
+let actor_input_coverage_valid = nefor.graph.actor_input_coverage_valid
+
+let route_handler_types = nefor.graph.route_handler_types
+
+let operation_handler_types = nefor.graph.operation_handler_types
+
+let terminal_output = nefor.graph.terminal_output
+
+let actor_output_coverage_valid = nefor.graph.actor_output_coverage_valid
+
+let actor_outputs_coverage_valid = nefor.graph.actor_outputs_coverage_valid
+
+let route_valid = nefor.graph.route_valid
+
+let validate_routes_stage = nefor.graph.validate_routes_stage
+
+let validate_contracts_stage = nefor.graph.validate_contracts_stage
+
+let validate_dead_stage = nefor.graph.validate_dead_stage
+
+let validate_reachable_stage = nefor.graph.validate_reachable_stage
+
+let validate_output_coverage_stage = nefor.graph.validate_output_coverage_stage
+
+let validate_input_coverage_stage = nefor.graph.validate_input_coverage_stage
+
+let validate_outputs_stage = nefor.graph.validate_outputs_stage
+
+let validate_roots_stage = nefor.graph.validate_roots_stage
+
+let validate_boundaries_stage = nefor.graph.validate_boundaries_stage
+
+let operation_id = nefor.graph.operation_id
+
+let operation_valid = nefor.graph.operation_valid
+
+let validate_unique_output_stage = nefor.graph.validate_unique_output_stage
+
+let validate_with_operations = nefor.graph.validate_with_operations
+
+let validate = nefor.graph.validate
+
+let zip_route_assignments = nefor.graph.zip_route_assignments
+
+let route_destination_descriptor_key = nefor.graph.route_destination_descriptor_key
+
+let assigned_route_id = nefor.graph.assigned_route_id
+
+let descriptor_assignment_index = nefor.graph.descriptor_assignment_index
+
+let assigned_input_bucket = nefor.graph.assigned_input_bucket
+
+let route_assignment_key = nefor.graph.route_assignment_key
+
+let assigned_route_key = nefor.graph.assigned_route_key
+
+let route_assignment_index = nefor.graph.route_assignment_index
+
+let reconstruct_assigned_routes = nefor.graph.reconstruct_assigned_routes
+
+let assigned_routes_from_indexes = nefor.graph.assigned_routes_from_indexes
+
+let assigned_analysis_routes = nefor.graph.assigned_analysis_routes
+
+let assigned_lowering_routes = nefor.graph.assigned_lowering_routes
+
+let assigned_routes = nefor.graph.assigned_routes
+
+let assigned_route_source_actor = nefor.graph.assigned_route_source_actor
+
+let assigned_route_source_wire = nefor.graph.assigned_route_source_wire
+
+let lower_destination = nefor.graph.lower_destination
+
+let actor_routes = nefor.graph.actor_routes
+
+let lower_actor_with_routes = nefor.graph.lower_actor_with_routes
+
+let lower_message = nefor.graph.lower_message
+
+let result_boundary = nefor.graph.result_boundary
+
+let actor_descriptors = nefor.graph.actor_descriptors
+
+let route_descriptors = nefor.graph.route_descriptors
+
+let message_descriptors = nefor.graph.message_descriptors
+
+let operation_descriptors = nefor.graph.operation_descriptors
+
+let program_descriptors = nefor.graph.program_descriptors
+
+let delta_descriptors = nefor.graph.delta_descriptors
+
+let lower_program = nefor.graph.lower_program
+
+let lower = nefor.graph.lower
+
+let graph_delta = nefor.graph.delta
+
+let node_delta = nefor.graph.node_delta
+
+let merge_delta = nefor.graph.merge_delta
+
+let delta_edge = nefor.graph.delta_edge
+
+let delta_route = nefor.graph.delta_route
+
+let delta_message = nefor.graph.delta_message
+
+let delta_message_front = nefor.graph.delta_message_front
+
+let lower_delta = nefor.graph.lower_delta
+
+type TypedCapture = nefor.mag.TypedCapture
+
+type Trigger = nefor.mag.Trigger
+
+type Capture = nefor.mag.Capture
+
+type Field = nefor.mag.Field
+
+type IntToDecimalString = nefor.mag.IntToDecimalString
+
+type ConcatStrings = nefor.mag.ConcatStrings
+
+type Expression = nefor.mag.Expression
+
+type LocalActorRef = nefor.mag.LocalActorRef
+
+type ExistingActorRef = nefor.mag.ExistingActorRef
+
+type ActorRef = nefor.mag.ActorRef
+
+type TemplatePort = nefor.mag.TemplatePort
+
+type ScalarParameterBinding = nefor.mag.ScalarParameterBinding
+
+type ActorReferenceRelocation = nefor.mag.ActorReferenceRelocation
+
+type TemplateActor = nefor.mag.TemplateActor
+
+type TemplateRoute = nefor.mag.TemplateRoute
+
+type TemplateMessage = nefor.mag.TemplateMessage
+
+type FixedPathSegment = nefor.mag.FixedPathSegment
+
+type BoundPathSegment = nefor.mag.BoundPathSegment
+
+type PathSegment = nefor.mag.PathSegment
+
+type TemplateLogicalNode = nefor.mag.TemplateLogicalNode
+
+type DeltaTemplate = nefor.mag.DeltaTemplate
+
+type InstantiateDeltaTemplate = nefor.mag.InstantiateDeltaTemplate
+
+type ProgramOperation = nefor.mag.ProgramOperation
+
+type Program<Initial> = nefor.mag.Program<Initial>
+
+type ProgramEnvelope<Initial> = nefor.mag.ProgramEnvelope<Initial>
+
+type DeltaEnvelope<D> = nefor.mag.DeltaEnvelope<D>
+
+let program_envelope = nefor.mag.program_envelope
+
+let delta_envelope = nefor.mag.delta_envelope
+
+let sequence_empty_factory = nefor.node.sequence_empty_factory
+
+let collector_factory = nefor.node.collector_factory
+
+let product_split_factory = nefor.node.product_split_factory
+
+let product_join_factory = nefor.node.product_join_factory
+
+let discard_factory = nefor.node.discard_factory
+
+type SequenceEmptyParams = nefor.node.SequenceEmptyParams
+
+type CollectorParams = nefor.node.CollectorParams
+
+type ProductSplitParams = nefor.node.ProductSplitParams
+
+type ProductJoinParams = nefor.node.ProductJoinParams
+
+type DiscardParams = nefor.node.DiscardParams
+
+let composite_id = nefor.node.composite_id
+
+let compound_nodes = nefor.node.compound_nodes
+
+let node_named = nefor.node.named
+
+let rename_path_root = nefor.node.rename_path_root
+
+let rename = nefor.node.rename
+
+let sequential_role = nefor.node.sequential_role
+
+let compose = nefor.node.compose
+
+let `>>>` = nefor.node.`>>>`
+
+let discard = nefor.node.discard
+
+let then = nefor.node.then
+
+let `*>` = nefor.node.`*>`
+
+let fanout = nefor.node.fanout
+
+let `&&&` = nefor.node.`&&&`
+
+let parallel = nefor.node.parallel
+
+let `***` = nefor.node.`***`
+
+let adt_unpack_factory = nefor.node.adt_unpack_factory
+
+let adt_pack_factory = nefor.node.adt_pack_factory
+
+type AdtUnpackParams = nefor.node.AdtUnpackParams
+
+type AdtPackParams = nefor.node.AdtPackParams
+
+let pack_adt = nefor.node.pack_adt
+
+let choose = nefor.node.choose
+
+let `+++` = nefor.node.`+++`
+
+let sequence_empty = nefor.node.sequence_empty
+
+let sequence_nonempty = nefor.node.sequence_nonempty
+
+let sequence = nefor.node.sequence
+
+let join = nefor.path.join
+
+let cwd = nefor.process.cwd
+
+let process_factory = nefor.process.factory
+
+type ProcessExecParams = nefor.process.ProcessExecParams
+
+type ProcessExecActorParams = nefor.process.ProcessExecActorParams
+
+let exec = nefor.process.exec
+
+let lift = nefor.result.lift
+
+let and_then = nefor.result.and_then
+
+let result_map = nefor.result.map
+
+let map_error = nefor.result.map_error
+
+let `>=>` = nefor.result.`>=>`
+
+let shell_timeout_ms = nefor.shell.timeout_ms
+
+let timeout_ms = nefor.shell.timeout_ms
+
+let shell_factory = nefor.shell.factory
+
+type ShellScriptParams = nefor.shell.ShellScriptParams
+
+type ShellScriptActorParams = nefor.shell.ShellScriptActorParams
+
+let script = nefor.shell.script
+
+let manifest = nefor.toolsets.manifest
+
+let read_only = nefor.toolsets.read_only
+
+let general = nefor.toolsets.general
+
+type CreateSpec = nefor.worktree.CreateSpec
+
+type OpenSpec = nefor.worktree.OpenSpec
+
+type Worktree = nefor.worktree.Worktree
+
+type WorktreeError = nefor.worktree.WorktreeError
+
+let create_factory = nefor.worktree.create_factory
+
+let open_factory = nefor.worktree.open_factory
+
+let create = nefor.worktree.create
+
+let open = nefor.worktree.open

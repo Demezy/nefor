@@ -40,7 +40,7 @@ type AgentErrorReason = ProviderError(ProviderError) | OutputValidationError(Out
 
 type AgentError {last_output: JsonValue, reason: AgentErrorReason}
 
-type DaPolicy {rules: Map<String, String>}
+type ToolApprovalPolicy {rules: Map<String, String>}
 
 type Timeout {present: Bool, milliseconds: Int}
 
@@ -60,9 +60,9 @@ let no_identifier: fn() -> OptionalIdentifier = | | => OptionalIdentifier {prese
 
 let identifier: fn(String) -> OptionalIdentifier = |value| => OptionalIdentifier {present: true, value: value}
 
-let no_da_policy: fn() -> DaPolicy = | | => DaPolicy {rules: (core.map.empty(type_tag<String>()): Map<String, String>)}
+let no_tool_approval_policy: fn() -> ToolApprovalPolicy = | | => ToolApprovalPolicy {rules: (core.map.empty(type_tag<String>()): Map<String, String>)}
 
-let da_policy: fn(Map<String, String>) -> DaPolicy = |rules| => DaPolicy {rules: rules}
+let tool_approval_policy: fn(Map<String, String>) -> ToolApprovalPolicy = |rules| => ToolApprovalPolicy {rules: rules}
 
 let no_timeout: fn() -> Timeout = | | => Timeout {present: false, milliseconds: 0}
 

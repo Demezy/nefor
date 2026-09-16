@@ -2,7 +2,7 @@ import nefor.artifact.{}
 import nefor.contracts.{}
 import nefor.graph.{}
 
-let left = nefor.graph.source("left", type_tag<nefor.contracts.Text>(), nefor.contracts.Text {content: "left"})
+let left = nefor.graph.source("left", nefor.contracts.Text {content: "left"})
 let input = nefor.graph.port("join", type_tag<(nefor.contracts.Text, nefor.contracts.Text)>(), "test.Value")
 let output = nefor.graph.port("join", type_tag<nefor.contracts.Text>(), "test.Value")
 let worker = nefor.graph.actor("join", "test.product", [type_evidence(type_tag<nefor.contracts.Text>())], nil, nefor.graph.store_port(input), [nefor.graph.store_port(output)])

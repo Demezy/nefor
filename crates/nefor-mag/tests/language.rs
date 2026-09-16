@@ -525,6 +525,120 @@ artifact {string: (identify(): TypeTag<String>), integer: (identify(): TypeTag<I
 }
 
 #[test]
+fn explicit_phantom_specializations_reach_evaluation_and_memoization() {
+    let root = workspace("explicit-phantom-specialization");
+    let artifact = compile(
+        r#"
+          let reveal<T>: fn() -> TypeDescriptor = | | => type_evidence(type_tag<T>())
+artifact {string: reveal<String>(), integer: reveal<Int>(), string_again: reveal<String>()}
+        "#,
+        &root,
+    )
+    .unwrap();
+
+    assert_eq!(artifact["string"]["name"], json!("String"));
+    assert_eq!(artifact["integer"]["name"], json!("Int"));
+    assert_eq!(artifact["string_again"], artifact["string"]);
+}
+
+#[test]
+fn explicit_generic_calls_support_exact_arguments_holes_imports_aliases_and_overloads() {
+    let root = workspace("explicit-generic-calls");
+    fs::create_dir_all(root.join("helpers")).unwrap();
+    fs::write(
+        root.join("helpers/generic.mag"),
+        r#"
+        type Entry<Key, Value> {key: Key, value: Value}
+let entry<Key, Value>: fn(Key, Value) -> Entry<Key, Value> = |key, value| => Entry<Key, Value> {key: key, value: value}
+        "#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("helpers/direct.mag"),
+        "let identity<T>: fn(T) -> T = |value| => value",
+    )
+    .unwrap();
+    fs::write(
+        root.join("main.mag"),
+        r#"
+        import helpers.generic as generic
+import helpers.direct.{}
+import helpers.generic.{entry as make}
+let select<T>: fn(T) -> T = |value| => value
+let select<Left, Right>: fn(Left, Right) -> Left = |left, right| => left
+let ignore<T>: fn(Int) -> Int = |value| => value
+let exact = generic.entry<String, Int>("exact", 1)
+let hole = make<String, _>("hole", 2)
+let inferred = make("inferred", 3)
+artifact {exact: exact, hole: hole, inferred: inferred, qualified: helpers.direct.identity<String>("qualified"), one: select<Int>(4), two: select<Int, String>(5, "ignored"), unused: ignore<String>(6)}
+        "#,
+    )
+    .unwrap();
+
+    let artifact = compile_file_with_inputs_and_module_roots(
+        &root,
+        "main.mag",
+        json!({}),
+        std::slice::from_ref(&root),
+    )
+    .unwrap();
+    assert_eq!(
+        artifact,
+        json!({
+            "exact": {"key": "exact", "value": 1},
+            "hole": {"key": "hole", "value": 2},
+            "inferred": {"key": "inferred", "value": 3},
+            "qualified": "qualified",
+            "one": 4,
+            "two": 5,
+            "unused": 6,
+        })
+    );
+}
+
+#[test]
+fn explicit_generic_calls_diagnose_arity_conflicts_and_unresolved_holes() {
+    let root = workspace("explicit-generic-call-errors");
+    let cases = [
+        (
+            "let entry<Key, Value>: fn(Key, Value) -> Value = |key, value| => value\nartifact(entry<String>(\"key\", 1))",
+            "generic call entry has no overload with exactly 1 type arguments; declared arities: 2",
+        ),
+        (
+            "let entry<Key, Value>: fn(Key, Value) -> Value = |key, value| => value\nartifact(entry<String, Int>(\"key\", \"wrong\"))",
+            "expected Int, got String",
+        ),
+        (
+            "let produce<T>: fn() -> T = | | => (\"value\": T)\nartifact(produce<_>())",
+            "cannot infer explicit type argument hole for produce at position 1 (T)",
+        ),
+        (
+            "let same<T>: fn(T, T) -> T = |left, right| => left\nartifact(same<_>(1, \"wrong\"))",
+            "conflicting inference for explicit type argument hole in same at position 1 (T)",
+        ),
+        (
+            "let produce<T>: fn() -> T = | | => (\"value\": T)\nlet produce<T>: fn(Int) -> T = |value| => (\"value\": T)\nartifact(produce<_>())",
+            "cannot infer explicit type argument hole for produce at position 1 (T)",
+        ),
+        (
+            "let same<T>: fn(T, T) -> T = |left, right| => left\nlet same<T>: fn(T, T, Unit) -> T = |left, right, ignored| => left\nartifact(same<_>(1, \"wrong\"))",
+            "conflicting inference for explicit type argument hole in same at position 1 (T)",
+        ),
+        (
+            "let plain: fn(Int) -> Int = |value| => value\nartifact(plain<Int>(1))",
+            "plain is not a generic function and does not accept explicit type arguments",
+        ),
+    ];
+    for (source, expected) in cases {
+        let error = compile(source, &root).unwrap_err().to_string();
+        assert!(
+            error.contains(expected),
+            "expected {expected:?} in {error:?}"
+        );
+    }
+}
+
+#[test]
 fn expected_function_types_resolve_value_function_name_overloads() {
     let root = workspace("higher-order-overload");
     let artifact = compile(
@@ -1375,11 +1489,12 @@ fn fallible_nodes_compose_with_kleisli_semantics() {
           import core.types.{}
 import nefor.graph.{}
 import nefor.node.{}
+import nefor.result.{}
 type Success {value: Int}
 type Failure {message: String}
 let fallible = nefor.graph.identity("fallible", type_tag<core.types.Result<Failure, Success>>())
-let continuation = nefor.node.lift_result("continuation-result", type_tag<Failure>(), nefor.graph.identity("continuation", type_tag<Success>()))
-let composed = nefor.node.`>=>`(fallible, continuation)
+let continuation = nefor.result.lift("continuation-result", type_tag<Failure>(), nefor.graph.identity("continuation", type_tag<Success>()))
+let composed = nefor.result.`>=>`(fallible, continuation)
 artifact(composed)
         "#,
     )
@@ -1395,10 +1510,14 @@ artifact(composed)
     )
     .unwrap();
 
-    assert_eq!(program["id"], "fallible>=>continuation-result");
-    assert!(program["actors"].as_array().is_some_and(|actors| actors
-        .iter()
-        .any(|actor| actor["id"] == "fallible>=>continuation-result.error")));
+    assert_eq!(
+        program["id"],
+        "nefor.node.composite:8:fallible3:>=>19:continuation-result"
+    );
+    assert!(program["actors"]
+        .as_array()
+        .is_some_and(|actors| actors.iter().any(|actor| actor["id"]
+            == "nefor.node.composite:8:fallible3:>=>19:continuation-result.error")));
     assert!(program["actors"].as_array().is_some_and(|actors| actors
         .iter()
         .any(|actor| actor["factory"] == "nefor.factory.adt-unpack")));

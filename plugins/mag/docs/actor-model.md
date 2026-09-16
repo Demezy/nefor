@@ -397,19 +397,17 @@ owned copy in the run context and applies it only while constructing `llm` and
 expansion, and actors added through `mag.apply` without rewriting their
 inventory specs or consulting live catalog state.
 
-`nefor.actors.agent` and `nefor.agents.dynamic_template_with_tools` accept one
-exhaustive resolver from a
+`nefor.actors.agent`, `nefor.actors.dynamic_agent`, and
+`nefor.agents.dynamic_template` accept one exhaustive resolver from a
 configuration's finite model vocabulary to `AuthoredModel`, the sum of a
 concrete `ResolvedModel` and `ModelProfile`. A concrete arm uses the snapshot's
 current model, preserving the current-only behavior. An arm may instead return
 `nefor.actors.model_profile("name")`; the compiled actor then carries that
 authored selector and lazy construction resolves it from the run snapshot's
-`profiles` map. The high-level `nefor.agents.with_tools` and
-`dynamic_with_tools` constructors use the same resolver contract, so a single
-configuration-owned `resolve_model` works in both direct and reusable graph
-forms. `resolved_agent` and the `with_resolved_tools` conveniences retain an
-explicit concrete-only boundary where useful. An absent profile fails actor
-construction before any provider invocation. Profile names and their concrete
+`profiles` map. A configuration can close over that resolver with its own
+concise generic constructors; Nefor does not define a second model vocabulary
+or concrete-only shortcut family. An absent profile fails actor construction
+before any provider invocation. Profile names and their concrete
 provider policy belong to the configuration; Nefor treats them as opaque exact
 keys.
 

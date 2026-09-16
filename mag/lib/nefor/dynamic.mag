@@ -70,7 +70,8 @@ let trigger_ref<T>: fn(TypeTag<T>) -> ValueRef<T> = |`type`| => {
   ValueRef<T> {id: "trigger", `type`: `type`, captures: (core.map.empty(type_tag<String>()): Map<String, nefor.mag.TypedCapture>), expressions: [named(nefor.mag.Expression, Trigger, nefor.mag.Trigger {id: "trigger", result_type: type_id(descriptor)})]}
 }
 
-let capture_ref<T>: fn(T, TypeTag<T>) -> ValueRef<T> = |value, `type`| => {
+let capture_ref<T>: fn(T) -> ValueRef<T> = |value| => {
+  let `type` = type_tag<T>()
   let descriptor = value_type_evidence(value, type_evidence(`type`))
   let capture_id = expression_id(CaptureValueIdentity {`type`: type_id(descriptor), value: pack(value)})
   let id = expression_id(CaptureIdentity {capture: capture_id, `type`: type_id(descriptor)})

@@ -1365,7 +1365,7 @@ let pass: fn(String) -> nefor.graph.Node<Int, Int> = |id| => {
 }
 fn linear_graph(size: usize, stage: &str) -> String {
     let mut source = graph_prelude();
-    source.push_str("let start = nefor.graph.source(\"start\", type_tag<Int>(), 1)\n");
+    source.push_str("let start = nefor.graph.source(\"start\", 1)\n");
     for index in 0..size {
         source.push_str(&format!("let n{index} = pass(\"n{index}\")\n"));
     }
@@ -1382,7 +1382,7 @@ fn fan_in_graph(size: usize, stage: &str) -> String {
     let mut source = graph_prelude();
     for index in 0..size {
         source.push_str(&format!(
-            "let s{index} = nefor.graph.source(\"s{index}\", type_tag<Int>(), {index})\n"
+            "let s{index} = nefor.graph.source(\"s{index}\", {index})\n"
         ));
     }
     let types = (0..size).map(|_| "Int").collect::<Vec<_>>().join(", ");
@@ -1398,7 +1398,7 @@ fn broad_frontier_graph(width: usize, depth: usize, stage: &str) -> (String, Str
     let mut source = graph_prelude();
     for chain in 0..width {
         source.push_str(&format!(
-            "let s{chain} = nefor.graph.source(\"s{chain}\", type_tag<Int>(), {chain})\n"
+            "let s{chain} = nefor.graph.source(\"s{chain}\", {chain})\n"
         ));
         for level in 0..depth {
             source.push_str(&format!(
@@ -1481,7 +1481,7 @@ fn stage_artifact(stage: &str) -> String {
 }
 fn invalid_conflict_graph() -> String {
     let mut source = graph_prelude();
-    source.push_str(r#"let start = nefor.graph.source("start", type_tag<Int>(), 1)
+    source.push_str(r#"let start = nefor.graph.source("start", 1)
 let left = pass("same")
 let right_input = nefor.graph.port("same", type_tag<Int>(), "nefor.graph.Value")
 let right_output = nefor.graph.port("same", type_tag<Int>(), "different")

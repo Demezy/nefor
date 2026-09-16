@@ -188,8 +188,8 @@ import nefor.artifact.{}
 import nefor.contracts.{}
 import nefor.graph.{}
 
-let start = nefor.actors.task_source("worker-task", "Answer the task.")
-let worker = nefor.agents.with_tools(agents.resolve_model, agents.standard, "worker", "Answer the task.", ["read_file"], type_tag<nefor.contracts.Task>(), type_tag<nefor.contracts.TextAnswer>(), 2)
+let start = nefor.graph.source("worker-task", nefor.contracts.Task {prompt: "Answer the task."})
+let worker = agents.agent<nefor.contracts.Task, nefor.contracts.TextAnswer>("worker", agents.AgentConfig {model: agents.standard, system: "Answer the task.", tools: ["read_file"], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2})
 let out = nefor.graph.output("worker-output", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, worker), nefor.graph.edge(worker, out)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
 ]=]
@@ -203,8 +203,8 @@ import nefor.artifact.{}
 import nefor.contracts.{}
 import nefor.graph.{}
 
-let start = nefor.actors.task_source("build-task", "Implement feature X.")
-let build = nefor.agents.with_tools(agents.resolve_model, agents.standard, "build", "Implement feature X.", ["read_file", "write_file"], type_tag<nefor.contracts.Task>(), type_tag<nefor.contracts.TextAnswer>(), 2)
+let start = nefor.graph.source("build-task", nefor.contracts.Task {prompt: "Implement feature X."})
+let build = agents.agent<nefor.contracts.Task, nefor.contracts.TextAnswer>("build", agents.AgentConfig {model: agents.standard, system: "Implement feature X.", tools: ["read_file", "write_file"], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2})
 let out = nefor.graph.output("build-output", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, build), nefor.graph.edge(build, out)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)
 ]=]

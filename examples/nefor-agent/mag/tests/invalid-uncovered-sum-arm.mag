@@ -6,7 +6,7 @@ type Left {value: Int}
 type Right {value: String}
 type Choice = Left(Left) | Right(Right)
 
-let start = nefor.graph.source("start", type_tag<Choice>(), named(Choice, Left, Left {value: 1}))
+let start = nefor.graph.source("start", named(Choice, Left, Left {value: 1}))
 let split_input = nefor.graph.port("split", type_tag<Choice>(), "nefor.adt.Value")
 let split_left = nefor.graph.port("split", type_tag<Left>(), "nefor.adt.First")
 let split_right = nefor.graph.port("split", type_tag<Right>(), "nefor.adt.Second")

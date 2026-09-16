@@ -42,6 +42,7 @@ pub enum CheckedExprKind {
     Call {
         callee: Box<CheckedExpr>,
         args: Vec<CheckedExpr>,
+        type_bindings: BTreeMap<String, MagType>,
     },
     Function(Arc<CheckedFn>),
     Ascribe {

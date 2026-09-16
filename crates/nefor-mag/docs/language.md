@@ -13,7 +13,7 @@ import nefor.actors        // open every direct export and permit nefor.actors.n
 import nefor.graph.{}      // qualified-only
 import nefor.node.{named, rename as rename_node} // selected local names
 import nefor.shell as shell // static namespace alias; only shell.name is permitted
-import nefor.actors.{task_source as _} // suppress an automatic spelling from an open import
+import nefor.actors.{agent_with_schema as _} // suppress an automatic spelling from an open import
 ```
 
 Imports compose order-independently. Suppressions affect only automatic names from a bare import, not explicit selectors. Namespace roots, namespace aliases, builtins, local declarations, and opened or selected exports share one collision domain; collisions are errors, never source-order choices. Use qualified-only imports, narrower selectors, selector or namespace renames, or `as _` to repair them. `import m.*` is not syntax.
@@ -86,6 +86,16 @@ let entry<K, V>: fn(K, V) -> Entry<K, V> = |key, value| =>
   Entry<K, V> {key: key, value: value}
 ```
 
+A call without angle brackets infers every generic argument as before. An
+immediate named call may instead supply the complete declared list, such as
+`entry<String, Int>("answer", 42)`, and may put `_` in any position that should
+still be inferred, such as `entry<String, _>("answer", 42)`. Once angle
+brackets are present, every declared generic position must appear: trailing
+omission is not shorthand. Explicit call arguments participate in overload
+selection and work through qualified module names and import aliases. The form
+specializes only that immediate call; it does not create a specialized
+function value.
+
 Ordinary word identifiers use snake_case without quoting. Backticks are reserved for names that genuinely require escaping, such as the qualified symbolic operator <code>nefor.node.`>>>`</code> or the reserved field name <code>`type`</code>.
 
 Symbolic operators may be used as ordinary values and called with parentheses, or declared with a fixity and applied infix. Infix application requires ASCII whitespace on both sides of a symbolic operator: write `left >>> right`, never `left>>>right`, `left >>>right`, or `(left)>>> right`. Spaces, tabs, and line breaks are separators; delimiters are not. A line may continue when a newline follows the operator (`left >>>` with `right` on the next line), while an operator at the start of the next line begins a new expression and is rejected. A `//` comment does not replace the required whitespace: write a space before the comment in `left >>> // explanation`. Alphabetic infix names use the same expression-separated position (`1 add 2`) without a separate symbolic-spacing check. This rule does not affect prefix calls such as `(>>>)(left, right)`, qualified calls such as <code>nefor.node.`>>>`(left, right)</code>, `->` in types, lambda delimiters, or signed numeric literals.
@@ -101,17 +111,8 @@ import nefor.artifact.{}
 import nefor.contracts.{}
 import nefor.graph.{}
 
-let start = nefor.actors.task_source("task", "Inspect the repository.")
-let worker = nefor.agents.with_tools(
-  agents.resolve_model,
-  agents.standard,
-  "worker",
-  "Inspect the repository and report the result.",
-  nefor.actors.read_only_tools,
-  type_tag<nefor.contracts.Task>(),
-  type_tag<nefor.contracts.TextAnswer>(),
-  2,
-)
+let start = nefor.graph.source("task", nefor.contracts.Task {prompt: "Inspect the repository."})
+let worker = agents.agent<nefor.contracts.Task, nefor.contracts.TextAnswer>("worker", agents.AgentConfig {model: agents.standard, system: "Inspect the repository and report the result.", tools: nefor.actors.read_only_tools, tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2})
 let result = nefor.graph.output(
   "result",
   type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>(),
@@ -150,9 +151,9 @@ I -> core.types.Result<nefor.contracts.AgentError, O>
 
 The whole result must be handled by a compatible downstream node or terminal output. `AgentError` preserves `last_output` and classifies the reason as provider failure or structured-output validation failure. The structured agent automatically asks the model to correct invalid output up to `max_corrections`; `0` means only the initial attempt. Exhaustion emits `AgentError` as data—it is not a successful `O` and should be routed deliberately.
 
-`tools` is the agent's capability boundary. Use <code>nefor.actors.read_only_tools</code>, <code>nefor.actors.general_tools</code>, or an explicit list. A tool call not in the invocation allowlist is rejected even if the tool exists globally. `da_policy` configures command policy; it does not replace the runtime approval gate.
+`tools` is the agent's capability boundary. Use <code>nefor.actors.read_only_tools</code>, <code>nefor.actors.general_tools</code>, or an explicit list. A tool call not in the invocation allowlist is rejected even if the tool exists globally. `tool_approval_policy` configures command policy; it does not replace the runtime approval gate.
 
-If a downstream reviewer can work with partial failed output, accept the full result as input. Otherwise bind the successful continuation with `nefor.node.>=>`, consume the full `Result`, or use an explicit Result unpack/repack node. `nefor.node.choose` is the corresponding branching combinator for `core.types.Either<A, B>`.
+If a downstream reviewer can work with partial failed output, accept the full result as input. Otherwise bind the successful continuation with <code>nefor.result.`>=>`</code>, consume the full `Result`, or use an explicit Result unpack/repack node. `nefor.node.choose` is the corresponding branching combinator for `core.types.Either<A, B>`.
 
 ## Edges, products, ADTs, and joins
 

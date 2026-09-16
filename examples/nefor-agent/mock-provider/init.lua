@@ -65,13 +65,13 @@ import nefor.graph.{}
 type OctopusSummary {content: String}
 type LighthouseSummary {content: String}
 
-let exact_model: fn(nefor.actors.ResolvedModel) -> nefor.actors.ResolvedModel = |model| => model
+let exact_model: fn(nefor.actors.ResolvedModel) -> nefor.actors.AuthoredModel = |model| => named(nefor.actors.AuthoredModel, ResolvedModel, model)
 let resolved_model_value = nefor.actors.ResolvedModel {provider: "mock-plugin", model: "mock-model", reasoning_effort: nefor.actors.reasoning_effort("medium")}
 
-let start = nefor.graph.source("task", type_tag<nefor.contracts.Task>(), nefor.contracts.Task {prompt: "<initial task text>"})
-let sx = nefor.actors.resolved_agent(exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {id: "sx", model: resolved_model_value, system: "Summarise octopuses in one sentence.", tools: [], da_policy: nefor.contracts.no_da_policy(), max_corrections: 2}, type_tag<nefor.contracts.Task>(), type_tag<OctopusSummary>())
-let sy = nefor.actors.resolved_agent(exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {id: "sy", model: resolved_model_value, system: "Summarise lighthouses in one sentence.", tools: [], da_policy: nefor.contracts.no_da_policy(), max_corrections: 2}, type_tag<core.types.Result<nefor.contracts.AgentError, OctopusSummary>>(), type_tag<LighthouseSummary>())
-let combine = nefor.actors.resolved_agent(exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {id: "combine", model: resolved_model_value, system: "Combine the two summaries above into one paragraph.", tools: [], da_policy: nefor.contracts.no_da_policy(), max_corrections: 2}, type_tag<core.types.Result<nefor.contracts.AgentError, LighthouseSummary>>(), type_tag<nefor.contracts.TextAnswer>())
+let start = nefor.graph.source("task", nefor.contracts.Task {prompt: "<initial task text>"})
+let sx = nefor.actors.agent("sx", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: resolved_model_value, system: "Summarise octopuses in one sentence.", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2}, type_tag<nefor.contracts.Task>(), type_tag<OctopusSummary>())
+let sy = nefor.actors.agent("sy", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: resolved_model_value, system: "Summarise lighthouses in one sentence.", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2}, type_tag<core.types.Result<nefor.contracts.AgentError, OctopusSummary>>(), type_tag<LighthouseSummary>())
+let combine = nefor.actors.agent("combine", exact_model, nefor.actors.AgentConfig<nefor.actors.ResolvedModel> {model: resolved_model_value, system: "Combine the two summaries above into one paragraph.", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2}, type_tag<core.types.Result<nefor.contracts.AgentError, LighthouseSummary>>(), type_tag<nefor.contracts.TextAnswer>())
 let result = nefor.graph.output("result", type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>())
 let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, sx), nefor.graph.edge(sx, sy), nefor.graph.edge(sy, combine), nefor.graph.edge(combine, result)])
 nefor.artifact.compile(topology)

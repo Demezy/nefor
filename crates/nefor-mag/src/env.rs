@@ -154,6 +154,7 @@ fn same_imported_value(env: &Env, left: &Value, right: &Value) -> bool {
 struct MemoCall {
     function: Arc<FnValue>,
     resolved_signature: Option<crate::types::MagType>,
+    type_bindings: BTreeMap<String, crate::types::MagType>,
     args: Vec<MemoArg>,
 }
 
@@ -162,6 +163,7 @@ impl PartialEq for MemoCall {
         Arc::ptr_eq(&self.function, &other.function)
             && self.args == other.args
             && self.resolved_signature == other.resolved_signature
+            && self.type_bindings == other.type_bindings
     }
 }
 
@@ -171,6 +173,7 @@ impl Hash for MemoCall {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Arc::as_ptr(&self.function).hash(state);
         self.resolved_signature.hash(state);
+        self.type_bindings.hash(state);
         self.args.hash(state);
     }
 }
@@ -1256,6 +1259,7 @@ impl Env {
         &self,
         function: &Arc<FnValue>,
         resolved_signature: Option<&crate::types::MagType>,
+        type_bindings: &BTreeMap<String, crate::types::MagType>,
         args: &[Value],
     ) -> Option<Value> {
         let args = args.iter().map(MemoArg::new).collect::<Option<Vec<_>>>()?;
@@ -1267,6 +1271,7 @@ impl Env {
             .get(&MemoCall {
                 function: function.clone(),
                 resolved_signature: resolved_signature.cloned(),
+                type_bindings: type_bindings.clone(),
                 args,
             })
             .cloned();
@@ -1290,6 +1295,7 @@ impl Env {
         &self,
         function: &Arc<FnValue>,
         resolved_signature: Option<&crate::types::MagType>,
+        type_bindings: &BTreeMap<String, crate::types::MagType>,
         args: &[Value],
         result: &Value,
     ) {
@@ -1310,6 +1316,7 @@ impl Env {
             MemoCall {
                 function: function.clone(),
                 resolved_signature: resolved_signature.cloned(),
+                type_bindings: type_bindings.clone(),
                 args,
             },
             result.clone(),

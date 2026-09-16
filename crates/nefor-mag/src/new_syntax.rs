@@ -764,26 +764,58 @@ impl<'a> Parser<'a> {
                 let authored::Expr::Name(owner) = value else {
                     return Err(self.here("generic application requires a callable name"));
                 };
-                let arguments = self.parse_type_arguments()?;
-                let owner_type = authored::Type::Apply {
-                    constructor: owner.clone(),
-                    arguments,
-                };
-                if self.eat_punct('.') {
-                    let constructor = self.expect_name()?;
-                    let marker = format!("#constructor{}", self.specialized_constructors.len());
-                    self.specialized_constructors
-                        .insert(marker.clone(), (owner_type, constructor));
-                    value = authored::Expr::Name(marker);
-                } else if self.allow_brace_construct && self.eat_punct('{') {
-                    value = authored::Expr::Ascribe {
-                        target: owner_type,
-                        value: Box::new(authored::Expr::Fields(self.parse_value_fields('}')?)),
+                let arguments = self.parse_call_type_arguments()?;
+                if self.eat_punct('(') {
+                    let args = self.parse_arguments()?;
+                    if args
+                        .iter()
+                        .any(|argument| matches!(argument, CallArgument::Named(_, _)))
+                    {
+                        return Err(self.here(
+                            "named arguments are only valid for named constructor payloads",
+                        ));
+                    }
+                    value = authored::Expr::Call {
+                        callee: Box::new(authored::Expr::Name(owner)),
+                        type_args: Some(arguments),
+                        args: args
+                            .into_iter()
+                            .map(|argument| match argument {
+                                CallArgument::Positional(value) => value,
+                                CallArgument::Named(_, _) => unreachable!(),
+                            })
+                            .collect(),
                     };
                 } else {
-                    return Err(self.here(
-                        "explicit type arguments on ordinary function calls are unsupported; generic function arguments are inferred",
-                    ));
+                    let concrete = arguments
+                        .into_iter()
+                        .map(|argument| match argument {
+                            authored::TypeArgument::Explicit(ty) => Ok(ty),
+                            authored::TypeArgument::Infer => Err(self.here(
+                                "'_' inference holes are only valid in explicit function calls",
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let owner_type = authored::Type::Apply {
+                        constructor: owner.clone(),
+                        arguments: concrete,
+                    };
+                    if self.eat_punct('.') {
+                        let constructor = self.expect_name()?;
+                        let marker = format!("#constructor{}", self.specialized_constructors.len());
+                        self.specialized_constructors
+                            .insert(marker.clone(), (owner_type, constructor));
+                        value = authored::Expr::Name(marker);
+                    } else if self.allow_brace_construct && self.eat_punct('{') {
+                        value = authored::Expr::Ascribe {
+                            target: owner_type,
+                            value: Box::new(authored::Expr::Fields(self.parse_value_fields('}')?)),
+                        };
+                    } else {
+                        return Err(self.here(
+                            "explicit type arguments must be followed by a call or constructor",
+                        ));
+                    }
                 }
             } else if self.eat_punct('(') {
                 let args = self.parse_arguments()?;
@@ -792,6 +824,7 @@ impl<'a> Parser<'a> {
                 let field = self.expect_name()?;
                 value = authored::Expr::Call {
                     callee: Box::new(authored::Expr::Name("get".into())),
+                    type_args: None,
                     args: vec![value, authored::Expr::Str(field)],
                 };
             } else if self.allow_brace_construct && self.at_punct('{') {
@@ -804,6 +837,7 @@ impl<'a> Parser<'a> {
                 value = if owner == "artifact" {
                     authored::Expr::Call {
                         callee: Box::new(authored::Expr::Name(owner)),
+                        type_args: None,
                         args: vec![authored::Expr::Fields(fields)],
                     }
                 } else if let Some((owner_prefix, constructor)) = owner.rsplit_once('.') {
@@ -896,7 +930,11 @@ impl<'a> Parser<'a> {
                     self.peek_n(1).kind,
                     TokenKind::Ident(_) | TokenKind::Operator(_)
                 )
-                && matches!(self.peek_n(2).kind, TokenKind::Punct('(' | '{')));
+                && (matches!(self.peek_n(2).kind, TokenKind::Punct('(' | '{'))
+                    || matches!(
+                        self.peek_n(2).kind,
+                        TokenKind::Operator(ref operator) if operator == "<"
+                    )));
         if !self.bound_names.contains(&word)
             && self.at_punct('.')
             && (!imported_alias || alias_qualifies)
@@ -1038,6 +1076,7 @@ impl<'a> Parser<'a> {
                 result: result_type,
                 body,
             })),
+            type_args: None,
             args: Vec::new(),
         })
     }
@@ -1363,6 +1402,7 @@ impl<'a> Parser<'a> {
         }
         Ok(authored::Expr::Call {
             callee: Box::new(callee),
+            type_args: None,
             args: args
                 .into_iter()
                 .map(|arg| match arg {
@@ -1454,6 +1494,28 @@ impl<'a> Parser<'a> {
         } else {
             Ok(authored::Type::Name(name))
         }
+    }
+
+    fn parse_call_type_arguments(&mut self) -> Result<Vec<authored::TypeArgument>, MagError> {
+        let mut values = Vec::new();
+        self.newlines();
+        if self.eat_operator(">") {
+            return Ok(values);
+        }
+        loop {
+            if self.at_word("_") {
+                self.bump();
+                values.push(authored::TypeArgument::Infer);
+            } else {
+                values.push(authored::TypeArgument::Explicit(self.parse_type()?));
+            }
+            if self.eat_operator(">") {
+                break;
+            }
+            self.expect_punct(',')?;
+            self.newlines();
+        }
+        Ok(values)
     }
 
     fn parse_type_arguments(&mut self) -> Result<Vec<authored::Type>, MagError> {
@@ -1983,8 +2045,10 @@ fn reduce_operator(values: &mut Vec<authored::Expr>, operator: String) -> Option
     values.push(authored::Expr::Call {
         callee: Box::new(authored::Expr::Call {
             callee: Box::new(authored::Expr::Name(operator)),
+            type_args: None,
             args: vec![left],
         }),
+        type_args: None,
         args: vec![right],
     });
     Some(())

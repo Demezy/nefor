@@ -762,7 +762,7 @@ fn worktree_program(operation: &str, repository: &str, path: &str, branch: &str)
 import nefor.graph.{{}}
 import nefor.worktree.{{}}
 
-let start = nefor.graph.source("start", type_tag<Unit>(), nil)
+let start = nefor.graph.source("start", nil)
 let workspace = {constructor}
 let result = nefor.graph.output_for("result", workspace)
 
@@ -927,8 +927,8 @@ import nefor.graph.{}
 import nefor.node.{}
 
 let draft: nefor.contracts.TextAnswer = ("draft": nefor.contracts.TextAnswer)
-let subject = nefor.graph.source("subject", type_tag<nefor.contracts.TextAnswer>(), draft)
-let approval = nefor.actors.approval_gate(nefor.actors.ApprovalConfig {id: "approval", prompt: "Ship it?"})
+let subject = nefor.graph.source("subject", draft)
+let approval = nefor.actors.approval_gate("approval", nefor.actors.ApprovalConfig {prompt: "Ship it?"})
 let flow = nefor.node.`>>>`(subject, approval)
 let result = nefor.graph.output_for("result", flow)
 

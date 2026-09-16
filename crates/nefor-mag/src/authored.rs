@@ -86,6 +86,7 @@ pub enum Expr {
     },
     Call {
         callee: Box<Expr>,
+        type_args: Option<Vec<TypeArgument>>,
         args: Vec<Expr>,
     },
     Function(Function),
@@ -99,6 +100,12 @@ pub enum Expr {
     },
     TypeTag(Type),
     Invalid(AuthoringError),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeArgument {
+    Explicit(Type),
+    Infer,
 }
 
 #[derive(Debug, Clone, PartialEq)]

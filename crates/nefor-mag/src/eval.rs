@@ -426,12 +426,20 @@ fn eval_checked_expr(env: &mut Env, expression: &CheckedExpr) -> Result<Value, M
             env.pop_scope();
             result
         }
-        CheckedExprKind::Call { callee, args } => {
+        CheckedExprKind::Call {
+            callee,
+            args,
+            type_bindings,
+        } => {
             let function = eval_checked_expr(env, callee)?;
             let args = args
                 .iter()
                 .map(|argument| eval_checked_expr(env, argument))
                 .collect::<Result<Vec<_>, _>>()?;
+            let type_bindings = type_bindings
+                .iter()
+                .map(|(name, ty)| (name.clone(), runtime_type(env, ty)))
+                .collect::<BTreeMap<_, _>>();
             let _call_binding = match &callee.kind {
                 CheckedExprKind::BindingRef(id) if force_stack_active() => {
                     Some(enter_call_binding(env, *id)?)
@@ -439,7 +447,7 @@ fn eval_checked_expr(env: &mut Env, expression: &CheckedExpr) -> Result<Value, M
                 _ => None,
             };
             let resolved_signature = runtime_type(env, &callee.ty);
-            let value = apply_resolved(env, &function, &args, &resolved_signature)?;
+            let value = apply_resolved(env, &function, &args, &resolved_signature, &type_bindings)?;
             let ty = runtime_type(env, &expression.ty);
             if matches!(ty, MagType::Map(_, _) | MagType::Set(_)) {
                 Ok(Value::Typed(std::sync::Arc::new(value), ty))
@@ -719,7 +727,7 @@ fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError
 }
 
 fn apply(caller: &Env, f: &Value, args: &[Value]) -> Result<Value, MagError> {
-    apply_with_signature(caller, f, args, None)
+    apply_with_signature(caller, f, args, None, &BTreeMap::new())
 }
 
 fn apply_resolved(
@@ -727,8 +735,9 @@ fn apply_resolved(
     f: &Value,
     args: &[Value],
     resolved_signature: &MagType,
+    type_bindings: &BTreeMap<String, MagType>,
 ) -> Result<Value, MagError> {
-    apply_with_signature(caller, f, args, Some(resolved_signature))
+    apply_with_signature(caller, f, args, Some(resolved_signature), type_bindings)
 }
 
 fn apply_with_signature(
@@ -736,6 +745,7 @@ fn apply_with_signature(
     f: &Value,
     args: &[Value],
     resolved_signature: Option<&MagType>,
+    type_bindings: &BTreeMap<String, MagType>,
 ) -> Result<Value, MagError> {
     caller.profile_counters(|counters| {
         counters.function_calls = counters.function_calls.saturating_add(1);
@@ -759,14 +769,22 @@ fn apply_with_signature(
                 });
             }
             let (expected_return, type_bindings) = match resolved_signature {
-                Some(signature) => crate::checker::check_resolved_call(caller, fun, signature),
+                Some(signature) => {
+                    crate::checker::check_resolved_call(caller, fun, signature, type_bindings)
+                }
                 None => crate::checker::check_call(caller, fun, args),
             }
             .map_err(|error| match &fun.name {
                 Some(name) => MagError::Type(format!("calling {name}: {error}")),
                 None => error,
             })?;
-            if let Some(result) = caller.memoized_call(fun, resolved_signature, args) {
+            let memo_type_bindings = type_bindings
+                .iter()
+                .map(|(name, ty)| (name.clone(), ty.clone()))
+                .collect::<BTreeMap<_, _>>();
+            if let Some(result) =
+                caller.memoized_call(fun, resolved_signature, &memo_type_bindings, args)
+            {
                 return Ok(result);
             }
             caller.profile_counters(|counters| {
@@ -798,7 +816,13 @@ fn apply_with_signature(
             drop(env);
             match evaluated {
                 Ok(result) => {
-                    caller.memoize_call(fun, resolved_signature, args, &result);
+                    caller.memoize_call(
+                        fun,
+                        resolved_signature,
+                        &memo_type_bindings,
+                        args,
+                        &result,
+                    );
                     if caller.frame_collection_due() {
                         let mut roots = Vec::with_capacity(args.len() + 2);
                         roots.push(Value::Fn(fun.clone()));

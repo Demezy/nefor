@@ -149,7 +149,8 @@ let operation_port: fn(nefor.mag.ProgramOperation) -> StoredPort = |value| => St
 
 let source_factory = "nefor.factory.source"
 
-let source<T>: fn(String, TypeTag<T>, T) -> Node<Unit, T> = |id, `type`, value| => {
+let source<T>: fn(String, T) -> Node<Unit, T> = |id, value| => {
+  let `type` = type_tag<T>()
   let input = port(id, type_tag<Unit>(), "mag.Unit")
   let output = port(id, `type`, "nefor.graph.Value")
   let source_actor = actor(id, source_factory, [type_evidence(`type`)], SourceParams<T> {value: value, value_type: value_type_id(value, `type`)}, store_port(input), [store_port(output)])

@@ -218,6 +218,7 @@ fn lower_list(items: &[ast::Expr]) -> authored::Expr {
         Some("fn") => lower_function(items),
         _ => authored::Expr::Call {
             callee: Box::new(lower_expr(&items[0])),
+            type_args: None,
             args: items[1..].iter().map(lower_expr).collect(),
         },
     }
