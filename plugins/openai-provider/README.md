@@ -33,6 +33,17 @@ The provider consumes `tool.register`, sends model `tool_calls` to the registere
 
 `<prefix>.interrupt` cancels an in-flight HTTP request via a `CancellationToken`. The legacy default-chat path maps `chat.interrupt` -> `<prefix>.interrupt`, so an ESC keypress in the chat surface aborts the active turn. `<prefix>.reset` clears legacy default-chat history.
 
+## Native reasoning continuation
+
+Completed reasoning is carried in `provider_context` separately from display text.
+Structured `reasoning_details` take precedence over the plaintext `reasoning` and
+`reasoning_content` aliases. During streaming, adjacent text or summary fragments
+with compatible metadata are concatenated without separators into one logical
+block. Type changes, explicit identity/index changes, and conflicting metadata
+preserve separate blocks; later fragments can supply missing metadata such as a
+signature. Encrypted and unknown detail types stay opaque, ordered, and intact.
+Completed arrays restored from history are not reinterpreted as streaming deltas.
+
 ## What it doesn't do
 
 - **Vision / images** -- this provider does not construct multimodal OpenAI message content. Image media returned by tools is converted to an explicit "model does not support image input" error in the text-only flow.

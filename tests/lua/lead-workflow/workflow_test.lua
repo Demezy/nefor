@@ -148,7 +148,7 @@ do
   assert_eq(preview_schema.parameters.required[1], "file", "preview requires only file")
   assert_eq(preview_schema.parameters.properties.content, nil, "preview cannot write source")
   assert_true(type(apply_schema.parameters.properties.content) == "table", "apply may create source")
-  assert_true(type(apply_schema.parameters.properties.run_id) == "table", "apply may target a live run")
+  assert_eq(apply_schema.parameters.properties.run_id, nil, "apply exposes only fresh workflow dispatch")
   assert_true(await_schema ~= nil, "the mag-await schema is advertised")
   assert_true(graph_status_schema ~= nil, "the mag-status schema is advertised")
   assert_true(graph_status_schema.description:find("One-shot snapshot", 1, true) ~= nil
@@ -1272,167 +1272,34 @@ do
     "compile failure carries the compiler message; got " .. json.encode(_test.calls()))
 end
 
--- mag apply compiles a Delta artifact, resolves params for newly spawned
--- actors, and waits for the kernel's correlated atomic-application ack.
-for _, cache_status in ipairs({ "cold", "miss", "hit" }) do
+-- A run_id is rejected even when it names a valid live run. A rejected call
+-- neither creates source nor dispatches work; removing the field can recover
+-- through the normal one-call source-and-execution path.
+for _, run_id in ipairs({ "", "orient", "mag-run-live-apply" }) do
   fresh()
-  if cache_status ~= "cold" then
-    lw.configure { project_build = { cache_dir = "/persistent/cache" } }
-  end
-  write_mag_file("firing-mag-write-apply", "live-delta.mag", "artifact(nil)")
-  local run_id = "mag-run-live-apply"
-  lw._internals.register_active_run(run_id, {}, "terminal", "dispatch-live",
+  lw._internals.register_active_run("mag-run-live-apply", {}, "terminal", "dispatch-live",
     "live", sessions.current_id())
   _test.calls_clear()
+  invoke_tool("apply-with-run-id", "mag-apply", {
+    file = "fresh-only.mag", content = READ_ONLY_MAG, run_id = run_id,
+  })
+  local rejected = tool_result("apply-with-run-id")
+  assert_true(rejected and rejected.body.error:find("run_id is not supported", 1, true) ~= nil,
+    "apply rejects every supplied run_id")
+  assert_true(rejected.body.error:find("Omit run_id", 1, true) ~= nil,
+    "rejection explains how to start the workflow")
+  assert_eq(find_call(decode_calls(), function(c)
+    return c.body.kind == "mag.load" or c.body.kind == "mag.build"
+      or c.body.kind == "mag.execute" or c.body.kind == "mag.apply"
+  end), nil, "unsupported live modification cannot compile or dispatch work")
 
-  invoke_tool("firing-mag-apply", "mag-apply", {
-    file = "live-delta.mag",
-    run_id = run_id,
+  invoke_tool("apply-without-run-id", "mag-apply", {
+    file = "fresh-only.mag", content = READ_ONLY_MAG,
   })
-  local load = find_call(decode_calls(), function(c)
-    return c.body.kind == (cache_status == "cold" and "mag.load" or "mag.build")
-      and c.target == "mag"
-  end)
-  assert_true(load ~= nil, "mag apply uses its explicit compilation policy")
-  assert_eq(tool_result("firing-mag-apply"), nil,
-    "mag apply does not settle before compilation and kernel acknowledgement")
-
-  local delta = {
-    actors = {
-      {
-        id = "patch.llm",
-        factory = "nefor.factory.llm",
-        type_arguments = {},
-        params = { ["$mag"] = "packed-value", value = {
-          provider = "chatgpt",
-          model = "gpt-5.6-sol",
-          reasoning_effort = "medium",
-          system = "Continue the live run.",
-        } },
-        routes = {},
-      },
-    },
-    messages = {},
-    nodes = {},
-    kills = {},
-    types = {},
-  }
-  feed("mag", {
-    kind = "mag.loaded",
-    in_reply_to = load.body.id,
-    hash = "sha256:delta",
-    build = cache_status ~= "cold" and { status = cache_status } or nil,
-    factories = KERNEL_FACTORIES,
-    factory_contracts = factory_contracts(KERNEL_FACTORIES),
-    artifact = { format = "nefor.mag", version = 2, kind = "delta", delta = delta },
-  })
-
-  local apply = find_call(decode_calls(), function(c)
-    return c.body.kind == "mag.apply" and c.target == "mag"
-  end)
-  assert_true(apply ~= nil, "a valid delta is submitted as mag.apply")
-  assert_eq(apply.body.run_id, run_id, "mag apply targets the explicitly named live run")
-  assert_eq(apply.body.source, "lead-workflow.mag.apply",
-    "mag apply declares its control-plane source")
-  assert_eq(apply.body.artifact.delta.actors[1].id, "patch.llm",
-    "mag apply submits the compiler-produced actors")
-  assert_eq(#apply.body.artifact.delta.messages, 0,
-    "mag apply submits the compiler-produced messages")
-  assert_eq(#apply.body.artifact.delta.kills, 0,
-    "mag apply submits the compiler-produced kills")
-  assert_eq(apply.body.params_overlay, nil,
-    "apply emits no parameter overlay without ambient system context")
-  assert_eq(apply.body.model_snapshot, nil,
-    "live apply cannot replace the target run model snapshot")
-  assert_eq(model_snapshot_resolutions, 0,
-    "live apply does not recompute the target run model snapshot")
-  assert_eq(apply.body.artifact.delta.actors[1].params.value.provider, "chatgpt",
-    "apply preserves the compiler-produced provider")
-  assert_eq(apply.body.artifact.delta.actors[1].params.value.model, "gpt-5.6-sol",
-    "apply preserves the compiler-produced model")
-  assert_eq(tool_result("firing-mag-apply"), nil,
-    "mag apply remains pending until the kernel acknowledgement")
-
-  feed("mag", {
-    kind = "mag.applied",
-    in_reply_to = apply.body.id,
-    ok = true,
-  })
-  local reply = tool_result("firing-mag-apply")
-  assert_true(reply ~= nil and reply.body.output ~= nil,
-    "the correlated mag.applied acknowledgement settles the tool")
-  assert_eq(reply.body.output.status, "applied", "mag apply reports applied status")
-  assert_eq(reply.body.output.run_id, run_id, "mag apply preserves the target run id")
-  assert_eq(reply.body.output.hash, "sha256:delta", "mag apply preserves the compiled hash")
-end
-
--- A targeted apply rejects fresh-run-only artifact fields before anything
--- reaches the kernel. Omitting run_id is the fresh-run form tested above.
-do
-  fresh()
-  write_mag_file("firing-mag-write-apply-invalid", "invalid-delta.mag", "artifact(nil)")
-  local run_id = "mag-run-live-invalid-apply"
-  lw._internals.register_active_run(run_id, {}, "terminal", "dispatch-live-invalid",
-    "live-invalid", sessions.current_id())
-  _test.calls_clear()
-  invoke_tool("firing-mag-apply-result", "mag-apply", {
-    file = "invalid-delta.mag",
-    run_id = run_id,
-  })
-  local load = find_call(decode_calls(), function(c) return c.body.kind == "mag.load" end)
-  feed("mag", {
-    kind = "mag.loaded",
-    in_reply_to = load.body.id,
-    hash = "sha256:not-a-delta",
-    factories = KERNEL_FACTORIES,
-    factory_contracts = factory_contracts(KERNEL_FACTORIES),
-    artifact = { format = "nefor.mag", version = 2, kind = "program", program = {
-      initial = { types = {}, actors = {}, messages = {}, nodes = {}, kills = {},
-        result = { from = { actor = "existing", type = "Result", wire = "Result" } } },
-      operations = {},
-    } },
-  })
-  local invalid = tool_result("firing-mag-apply-result")
-  assert_true(invalid ~= nil
-      and invalid.body.error:find("requires a delta envelope", 1, true) ~= nil,
-    "mag apply rejects a fresh-run result boundary")
-  assert_eq(find_call(decode_calls(), function(c) return c.body.kind == "mag.apply" end), nil,
-    "invalid delta never reaches the kernel")
-end
-
--- A kernel rejection settles the exact pending apply rather than leaving the
--- tool invocation hanging.
-do
-  fresh()
-  write_mag_file("firing-mag-write-apply-reject", "rejected-delta.mag", "artifact(nil)")
-  local run_id = "mag-run-live-rejected-apply"
-  lw._internals.register_active_run(run_id, {}, "terminal", "dispatch-live-rejected",
-    "live-rejected", sessions.current_id())
-  _test.calls_clear()
-  invoke_tool("firing-mag-apply-reject", "mag-apply", {
-    file = "rejected-delta.mag", run_id = run_id,
-  })
-  local load = find_call(decode_calls(), function(c) return c.body.kind == "mag.load" end)
-  feed("mag", {
-    kind = "mag.loaded",
-    in_reply_to = load.body.id,
-    hash = "sha256:rejected-delta",
-    factories = KERNEL_FACTORIES,
-    factory_contracts = factory_contracts(KERNEL_FACTORIES),
-    artifact = { format = "nefor.mag", version = 2, kind = "delta",
-      delta = { actors = {}, messages = {}, nodes = {}, kills = {}, types = {} } },
-  })
-  local apply = find_call(decode_calls(), function(c) return c.body.kind == "mag.apply" end)
-  feed("mag", {
-    kind = "mag.applied",
-    in_reply_to = apply.body.id,
-    ok = false,
-    error = "actor id was already used",
-  })
-  local rejected = tool_result("firing-mag-apply-reject")
-  assert_true(rejected ~= nil
-      and rejected.body.error:find("actor id was already used", 1, true) ~= nil,
-    "kernel apply rejection is returned to the invoking lead")
+  feed_loaded(read_only_modification())
+  local exec = find_call(decode_calls(), function(c) return c.body.kind == "mag.execute" end)
+  assert_true(exec ~= nil, "removing run_id creates source and dispatches in one call")
+  assert_true(exec.body.run_id ~= "mag-run-live-apply", "dispatch mints a new run handle")
 end
 
 local function has_relayed_lead_turn()
@@ -2671,47 +2538,28 @@ do
   assert_eq(next(registry.run_dispatchers), nil, "session reset clears reverse ownership")
 end
 
--- A targeted MAG apply uses the same exact-dispatch authority as the other
--- run-control operations. The invoking graph cannot modify itself or a graph
--- dispatched by another actor, while its directly dispatched child is valid.
+-- Workers have the same fresh-dispatch-only tool contract as the lead,
+-- including when they supply a handle for their own directly dispatched child.
 do
   fresh()
-  write_mag_file("apply-authority-source", "authority-delta.mag", "artifact(nil)")
   local registry = lw._internals.run_registry
   local actor = "parent.run-tool"
-  local sibling_actor = "sibling.run-tool"
   local child_id = registry:mint_run_id()
   lw._internals.register_active_run(child_id, {}, "terminal", "child-dispatch",
     "child", sessions.current_id(), actor)
-  local sibling_id = registry:mint_run_id()
-  lw._internals.register_active_run(sibling_id, {}, "terminal", "sibling-dispatch",
-    "sibling", sessions.current_id(), sibling_actor)
   local metadata = { invocation = invocation(sessions.current_id(), "subagent",
     "scope/cap-parent-apply", actor, "mag-run-parent") }
-
   _test.calls_clear()
   invoke_tool_with_metadata("apply-child", "mag-apply", {
-    file = "authority-delta.mag", run_id = child_id,
+    file = "authority-delta.mag", content = "(artifact nil)", run_id = child_id,
   }, metadata)
-  assert_true(find_call(decode_calls(), function(c)
-    return c.body.kind == "mag.load" and c.target == "mag"
-  end) ~= nil, "an actor may apply to the graph it directly dispatched")
-
-  for _, denied in ipairs({
-    { id = "apply-self", run_id = "mag-run-parent", code = "run_control_self" },
-    { id = "apply-sibling", run_id = sibling_id, code = "run_control_unauthorized" },
-  }) do
-    _test.calls_clear()
-    invoke_tool_with_metadata(denied.id, "mag-apply", {
-      file = "authority-delta.mag", run_id = denied.run_id,
-    }, metadata)
-    local result = tool_result(denied.id)
-    assert_true(result ~= nil and type(result.body.error) == "string"
-        and result.body.error:find(denied.code, 1, true) ~= nil,
-      denied.id .. " returns the stable authority denial")
-    assert_eq(find_call(decode_calls(), function(c) return c.body.kind == "mag.load" end), nil,
-      denied.id .. " is rejected before compilation")
-  end
+  local result = tool_result("apply-child")
+  assert_true(result and result.body.error:find("run_id is not supported", 1, true) ~= nil,
+    "workers cannot modify even their own dispatched live run")
+  assert_eq(find_call(decode_calls(), function(c)
+    return c.body.kind == "mag.load" or c.body.kind == "mag.build"
+      or c.body.kind == "mag.execute" or c.body.kind == "mag.apply"
+  end), nil, "worker live modification is rejected before compilation or dispatch")
 end
 
 -- ------------------------------------------------------------------

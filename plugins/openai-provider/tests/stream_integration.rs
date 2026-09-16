@@ -1873,7 +1873,7 @@ async fn reasoning_content_reaches_the_reasoning_stream_accumulator() {
 }
 
 #[tokio::test]
-async fn streamed_reasoning_details_preserve_every_chunk_and_unknown_field() {
+async fn streamed_reasoning_details_preserve_opaque_blocks_and_unknown_fields() {
     let body = concat!(
         "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"first\",\"index\":0,\"future\":true}]}}]}\n\n",
         "data: {\"choices\":[{\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"data\":\"sealed\",\"index\":1}],\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",

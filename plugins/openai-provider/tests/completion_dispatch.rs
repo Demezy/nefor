@@ -311,6 +311,136 @@ async fn native_reasoning_round_trips_beside_assistant_tool_calls_and_tool_resul
 }
 
 #[tokio::test]
+async fn streamed_reasoning_blocks_survive_the_next_completion_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let expected_details = json!([
+        {
+            "type":"reasoning.text", "text":"The repo\ncontains evidence.",
+            "index":0, "id":"text-a", "format":"provider-v1",
+            "signature":"signed-a", "future":{"kept":true}
+        },
+        {"type":"reasoning.text","text":"A separate block.","index":0,"id":"text-b"},
+        {"type":"reasoning.summary","summary":"A summary.\n","index":0,"id":"summary-a"},
+        {"type":"reasoning.encrypted","data":"sealed-a","index":0,"unknown":[1,2]},
+        {"type":"reasoning.encrypted","data":"sealed-a","index":0,"unknown":[1,2]},
+        {"type":"future.reasoning","text":"opaque text","future":{"nested":"kept"}},
+        {"type":"reasoning.text","text":"After opaque blocks.","index":0,"id":"text-a"}
+    ]);
+    let expected_request_details = expected_details.clone();
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.expect("accept first completion");
+        let request = read_request_json(&mut first).await;
+        assert_eq!(request["messages"].as_array().expect("messages").len(), 1);
+        let deltas = [
+            json!({
+                "reasoning":"The", "reasoning_content":"The",
+                "reasoning_details":[{
+                    "type":"reasoning.text","text":"The","index":0,"id":"text-a",
+                    "format":"provider-v1","signature":null,"future":{"kept":true}
+                }]
+            }),
+            json!({
+                "reasoning":" repo\n", "reasoning_content":" repo\n",
+                "reasoning_details":[{"type":"reasoning.text","text":" repo\n","index":0}]
+            }),
+            json!({
+                "reasoning":"contains evidence.", "reasoning_content":"contains evidence.",
+                "reasoning_details":[{"type":"reasoning.text","text":"contains evidence.","index":0}]
+            }),
+            json!({"reasoning_details":[{"type":"reasoning.text","signature":"signed-a","index":0}]}),
+            json!({"reasoning_details":[{"type":"reasoning.text","text":"A separate block.","index":0,"id":"text-b"}]}),
+            json!({"reasoning_details":[{"type":"reasoning.summary","summary":"A", "index":0,"id":"summary-a"}]}),
+            json!({"reasoning_details":[{"type":"reasoning.summary","summary":" summary.\n","index":0}]}),
+            json!({"reasoning_details":[
+                {"type":"reasoning.encrypted","data":"sealed-a","index":0,"unknown":[1,2]},
+                {"type":"reasoning.encrypted","data":"sealed-a","index":0,"unknown":[1,2]},
+                {"type":"future.reasoning","text":"opaque text","future":{"nested":"kept"}}
+            ]}),
+            json!({"reasoning_details":[{"type":"reasoning.text","text":"After opaque blocks.","index":0,"id":"text-a"}]}),
+        ];
+        let mut events = deltas
+            .into_iter()
+            .map(|delta| format!("data: {}\n\n", json!({"choices":[{"delta":delta}]})))
+            .collect::<String>();
+        events.push_str(&format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{
+                "delta":{"tool_calls":[{
+                    "index":0,"id":"call_1","type":"function",
+                    "function":{"name":"read_file","arguments":"{}"}
+                }]},
+                "finish_reason":"tool_calls"
+            }]})
+        ));
+        first
+            .write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                events.len(), events
+            ).as_bytes())
+            .await
+            .expect("first response");
+        drop(first);
+
+        let (mut second, _) = listener.accept().await.expect("accept replay completion");
+        let request = read_request_json(&mut second).await;
+        let assistant = &request["messages"][1];
+        assert_eq!(assistant["reasoning_details"], expected_request_details);
+        assert!(assistant.get("reasoning").is_none());
+        assert!(assistant.get("reasoning_content").is_none());
+        assert_eq!(request["messages"][2]["tool_call_id"], "call_1");
+        let events = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            json!({"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]})
+        );
+        second
+            .write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                events.len(), events
+            ).as_bytes())
+            .await
+            .expect("second response");
+    });
+    let (mut child, mut stdin, mut stdout) = spawn_provider(&format!("http://{addr}")).await;
+    let initial = json!({"role":"user","content":"inspect the repository"});
+    send_completion_messages(&mut stdin, "first", json!([initial])).await;
+    let mut visible_reasoning = String::new();
+    let completed = loop {
+        let event = next_completion_event(&mut stdout, "first").await;
+        if event["event"] == "reasoning_delta" {
+            visible_reasoning.push_str(event["text"].as_str().expect("reasoning delta"));
+        }
+        if event["event"] == "completed" {
+            break event;
+        }
+    };
+    assert_eq!(visible_reasoning, "The repo\ncontains evidence.");
+    assert_eq!(completed["reasoning"], visible_reasoning);
+    assert_eq!(
+        completed["provider_context"]["artifact"],
+        json!({"reasoning_details":expected_details})
+    );
+    send_completion_messages(&mut stdin, "replay", json!([
+        initial,
+        {
+            "role":"assistant",
+            "tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":"{}"}}],
+            "provider_context":completed["provider_context"]
+        },
+        {"role":"tool","tool_call_id":"call_1","content":"repository evidence"}
+    ])).await;
+    loop {
+        let event = next_completion_event(&mut stdout, "replay").await;
+        if event["event"] == "completed" {
+            assert_eq!(event["text"], "done");
+            break;
+        }
+    }
+    server.await.expect("server");
+    child.kill().await.expect("kill provider");
+}
+
+#[tokio::test]
 async fn plaintext_reasoning_fields_round_trip_without_visible_text_substitution() {
     for field in ["reasoning_content", "reasoning"] {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

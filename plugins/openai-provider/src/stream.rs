@@ -1042,15 +1042,14 @@ where
             on_reasoning(ReasoningEvent::Delta(&text));
         }
         SseEvent::ReasoningDetails(details) => {
-            let mut accumulated = match outcome.reasoning_continuation.take() {
-                Some(ReasoningContinuation::Details { reasoning_details }) => {
-                    reasoning_details.into_chunks()
-                }
-                _ => Vec::new(),
-            };
-            accumulated.extend(details);
-            outcome.reasoning_continuation = ReasoningDetails::from_chunks(accumulated)
-                .map(|reasoning_details| ReasoningContinuation::Details { reasoning_details });
+            if let Some(ReasoningContinuation::Details { reasoning_details }) =
+                &mut outcome.reasoning_continuation
+            {
+                reasoning_details.append_chunks(details);
+            } else {
+                outcome.reasoning_continuation = ReasoningDetails::from_chunks(details)
+                    .map(|reasoning_details| ReasoningContinuation::Details { reasoning_details });
+            }
         }
         SseEvent::ToolCallFragment {
             index,

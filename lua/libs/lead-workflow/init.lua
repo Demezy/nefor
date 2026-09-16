@@ -1831,18 +1831,16 @@ local function lead_workflow_tool_schemas()
     {
       name = "mag-apply",
       display = display_contract("mag apply", display_field("file", "args", "file", "path"),
-        { display_field("run", "args", "run_id", "scalar", { omit = "missing" }) },
-        "receipt", "MAG graph applied", {
+        {}, "receipt", "MAG graph applied", {
           display_field("status", "result", "status", "status", { omit = "missing" }),
           display_field("run", "result", "run_id", "scalar", { omit = "missing" }),
           display_field("workflow", "result", "workflow_tree", "text",
             { omit = "missing", max_lines = 120, max_bytes = 12000 }),
         }, "delayed"),
-      description = "Execute a MAG operation or workflow, including a single command. To execute a new graph in one call, pass file and content together: this atomically writes a new source file, compiles and validates it, then dispatches it. Source-write, compilation, or pre-dispatch validation errors return without dispatch; created source remains available for editing. Existing files cannot be overwritten via content; edit them with mag-write-file and omit content when applying. Omit run_id for a fresh graph; supply a directly dispatched live run_id to apply a delta. Quick runs return the terminal result. Asynchronous acknowledgments include run_id, the complete authored node tree, and completion instructions for the calling role.",
+      description = "Execute a new MAG operation or workflow, including a single command. To execute a new graph in one call, pass file and content together: this atomically writes a new source file, compiles and validates it, then dispatches it. Source-write, compilation, or pre-dispatch validation errors return without dispatch; created source remains available for editing. Existing files cannot be overwritten via content; edit them with mag-write-file and omit content when applying. Quick runs return the terminal result. Asynchronous acknowledgments include run_id, the complete authored node tree, and completion instructions for the calling role.",
       parameters = { type = "object", additionalProperties = false, properties = {
         file = { type = "string", description = "Normalized path relative to the session MAG workspace." },
         content = { type = "string", description = "Optional complete source for a new file. Existing files are never overwritten here." },
-        run_id = { type = "string", description = "Optional directly dispatched live run to modify. Omit for a fresh graph." },
       }, required = { "file" } },
     },
   }
@@ -2243,27 +2241,17 @@ local function mag_preview(firing_id, args, metadata)
   begin_mag_load(firing_id, "preview", args, ws, provenance)
 end
 
+-- TODO: Reconsider live workflow modification in favor of resuming workflows
+-- with completed-node outputs. Live modification is not sufficiently supported
+-- and may be removed; this tool deliberately exposes only fresh dispatches.
 local function mag_apply(firing_id, args, metadata)
+  if args.run_id ~= nil then
+    emit_tool_result_err(firing_id,
+      "mag-apply: run_id is not supported; each call starts a new workflow. Omit run_id and pass file with optional content.")
+    return
+  end
   local ws, provenance = mag_workspace(firing_id, args, metadata, "mag-apply")
   if not ws then return end
-  if args.run_id ~= nil then
-    if type(args.run_id) ~= "string" or args.run_id == "" then
-      emit_tool_result_err(firing_id, "mag-apply: run_id must be a non-empty graph run id")
-      return
-    end
-    local context = {
-      session_id = provenance.session_id,
-      dispatcher_id = provenance.dispatcher_id,
-      owning_run_id = provenance.owner_run_id,
-    }
-    local target, target_error = authorize_control_target(context, args.run_id)
-    if not target or target.phase == "terminal" then
-      local error_code = target_error and target_error.error_code or "not_active"
-      local message = target_error and target_error.error or "graph run is already terminal"
-      emit_tool_result_err(firing_id, "mag-apply[" .. error_code .. "]: " .. message)
-      return
-    end
-  end
   local _, source_error
   if args.content ~= nil then
     _, source_error = mag.create_file(ws, args.file, args.content)

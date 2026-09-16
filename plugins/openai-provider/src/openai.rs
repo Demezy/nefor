@@ -74,11 +74,10 @@ pub fn provider_arguments(arguments: &str) -> String {
 /// message's opaque native reasoning continuation.
 pub const REASONING_CONTEXT_FORMAT: &str = "openai-chat-reasoning-v1";
 
-/// Opaque structured reasoning details returned by an OpenAI-compatible provider.
+/// Completed structured reasoning blocks for native continuation.
 ///
-/// OpenRouter requires every object, including unknown fields and duplicate
-/// entries, to be replayed in its original order. We therefore validate only
-/// the stable array-of-objects boundary and otherwise retain the JSON verbatim.
+/// Restored arrays are kept verbatim. During streaming, adjacent compatible
+/// text/summary fragments form one block; opaque details remain discrete.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ReasoningDetails(Vec<Value>);
@@ -101,16 +100,99 @@ impl ReasoningDetails {
     }
 
     pub fn from_chunks(chunks: Vec<Value>) -> Option<Self> {
-        (!chunks.is_empty()).then_some(Self(chunks))
+        if chunks.is_empty() {
+            return None;
+        }
+        let mut details = Self(Vec::new());
+        details.append_chunks(chunks);
+        Some(details)
+    }
+
+    pub fn append_chunks(&mut self, chunks: Vec<Value>) {
+        for chunk in chunks {
+            if self
+                .0
+                .last_mut()
+                .is_some_and(|previous| merge_reasoning_fragment(previous, &chunk))
+            {
+                continue;
+            }
+            self.0.push(chunk);
+        }
     }
 
     pub fn as_slice(&self) -> &[Value] {
         &self.0
     }
+}
 
-    pub fn into_chunks(self) -> Vec<Value> {
-        self.0
+fn reasoning_text_field(detail: &Map<String, Value>) -> Option<&'static str> {
+    match detail.get("type").and_then(Value::as_str) {
+        Some("reasoning.text") => Some("text"),
+        Some("reasoning.summary") => Some("summary"),
+        _ => None,
     }
+}
+
+fn fragment_text<'a>(detail: &'a Map<String, Value>, field: &str) -> Option<&'a str> {
+    match detail.get(field) {
+        None | Some(Value::Null) => Some(""),
+        Some(Value::String(text)) => Some(text),
+        _ => None,
+    }
+}
+
+fn missing_reasoning_metadata(key: &str, value: &Value) -> bool {
+    match key {
+        "id" | "format" | "signature" => value.is_null() || value.as_str() == Some(""),
+        "index" => value.is_null(),
+        _ => false,
+    }
+}
+
+fn merge_reasoning_fragment(previous: &mut Value, next: &Value) -> bool {
+    let (Some(previous), Some(next)) = (previous.as_object_mut(), next.as_object()) else {
+        return false;
+    };
+    let Some(field) = reasoning_text_field(previous) else {
+        return false;
+    };
+    if reasoning_text_field(next) != Some(field) || fragment_text(previous, field).is_none() {
+        return false;
+    }
+    let Some(text) = fragment_text(next, field) else {
+        return false;
+    };
+    // Only the adjacent block can continue. Explicit identity changes and
+    // conflicting metadata are boundaries, even when an index is reused.
+    if next.iter().any(|(key, value)| {
+        key != field
+            && previous.get(key).is_some_and(|old| {
+                old != value
+                    && !missing_reasoning_metadata(key, old)
+                    && !missing_reasoning_metadata(key, value)
+            })
+    }) {
+        return false;
+    }
+    for (key, value) in next {
+        if key == field {
+            continue;
+        }
+        if previous
+            .get(key)
+            .is_none_or(|old| missing_reasoning_metadata(key, old))
+        {
+            previous.insert(key.clone(), value.clone());
+        }
+    }
+    match previous.get_mut(field) {
+        Some(Value::String(accumulated)) => accumulated.push_str(text),
+        _ => {
+            previous.insert(field.to_owned(), Value::String(text.to_owned()));
+        }
+    }
+    true
 }
 
 /// Provider-native assistant reasoning that must be replayed on continuation.
@@ -892,6 +974,52 @@ mod tests {
             parse_sse_chunk(r#"{"choices":[{"delta":{"reasoning_details":null}}]}"#),
             SseEvent::Empty
         );
+    }
+
+    #[test]
+    fn streamed_reasoning_fragments_preserve_boundaries_and_unknown_metadata() {
+        let original = json!({
+            "type":"reasoning.text", "text":"first", "index":0,
+            "id":"block-a", "format":"provider-v1", "future":{"kept":true}
+        });
+        for boundary in [
+            json!({"type":"reasoning.text","text":"next","index":1}),
+            json!({"type":"reasoning.text","text":"next","id":"block-b"}),
+            json!({"type":"reasoning.text","text":"next","format":"provider-v2"}),
+            json!({"type":"reasoning.text","text":"next","future":{"kept":false}}),
+            json!({"type":"reasoning.text","text":["opaque-shape"],"index":0}),
+            json!({"type":"reasoning.summary","summary":"next","index":0}),
+            json!({"type":"reasoning.encrypted","data":"sealed","index":0}),
+            json!({"type":"future.reasoning","text":"opaque","index":0}),
+        ] {
+            let details = ReasoningDetails::from_chunks(vec![original.clone(), boundary.clone()])
+                .expect("nonempty stream");
+            assert_eq!(details.as_slice(), [original.clone(), boundary]);
+        }
+        let opaque = json!({"type":"reasoning.encrypted","data":"sealed","index":0});
+        let details = ReasoningDetails::from_chunks(vec![
+            original.clone(),
+            opaque.clone(),
+            opaque.clone(),
+            original.clone(),
+        ])
+        .expect("nonempty stream");
+        assert_eq!(
+            details.as_slice(),
+            [original.clone(), opaque.clone(), opaque, original]
+        );
+    }
+
+    #[test]
+    fn completed_reasoning_blocks_are_not_reinterpreted_as_stream_fragments() {
+        let completed = json!([
+            {"type":"reasoning.text","text":"one","index":0},
+            {"type":"reasoning.text","text":"two","index":0}
+        ]);
+        let details = ReasoningDetails::from_value(&completed)
+            .expect("valid completed details")
+            .expect("nonempty details");
+        assert_eq!(serde_json::to_value(details).expect("serialize"), completed);
     }
 
     #[test]
