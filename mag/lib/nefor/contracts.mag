@@ -10,7 +10,7 @@ type ProviderInput {content: JsonValue}
 
 // Direct-text codec: provider terminal text is the value. Unlike every other
 // named contract, this exact nominal type bypasses structured JSON.
-type TextAnswer = String
+newtype TextAnswer = String
 
 type ToolCall {name: String, arguments: JsonValue}
 

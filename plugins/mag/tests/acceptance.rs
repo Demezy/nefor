@@ -926,7 +926,7 @@ import nefor.contracts.{}
 import nefor.graph.{}
 import nefor.node.{}
 
-let draft: nefor.contracts.TextAnswer = "draft"
+let draft: nefor.contracts.TextAnswer = ("draft": nefor.contracts.TextAnswer)
 let subject = nefor.graph.source("subject", type_tag<nefor.contracts.TextAnswer>(), draft)
 let approval = nefor.actors.approval_gate(nefor.actors.ApprovalConfig {id: "approval", prompt: "Ship it?"})
 let flow = nefor.node.`>>>`(subject, approval)

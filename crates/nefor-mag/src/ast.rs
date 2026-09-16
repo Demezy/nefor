@@ -180,6 +180,7 @@ pub struct FieldTypes(pub BTreeMap<String, MagType>);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeDeclBody {
     Fields(FieldTypes),
+    TransparentAlias(MagType),
     Alias(MagType),
     Adt(Vec<ConstructorDecl>),
     Native,

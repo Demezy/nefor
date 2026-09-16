@@ -14,6 +14,21 @@ pub enum Form {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Require {
     pub module: String,
+    pub exposure: ImportExposure,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportExposure {
+    Open,
+    Qualified,
+    Selective(Vec<ImportSelector>),
+    NamespaceAlias(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportSelector {
+    pub export: String,
+    pub local: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,7 +41,8 @@ pub struct TypeDeclaration {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeDeclarationBody {
     Fields(Vec<(String, Type)>),
-    Alias(Type),
+    TransparentAlias(Type),
+    Newtype(Type),
     Adt(Vec<ConstructorDeclaration>),
 }
 
@@ -74,6 +90,10 @@ pub enum Expr {
     },
     Function(Function),
     Ascribe {
+        target: Type,
+        value: Box<Expr>,
+    },
+    Annotate {
         target: Type,
         value: Box<Expr>,
     },

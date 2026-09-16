@@ -8,7 +8,7 @@ See [Authoring reference](language.md) for valid forms and [Orchestrating MAG](o
 
 Parsing, name resolution, and type checking happen before execution. Typical causes:
 
-- using a Lisp `(require "...")` form in a `.mag` file instead of `import module.identity.{}`;
+- using a Lisp `(require "...")` form in a `.mag` file instead of a supported direct `import module.identity`, `import module.identity.{...}`, or `import module.identity as alias` declaration;
 - referencing an undeclared semantic type;
 - passing a value that does not conform to a declared record;
 - connecting incompatible semantic types;

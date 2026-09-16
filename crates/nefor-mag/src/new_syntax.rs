@@ -419,9 +419,9 @@ struct Parser<'a> {
     cursor: usize,
     fixities: HashMap<String, Fixity>,
     aliases: HashMap<String, String>,
-    alias_origins: HashMap<String, (String, ByteSpan)>,
     variants: HashMap<String, VariantMetadata>,
-    requires: Vec<String>,
+    requires: Vec<authored::Require>,
+    namespace_aliases: HashSet<String>,
     bound_names: HashSet<String>,
     local_types: HashSet<String>,
     allow_brace_construct: bool,
@@ -438,9 +438,9 @@ impl<'a> Parser<'a> {
             cursor: 0,
             fixities,
             aliases: HashMap::new(),
-            alias_origins: HashMap::new(),
             variants: HashMap::new(),
             requires: Vec::new(),
+            namespace_aliases: HashSet::new(),
             bound_names,
             local_types: HashSet::new(),
             allow_brace_construct: true,
@@ -460,7 +460,7 @@ impl<'a> Parser<'a> {
                 || self.at_word("infix")
             {
                 self.skip_fixity()?;
-            } else if self.at_word("type") {
+            } else if self.at_word("type") || self.at_word("newtype") {
                 forms.extend(self.parse_type_declaration()?);
             } else if self.at_word("let") {
                 forms.push(authored::Form::Block(self.parse_let()?));
@@ -474,7 +474,7 @@ impl<'a> Parser<'a> {
         let mut result = self
             .requires
             .into_iter()
-            .map(|module| authored::Form::Require(authored::Require { module }))
+            .map(authored::Form::Require)
             .collect::<Vec<_>>();
         result.extend(forms);
         Ok(authored::Module { forms: result })
@@ -483,62 +483,64 @@ impl<'a> Parser<'a> {
     fn parse_import(&mut self) -> Result<(), MagError> {
         self.expect_word("import")?;
         let mut path = self.expect_name()?;
-        while self.eat_punct('.') {
-            if self.eat_operator("*") {
-                self.add_require(path);
-                return Ok(());
-            }
-            if self.eat_punct('{') {
-                if !self.eat_punct('}') {
-                    loop {
-                        let declaration_span = self.peek().span;
-                        let export = self.expect_name()?;
-                        let alias = if self.eat_word("as") {
-                            self.expect_binding_name()?
-                        } else {
-                            export.clone()
-                        };
-                        let canonical = format!("{path}.{export}");
-                        if self.bound_names.contains(&alias)
-                            || crate::checker::BUILTIN_NAMES.contains(&alias.as_str())
-                        {
-                            return Err(self.parse_error(
-                                format!(
-                                    "import alias '{alias}' collides with a local or builtin name"
-                                ),
-                                declaration_span,
-                            ));
-                        }
-                        if let Some((previous, previous_span)) = self.alias_origins.get(&alias) {
-                            if previous != &canonical {
-                                return Err(self.error(
-                                    "MAG2011",
-                                    format!("distinct imports collide at local name '{alias}'"),
-                                    declaration_span,
-                                    Some(("previous import declared here".into(), *previous_span)),
-                                ));
-                            }
-                        } else {
-                            self.alias_origins
-                                .insert(alias.clone(), (canonical.clone(), declaration_span));
-                            if let Some(fixity) = self.fixities.get(&alias).copied() {
-                                self.fixities.insert(canonical.clone(), fixity);
-                            }
-                            self.aliases.insert(alias, canonical);
-                        }
-                        if self.eat_punct('}') {
-                            break;
-                        }
-                        self.expect_punct(',')?;
-                    }
-                }
-                self.add_require(path);
-                return Ok(());
+        while self.at_punct('.') && !matches!(self.peek_n(1).kind, TokenKind::Punct('{')) {
+            self.bump();
+            if self.at_operator("*") {
+                return Err(self.here("wildcard imports are unsupported"));
             }
             path.push('.');
             path.push_str(&self.expect_name()?);
         }
-        self.add_require(path);
+
+        let exposure = if self.eat_word("as") {
+            let alias = self.expect_binding_name()?;
+            if alias == "_" {
+                return Err(self.here("'_' is only valid after 'as' in an import selector"));
+            }
+            self.namespace_aliases.insert(alias.clone());
+            self.aliases.insert(alias.clone(), alias.clone());
+            authored::ImportExposure::NamespaceAlias(alias)
+        } else if self.eat_punct('.') {
+            self.expect_punct('{')?;
+            let mut selectors = Vec::new();
+            if !self.eat_punct('}') {
+                loop {
+                    let export = self.expect_name()?;
+                    let local = if self.eat_word("as") {
+                        let name = self.expect_binding_name()?;
+                        (name != "_").then_some(name)
+                    } else {
+                        Some(export.clone())
+                    };
+                    if let Some(local_name) = &local {
+                        let canonical = format!("{path}.{export}");
+                        if let Some(fixity) = self.fixities.get(local_name).copied() {
+                            self.fixities.insert(canonical.clone(), fixity);
+                        }
+                        self.aliases.insert(local_name.clone(), canonical);
+                    }
+                    selectors.push(authored::ImportSelector { export, local });
+                    if self.eat_punct('}') {
+                        break;
+                    }
+                    self.expect_punct(',')?;
+                    if self.eat_punct('}') {
+                        break;
+                    }
+                }
+            }
+            if selectors.is_empty() {
+                authored::ImportExposure::Qualified
+            } else {
+                authored::ImportExposure::Selective(selectors)
+            }
+        } else {
+            authored::ImportExposure::Open
+        };
+        self.requires.push(authored::Require {
+            module: path,
+            exposure,
+        });
         Ok(())
     }
 
@@ -550,10 +552,16 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_declaration(&mut self) -> Result<Vec<authored::Form>, MagError> {
-        self.expect_word("type")?;
+        let is_newtype = self.eat_word("newtype");
+        if !is_newtype {
+            self.expect_word("type")?;
+        }
         let name = self.expect_name()?;
         self.local_types.insert(name.clone());
         let params = self.parse_generic_names()?;
+        if is_newtype && self.at_punct('{') {
+            return Err(self.here("newtype requires '= TypeExpr'"));
+        }
         if self.eat_punct('{') {
             let body = authored::TypeDeclarationBody::Fields(self.parse_type_fields('}')?);
             return Ok(vec![authored::Form::Type(authored::TypeDeclaration {
@@ -564,11 +572,22 @@ impl<'a> Parser<'a> {
         }
         self.expect_operator("=")?;
         self.newlines();
+        if is_newtype {
+            if self.at_punct('{') || self.peek_variant_declaration() {
+                return Err(self.here("newtype requires '= TypeExpr' and declares no constructors"));
+            }
+            let body = authored::TypeDeclarationBody::Newtype(self.parse_type()?);
+            return Ok(vec![authored::Form::Type(authored::TypeDeclaration {
+                name,
+                params,
+                body,
+            })]);
+        }
         if !self.peek_variant_declaration() {
             let body = if self.eat_punct('{') {
                 authored::TypeDeclarationBody::Fields(self.parse_type_fields('}')?)
             } else {
-                authored::TypeDeclarationBody::Alias(self.parse_type()?)
+                authored::TypeDeclarationBody::TransparentAlias(self.parse_type()?)
             };
             return Ok(vec![authored::Form::Type(authored::TypeDeclaration {
                 name,
@@ -682,7 +701,7 @@ impl<'a> Parser<'a> {
                 false
             };
             if !generic_function {
-                value = authored::Expr::Ascribe {
+                value = authored::Expr::Annotate {
                     target,
                     value: Box::new(value),
                 };
@@ -863,20 +882,21 @@ impl<'a> Parser<'a> {
     fn parse_name_expression(
         &mut self,
         word: String,
-        expected: Option<&authored::Type>,
+        _expected: Option<&authored::Type>,
     ) -> Result<authored::Expr, MagError> {
         let mut name = self.resolve_name(&word);
         let imported_alias = self.aliases.contains_key(&word);
         // Bound values and selectively imported values own dot access. An import
         // alias is consumed as a qualified owner only when the next segment is
         // immediately constructed or called.
-        let alias_qualifies = imported_alias
-            && self.at_punct('.')
-            && matches!(
-                self.peek_n(1).kind,
-                TokenKind::Ident(_) | TokenKind::Operator(_)
-            )
-            && matches!(self.peek_n(2).kind, TokenKind::Punct('(' | '{'));
+        let alias_qualifies = self.namespace_aliases.contains(&word)
+            || (imported_alias
+                && self.at_punct('.')
+                && matches!(
+                    self.peek_n(1).kind,
+                    TokenKind::Ident(_) | TokenKind::Operator(_)
+                )
+                && matches!(self.peek_n(2).kind, TokenKind::Punct('(' | '{')));
         if !self.bound_names.contains(&word)
             && self.at_punct('.')
             && (!imported_alias || alias_qualifies)
@@ -884,22 +904,6 @@ impl<'a> Parser<'a> {
             while self.eat_punct('.') {
                 name.push('.');
                 name.push_str(&self.expect_name()?);
-            }
-            if !self.local_types.contains(&word)
-                && !imported_alias
-                && !self
-                    .requires
-                    .iter()
-                    .any(|module| name.starts_with(&format!("{module}.")))
-            {
-                if let Some((owner, _)) = name.rsplit_once('.') {
-                    let module = if expected_owner_name(expected) == Some(owner) {
-                        owner.rsplit_once('.').map_or(owner, |(module, _)| module)
-                    } else {
-                        owner
-                    };
-                    self.add_require(module.to_owned());
-                }
             }
         }
         Ok(authored::Expr::Name(name))
@@ -1645,16 +1649,7 @@ impl<'a> Parser<'a> {
             result.push('.');
             result.push_str(&self.expect_name()?);
         }
-        if let Some((module, _)) = result.rsplit_once('.') {
-            self.add_require(module.to_owned());
-        }
         Ok(result)
-    }
-
-    fn add_require(&mut self, module: String) {
-        if !self.requires.contains(&module) {
-            self.requires.push(module);
-        }
     }
 
     fn lookahead_ascribed_function_type(&self) -> Option<authored::Type> {
@@ -2211,6 +2206,7 @@ mod tests {
             r#"
             import nefor.graph.{edge, identity as id}
             import support.{}
+            import nefor.node.{}
             type Score { label: String, accepted: Bool }
             type Decision = Accepted(Score) | Rejected {score: Score, reason: String}
             let score: Score = Score { label: "ok", accepted: true }
@@ -2251,7 +2247,7 @@ mod tests {
         )
         .unwrap();
         let authored::Form::Block(authored::BlockItem::Let {
-            value: authored::Expr::Ascribe { value, .. },
+            value: authored::Expr::Annotate { value, .. },
             ..
         }) = module.forms.last().unwrap()
         else {
@@ -2290,7 +2286,7 @@ mod tests {
     fn complete_let_type_supplies_lambda_annotations() {
         let module = parse("let f: fn(Int, String) -> Bool = |number, text| => true\n").unwrap();
         let authored::Form::Block(authored::BlockItem::Let {
-            value: authored::Expr::Ascribe { value, .. },
+            value: authored::Expr::Annotate { value, .. },
             ..
         }) = &module.forms[0]
         else {
@@ -2325,14 +2321,14 @@ mod tests {
         )
         .unwrap();
         let authored::Form::Block(authored::BlockItem::Let {
-            value: authored::Expr::Ascribe { target: tupled, .. },
+            value: authored::Expr::Annotate { target: tupled, .. },
             ..
         }) = &module.forms[0]
         else {
             panic!("tuple function")
         };
         let authored::Form::Block(authored::BlockItem::Let {
-            value: authored::Expr::Ascribe { target: nary, .. },
+            value: authored::Expr::Annotate { target: nary, .. },
             ..
         }) = &module.forms[1]
         else {
@@ -2388,7 +2384,7 @@ mod tests {
             parse("import operators.{`->`}\ninfixr 4 (->)\nlet value: Result = left -> right\n")
                 .unwrap();
         let authored::Form::Block(authored::BlockItem::Let {
-            value: authored::Expr::Ascribe { value, .. },
+            value: authored::Expr::Annotate { value, .. },
             ..
         }) = module.forms.last().unwrap()
         else {
@@ -2413,7 +2409,7 @@ mod tests {
         )
         .unwrap();
         let authored::Form::Block(authored::BlockItem::Let {
-            value: authored::Expr::Ascribe { value, .. },
+            value: authored::Expr::Annotate { value, .. },
             ..
         }) = module.forms.last().unwrap()
         else {
@@ -2517,7 +2513,7 @@ mod tests {
         )
         .is_ok());
         assert!(parse("let value = (+)(1, 2)\n").is_ok());
-        assert!(parse("let value = nefor.node.`>>>`(left, right)\n").is_ok());
+        assert!(parse("import nefor.node.{}\nlet value = nefor.node.`>>>`(left, right)\n").is_ok());
     }
 
     #[test]
@@ -2527,7 +2523,7 @@ mod tests {
         )
         .unwrap();
         let authored::Form::Block(authored::BlockItem::Let {
-            value: authored::Expr::Ascribe { value, .. },
+            value: authored::Expr::Annotate { value, .. },
             ..
         }) = module.forms.last().unwrap()
         else {
@@ -2552,7 +2548,7 @@ mod tests {
         )
         .unwrap();
         let authored::Form::Block(authored::BlockItem::Let {
-            value: authored::Expr::Ascribe { value, .. },
+            value: authored::Expr::Annotate { value, .. },
             ..
         }) = module.forms.last().unwrap()
         else {

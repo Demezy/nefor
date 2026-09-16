@@ -589,6 +589,11 @@ fn resolve(
                         },
                     }
                 }
+                crate::ast::TypeDeclBody::TransparentAlias(body) => resolve(
+                    env,
+                    &crate::checker::substitute(&body, &substitutions),
+                    resolving,
+                )?,
                 crate::ast::TypeDeclBody::Alias(body) => ConcreteType::Named {
                     name: name.clone(),
                     arguments,

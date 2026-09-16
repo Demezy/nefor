@@ -73,6 +73,8 @@ fn analysis_preserves_normalized_first_occurrence_and_flattening_order() {
         r#"
 import core.validated.{}
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 import nefor.mag.{}
 
 let test_operation<T>: fn(String, nefor.graph.Port<T>) -> nefor.mag.ProgramOperation = |id, on| =>
@@ -153,6 +155,8 @@ fn route_assignment_sorts_product_buckets_but_lowers_original_route_order() {
         "route-order",
         r#"
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 
 let start = nefor.graph.source("start", type_tag<nefor.contracts.Text>(), nefor.contracts.Text {content: "start"})
 let emitter_input = nefor.graph.port("emitter", type_tag<nefor.contracts.Text>(), "test.Value")
@@ -254,6 +258,8 @@ fn indexed_reachability_handles_cycles_and_preserves_dead_path_diagnostics() {
         r#"
 import core.validated.{}
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 import nefor.mag.{}
 
 let test_operation<T>: fn(String, nefor.graph.Port<T>) -> nefor.mag.ProgramOperation = |id, on| =>
@@ -319,6 +325,8 @@ fn duplicate_precedence_contract_selection_and_sequence_order_are_stable() {
         r#"
 import core.validated.{}
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 import nefor.node.{}
 
 let validation_message: fn(core.validated.Validated<String, nefor.graph.Graph>) -> String = |checked| =>
@@ -386,6 +394,8 @@ fn nefor_artifact_emits_exact_versioned_program_and_delta_envelopes() {
         r#"
 import nefor.artifact.{}
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 let start = nefor.graph.source("start", type_tag<nefor.contracts.Text>(), nefor.contracts.Text {content: "hello"})
 let result = nefor.graph.output("result", type_tag<nefor.contracts.Text>())
 let close: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, result)])
@@ -407,6 +417,8 @@ nefor.artifact.compile(close)
         r#"
 import nefor.artifact.{}
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 nefor.artifact.delta(nefor.graph.delta([], [], [], []))
 "#,
         json!({}),
@@ -426,6 +438,8 @@ fn compile_graph_closes_one_terminal_through_existing_graph_values() {
         r#"
 import nefor.artifact.{}
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 let start = nefor.graph.source("start", type_tag<String>(), "hello")
 let result = nefor.graph.output_for("result", start)
 let close: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| =>
@@ -439,6 +453,8 @@ nefor.artifact.compile(close)
         r#"
 import nefor.artifact.{}
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 let start = nefor.graph.source("start", type_tag<String>(), "hello")
 nefor.artifact.compile_graph(start)
 "#,
@@ -466,6 +482,8 @@ nefor.artifact.compile_graph(start)
         r#"
 import nefor.artifact.{}
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 let result = nefor.graph.source("result", type_tag<String>(), "hello")
 nefor.artifact.compile_graph(result)
 "#,
@@ -483,6 +501,8 @@ fn only_exact_unit_ports_are_root_capable() {
         "exact-unit-root",
         r#"
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 type Maybe = Ready(Unit) | Waiting(String)
 let exact = nefor.graph.store_port(nefor.graph.port("exact", type_tag<Unit>(), "wire"))
 let sum = nefor.graph.store_port(nefor.graph.port("sum", type_tag<Maybe>(), "wire"))
@@ -506,6 +526,8 @@ fn exact_unit_root_cache_preserves_actual_activation_evidence() {
         root.join("main.mag"),
         r#"
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 import nefor.artifact.{}
 type Arm {text: String}
 let start = nefor.graph.identity("start", type_tag<Unit>())
@@ -562,6 +584,8 @@ fn delta_bootstrap_uses_exact_unit_and_full_input_address() {
         "delta-bootstrap-address",
         r#"
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 type Arm {text: String}
 let unit = nefor.graph.identity("unit", type_tag<Unit>())
 let sum = nefor.graph.identity("sum", type_tag<Unit>())
@@ -601,6 +625,8 @@ fn indexed_output_diagnostics_include_explicit_operations_and_each_port() {
         "operation-diagnostics",
         r#"
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 import nefor.mag.{}
 import core.validated.{}
 type Arm {text: String}
@@ -655,6 +681,8 @@ fn input_diagnostics_keep_raw_occurrences_and_actual_message_evidence() {
         "input-diagnostic-order",
         r#"
 import nefor.graph.{}
+import nefor.contracts.{}
+import core.map.{}
 let start = nefor.graph.source("start", type_tag<Unit>(), ())
 let target = nefor.graph.identity("target", type_tag<(Unit, Unit)>())
 let first_route = (assoc(nefor.graph.stored_route(nefor.graph.port("raw-first", type_tag<Unit>(), "out"), get(target, "input")), "id", "z"): nefor.graph.StoredRoute)

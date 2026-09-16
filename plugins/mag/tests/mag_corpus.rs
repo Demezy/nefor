@@ -771,7 +771,9 @@ nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edg
         r#"import nefor.artifact.{}
 import nefor.graph.{}
 import nefor.shell.{}
+import nefor.mag.{}
 import nefor.process.{}
+import nefor.contracts.{}
 let start = nefor.graph.source("start", type_tag<Unit>(), nil)
 let operation = nefor.shell.script("x", nefor.shell.ShellScriptParams {script: "true", cwd: nefor.process.cwd, timeout: nefor.contracts.no_timeout()})
 let result = nefor.graph.output_for("result", operation)
@@ -799,6 +801,7 @@ nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edg
 import nefor.graph.{}
 import nefor.path.{}
 import nefor.process.{}
+import nefor.contracts.{}
 let start = nefor.graph.source("start", type_tag<Unit>(), nil)
 let operation = nefor.process.exec("pwd", nefor.process.ProcessExecParams {argv: ["pwd"], cwd: nefor.path.join(nefor.process.cwd, "../outside"), timeout: nefor.contracts.no_timeout()})
 let result = nefor.graph.output_for("result", operation)
@@ -863,7 +866,9 @@ nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edg
             r#"import nefor.artifact.{{}}
 import nefor.graph.{{}}
 import nefor.shell.{{}}
+import nefor.mag.{{}}
 import nefor.process.{{}}
+import nefor.contracts.{{}}
 let start = nefor.graph.source("start", type_tag<Unit>(), nil)
 let operation = nefor.shell.script("operation", nefor.shell.ShellScriptParams {{script: "true", cwd: nefor.process.cwd, timeout: nefor.contracts.no_timeout()}})
 let unused = nefor.shell.script("unused", nefor.shell.ShellScriptParams {{script: "false", cwd: nefor.process.cwd, timeout: nefor.contracts.no_timeout()}})
@@ -1052,6 +1057,7 @@ nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edg
 import nefor.contracts.{}
 import nefor.graph.{}
 import nefor.shell.{}
+import nefor.mag.{}
 let input = nefor.graph.port("x", type_tag<Unit>(), "nefor.process.Input")
 let output = nefor.graph.port("x", type_tag<nefor.contracts.ProcessResult>(), "mag.Unknown")
 let actor = nefor.graph.actor("x", "nefor.factory.shell-script", [], nefor.shell.ShellScriptParams {script: "true", cwd: ".", timeout: nefor.contracts.no_timeout()}, nefor.graph.store_port(input), [nefor.graph.store_port(output)])
@@ -1094,6 +1100,7 @@ nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edg
 import nefor.contracts.{}
 import nefor.graph.{}
 import nefor.shell.{}
+import nefor.mag.{}
 let input = nefor.graph.port("x", type_tag<Unit>(), "mag.Unknown")
 let output = nefor.graph.port("x", type_tag<nefor.contracts.ProcessResult>(), "nefor.process.Result")
 let actor = nefor.graph.actor("x", "nefor.factory.shell-script", [], nefor.shell.ShellScriptParams {script: "true", cwd: ".", timeout: nefor.contracts.no_timeout()}, nefor.graph.store_port(input), [nefor.graph.store_port(output)])
@@ -1136,6 +1143,7 @@ nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edg
 import nefor.contracts.{}
 import nefor.graph.{}
 import nefor.shell.{}
+import nefor.mag.{}
 let input = nefor.graph.port("x", type_tag<Unit>(), "nefor.process.Input")
 let output = nefor.graph.port("x", type_tag<nefor.contracts.ProcessResult>(), "nefor.process.Result")
 let actor = nefor.graph.actor("x", "missing.factory", [], nefor.shell.ShellScriptParams {script: "true", cwd: ".", timeout: nefor.contracts.no_timeout()}, nefor.graph.store_port(input), [nefor.graph.store_port(output)])

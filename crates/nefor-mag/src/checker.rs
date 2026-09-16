@@ -366,6 +366,23 @@ fn infer(env: &Env, locals: &mut Locals, expr: &Expr) -> Result<MagType, MagErro
             }
             Ok(target)
         }
+        Expr::Annotate { target, value } => {
+            let mut vars = HashSet::new();
+            for ty in locals.values().flatten() {
+                collect_vars(ty, &mut vars);
+            }
+            let target = resolve_type(env, target, &vars)?;
+            if matches!(value.as_ref(), Expr::Construct { .. }) {
+                return Ok(target);
+            }
+            let actual = if matches!(value.as_ref(), Expr::Fields(_)) {
+                infer_fields_against(env, locals, value, &target)?
+            } else {
+                infer(env, locals, value)?
+            };
+            compatible(env, &actual, &target, &mut HashMap::new()).map_err(MagError::Type)?;
+            Ok(target)
+        }
         Expr::TypeTag(target) => {
             let mut vars = HashSet::new();
             for ty in locals.values().flatten() {
@@ -660,12 +677,14 @@ fn equality_admissible_in(
                         )
                     })
                 }
-                TypeDeclBody::Alias(body) => equality_admissible_in(
-                    env,
-                    &substitute(&body, &substitution),
-                    variables,
-                    visiting,
-                ),
+                TypeDeclBody::TransparentAlias(body) | TypeDeclBody::Alias(body) => {
+                    equality_admissible_in(
+                        env,
+                        &substitute(&body, &substitution),
+                        variables,
+                        visiting,
+                    )
+                }
                 TypeDeclBody::Adt(constructors) => {
                     constructors.iter().try_for_each(|constructor| {
                         equality_admissible_in(
@@ -2134,6 +2153,7 @@ fn compile_expr(
         } => compile_construct(env, scopes, owner, constructor, payload)?,
         Expr::Match { value, arms } => compile_match(env, scopes, value, arms, expected)?,
         Expr::Ascribe { target, value } => compile_ascribe(env, scopes, target, value)?,
+        Expr::Annotate { target, value } => compile_annotate(env, scopes, target, value)?,
         Expr::TypeTag(target) => compile_type_tag(env, scopes, target)?,
         Expr::Function(function) => compile_function(env, scopes, None, function, expected, None)?,
         Expr::Call { callee, args } => compile_call(env, scopes, callee, args, expected)?,
@@ -2613,9 +2633,31 @@ fn compile_ascribe(
         Expr::Vector(values) if matches!(target, MagType::Product(_)) => {
             compile_vector(env, scopes, values, Some(&target))?
         }
-        Expr::Call { callee, args } => compile_call(env, scopes, callee, args, Some(&target))?,
+        // An explicit ascription owns a possible newtype conversion, while
+        // ordinary result-only overloads and generics still need target context.
+        Expr::Call { callee, args } if newtype_underlying(env, &target).is_some() => {
+            let underlying = newtype_underlying(env, &target).ok_or_else(|| {
+                MagError::Type(format!("missing newtype target for ascription to {target}"))
+            })?;
+            compile_call(env, scopes, callee, args, Some(&underlying))
+                .or_else(|_| compile_call(env, scopes, callee, args, None))?
+        }
+        Expr::Call { callee, args } if contains_newtype(env, &target) => {
+            compile_call(env, scopes, callee, args, None)?
+        }
+        Expr::Call { callee, args } => compile_call(env, scopes, callee, args, Some(&target))
+            .or_else(|_| compile_call(env, scopes, callee, args, None))?,
         source => compile_expr(env, scopes, source, source_expected)?,
     };
+    if (contains_newtype(env, &value.ty) || contains_newtype(env, &target))
+        && compatible_static(env, &value.ty, &target, &mut HashMap::new()).is_err()
+        && !is_newtype_boundary(env, &value.ty, &target)
+    {
+        return Err(MagError::Type(format!(
+            "invalid ascription from {} to {target}",
+            value.ty
+        )));
+    }
     Ok(checked(
         target.clone(),
         CheckedExprKind::Ascribe {
@@ -2623,6 +2665,77 @@ fn compile_ascribe(
             value: Box::new(value),
         },
     ))
+}
+
+fn compile_annotate(
+    env: &Env,
+    scopes: &[CheckedScope],
+    authored_target: &Type,
+    source: &Expr,
+) -> Result<CheckedExpr, MagError> {
+    let target = parse_checked_type(env, scopes, authored_target)?;
+    if matches!(source, Expr::Construct { .. }) {
+        return compile_ascribe(env, scopes, authored_target, source);
+    }
+    let value = match source {
+        Expr::Fields(fields) => compile_map(env, scopes, fields, Some(&target))?,
+        Expr::Vector(values) if matches!(target, MagType::Product(_)) => {
+            compile_vector(env, scopes, values, Some(&target))?
+        }
+        source => compile_expr(env, scopes, source, Some(&target))?,
+    };
+    compatible_static(env, &value.ty, &target, &mut HashMap::new()).map_err(MagError::Type)?;
+    Ok(checked(
+        target.clone(),
+        CheckedExprKind::Ascribe {
+            target,
+            value: Box::new(value),
+        },
+    ))
+}
+
+fn newtype_underlying(env: &Env, ty: &MagType) -> Option<MagType> {
+    let MagType::Named(name, arguments) = ty else {
+        return None;
+    };
+    let declaration = env.type_decl(name)?;
+    let TypeDeclBody::Alias(body) = declaration.body else {
+        return None;
+    };
+    let substitutions = declaration
+        .params
+        .into_iter()
+        .zip(arguments.iter().cloned())
+        .collect();
+    Some(substitute(&body, &substitutions))
+}
+
+fn is_newtype_boundary(env: &Env, source: &MagType, target: &MagType) -> bool {
+    newtype_underlying(env, source).is_some_and(|underlying| {
+        compatible_static(env, &underlying, target, &mut HashMap::new()).is_ok()
+    }) || newtype_underlying(env, target).is_some_and(|underlying| {
+        compatible_static(env, source, &underlying, &mut HashMap::new()).is_ok()
+    })
+}
+
+fn contains_newtype(env: &Env, ty: &MagType) -> bool {
+    if newtype_underlying(env, ty).is_some() {
+        return true;
+    }
+    match ty {
+        MagType::List(item) | MagType::Set(item) | MagType::TypeTag(item) => {
+            contains_newtype(env, item)
+        }
+        MagType::Map(key, value) => contains_newtype(env, key) || contains_newtype(env, value),
+        MagType::Product(items) => items.iter().any(|item| contains_newtype(env, item)),
+        MagType::Function(params, result) => {
+            params.iter().any(|param| contains_newtype(env, param)) || contains_newtype(env, result)
+        }
+        MagType::Named(_, arguments) => arguments
+            .iter()
+            .any(|argument| contains_newtype(env, argument)),
+        _ => false,
+    }
 }
 
 fn compile_type_tag(
@@ -3269,7 +3382,7 @@ pub(crate) fn resolve_type(
                 })
                 .collect::<Vec<_>>();
             match types.as_slice() {
-                [ty] => Ok(ty.clone()),
+                [ty] => expand_transparent_alias(env, ty),
                 [] if candidates.is_empty() => Err(MagError::Unresolved(name.clone())),
                 [] => Err(MagError::Type(format!("{name} is not a type"))),
                 _ => Err(MagError::Type(format!("ambiguous type name {name}"))),
@@ -3326,11 +3439,33 @@ pub(crate) fn resolve_type(
                     "unsupported native type application {}",
                     declaration.name
                 ))),
+                (TypeDeclBody::TransparentAlias(body), _) => {
+                    let substitutions = declaration.params.iter().cloned().zip(arguments).collect();
+                    expand_transparent_alias(env, &substitute(&body, &substitutions))
+                }
                 _ => Ok(MagType::Named(declaration.name, arguments)),
             }
         }
         Type::Invalid(message) => Err(MagError::Type(message.clone())),
     }
+}
+
+fn expand_transparent_alias(env: &Env, ty: &MagType) -> Result<MagType, MagError> {
+    let MagType::Named(name, arguments) = ty else {
+        return Ok(ty.clone());
+    };
+    let Some(declaration) = env.type_decl(name) else {
+        return Ok(ty.clone());
+    };
+    let TypeDeclBody::TransparentAlias(body) = declaration.body else {
+        return Ok(ty.clone());
+    };
+    let substitutions = declaration
+        .params
+        .into_iter()
+        .zip(arguments.iter().cloned())
+        .collect();
+    expand_transparent_alias(env, &substitute(&body, &substitutions))
 }
 
 fn visible_type_variables(scopes: &[CheckedScope]) -> HashSet<String> {
@@ -3565,7 +3700,9 @@ pub(crate) fn named_field_types(env: &Env, ty: &MagType) -> Option<BTreeMap<Stri
                     .map(|(name, ty)| (name.clone(), substitute(ty, &substitutions)))
                     .collect(),
             ),
-            TypeDeclBody::Alias(body) => resolve(env, &substitute(&body, &substitutions), visiting),
+            TypeDeclBody::TransparentAlias(body) | TypeDeclBody::Alias(body) => {
+                resolve(env, &substitute(&body, &substitutions), visiting)
+            }
             TypeDeclBody::Adt(_) | TypeDeclBody::Native => None,
         }
     }

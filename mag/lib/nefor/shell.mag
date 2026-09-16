@@ -2,6 +2,8 @@ import nefor.graph.{}
 
 import nefor.contracts.{}
 
+let timeout_ms = nefor.contracts.timeout_ms
+
 let factory = "nefor.factory.shell-script"
 
 type ShellScriptParams {script: String, cwd: String, timeout: nefor.contracts.Timeout}

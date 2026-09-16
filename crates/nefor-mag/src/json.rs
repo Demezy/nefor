@@ -639,7 +639,8 @@ fn decode_typed_value(
                     )?),
                     ty.clone(),
                 ),
-                crate::ast::TypeDeclBody::Alias(body) => Value::Typed(
+                crate::ast::TypeDeclBody::TransparentAlias(body)
+                | crate::ast::TypeDeclBody::Alias(body) => Value::Typed(
                     std::sync::Arc::new(decode_typed_value(
                         env,
                         value,

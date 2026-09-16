@@ -6,18 +6,21 @@ See [Orchestrating MAG](orchestrating.md) for lead tools, [Patterns](../../../pl
 
 ## Modules and data
 
-Import modules by identity. The empty selector imports the module while definitions remain in their canonical namespace:
+Imports are declarations, not runtime values. Each supported form has a distinct visibility effect:
 
 ```mag
-import nefor.actors.{}
-import agents.{}
-import nefor.agents.{}
-import nefor.artifact.{}
-import nefor.contracts.{}
-import nefor.graph.{}
+import nefor.actors        // open every direct export and permit nefor.actors.name
+import nefor.graph.{}      // qualified-only
+import nefor.node.{named, rename as rename_node} // selected local names
+import nefor.shell as shell // static namespace alias; only shell.name is permitted
+import nefor.actors.{task_source as _} // suppress an automatic spelling from an open import
 ```
 
-Imports are declarations, not runtime expressions. A `.mag` suffix selects this syntax and a `.magl` suffix selects the legacy Lisp parser; explicit entry overrides may select either frontend without changing imported modules' suffix selection.
+Imports compose order-independently. Suppressions affect only automatic names from a bare import, not explicit selectors. Namespace roots, namespace aliases, builtins, local declarations, and opened or selected exports share one collision domain; collisions are errors, never source-order choices. Use qualified-only imports, narrower selectors, selector or namespace renames, or `as _` to repair them. `import m.*` is not syntax.
+
+Qualified references require a matching direct import. Visibility is non-transitive: importing a module does not expose the dependencies that module imported. Every module evaluates once per compilation, circular imports are rejected, and only its direct top-level declarations are exports. An unresolved name remains an error even when diagnostics statically suggest sorted candidate imports; candidate discovery parses files without evaluating their bindings, dependencies, or file inputs.
+
+A `.mag` suffix selects this syntax and a `.magl` suffix selects the legacy Lisp parser; explicit entry overrides may select either frontend without changing imported modules' suffix selection.
 
 Declare nominal records and algebraic data types with `type`:
 
@@ -27,6 +30,10 @@ type Decision = Finding(Finding) | AgentError(nefor.contracts.AgentError)
 ```
 
 Algebraic alternatives are owned by their declared ADT. Construct one through the owner, such as `Decision.Finding(finding)` or `Decision.AgentError(failure)`. `(A, B)` is an anonymous all-of product type, not a nominal declaration. Product occurrences matter: `(T, T)` requires two matching incoming edges from distinct senders.
+
+Alias-shaped declarations are transparent after generic substitution: `type Label = String` and `type Pair<T> = (T, T)` introduce alternate spellings but no semantic identity. Compatibility, inference, construction, type descriptors, schemas, and semantic IDs see the target type.
+
+`newtype UserId = String` retains a distinct nominal identity with the target's runtime representation. There is no implicit conversion in either direction, including through a `let` annotation or function argument. Expression ascription is the explicit one-boundary operation: `(raw: UserId)` introduces the newtype and `(id: String)` eliminates it. Unrelated newtypes cannot be converted directly. Newtype descriptors and semantic IDs retain the qualified owner and differ from their target and from separately declared newtypes.
 
 Eliminate an ADT with an exhaustive `match`. Each case names one constructor, binds its payload at that constructor's concrete type, and produces the same result type:
 

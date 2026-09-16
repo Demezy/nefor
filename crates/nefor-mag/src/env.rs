@@ -187,6 +187,7 @@ struct CompilationState {
     frames: HashMap<FrameId, ScopeFrame>,
     frame_roots: HashMap<FrameId, usize>,
     loaded: HashMap<String, BTreeMap<String, Vec<Value>>>,
+    semantic_types: HashMap<String, TypeDecl>,
     loading: Vec<String>,
     file_reads: HashMap<PathBuf, Result<String, String>>,
     memoized_calls: HashMap<MemoCall, Value>,
@@ -223,7 +224,6 @@ pub struct Env {
     module_roots: Vec<PathBuf>,
     module: String,
     state: Arc<Mutex<CompilationState>>,
-    imports: HashSet<String>,
     profiler: Option<CompileProfiler>,
 }
 
@@ -242,7 +242,6 @@ impl Clone for Env {
             module_roots: self.module_roots.clone(),
             module: self.module.clone(),
             state: self.state.clone(),
-            imports: self.imports.clone(),
             profiler: self.profiler.clone(),
         }
     }
@@ -293,7 +292,6 @@ impl Env {
             module_roots,
             module: module.into(),
             state,
-            imports: HashSet::new(),
             profiler,
         };
         for &name in crate::checker::BUILTIN_NAMES {
@@ -760,6 +758,14 @@ impl Env {
         }
     }
     pub fn define(&mut self, name: &str, value: Value) {
+        if let Value::TypeDecl(declaration) = &value {
+            self.state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .semantic_types
+                .entry(declaration.name.clone())
+                .or_insert_with(|| declaration.clone());
+        }
         let ty = crate::checker::value_type(&value);
         let id = self.allocate_binding_id(name, ty);
         self.define_ready(id, name, value);
@@ -873,8 +879,6 @@ impl Env {
         }
     }
     pub fn type_decl(&self, canonical: &str) -> Option<TypeDecl> {
-        // Nominal resolution must not clone unrelated runtime data (especially
-        // host inventories) on every type lookup.
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         self.scopes
             .iter()
@@ -882,11 +886,14 @@ impl Env {
             .filter_map(|scope| state.frames.get(scope))
             .flat_map(|frame| frame.slots.values())
             .find_map(|slot| match slot {
-                BindingSlot::Ready(Value::TypeDecl(decl)) if decl.name == canonical => {
-                    Some(decl.clone())
+                BindingSlot::Ready(Value::TypeDecl(declaration))
+                    if declaration.name == canonical =>
+                {
+                    Some(declaration.clone())
                 }
                 _ => None,
             })
+            .or_else(|| state.semantic_types.get(canonical).cloned())
     }
     // Nominal declarations are the compilation-wide type namespace, not dynamic values.
     pub fn define_type_declarations_from(&mut self, source: &Self) {
@@ -937,6 +944,31 @@ impl Env {
             }
         }
     }
+    pub fn define_semantic_type_declarations_from(&mut self, source: &Self) {
+        let declarations = {
+            let state = source
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            source
+                .scopes
+                .iter()
+                .filter_map(|scope| state.frames.get(scope))
+                .flat_map(|frame| frame.slots.values())
+                .filter_map(|slot| match slot {
+                    BindingSlot::Ready(Value::TypeDecl(declaration)) => Some(declaration.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        for declaration in declarations {
+            let canonical = declaration.name.clone();
+            if self.type_decl(&canonical).is_none() {
+                self.define(&canonical, Value::TypeDecl(declaration));
+            }
+        }
+    }
+
     pub fn snapshot(&self) -> Vec<Scope> {
         let snapshot = self.scopes.clone();
         self.profile_counters(|counters| {
@@ -1073,45 +1105,36 @@ impl Env {
             module_roots: self.module_roots.clone(),
             module: self.module.clone(),
             state: self.state.clone(),
-            imports: self.imports.clone(),
             profiler: self.profiler.clone(),
         }
     }
-    pub fn user_defs(&self) -> BTreeMap<String, Vec<Value>> {
+    pub fn user_defs(&self, direct_names: &HashSet<String>) -> BTreeMap<String, Vec<Value>> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         self.scopes
             .first()
             .into_iter()
-            .flat_map(|s| {
-                let Some(frame) = state.frames.get(s) else {
+            .flat_map(|scope| {
+                let Some(frame) = state.frames.get(scope) else {
                     return Vec::new();
                 };
-                frame
-                    .names
+                direct_names
                     .iter()
-                    .map(|(name, ids)| {
+                    .filter_map(|name| {
+                        let ids = frame.names.get(name)?;
                         let values = ids
                             .iter()
                             .filter_map(|id| match frame.slots.get(id) {
-                                Some(BindingSlot::Ready(value)) => Some(value.clone()),
+                                Some(BindingSlot::Ready(value))
+                                    if !matches!(value, Value::BuiltinFn(_) | Value::Type(_)) =>
+                                {
+                                    Some(value.clone())
+                                }
                                 _ => None,
                             })
                             .collect::<Vec<_>>();
-                        (name.clone(), values)
+                        (!values.is_empty()).then_some((name.clone(), values))
                     })
                     .collect::<Vec<_>>()
-            })
-            .filter_map(|(name, values)| {
-                let qualified = self.qualify(&name);
-                let own_nested_type = values.iter().any(
-                    |value| matches!(value, Value::TypeDecl(declaration) if declaration.name == qualified),
-                );
-                let values = values
-                    .into_iter()
-                    .filter(|v| !matches!(v, Value::BuiltinFn(_) | Value::Type(_)))
-                    .collect::<Vec<_>>();
-                ((!name.contains('.') || own_nested_type) && !values.is_empty())
-                    .then_some((name, values))
             })
             .collect()
     }
@@ -1131,14 +1154,13 @@ impl Env {
         });
         cached
     }
-    pub fn loaded_modules(&self) -> Vec<(String, BTreeMap<String, Vec<Value>>)> {
+    pub fn module_defs(&self, name: &str) -> Option<BTreeMap<String, Vec<Value>>> {
         self.state
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|error| error.into_inner())
             .loaded
-            .iter()
-            .map(|(name, defs)| (name.clone(), defs.clone()))
-            .collect()
+            .get(name)
+            .cloned()
     }
     pub fn begin_module(&self, name: &str) -> Result<(), MagError> {
         let mut m = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1161,17 +1183,11 @@ impl Env {
         self.profile_counters(|counters| {
             counters.modules_loaded = counters.modules_loaded.saturating_add(1);
         });
-        self.install_module(name, defs);
     }
     pub fn install_module(&mut self, name: &str, defs: BTreeMap<String, Vec<Value>>) {
-        self.imports.insert(name.into());
         for (local, values) in defs {
             for value in values {
-                let qualified = match &value {
-                    Value::TypeDecl(declaration) => declaration.name.clone(),
-                    _ if local.contains('.') => local.clone(),
-                    _ => format!("{name}.{local}"),
-                };
+                let qualified = format!("{name}.{local}");
                 if !self
                     .lookup_candidates(&qualified)
                     .iter()
@@ -1182,6 +1198,7 @@ impl Env {
             }
         }
     }
+
     pub fn module_env(&self, name: &str) -> Self {
         let mut env = Self::new_in(
             &self.source_dir,

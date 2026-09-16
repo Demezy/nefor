@@ -54,6 +54,7 @@ fn lower_require(items: &[ast::Expr]) -> authored::Form {
     match &items[1] {
         ast::Expr::Str(module) => authored::Form::Require(authored::Require {
             module: module.clone(),
+            exposure: authored::ImportExposure::Qualified,
         }),
         _ => authored::Form::Invalid(AuthoringError::Eval(
             "require expects a module string".into(),
@@ -116,7 +117,7 @@ fn lower_declaration_body(expression: &ast::Expr) -> authored::TypeDeclarationBo
         let mut lowered = Vec::with_capacity(fields.len());
         for (key, value) in fields {
             let Some(key) = record_key(key) else {
-                return authored::TypeDeclarationBody::Alias(authored::Type::Invalid(
+                return authored::TypeDeclarationBody::Newtype(authored::Type::Invalid(
                     "named field names must be symbols or keywords".into(),
                 ));
             };
@@ -125,25 +126,25 @@ fn lower_declaration_body(expression: &ast::Expr) -> authored::TypeDeclarationBo
         return authored::TypeDeclarationBody::Fields(lowered);
     }
     let ast::Expr::List(items) = expression else {
-        return authored::TypeDeclarationBody::Alias(lower_type(expression));
+        return authored::TypeDeclarationBody::Newtype(lower_type(expression));
     };
     if items.first().and_then(ast::Expr::as_symbol) != Some("adt") {
-        return authored::TypeDeclarationBody::Alias(lower_type(expression));
+        return authored::TypeDeclarationBody::Newtype(lower_type(expression));
     }
     let mut constructors = Vec::with_capacity(items.len().saturating_sub(1));
     for constructor in &items[1..] {
         let ast::Expr::Vector(parts) = constructor else {
-            return authored::TypeDeclarationBody::Alias(authored::Type::Invalid(
+            return authored::TypeDeclarationBody::Newtype(authored::Type::Invalid(
                 "ADT constructor must be [Name PayloadType]".into(),
             ));
         };
         let [name, payload] = parts.as_slice() else {
-            return authored::TypeDeclarationBody::Alias(authored::Type::Invalid(
+            return authored::TypeDeclarationBody::Newtype(authored::Type::Invalid(
                 "ADT constructor must be [Name PayloadType]".into(),
             ));
         };
         let Some(name) = name.as_symbol() else {
-            return authored::TypeDeclarationBody::Alias(authored::Type::Invalid(
+            return authored::TypeDeclarationBody::Newtype(authored::Type::Invalid(
                 "ADT constructor name must be a symbol".into(),
             ));
         };

@@ -189,6 +189,15 @@ pub mod fuel {
 
 pub(crate) fn eval_program(env: &mut Env, module: &Module) -> Result<Value, MagError> {
     let _fuel = fuel::ensure(env.compiler_limits());
+    let requires = module
+        .forms
+        .iter()
+        .filter_map(|form| match form {
+            Form::Require(require) => Some(require.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    eval_imports(env, &requires, module)?;
     let mut source = Vec::new();
     for form in &module.forms {
         let _declaration_depth = if matches!(form, Form::Block(_)) {
@@ -202,18 +211,18 @@ pub(crate) fn eval_program(env: &mut Env, module: &Module) -> Result<Value, MagE
             Some(depth)
         };
         match form {
-            Form::Require(require) => {
-                eval_require(env, &require.module)?;
-            }
+            Form::Require(_) => {}
             Form::Type(declaration) => {
-                eval_type_declaration(env, declaration)?;
+                eval_type_declaration(env, declaration)
+                    .map_err(|error| enrich_unresolved_import(env, error))?;
             }
             Form::Block(item) => source.push(item.clone()),
             Form::Invalid(error) => return Err(error.clone().into_mag_error()),
         }
     }
     let checking_phase = env.profile_phase(Phase::Checking);
-    let checked = crate::checker::compile_block(env, &source)?;
+    let checked = crate::checker::compile_block(env, &source)
+        .map_err(|error| enrich_unresolved_import(env, error))?;
     drop(checking_phase);
     let evaluated = eval_checked_block(env, &checked);
     match &evaluated {
@@ -227,6 +236,21 @@ pub(crate) fn eval_program(env: &mut Env, module: &Module) -> Result<Value, MagE
     evaluated
 }
 
+fn enrich_unresolved_import(env: &Env, error: MagError) -> MagError {
+    let MagError::Unresolved(name) = error else {
+        return error;
+    };
+    let suggestions = crate::resolver::import_suggestions(env.module_roots(), &name);
+    if suggestions.is_empty() {
+        MagError::Unresolved(name)
+    } else {
+        MagError::Unresolved(format!(
+            "{name}; possible imports: {}",
+            suggestions.join(", ")
+        ))
+    }
+}
+
 fn eval_type_declaration(env: &mut Env, authored: &TypeDeclaration) -> Result<Value, MagError> {
     let vars = authored.params.iter().cloned().collect();
     let qualified = env.qualify(&authored.name);
@@ -234,7 +258,10 @@ fn eval_type_declaration(env: &mut Env, authored: &TypeDeclaration) -> Result<Va
         TypeDeclarationBody::Fields(fields) => TypeDeclBody::Fields(crate::ast::FieldTypes(
             crate::checker::resolve_field_types(env, fields, &vars)?,
         )),
-        TypeDeclarationBody::Alias(body) => {
+        TypeDeclarationBody::TransparentAlias(body) => {
+            TypeDeclBody::TransparentAlias(crate::checker::resolve_type(env, body, &vars)?)
+        }
+        TypeDeclarationBody::Newtype(body) => {
             TypeDeclBody::Alias(crate::checker::resolve_type(env, body, &vars)?)
         }
         TypeDeclarationBody::Adt(constructors) => {
@@ -271,6 +298,14 @@ fn eval_type_declaration(env: &mut Env, authored: &TypeDeclaration) -> Result<Va
         params: authored.params.clone(),
         body,
     };
+    if let Some(existing) = env.type_decl(&declaration.name) {
+        if existing != declaration {
+            return Err(MagError::Type(format!(
+                "conflicting semantic type declaration {}",
+                declaration.name
+            )));
+        }
+    }
     let value = Value::TypeDecl(declaration);
     env.define(&authored.name, value.clone());
     Ok(value)
@@ -640,7 +675,7 @@ fn validate_value(env: &Env, value: &Value, ty: &MagType) -> Result<(), MagError
                     }
                     _ => false,
                 },
-                TypeDeclBody::Alias(body) => validate_value(
+                TypeDeclBody::TransparentAlias(body) | TypeDeclBody::Alias(body) => validate_value(
                     env,
                     value,
                     &crate::checker::substitute(&body, &substitutions),
@@ -2016,9 +2051,292 @@ fn selected_value_type(
     Ok(declared.clone())
 }
 
+fn direct_module_exports(env: &Env, name: &str) -> Result<BTreeSet<String>, MagError> {
+    let resolve_phase = env.profile_phase(Phase::ModuleResolve);
+    let resolved = crate::resolver::resolve_module(env.module_roots(), name)?;
+    drop(resolve_phase);
+    let read_phase = env.profile_phase(Phase::ModuleRead);
+    let source = std::fs::read_to_string(&resolved.path)
+        .map_err(|error| MagError::Eval(format!("cannot read module {name}: {error}")))?;
+    drop(read_phase);
+    let snapshot = crate::diagnostic::SourceSnapshot::file(&resolved.path, &source);
+    let profiler = env.profiler();
+    let authored = crate::frontend::compile_source(
+        resolved.syntax,
+        &snapshot,
+        profiler.as_ref(),
+        crate::frontend::SourceRole::Module,
+    )?;
+    Ok(authored
+        .forms
+        .iter()
+        .filter_map(|form| match form {
+            Form::Type(declaration) if !declaration.name.contains('.') => {
+                Some(declaration.name.clone())
+            }
+            Form::Block(crate::authored::BlockItem::Let { name, .. }) => Some(name.clone()),
+            _ => None,
+        })
+        .collect())
+}
+
+fn eval_imports(
+    env: &mut Env,
+    requires: &[crate::authored::Require],
+    authored: &Module,
+) -> Result<(), MagError> {
+    use crate::authored::ImportExposure;
+
+    let mut direct_exports = BTreeMap::new();
+    for require in requires {
+        if !direct_exports.contains_key(&require.module) {
+            direct_exports.insert(
+                require.module.clone(),
+                direct_module_exports(env, &require.module)?,
+            );
+        }
+    }
+
+    let mut bare = BTreeSet::new();
+    let mut suppressions = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut positive = BTreeSet::<(String, String, String)>::new();
+    let mut canonical_modules = BTreeSet::new();
+    let mut aliases = BTreeMap::<String, BTreeSet<String>>::new();
+    for require in requires {
+        let exports = direct_exports.get(&require.module).ok_or_else(|| {
+            MagError::Eval(format!("resolved import {} is unavailable", require.module))
+        })?;
+        match &require.exposure {
+            ImportExposure::Open => {
+                bare.insert(require.module.clone());
+                canonical_modules.insert(require.module.clone());
+            }
+            ImportExposure::Qualified => {
+                canonical_modules.insert(require.module.clone());
+            }
+            ImportExposure::NamespaceAlias(alias) => {
+                aliases
+                    .entry(alias.clone())
+                    .or_default()
+                    .insert(require.module.clone());
+            }
+            ImportExposure::Selective(selectors) => {
+                canonical_modules.insert(require.module.clone());
+                for selector in selectors {
+                    if !exports.contains(&selector.export) {
+                        return Err(MagError::Unresolved(format!(
+                            "{}.{} (import selector)",
+                            require.module, selector.export
+                        )));
+                    }
+                    if let Some(local) = &selector.local {
+                        positive.insert((
+                            require.module.clone(),
+                            selector.export.clone(),
+                            local.clone(),
+                        ));
+                    } else {
+                        suppressions
+                            .entry(require.module.clone())
+                            .or_default()
+                            .insert(selector.export.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Local spellings map to canonical declaration identities. Repeated
+    // exposure of one declaration is idempotent; overload members remain
+    // grouped under that declaration instead of becoming collision candidates.
+    let mut opened = BTreeMap::<String, BTreeSet<(String, String)>>::new();
+    for module in &bare {
+        let suppressed = suppressions.get(module);
+        for export in &direct_exports[module] {
+            if !suppressed.is_some_and(|names| names.contains(export)) {
+                opened
+                    .entry(export.clone())
+                    .or_default()
+                    .insert((module.clone(), export.clone()));
+            }
+        }
+    }
+    for (module, export, local) in positive {
+        opened.entry(local).or_default().insert((module, export));
+    }
+
+    let mut candidates = BTreeMap::<String, BTreeSet<String>>::new();
+    for form in &authored.forms {
+        match form {
+            Form::Type(declaration) if !declaration.name.contains('.') => {
+                candidates
+                    .entry(declaration.name.clone())
+                    .or_default()
+                    .insert(format!("local type {}", declaration.name));
+            }
+            Form::Block(crate::authored::BlockItem::Let { name, .. }) => {
+                candidates
+                    .entry(name.clone())
+                    .or_default()
+                    .insert(format!("local let {name}"));
+            }
+            _ => {}
+        }
+    }
+    for builtin in crate::checker::BUILTIN_NAMES.iter().copied().chain([
+        "List",
+        "Map",
+        "Set",
+        "Artifact",
+        "JsonValue",
+        "TypeDescriptor",
+        "TypeSchema",
+        "SemanticTypeId",
+        "PackedValue",
+        "Unit",
+        "Bool",
+        "Int",
+        "Float",
+        "String",
+    ]) {
+        candidates
+            .entry(builtin.to_owned())
+            .or_default()
+            .insert(format!("builtin {builtin}"));
+    }
+    for module in &canonical_modules {
+        if let Some(root) = module.split('.').next() {
+            candidates
+                .entry(root.to_owned())
+                .or_default()
+                .insert(format!("canonical namespace {root}"));
+        }
+    }
+    for (alias, modules) in &aliases {
+        for module in modules {
+            candidates
+                .entry(alias.clone())
+                .or_default()
+                .insert(format!("namespace alias {alias} for {module}"));
+        }
+    }
+    for (local, declarations) in &opened {
+        for (module, export) in declarations {
+            candidates
+                .entry(local.clone())
+                .or_default()
+                .insert(format!("imported export {module}.{export}"));
+        }
+    }
+
+    // A directly imported descendant is a namespace segment, not a field of
+    // the imported prefix module.
+    for descendant in &canonical_modules {
+        let segments = descendant.split('.').collect::<Vec<_>>();
+        for index in 1..segments.len() {
+            let prefix = segments[..index].join(".");
+            let segment = segments[index];
+            if canonical_modules.contains(&prefix)
+                && direct_exports
+                    .get(&prefix)
+                    .is_some_and(|exports| exports.contains(segment))
+            {
+                let spelling = format!("{prefix}.{segment}");
+                let set = candidates.entry(spelling).or_default();
+                set.insert(format!(
+                    "canonical namespace {}",
+                    segments[..=index].join(".")
+                ));
+                set.insert(format!("imported export {prefix}.{segment}"));
+            }
+        }
+    }
+
+    if let Some((spelling, conflicting)) = candidates.iter().find(|(_, set)| {
+        set.len() > 1
+            && set.iter().any(|candidate| {
+                candidate.starts_with("imported export ")
+                    || candidate.starts_with("canonical namespace ")
+                    || candidate.starts_with("namespace alias ")
+            })
+    }) {
+        let mut repairs = BTreeSet::new();
+        for require in requires {
+            match &require.exposure {
+                ImportExposure::Open
+                    if direct_exports[&require.module].contains(spelling.as_str()) =>
+                {
+                    repairs.insert(format!(
+                        "replace `import {0}` with `import {0}.{{}}`, or add `import {0}.{{{1} as _}}`",
+                        require.module, spelling
+                    ));
+                }
+                ImportExposure::Selective(selectors) => {
+                    for selector in selectors
+                        .iter()
+                        .filter(|selector| selector.local.as_deref() == Some(spelling.as_str()))
+                    {
+                        repairs.insert(format!(
+                            "remove or rename selector `{}.{{{}}}`",
+                            require.module, selector.export
+                        ));
+                    }
+                }
+                ImportExposure::Qualified if require.module.split('.').next() == Some(spelling) => {
+                    repairs.insert(format!(
+                        "replace `import {0}.{{}}` with `import {0} as alias` and qualify its uses through `alias`",
+                        require.module
+                    ));
+                }
+                _ => {}
+            }
+        }
+        let repairs = if repairs.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; repairs: {}",
+                repairs.into_iter().collect::<Vec<_>>().join("; ")
+            )
+        };
+        return Err(MagError::Type(format!(
+            "import collision at '{spelling}'; candidates: {}{repairs}",
+            conflicting.iter().cloned().collect::<Vec<_>>().join(", ")
+        )));
+    }
+
+    let mut modules = BTreeMap::new();
+    for require in requires {
+        if !modules.contains_key(&require.module) {
+            eval_require(env, &require.module)?;
+            let defs = env.module_defs(&require.module).ok_or_else(|| {
+                MagError::Eval(format!("module {} did not enter the cache", require.module))
+            })?;
+            modules.insert(require.module.clone(), defs);
+        }
+    }
+
+    for module in &canonical_modules {
+        env.install_module(module, modules[module].clone());
+    }
+    for (alias, targets) in &aliases {
+        if let Some(module) = targets.iter().next() {
+            env.install_module(alias, modules[module].clone());
+        }
+    }
+    for (local, declarations) in opened {
+        let Some((module, export)) = declarations.into_iter().next() else {
+            continue;
+        };
+        for value in &modules[&module][&export] {
+            env.define(&local, value.clone());
+        }
+    }
+    Ok(())
+}
+
 fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
     if let Some(defs) = env.module_cached(name) {
-        env.install_module(name, defs.clone());
         return Ok(Value::ModuleNamespace(std::sync::Arc::new(
             module_value_map(&defs),
         )));
@@ -2052,11 +2370,19 @@ fn eval_require(env: &mut Env, name: &str) -> Result<Value, MagError> {
     drop(eval_phase);
     match result {
         Ok(_) => {
-            let defs = module.user_defs();
+            let direct_names = authored
+                .forms
+                .iter()
+                .filter_map(|form| match form {
+                    Form::Type(declaration) if !declaration.name.contains('.') => {
+                        Some(declaration.name.clone())
+                    }
+                    Form::Block(crate::authored::BlockItem::Let { name, .. }) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect::<HashSet<_>>();
+            let defs = module.user_defs(&direct_names);
             env.finish_module(name, defs.clone());
-            for (module_name, module_defs) in env.loaded_modules() {
-                env.install_module(&module_name, module_defs);
-            }
             Ok(Value::ModuleNamespace(std::sync::Arc::new(
                 module_value_map(&defs),
             )))
