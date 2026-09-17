@@ -372,7 +372,7 @@ end
 -- Write-capable detection over a modification's actors: any actor whose
 -- params.tools names a write-capable tool makes the program write-capable and
 -- subject to the plan-approval gate. Shell and read-tool actors run freely —
--- the tool-gate and da-policies enforce runtime permissions.
+-- the tool gate and its configured validator enforce runtime permissions.
 local WRITE_TOOLS = { ["fs/edit"] = true, ["write_file"] = true }
 
 local function actors_have_writers(inventory)

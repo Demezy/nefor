@@ -28,9 +28,11 @@ type AgentErrorReason = ProviderError(ProviderError) | OutputValidationError(Out
 
 type AgentError {last_output: JsonValue, reason: AgentErrorReason}
 
-// Default selects the configured approval behavior, never a bypass. DaRules
-// is transported metadata; the current tool gate does not enforce these rules.
-type ToolApprovalPolicy = Default(Unit) | DaRules(Map<String, String>)
+// Default selects the configured approval behavior, never a bypass. Rules
+// carries mechanism-neutral per-agent approval-rule metadata.
+type ToolApprovalRules {rules: Map<String, String>}
+
+type ToolApprovalPolicy = Default(Unit) | Rules(ToolApprovalRules)
 
 type ToolApprovalRuntimeRules {rules: Map<String, String>}
 
@@ -55,5 +57,5 @@ let identifier: fn(String) -> OptionalIdentifier = |value| => OptionalIdentifier
 
 let normalize_tool_approval_policy: fn(ToolApprovalPolicy) -> ToolApprovalRuntimeRules = |policy| => match policy {
   case Default(unit) => ToolApprovalRuntimeRules {rules: core.map.empty<String, String>()},
-  case DaRules(rules) => ToolApprovalRuntimeRules {rules: rules},
+  case Rules(policy_rules) => ToolApprovalRuntimeRules {rules: get(policy_rules, "rules")},
 }

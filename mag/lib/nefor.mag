@@ -59,6 +59,8 @@ type AgentErrorReason = nefor.contracts.AgentErrorReason
 
 type AgentError = nefor.contracts.AgentError
 
+type ToolApprovalRules = nefor.contracts.ToolApprovalRules
+
 type ToolApprovalPolicy = nefor.contracts.ToolApprovalPolicy
 
 type Timeout = nefor.contracts.Timeout

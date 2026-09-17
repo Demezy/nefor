@@ -856,7 +856,7 @@ let operator_bound = nefor.result.`>=>`(result_input, lifted)
 let colliding_left = nefor.node.composite_id("a&&&b", "&&&", "c")
 let colliding_right = nefor.node.composite_id("a", "&&&", "b&&&c")
 
-let policy = named(nefor.contracts.ToolApprovalPolicy, DaRules, core.map.insert((core.map.empty<String, String>(): Map<String, String>), "bash", "deny"))
+let policy = named(nefor.contracts.ToolApprovalPolicy, Rules, nefor.contracts.ToolApprovalRules {rules: core.map.insert((core.map.empty<String, String>(): Map<String, String>), "bash", "deny")})
 let no_policy = named(nefor.contracts.ToolApprovalPolicy, Default, nil)
 let resolve_model: fn(String) -> nefor.actors.AuthoredModel = |model| => named(nefor.actors.AuthoredModel, ResolvedModel, nefor.actors.ResolvedModel {provider: "test", model: model, reasoning_effort: nefor.actors.no_reasoning_effort})
 let agent = nefor.actors.agent<String, Input, Output>("agent", resolve_model, nefor.actors.AgentConfig<String> {model: "mock", system: "test", tools: [], tool_approval_policy: policy, max_corrections: 1})
@@ -946,7 +946,7 @@ artifact {
     );
     assert_eq!(
         artifact["tool_approval_policy"],
-        json!({"constructor": "DaRules", "value": {"bash": "deny"}})
+        json!({"constructor": "Rules", "value": {"rules": {"bash": "deny"}}})
     );
     assert_eq!(
         artifact["run_tool_params"]["value"]["tool_approval_policy"],
@@ -1477,7 +1477,7 @@ fn authored_tool_policies_lower_without_changing_agent_configuration() {
 import nefor
 import core.map.{}
 let resolver: fn(String) -> AuthoredModel = |model| => named(AuthoredModel, ResolvedModel, ResolvedModel {provider: "test", model: model, reasoning_effort: no_reasoning_effort})
-let policies = [named(ToolApprovalPolicy, Default, nil), named(ToolApprovalPolicy, DaRules, core.map.insert(core.map.empty<String, String>(), "cargo build", "deny"))]
+let policies = [named(ToolApprovalPolicy, Default, nil), named(ToolApprovalPolicy, Rules, ToolApprovalRules {rules: core.map.insert(core.map.empty<String, String>(), "cargo build", "deny")})]
 let config: fn(ToolApprovalPolicy) -> AgentConfig<String> = |policy| => AgentConfig<String> {model: "test", system: "", tools: [], tool_approval_policy: policy, max_corrections: 0}
 let configs = map(config, policies)
 let nodes = map(((|settings| => agent<String, String, TextAnswer>("worker", resolver, settings)): fn(AgentConfig<String>) -> Node<String, core.types.Result<AgentError, TextAnswer>>), configs)
@@ -1489,7 +1489,7 @@ artifact {configs: configs, actors: map(((|node| => get(node, "actors")): fn(Nod
     );
     assert_eq!(
         result["configs"][1]["tool_approval_policy"],
-        json!({"constructor": "DaRules", "value": {"cargo build": "deny"}})
+        json!({"constructor": "Rules", "value": {"rules": {"cargo build": "deny"}}})
     );
     for (index, rules) in [json!({}), json!({"cargo build": "deny"})]
         .into_iter()
@@ -1558,7 +1558,7 @@ fn nefor_facade_exports_exact_authoring_allowlist() {
             Some(name.to_owned())
         })
         .collect();
-    let expected: std::collections::BTreeSet<_> = "Node source identity compile_graph AgentConfig agent AuthoredModel ResolvedModel ModelProfile model_profile OptionalReasoningEffort reasoning_effort no_reasoning_effort read_only_tools general_tools ToolApprovalPolicy ProviderInput TextAnswer OutputViolation ProviderError OutputValidationError AgentErrorReason AgentError ApprovalConfig approval_gate HumanWorkflowApproval HumanWorkflowRejection HumanWorkflowDecision RetryGateConfig retry_gate RetryDecision node_named rename compose >>> discard then *> keep_left before <* fanout &&& parallel *** choose +++ sequence lift and_then >=> result_map_named result_map map_error_named map_error DynamicList Indexed traverse context Timeout ProcessExecParams exec ShellScriptParams script ProcessExited ProcessSignaled ProcessTermination ProcessResult cwd CreateSpec OpenSpec Worktree WorktreeError create open join".split_whitespace().map(str::to_owned).collect();
+    let expected: std::collections::BTreeSet<_> = "Node source identity compile_graph AgentConfig agent AuthoredModel ResolvedModel ModelProfile model_profile OptionalReasoningEffort reasoning_effort no_reasoning_effort read_only_tools general_tools ToolApprovalRules ToolApprovalPolicy ProviderInput TextAnswer OutputViolation ProviderError OutputValidationError AgentErrorReason AgentError ApprovalConfig approval_gate HumanWorkflowApproval HumanWorkflowRejection HumanWorkflowDecision RetryGateConfig retry_gate RetryDecision node_named rename compose >>> discard then *> keep_left before <* fanout &&& parallel *** choose +++ sequence lift and_then >=> result_map_named result_map map_error_named map_error DynamicList Indexed traverse context Timeout ProcessExecParams exec ShellScriptParams script ProcessExited ProcessSignaled ProcessTermination ProcessResult cwd CreateSpec OpenSpec Worktree WorktreeError create open join".split_whitespace().map(str::to_owned).collect();
     assert_eq!(actual, expected);
     for name in [
         "Task",
