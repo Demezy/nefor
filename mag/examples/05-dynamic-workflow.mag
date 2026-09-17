@@ -1,24 +1,25 @@
 import agents.{}
 import core.types.{Result}
-import nefor
+import nefor.{>>>, AgentError, DynamicList, ProviderInput, ToolApprovalPolicy, and_then, compile_graph, context, lift, source, traverse}
 
+type PlanningRequest {prompt: String}
 type WorkItem {task: String}
 type WorkResult {summary: String}
 type FinalSummary {summary: String}
 
-let task = source("task", Task {prompt: "Split this request into independent work."})
-let planner = agents.agent<Task, DynamicList<WorkItem>>("planner", agents.AgentConfig {
+let task = source("task", PlanningRequest {prompt: "Split this request into independent work."})
+let planner = agents.agent<PlanningRequest, DynamicList<WorkItem>>("planner", agents.AgentConfig {
   model: agents.mock,
   system: "Return the ordered work items as JSON.",
   tools: [],
-  tool_approval_policy: no_tool_approval_policy(),
+  tool_approval_policy: named(ToolApprovalPolicy, Default, nil),
   max_corrections: 1
 })
 let worker = agents.agent<WorkItem, WorkResult>("worker", agents.AgentConfig {
   model: agents.mock,
   system: "Consume the typed WorkItem input, complete it, and return one WorkResult.",
   tools: [],
-  tool_approval_policy: no_tool_approval_policy(),
+  tool_approval_policy: named(ToolApprovalPolicy, Default, nil),
   max_corrections: 1
 })
 let workers = traverse("workers", worker)
@@ -27,15 +28,16 @@ let integrator = agents.agent<ProviderInput, FinalSummary>("integrator", agents.
   model: agents.mock,
   system: "Integrate all ordered worker results into one summary.",
   tools: [],
-  tool_approval_policy: no_tool_approval_policy(),
+  tool_approval_policy: named(ToolApprovalPolicy, Default, nil),
   max_corrections: 1
 })
-let integrate = compose("integrate", result_context, integrator)
+let integrate = result_context >>> integrator
 
-// The top-level graph is still assembled entirely from ordinary nodes:
-// >=> continues successful values and preserves AgentError as data.
-let planned = compose("planned", task, planner)
-let ran = and_then("ran", planned, lift<DynamicList<WorkItem>, AgentError, DynamicList<Result<AgentError, WorkResult>>>("workers-result", workers))
+// The top-level graph is assembled from ordinary typed nodes. >>> is ordinary
+// infix application; and_then continues Ok values and preserves AgentError.
+let planned = task >>> planner
+let workers_in_result = lift<DynamicList<WorkItem>, AgentError, DynamicList<Result<AgentError, WorkResult>>>("workers-result", workers)
+let ran = and_then("ran", planned, workers_in_result)
 let workflow = and_then("workflow", ran, integrate)
 
 compile_graph(workflow)

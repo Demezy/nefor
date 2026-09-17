@@ -331,7 +331,7 @@ end
 local function lead_artifact()
   local task_type = {
     kind = "named",
-    name = "nefor.contracts.Task",
+    name = "example.LeadTurnInput",
     arguments = json.decode("[]"),
   }
   return {

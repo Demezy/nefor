@@ -80,6 +80,11 @@ fn starter_mag_kernel_tool_primitives() {
 }
 
 #[test]
+fn starter_mag_kernel_process_primitives() {
+    run_lua_test("tests/lua/mag-kernel/process_test.lua");
+}
+
+#[test]
 fn starter_mag_kernel_adapter_factory() {
     run_lua_test("tests/lua/mag-kernel/adapter_test.lua");
 }

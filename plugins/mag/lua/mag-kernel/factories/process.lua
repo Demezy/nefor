@@ -12,17 +12,17 @@ local INPUT_TYPE = {kind="primitive",name="Unit"}
 
 local function timeout_ms(timeout, actor)
   if type(timeout) ~= "table" or type(timeout.present) ~= "boolean"
-      or type(timeout.milliseconds) ~= "number" then
-    return nil, actor .. " params.timeout must be a Timeout record"
+      or math.type(timeout.milliseconds) ~= "integer" then
+    return nil, actor .. " params.timeout must be a normalized runtime timeout"
   end
   if timeout.present then
-    if timeout.milliseconds < 1 or timeout.milliseconds % 1 ~= 0 then
-      return nil, actor .. " params.timeout must contain a positive integer number of milliseconds"
+    if timeout.milliseconds < 1 then
+      return nil, actor .. " normalized runtime timeout must contain positive signed i64 milliseconds"
     end
     return timeout.milliseconds
   end
   if timeout.milliseconds ~= 0 then
-    return nil, actor .. " params.timeout must use milliseconds 0 when absent"
+    return nil, actor .. " normalized runtime timeout must use milliseconds 0 when absent"
   end
   return nil
 end
@@ -161,14 +161,6 @@ local function factory(config)
     local function handle_input(one)
       local request_args = {}
       for key, value in pairs(config_args.request) do request_args[key] = value end
-      local arrival = one.arrival or {}
-      local constructor = arrival.constructor_id or arrival.type_id
-      local descriptor = arrival.type or {}
-      if constructor == "nefor.contracts.Text" or descriptor.name == "nefor.contracts.Text" then
-        local message = one.message or {}
-        local value = message.value
-        request_args.stdin = type(value) == "table" and value.content or message.content or ""
-      end
       seq = seq + 1
       pending[seq] = true
       emit(sign({

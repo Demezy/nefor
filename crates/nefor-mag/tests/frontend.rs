@@ -30,19 +30,62 @@ fn new_and_lisp_frontends_preserve_nominal_artifact_semantics() {
 }
 
 #[test]
-fn infix_is_curried_while_parenthesized_calls_remain_nary() {
+fn infix_and_prefix_forms_make_equivalent_binary_calls_while_nary_calls_remain_intact() {
     let artifact = compile_with_syntax(
         r#"
-let choose: String -> String -> String = |left| => |right| => left
-let join: fn(String, String) -> String = |left, right| => str(left, right)
-artifact(join("nary:", "left" choose "right"))
+infixl 5 (<>)
+let (<>): fn(String, String) -> String = |left, right| => str("(", left, "<>", right, ")")
+let join: fn(String, String, String) -> String = |left, middle, right| => str(left, middle, right)
+artifact {
+  infix_value: "left" <> "right",
+  prefix_value: (<>)("left", "right"),
+  nary_value: join("left", ":", "right"),
+}
 "#,
         Path::new("."),
         SyntaxMode::New,
     )
     .unwrap();
 
-    assert_eq!(artifact, serde_json::json!("nary:left"));
+    assert_eq!(
+        artifact,
+        serde_json::json!({
+            "infix_value": "(left<>right)",
+            "prefix_value": "(left<>right)",
+            "nary_value": "left:right",
+        })
+    );
+}
+
+#[test]
+fn infix_binary_calls_preserve_declared_precedence_and_associativity() {
+    let artifact = compile_with_syntax(
+        r#"
+infixl 4 (<+>)
+infixl 5 (<*>)
+infixr 6 (<^>)
+let (<+>): fn(String, String) -> String = |left, right| => str("(", left, "+", right, ")")
+let (<*>): fn(String, String) -> String = |left, right| => str("(", left, "*", right, ")")
+let (<^>): fn(String, String) -> String = |left, right| => str("(", left, "^", right, ")")
+artifact {
+  precedence: "a" <+> "b" <*> "c",
+  left: "a" <+> "b" <+> "c",
+  right: "a" <^> "b" <^> "c",
+}
+"#,
+        Path::new("."),
+        SyntaxMode::New,
+    )
+    .unwrap();
+
+    assert_eq!(
+        artifact,
+        serde_json::json!({
+            "precedence": "(a+(b*c))",
+            "left": "((a+b)+c)",
+            "right": "(a^(b^c))",
+        })
+    );
 }
 
 #[test]
@@ -50,7 +93,7 @@ fn imported_arrow_operator_is_infix_only_in_expression_context() {
     let root = workspace("arrow-term-operator");
     fs::write(
         root.join("operators.mag"),
-        "let (->): Int -> Int -> Int = |left| => |right| => left\n",
+        "let (->): fn(Int, Int) -> Int = |left, right| => left\n",
     )
     .unwrap();
     fs::write(
@@ -71,7 +114,7 @@ type Score {name: String, accepted: Bool}
 type Result<E, T> = Error(E) | Ok(T)
 
 infixr 5 append
-let append: String -> String -> String = |left| => |right| => str(left, right)
+let append: fn(String, String) -> String = |left, right| => str(left, right)
 let score = Score {name: "review", accepted: true}
 let outcome: Result<String, Score> = Result<String, Score>.Ok(score)
 let label: String = {
@@ -108,8 +151,8 @@ artifact(boxed("value"))
 }
 
 #[test]
-fn nary_functions_are_not_adapted_when_used_infix() {
-    let error = compile_with_syntax(
+fn ordinary_binary_functions_can_be_used_infix() {
+    let artifact = compile_with_syntax(
         r#"
 let take_left: fn(Int, Int) -> Int = |left, right| => left
 artifact(1 take_left 2)
@@ -117,12 +160,9 @@ artifact(1 take_left 2)
         Path::new("."),
         SyntaxMode::New,
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(matches!(
-        error,
-        nefor_mag::error::MagError::Type(_) | nefor_mag::error::MagError::Arity { .. }
-    ));
+    assert_eq!(artifact, serde_json::json!(1));
 }
 
 #[test]

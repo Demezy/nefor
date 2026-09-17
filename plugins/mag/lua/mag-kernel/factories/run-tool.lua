@@ -77,7 +77,7 @@ M.declaration = {
   params = {
     model = "string?", provider = "string?", conversation_peer = "string?",
     allowlist = "table?",  -- tool-name allowlist for this node (lowered from :tools)
-    tool_approval_policy = "table?", -- per-node rules; forwarded on the established external key
+    tool_approval_policy = "table", -- per-node rules; forwarded on the established external key
   },
   template = { relocations = {
     { path = { "conversation_peer" }, shape = "actor_id" },
@@ -101,14 +101,19 @@ function M.construct(id, params, emit, deps)
   params = params or {}
   deps = deps or {}
 
-  -- Per-node gating, threaded to every tool invocation this instance makes.
-  -- MAG-authored params are snake_case; the tool-gate request below retains
-  -- its established external wire key. Opaque plain data — the factory
-  -- forwards it, tool-gate interprets it.
-  local tool_approval_policy = params.tool_approval_policy
-  if type(tool_approval_policy) == "table" and type(tool_approval_policy.rules) == "table" then
-    tool_approval_policy = tool_approval_policy.rules
+  -- MAG supplies one normalized runtime record. The external tool API keeps
+  -- its established `da-policy` key and receives only the contained rules as
+  -- metadata; this factory does not interpret or enforce them.
+  local normalized_policy = params.tool_approval_policy
+  if type(normalized_policy) ~= "table" or type(normalized_policy.rules) ~= "table" then
+    return nil, "run-tool actor params.tool_approval_policy must be normalized ToolApprovalRuntimeRules"
   end
+  for key, value in pairs(normalized_policy.rules) do
+    if type(key) ~= "string" or type(value) ~= "string" then
+      return nil, "run-tool actor normalized tool approval rules must map strings to strings"
+    end
+  end
+  local tool_approval_policy = normalized_policy.rules
   local allowlist = params.allowlist
   if allowlist == nil then
     allowlist = params.tools

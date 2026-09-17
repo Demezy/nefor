@@ -167,9 +167,9 @@ end
 -- synchronous producer standing in for the llm.
 local function gate_actors()
   local string = {kind="primitive",name="String"}
-  local approved = {kind="named",name="test.Approved",arguments={},body={kind="record",fields={{name="content",type=string}}}}
-  local rejected = {kind="named",name="test.Rejected",arguments={},body={kind="record",fields={{name="reason",type=string}}}}
-  local decision = {kind="adt",name="test.ApprovalDecision",arguments={},constructors={
+  local approved = {kind="named",name="nefor.human.HumanWorkflowApproval",arguments={},body={kind="record",fields={{name="content",type=string}}}}
+  local rejected = {kind="named",name="nefor.human.HumanWorkflowRejection",arguments={},body={kind="record",fields={{name="reason",type=string}}}}
+  local decision = {kind="adt",name="nefor.human.HumanWorkflowDecision",arguments={},constructors={
     {name="Approved",payload=approved},{name="Rejected",payload=rejected},
   }}
   return {
@@ -196,7 +196,7 @@ local function gate_actors()
     },
     {
       id = "rework", factory = "adapter", type_arguments = {rejected},
-      params = { seed = "provider-in", schema={version=2,root={kind="named",name="test.Rejected",body={kind="record",fields={{name="reason",schema={kind="string"}}}}}} },
+      params = { seed = "provider-in", schema={version=2,root={kind="named",name="nefor.human.HumanWorkflowRejection",body={kind="record",fields={{name="reason",schema={kind="string"}}}}}} },
       evidence={version=2,identity="nefor.factory.adapter",arguments={rejected},input=rejected,output={kind="named",name="nefor.contracts.ProviderInput",arguments={}}},
       input={type=rejected,wire="nefor.agent.Input"},outputs={{type={kind="named",name="nefor.contracts.ProviderInput",arguments={}},wire="generic-provider.ProviderOut"}},
       routes = { ["generic-provider.ProviderOut"] = { { actor = "produce", wire = "generic-provider.ProviderOut" } } },
@@ -409,9 +409,9 @@ do
   local result_type = {kind="adt",name="core.types.Result",arguments={agent_error,text_answer},constructors={
     {name="Error",payload=agent_error},{name="Ok",payload=text_answer},
   }}
-  local approved = named("test.Approved")
-  local rejected = named("test.Rejected")
-  local decision = {kind="adt",name="test.ApprovalDecision",arguments={},constructors={
+  local approved = named("nefor.human.HumanWorkflowApproval")
+  local rejected = named("nefor.human.HumanWorkflowRejection")
+  local decision = {kind="adt",name="nefor.human.HumanWorkflowDecision",arguments={},constructors={
     {name="Approved",payload=approved},{name="Rejected",payload=rejected},
   }}
   for _, mod in ipairs({ llm, human, adapter, sink, adt_unpack }) do

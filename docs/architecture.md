@@ -15,6 +15,35 @@ carry the single closed `InstantiateDeltaTemplate` operation with its five
 expression forms; raw modifications, a general runtime expression language,
 and post-compilation function application are not part of version 2.
 
+## MAG authoring and runtime protocol ownership
+
+The `nefor` facade is an explicit authoring allowlist. Low-level graph editing,
+factory parameters, tool wires, template machinery, and normalization records
+remain available through their direct modules, not the facade. Application
+inputs and review vocabulary are local nominal types; no library `Task` or
+`Text` shape controls entry adaptation or display. Source previews preserve
+compiler evidence, and generic records render as structured values.
+
+`nefor.contracts.ProviderInput` and `TextAnswer` are deliberately different:
+their exact nominal identities select provider-context input and terminal-text
+output codecs. Failure and process-result contracts describe runtime facts.
+`nefor.human` owns human workflow approval and its nominal decisions, while tool
+authorization belongs to tool-gate/tool-validator and prelaunch write-plan
+review belongs to lead-workflow. These are three independent boundaries.
+
+An authored `ToolApprovalPolicy` selects `Default` (no per-agent override, not
+an approval bypass) or `DaRules`. Agent lowering normalizes that selection into
+`ToolApprovalRuntimeRules`. The current `da-policy` map is transported metadata:
+tool-gate does not consume or enforce it. Authorization still follows its gate
+policy and configured validator; a deny entry alone does not prevent execution.
+
+Authored `Timeout` units normalize once in `nefor.timeout`, shared by process
+and shell constructors. The library owns positivity and unit factors; MAG's
+general-purpose integer operations provide checked signed-i64 multiplication.
+Node construction rejects invalid durations before runtime. Lua validates the
+normalized record at the artifact boundary; external process/shell tools still
+accept their optional-millisecond wire format, not MAG constructor envelopes.
+
 ## The decoupling rule
 
 A plugin capability and the logic that uses it are separate concerns. Adding a new workflow or policy should normally touch Lua composition, Lua libraries, or MAG programs, not provider/tool plugin internals.

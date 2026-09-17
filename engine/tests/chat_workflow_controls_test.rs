@@ -159,6 +159,9 @@ fn usage_reset_display_contract() {
 #[test]
 fn conversation_projection_surface_contract() {
     let lua = Lua::new();
+    let nefor = lua.create_table().expect("create nefor table");
+    nefor::lua::bindings::install_json(&lua, &nefor).expect("install json binding");
+    lua.globals().set("nefor", nefor).expect("set nefor global");
     let root = repo_root();
     let lua_root = root.join("lua").display().to_string();
     lua.load(format!(

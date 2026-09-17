@@ -1,7 +1,7 @@
 import core.map as maps
 
 type ExampleValues {unit: Unit, bool: Bool, int: Int, float: Float, string: String, list: List<Int>, map: Map<String, Int>}
-type ExampleArtifact {record: ExampleValues, copied: List<Int>}
+type ExampleArtifact {record: ExampleValues, copied: List<Int>, filtered: List<Int>}
 
 let record = ExampleValues {
   unit: nil,
@@ -13,8 +13,10 @@ let record = ExampleValues {
   map: maps.insert(maps.insert(maps.empty<String, Int>(), "one", 1), "two", 2)
 }
 
-// Collection transforms return new values; numbers remains [1, 2, 3].
+// Collection transforms return new values; numbers remains [1, 2, 3]. The
+// equality function shows the prefix (operator)(arguments) call form.
 let numbers = [1, 2, 3]
 let copied = map(((|value| => value): fn(Int) -> Int), numbers)
+let filtered = filter(((|value| => (=)(value, 2)): fn(Int) -> Bool), numbers)
 
-artifact(ExampleArtifact {record: record, copied: copied})
+artifact(ExampleArtifact {record: record, copied: copied, filtered: filtered})

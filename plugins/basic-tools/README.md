@@ -96,14 +96,18 @@ program.
 
 Both capabilities require a non-empty `cwd`. Relative paths are resolved by the
 child process from that directory; in MAG, `nefor.process.cwd` is `"."`, meaning
-the working directory inherited by the Nefor/MAG host. Both also require an
-explicit timeout record: `no_timeout` is intentionally unbounded, while
-`timeout_ms N` must use a positive millisecond value. An unbounded process that
-never exits keeps its MAG run nonterminal.
+the working directory inherited by the Nefor/MAG host. Both capabilities require
+an optional-millisecond timeout record: `{present: false, milliseconds: 0}` is
+unbounded; `{present: true, milliseconds: N}` requires positive milliseconds.
+MAG authors use nominal `Timeout` constructors (`Unlimited`, `Milliseconds`,
+`Seconds`, or `Minutes`). Process and shell node construction normalizes them to
+this same wire record, rejecting nonpositive and overflowing durations during
+compilation. The external tool API does not accept MAG constructor envelopes.
+An unbounded process that never exits keeps its MAG run nonterminal.
 
 Direct tool invocations may pass optional string `stdin`. In a MAG graph a
-`Unit` input starts the process with no stdin, while an upstream
-`nefor.contracts.Text` value supplies its `content` as stdin. The result is
+`Unit` input starts the process with no stdin; the MAG node constructors expose
+no stdin-bearing input. The result is
 structured data with independent `stdout`, `stderr`, and `termination`; MAG
 translates the raw capability result into the nominal `ProcessExited {code}` or
 `ProcessSignaled {signal}` constructor. A nonzero exit code is still result

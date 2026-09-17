@@ -19,8 +19,8 @@ end
 local function input(tag, value)
   local named = tag == "mag.Text"
   return { messages = {{ tag = "nefor.process.Input", message = value or {}, arrival = {
-    constructor_id = named and "nefor.contracts.Text" or "Unit",
-    type = named and {kind="named", name="nefor.contracts.Text", arguments={}}
+    constructor_id = named and "example.MessageContent" or "Unit",
+    type = named and {kind="named", name="example.MessageContent", arguments={}}
       or {kind="primitive", name="Unit"},
   } }} }
 end
@@ -103,9 +103,10 @@ do
   local instance = process.exec.construct("piped", typed_params({
     argv = {"cat"}, cwd = "/repo", timeout = {present=true, milliseconds=25},
   }), emit)
-  instance.deliver(input("mag.Text", {value={content="stdin"}}))
+  instance.deliver(input("mag.Text", {value={content="must not become stdin"}}))
   local invocation = find(messages, "capability.invoke")
-  assert_eq(invocation.request.args.stdin, "stdin", "Text becomes stdin")
+  assert_eq(invocation.request.args.stdin, nil,
+    "Unit process nodes never infer stdin from a misleading runtime payload")
   assert_eq(invocation.request.args.timeout.present, true, "bounded timeout remains explicit")
   assert_eq(invocation.request.args.timeout.milliseconds, 25, "positive timeout passed")
   local failed = instance.deliver(reply(invocation.ref, nil, "provider unavailable"))
@@ -140,6 +141,9 @@ for _, bad in ipairs({
   typed_params({argv={"true"}, cwd="/repo", timeout={present=true,milliseconds=0}}),
   typed_params({argv={"true"}, cwd="/repo", timeout={present=true,milliseconds=-1}}),
   typed_params({argv={"true"}, cwd="/repo", timeout={present=true,milliseconds=1.5}}),
+  typed_params({argv={"true"}, cwd="/repo", timeout={present=true,milliseconds="25"}}),
+  typed_params({argv={"true"}, cwd="/repo", timeout={present=false,milliseconds=1}}),
+  typed_params({argv={"true"}, cwd="/repo", timeout={present=true,milliseconds=1e20}}),
   typed_params({argv={}, cwd="/repo", timeout=unbounded()}),
   typed_params({argv={"true", 2}, cwd="/repo", timeout=unbounded()}),
   typed_params({argv={"true"}, cwd="", timeout=unbounded()}),
@@ -148,6 +152,16 @@ for _, bad in ipairs({
   local instance, error = process.exec.construct("invalid", bad, emit)
   assert_true(instance == nil and error ~= nil, "malformed exec params rejected")
   assert_true(find(messages, "capability.invoke") == nil, "invalid params never invoke")
+end
+
+do
+  local messages, emit = capture()
+  local instance, error = process.exec.construct("invalid-timeout", typed_params({
+    argv={"true"}, cwd="/repo", timeout={present=true,milliseconds=0},
+  }), emit)
+  assert_eq(instance, nil, "invalid normalized timeout is rejected")
+  assert_true(error:find("normalized runtime timeout", 1, true) ~= nil,
+    "timeout diagnostics identify the normalized runtime boundary")
 end
 
 do
@@ -169,6 +183,25 @@ do
   instance.handle_kill()
   assert_true(instance.deliver(reply(invocation.ref, {stdout="late",stderr="",status=0})) == nil,
     "late reply after MAG cancellation is void")
+end
+
+
+-- Preserve signed-i64 maxima through the actual JSON codec and both capability
+-- boundaries, not merely as Lua literals or compiler artifact assertions.
+for _, maximum in ipairs({9223372036854775807, 9223372036854775000, 9223372036854720000}) do
+  for _, factory in ipairs({process.exec, process.script}) do
+    local params = nefor.json.decode(nefor.json.encode({
+      argv={"true"}, script="true", cwd="/repo",
+      timeout={present=true, milliseconds=maximum},
+    }))
+    local messages, emit = capture()
+    local instance, err = factory.construct("maximum-timeout", params, emit)
+    assert_true(instance ~= nil and err == nil, "maximum timeout constructs")
+    instance.deliver(input("mag.Unit", {}))
+    local invocation = nefor.json.decode(nefor.json.encode(find(messages, "capability.invoke")))
+    assert_eq(math.type(invocation.request.args.timeout.milliseconds), "integer", "transport retains integer")
+    assert_eq(invocation.request.args.timeout.milliseconds, maximum, "transport retains exact maximum")
+  end
 end
 
 print("mag-kernel process_test: all assertions passed")

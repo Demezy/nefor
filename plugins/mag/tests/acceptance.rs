@@ -924,11 +924,12 @@ fn approval_program() -> &'static str {
 import nefor.artifact.{}
 import nefor.contracts.{}
 import nefor.graph.{}
+import nefor.human.{}
 import nefor.node.{}
 
 let draft: nefor.contracts.TextAnswer = ("draft": nefor.contracts.TextAnswer)
 let subject = nefor.graph.source("subject", draft)
-let approval = nefor.actors.approval_gate("approval", nefor.actors.ApprovalConfig {prompt: "Ship it?"})
+let approval = nefor.human.approval_gate("approval", nefor.human.ApprovalConfig {prompt: "Ship it?"})
 let flow = nefor.node.`>>>`(subject, approval)
 let result = nefor.graph.output_for("result", flow)
 

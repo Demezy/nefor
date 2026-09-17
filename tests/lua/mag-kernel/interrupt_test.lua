@@ -106,7 +106,7 @@ local function harness()
   -- run-tool --ToolHandle--> tool-result --ProviderInput--> capture-sink.
   local res = inv.apply({
     actors = {
-      { id = "rt", factory = "run-tool", type_arguments = {}, params = {},
+      { id = "rt", factory = "run-tool", type_arguments = {}, params = {tool_approval_policy = {rules = {}}},
         evidence={version=2,identity="nefor.factory.run-tool",arguments={},input={kind="named",name="nefor.contracts.ToolCalls",arguments={}},output={kind="named",name="nefor.contracts.ToolHandle",arguments={}}},
         input={type={kind="named",name="nefor.contracts.ToolCalls",arguments={}},wire="generic-tool.ToolCalls"},outputs={{type={kind="named",name="nefor.contracts.ToolHandle",arguments={}},wire="generic-tool.ToolHandle"}},
         routes = { ["generic-tool.ToolHandle"] = { { actor = "tr", wire = "generic-tool.ToolHandle" } } } },

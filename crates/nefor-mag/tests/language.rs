@@ -202,6 +202,62 @@ let value = First.Same(1)
 }
 
 #[test]
+fn integer_builtins_are_registered_typed_and_evaluated() {
+    let root = workspace("integer-builtins");
+    let artifact = compile(
+        r#"
+let product: Int = int_mul(6, 7)
+let positive_gt: Bool = int_gt(8, 3)
+let equal_gt: Bool = int_gt(3, 3)
+let negative_gt: Bool = int_gt(2, 5)
+artifact {
+  product: product,
+  positive_gt: positive_gt,
+  equal_gt: equal_gt,
+  negative_gt: negative_gt,
+}
+        "#,
+        &root,
+    )
+    .unwrap();
+
+    assert_eq!(
+        artifact,
+        json!({
+            "product": 42,
+            "positive_gt": true,
+            "equal_gt": false,
+            "negative_gt": false,
+        })
+    );
+}
+
+#[test]
+fn integer_builtins_reject_non_integer_arguments() {
+    let root = workspace("integer-builtin-types");
+    for source in [
+        r#"artifact(int_mul(2, "3"))"#,
+        r#"artifact(int_gt("2", 3))"#,
+    ] {
+        let error = compile(source, &root).unwrap_err().to_string();
+        assert!(error.contains("expected Int, got String"), "{error}");
+    }
+}
+
+#[test]
+fn int_mul_rejects_i64_overflow() {
+    let root = workspace("int-mul-overflow");
+    let error = compile("artifact(int_mul(9223372036854775807, 2))", &root)
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("int_mul overflow: 9223372036854775807 * 2"),
+        "{error}"
+    );
+}
+
+#[test]
 fn artifact_is_the_only_top_level_output() {
     let root = workspace("artifact");
     let artifact = compile(r#"artifact {answer: 42}"#, &root).unwrap();

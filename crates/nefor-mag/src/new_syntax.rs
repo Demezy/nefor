@@ -2043,13 +2043,9 @@ fn reduce_operator(values: &mut Vec<authored::Expr>, operator: String) -> Option
     let right = values.pop()?;
     let left = values.pop()?;
     values.push(authored::Expr::Call {
-        callee: Box::new(authored::Expr::Call {
-            callee: Box::new(authored::Expr::Name(operator)),
-            type_args: None,
-            args: vec![left],
-        }),
+        callee: Box::new(authored::Expr::Name(operator)),
         type_args: None,
-        args: vec![right],
+        args: vec![left, right],
     });
     Some(())
 }
@@ -2327,7 +2323,7 @@ mod tests {
     }
 
     #[test]
-    fn preserves_nary_calls_and_curries_infix() {
+    fn preserves_nary_calls_and_lowers_infix_to_binary_calls() {
         let module = parse("fixity right 5 ++\nlet x = f(a, b, c)\nlet y = a ++ b ++ c\n").unwrap();
         let authored::Form::Block(authored::BlockItem::Let {
             value: authored::Expr::Call { args, .. },
@@ -2337,13 +2333,30 @@ mod tests {
             panic!("nary call")
         };
         assert_eq!(args.len(), 3);
-        let authored::Form::Block(authored::BlockItem::Let { value, .. }) = &module.forms[1] else {
+
+        let authored::Form::Block(authored::BlockItem::Let {
+            value: authored::Expr::Call { callee, args, .. },
+            ..
+        }) = &module.forms[1]
+        else {
             panic!("infix")
         };
-        let authored::Expr::Call { callee, .. } = value else {
-            panic!("outer application")
+        assert!(matches!(callee.as_ref(), authored::Expr::Name(name) if name == "++"));
+        assert!(
+            matches!(args.as_slice(), [authored::Expr::Name(name), authored::Expr::Call { .. }] if name == "a")
+        );
+        let authored::Expr::Call {
+            callee: nested_callee,
+            args: nested_args,
+            ..
+        } = &args[1]
+        else {
+            panic!("right-associated infix call")
         };
-        assert!(matches!(callee.as_ref(), authored::Expr::Call { .. }));
+        assert!(matches!(nested_callee.as_ref(), authored::Expr::Name(name) if name == "++"));
+        assert!(
+            matches!(nested_args.as_slice(), [authored::Expr::Name(left), authored::Expr::Name(right)] if left == "b" && right == "c")
+        );
     }
 
     #[test]
@@ -2436,7 +2449,7 @@ mod tests {
     #[test]
     fn parenthesized_symbolic_bindings_and_fixities_use_maximal_munch() {
         let module = parse(
-            "infixr 4 (>>>), (->)\nlet (>>>) : Int -> Int -> Int = |left| => |right| => left\nlet value = 1 >>> 2\n",
+            "infixr 4 (>>>), (->)\nlet (>>>): fn(Int, Int) -> Int = |left, right| => left\nlet value = 1 >>> 2\n",
         )
         .unwrap();
         assert!(module.forms.iter().any(|form| matches!(form, authored::Form::Block(authored::BlockItem::Let { name, .. }) if name == ">>>")));
@@ -2454,14 +2467,11 @@ mod tests {
         else {
             panic!("arrow infix binding")
         };
-        let authored::Expr::Call { callee, .. } = value.as_ref() else {
+        let authored::Expr::Call { callee, args, .. } = value.as_ref() else {
             panic!("arrow infix application")
         };
-        assert!(matches!(
-            callee.as_ref(),
-            authored::Expr::Call { callee, .. }
-                if matches!(callee.as_ref(), authored::Expr::Name(name) if name == "operators.->")
-        ));
+        assert!(matches!(callee.as_ref(), authored::Expr::Name(name) if name == "operators.->"));
+        assert_eq!(args.len(), 2);
         assert!(parse("let f: Int -> Int = |value| => value\n").is_ok());
         assert!(parse("let arrow = (->)\n").is_ok());
     }
@@ -2573,7 +2583,7 @@ mod tests {
     #[test]
     fn alphabetic_infix_and_symbolic_prefix_forms_keep_their_meaning() {
         assert!(parse(
-            "infixl 5 add\nlet add: Int -> Int -> Int = |left| => |right| => left\nlet value = 1 add 2\n",
+            "infixl 5 add\nlet add: fn(Int, Int) -> Int = |left, right| => left\nlet value = 1 add 2\n",
         )
         .is_ok());
         assert!(parse("let value = (+)(1, 2)\n").is_ok());
@@ -2653,9 +2663,14 @@ mod tests {
         else {
             panic!("value")
         };
-        let authored::Expr::Call { args, .. } = value else {
+        let authored::Expr::Call { callee, args, .. } = value else {
             panic!("right-associated call")
         };
-        assert!(matches!(args.as_slice(), [authored::Expr::Call { .. }]));
+        assert!(
+            matches!(callee.as_ref(), authored::Expr::Name(name) if name == "operators.append")
+        );
+        assert!(
+            matches!(args.as_slice(), [authored::Expr::Name(left), authored::Expr::Call { .. }] if left == "a")
+        );
     }
 }

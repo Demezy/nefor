@@ -125,7 +125,7 @@ function value.
 
 Ordinary word identifiers use snake_case without quoting. Backticks are reserved for names that genuinely require escaping, such as the qualified symbolic operator <code>nefor.node.`>>>`</code> or the reserved field name <code>`type`</code>.
 
-Symbolic operators may be used as ordinary values and called with parentheses, or declared with a fixity and applied infix. Infix application requires ASCII whitespace on both sides of a symbolic operator: write `left >>> right`, never `left>>>right`, `left >>>right`, or `(left)>>> right`. Spaces, tabs, and line breaks are separators; delimiters are not. A line may continue when a newline follows the operator (`left >>>` with `right` on the next line), while an operator at the start of the next line begins a new expression and is rejected. A `//` comment does not replace the required whitespace: write a space before the comment in `left >>> // explanation`. Alphabetic infix names use the same expression-separated position (`1 add 2`) without a separate symbolic-spacing check. This rule does not affect prefix calls such as `(>>>)(left, right)`, qualified calls such as <code>nefor.node.`>>>`(left, right)</code>, `->` in types, lambda delimiters, or signed numeric literals.
+Symbolic operators may be used as ordinary values and called with parentheses, or declared with a fixity and applied infix. `left op right` is the ordinary binary call `(op)(left, right)`, not a curried application. Infix application requires ASCII whitespace on both sides of a symbolic operator: write `left >>> right`, never `left>>>right`, `left >>>right`, or `(left)>>> right`. Spaces, tabs, and line breaks are separators; delimiters are not. A line may continue when a newline follows the operator (`left >>>` with `right` on the next line), while an operator at the start of the next line begins a new expression and is rejected. A `//` comment does not replace the required whitespace: write a space before the comment in `left >>> // explanation`. Alphabetic infix names use the same expression-separated position (`1 add 2`) without a separate symbolic-spacing check. This rule does not affect prefix calls such as `(>>>)(left, right)`, qualified calls such as <code>nefor.node.`>>>`(left, right)</code>, `->` in types, lambda delimiters, or signed numeric literals.
 
 ## A complete graph
 
@@ -137,12 +137,11 @@ import nefor.artifact.{}
 import nefor.contracts.{}
 import nefor.graph.{}
 
-let start = nefor.graph.source("task", nefor.contracts.Task {prompt: "Inspect the repository."})
-let worker = agents.agent<nefor.contracts.Task, nefor.contracts.TextAnswer>("worker", agents.AgentConfig {model: agents.standard, system: "Inspect the repository and report the result.", tools: nefor.actors.read_only_tools, tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2})
-let result = nefor.graph.output(
-  "result",
-  type_tag<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>(),
-)
+type InspectionInput {prompt: String}
+
+let start = nefor.graph.source("task", InspectionInput {prompt: "Inspect the repository."})
+let worker = agents.agent<InspectionInput, nefor.contracts.TextAnswer>("worker", agents.AgentConfig {model: agents.standard, system: "Inspect the repository and report the result.", tools: nefor.actors.read_only_tools, tool_approval_policy: named(nefor.contracts.ToolApprovalPolicy, Default, nil), max_corrections: 2})
+let result = nefor.graph.output<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>("result")
 
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [
   nefor.graph.edge(start, worker),
@@ -205,7 +204,7 @@ import nefor.process.{}
 nefor.process.exec("search", nefor.process.ProcessExecParams {
   argv: ["rg", "-n", "TODO", "src/"],
   cwd: nefor.process.cwd,
-  timeout: nefor.contracts.no_timeout(),
+  timeout: named(nefor.contracts.Timeout, Unlimited, nil),
 })
 ```
 
@@ -219,7 +218,7 @@ nefor.shell.script("bounded-search", nefor.shell.ShellScriptParams {
   script: strip_margin("""|rg -n 'TODO|FIXME' src/
                             |  | sort"""),
   cwd: ".",
-  timeout: nefor.contracts.timeout_ms(30000),
+  timeout: named(nefor.contracts.Timeout, Seconds, 30),
 })
 ```
 
@@ -227,11 +226,11 @@ POSIX shell does not imply Bash. When Bash semantics are required, invoke it exp
 
 Both nodes require a non-empty `cwd`; relative paths resolve from the MAG host's inherited working directory, exposed as `nefor.process.cwd` (`"."`). They accept `Unit`; an unfed node receives one automatic activation, while an incoming `Unit` edge makes it dependency-driven. The output is `ProcessResult`, containing separate `stdout`, `stderr`, and a nominal `ProcessExited` or `ProcessSignaled` termination value. Use exhaustive `match` to distinguish the two constructors; authored MAG never compares process-termination strings. Nonzero exit is result data, not a compilation failure.
 
-Timeouts are mandatory and explicit. <code>nefor.contracts.no_timeout()</code> is unbounded; use it only when waiting indefinitely is intentional. <code>nefor.contracts.timeout_ms(N)</code> sets a positive wall-clock bound. A process that never exits keeps its run nonterminal, so an awaited run also waits indefinitely. The current API has no `bash`, `BashOptions`, `command-with-options`, or `pipe-command` compatibility surface.
+Timeouts are mandatory and explicit. <code>named(nefor.contracts.Timeout, Unlimited, nil)</code> is unbounded; use it only when waiting indefinitely is intentional. <code>named(nefor.contracts.Timeout, Milliseconds, N)</code> sets a positive wall-clock bound. `named(Timeout, Seconds, N)` and `named(Timeout, Minutes, N)` normalize through the same checked signed-integer conversion. Zero, negative, and overflowing durations fail when constructing a node during compilation. A process that never exits keeps its run nonterminal, so an awaited run also waits indefinitely. The current API has no `bash`, `BashOptions`, `command-with-options`, or `pipe-command` compatibility surface.
 
 ## Human approvals
 
-<code>nefor.actors.approval_gate</code> branches a `TextAnswer` into nominal `Approved` and `Rejected` results. Use it when human judgment is part of the graph's meaning. It is distinct from lead `write-review`, which authorizes execution of a write-capable orchestration plan before launch. See [Orchestrating MAG](orchestrating.md#author-and-launch-a-program).
+<code>nefor.human.approval_gate</code> turns a `TextAnswer` into `nefor.human.HumanWorkflowDecision`, with `Approved(HumanWorkflowApproval {content})` and `Rejected(HumanWorkflowRejection {reason})` alternatives. Use it when human judgment is part of the graph's meaning. It is distinct from lead `write-review`, which authorizes execution of a write-capable orchestration plan before launch. See [Orchestrating MAG](orchestrating.md#author-and-launch-a-program).
 
 ## Runtime expansion
 

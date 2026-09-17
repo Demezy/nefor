@@ -1218,6 +1218,19 @@ fn builtin(env: &Env, name: &str, args: &[Value]) -> Result<Value, MagError> {
                 )),
             }
         }
+        "int_mul" | "int_gt" => {
+            arity(args, 2)?;
+            let (Value::Int(left), Value::Int(right)) = (raw(&args[0]), raw(&args[1])) else {
+                return Err(MagError::Type(format!("{name} expects Int arguments")));
+            };
+            if name == "int_mul" {
+                left.checked_mul(*right)
+                    .map(Value::Int)
+                    .ok_or_else(|| MagError::Eval(format!("int_mul overflow: {left} * {right}")))
+            } else {
+                Ok(Value::Bool(left > right))
+            }
+        }
         "=" => {
             arity(args, 2)?;
             Ok(Value::Bool(equal(env, &args[0], &args[1])))

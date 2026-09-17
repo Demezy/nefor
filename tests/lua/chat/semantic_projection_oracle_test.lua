@@ -143,7 +143,7 @@ local function fixture()
   append("content_chunk_appended", { message_id = "user-1", turn_id = "turn-1",
     chunk = { kind = "structured", data = {
       value = { prompt = "same" },
-      mag_type = { version = 1, root = { kind = "named", name = "nefor.contracts.Task" } },
+      mag_type = { version = 1, root = { kind = "named", name = "example.LeadTurnInput" } },
     } } })
   append("message_completed", { message_id = "user-1", turn_id = "turn-1" })
   append("message_started", { message_id = "assistant-1", turn_id = "turn-1", role = "assistant" })
@@ -189,15 +189,17 @@ replay_state, snapshot_actions = surface_projection.reduce(replay_state,
 local replay = apply_actions({ entries = {} }, snapshot_actions)
 eq(semantic.normalize(replay).canonical, expected,
   "snapshot/replay converges with live semantic transcript")
-eq(expected[1].text, "same", "structured first Task projects its prompt")
+eq(expected[1].text, [[{"prompt":"same"}]],
+  "structured local records project their generic value")
 eq(expected[1].message_id, "user-1", "structured display preserves canonical identity")
 eq(expected[2].role, "assistant", "structured first Task remains before assistant output")
-local first_prompt_count = 0
+local structured_count, plain_count = 0, 0
 for _, row in ipairs(semantic.normalize(replay).canonical) do
-  if row.text == "same" then first_prompt_count = first_prompt_count + 1 end
+  if row.text == [[{"prompt":"same"}]] then structured_count = structured_count + 1 end
+  if row.text == "same" then plain_count = plain_count + 1 end
 end
-eq(first_prompt_count, 2,
-  "repeated identical later plain text remains distinct while each message appears once")
+eq(structured_count, 1, "the structured local record appears once")
+eq(plain_count, 1, "the later plain text remains a distinct message")
 
 local decorated = { entries = {} }
 for _, entry in ipairs(live.entries) do decorated.entries[#decorated.entries + 1] = entry end

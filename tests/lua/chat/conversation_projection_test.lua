@@ -170,27 +170,29 @@ end
 
 local task_data = { value = { prompt = "session-derived prompt" },
   mag_type = { version = 1, root = {
-    kind = "named", name = "nefor.contracts.Task",
+    kind = "named", name = "example.LeadTurnInput",
   } } }
 actions = structured_user_actions(task_data, {
   id = "structured-user", turn_id = "structured-turn", role = "user", text = "",
 })
-eq(actions[1].text, "session-derived prompt",
-  "live structured Task delta supplies completion display text")
+eq(actions[1].text, [[{"prompt":"session-derived prompt"}]],
+  "live structured records use generic value display")
 eq(actions[1].message_id, "structured-user", "live structured display preserves message identity")
 
 actions = structured_user_actions({ value = { prompt = "not a task" },
   mag_type = { version = 1, root = { kind = "named", name = "Other" } } }, {
   id = "structured-user", turn_id = "structured-turn", role = "user", text = "",
 })
-eq(actions[1].text, "", "non-Task structured content has no invented transcript serialization")
+eq(actions[1].text, [[{"prompt":"not a task"}]],
+  "local domain records do not require a privileged nominal type")
 actions = structured_user_actions({ value = { prompt = 42 },
   mag_type = { version = 1, root = {
-    kind = "named", name = "nefor.contracts.Task",
+    kind = "named", name = "example.LeadTurnInput",
   } } }, {
   id = "structured-user", turn_id = "structured-turn", role = "user", text = "",
 })
-eq(actions[1].text, "", "malformed Task structured content stays undisplayed")
+eq(actions[1].text, [[{"prompt":42}]],
+  "generic structured display does not impose Task field semantics")
 
 local snapshot_state = projection.new()
 snapshot_state = select(1, projection.reduce(snapshot_state, {

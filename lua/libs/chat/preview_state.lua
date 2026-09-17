@@ -85,9 +85,7 @@ function M.spawn(state, run_id, actor_id, factory, spec, now_ms)
       next.source_fact = {
         value = next.params.value,
         semantic_type_id = next.params.value_type,
-        semantic_type = next.spec.semantic_type or next.spec.output_type
-          or (type(next.params.value) == "table" and type(next.params.value.prompt) == "string"
-            and { kind = "named", name = "nefor.contracts.Task" } or nil),
+        semantic_type = next.spec.semantic_type or next.spec.output_type,
         constructor_id = next.params.value_type,
         wire = "nefor.graph.Value",
         from = actor_id,

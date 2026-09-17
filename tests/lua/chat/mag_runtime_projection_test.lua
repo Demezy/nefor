@@ -323,16 +323,30 @@ eq(assignment, nil)
 local task = {
   node_previews = {}, mag_arrivals = {}, scope_to_run = {}, capability_owners = {},
 }
+local local_request_type = { kind = "named", name = "workflow.LocalRequest",
+  body = { kind = "record", fields = {
+    { name = "prompt", type = { kind = "primitive", name = "String" } },
+  } },
+}
 task = preview_state.spawn(task, "task-run", "task", "source", {
   params = { value = { prompt = "Full human task prompt" }, value_type = "sha256:task" },
+  output_type = local_request_type,
 }, 0)
 local authored_task = preview_state.node(task, "task-run", "task").source_fact
-eq(authored_task.value.prompt, "Full human task prompt", "typed Task is retained before firing")
+eq(authored_task.value.prompt, "Full human task prompt", "typed source value is retained before firing")
 eq(authored_task.semantic_type_id, "sha256:task")
+eq(authored_task.semantic_type, local_request_type,
+  "source preview preserves the compiler-supplied local type descriptor")
+
+local untyped = preview_state.spawn(task, "task-run", "untyped", "source", {
+  params = { value = { prompt = "looks task-shaped" }, value_type = "sha256:unknown" },
+}, 0)
+eq(preview_state.node(untyped, "task-run", "untyped").source_fact.semantic_type, nil,
+  "prompt-shaped values never fabricate nominal Task evidence")
 task = preview_state.arrival(task, {
   run_id = "task-run", arrival_id = "task-arrival", from = "task",
   wire = "nefor.graph.Value", semantic_type_id = "sha256:task",
-  semantic_type = { kind = "named", name = "nefor.contracts.Task" },
+  semantic_type = local_request_type,
   constructor_id = "sha256:task", value = { prompt = "Full human task prompt" },
 }, 1)
 task = preview_state.finish_run(task, "task-run", "done", 2)

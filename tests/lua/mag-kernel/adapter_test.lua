@@ -155,7 +155,7 @@ end
 
 do
   local task_schema = { version = 1, root = {
-    kind = "named", name = "nefor.contracts.Task", body = {
+    kind = "named", name = "example.LeadTurnInput", body = {
       kind = "record", fields = { { name = "prompt", schema = { kind = "string" } } },
     },
   } }

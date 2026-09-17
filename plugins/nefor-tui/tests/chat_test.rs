@@ -3010,7 +3010,7 @@ fn resumed_snapshot_renders_structured_first_task_once_before_assistant() {
                       "display_text": "resumed visible prompt", "structured": [{
                         "value": { "prompt": "resumed visible prompt" },
                         "mag_type": { "version": 1, "root": {
-                          "kind": "named", "name": "nefor.contracts.Task"
+                          "kind": "named", "name": "main.InvestigationInput"
                         } }
                       }] },
                     { "id": "assistant", "turn_id": "turn", "role": "assistant",
@@ -11763,7 +11763,7 @@ fn task_source_group_shows_readable_prompt_and_details_without_duplication() {
         json!({
             "kind": "mag.arrival", "run_id": "task-run", "arrival_id": "task-arrival",
             "from": "task", "wire": "nefor.graph.Value", "semantic_type_id": "sha256:task",
-            "semantic_type": { "kind": "named", "name": "nefor.contracts.Task" },
+            "semantic_type": { "kind": "named", "name": "main.InvestigationInput" },
             "constructor_id": "sha256:task", "value": { "prompt": "Explain the complete migration plan." }
         }),
     );
@@ -11783,7 +11783,7 @@ fn task_source_group_shows_readable_prompt_and_details_without_duplication() {
         "{detailed}"
     );
     for expected in [
-        "nefor.contracts.Task",
+        "main.InvestigationInput",
         "sha256:task",
         "nefor.graph.Value",
         "task-arrival",
@@ -12180,7 +12180,7 @@ fn source_node_renders_its_typed_task_value() {
             "kind": "mag.actor_spawned", "run_id": "source-run", "id": "task",
             "factory": "nefor.factory.source", "spec": { "params": {
                 "value": { "prompt": "VISIBLE TYPED TASK PROMPT" },
-                "value_type": "nefor.contracts.Task"
+                "value_type": "main.InvestigationInput"
             } }
         }),
     );

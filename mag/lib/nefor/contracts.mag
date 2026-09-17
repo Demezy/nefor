@@ -1,10 +1,8 @@
-// Shared runtime-facing domain values used across actor families. Factory
+// Runtime-facing protocol values and authored mechanism selections. Factory
 // identities and actor parameter records live with their constructors.
 import core.map.{}
 
 import core.types.{}
-
-type Task {prompt: String}
 
 type ProviderInput {content: JsonValue}
 
@@ -18,16 +16,6 @@ type ToolCalls {calls: List<ToolCall>}
 
 type ToolHandle {results: JsonValue}
 
-type ToolResult {content: String}
-
-type Approved {content: String}
-
-type Rejected {reason: String}
-
-type ApprovalDecision = Approved(Approved) | Rejected(Rejected)
-
-type Text {content: String}
-
 type OutputViolation {path: String, code: String, expected: String, actual: String, message: String}
 
 type OptionalIdentifier {present: Bool, value: String}
@@ -40,9 +28,13 @@ type AgentErrorReason = ProviderError(ProviderError) | OutputValidationError(Out
 
 type AgentError {last_output: JsonValue, reason: AgentErrorReason}
 
-type ToolApprovalPolicy {rules: Map<String, String>}
+// Default selects the configured approval behavior, never a bypass. DaRules
+// is transported metadata; the current tool gate does not enforce these rules.
+type ToolApprovalPolicy = Default(Unit) | DaRules(Map<String, String>)
 
-type Timeout {present: Bool, milliseconds: Int}
+type ToolApprovalRuntimeRules {rules: Map<String, String>}
+
+type Timeout = Unlimited(Unit) | Milliseconds(Int) | Seconds(Int) | Minutes(Int)
 
 type ProcessExited {code: Int}
 
@@ -60,10 +52,8 @@ let no_identifier: fn() -> OptionalIdentifier = | | => OptionalIdentifier {prese
 
 let identifier: fn(String) -> OptionalIdentifier = |value| => OptionalIdentifier {present: true, value: value}
 
-let no_tool_approval_policy: fn() -> ToolApprovalPolicy = | | => ToolApprovalPolicy {rules: (core.map.empty<String, String>(): Map<String, String>)}
 
-let tool_approval_policy: fn(Map<String, String>) -> ToolApprovalPolicy = |rules| => ToolApprovalPolicy {rules: rules}
-
-let no_timeout: fn() -> Timeout = | | => Timeout {present: false, milliseconds: 0}
-
-let timeout_ms: fn(Int) -> Timeout = |milliseconds| => Timeout {present: true, milliseconds: milliseconds}
+let normalize_tool_approval_policy: fn(ToolApprovalPolicy) -> ToolApprovalRuntimeRules = |policy| => match policy {
+  case Default(unit) => ToolApprovalRuntimeRules {rules: core.map.empty<String, String>()},
+  case DaRules(rules) => ToolApprovalRuntimeRules {rules: rules},
+}

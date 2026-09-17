@@ -113,7 +113,7 @@ end
 
 do
   local msgs, emit = capture()
-  local inst = run_tool.construct("docs-explorer.run-tool", {}, emit)
+  local inst = run_tool.construct("docs-explorer.run-tool", {tool_approval_policy = {rules = {}}}, emit)
   assert_true(inst ~= nil, "run-tool constructs")
   local ready = find_kind(msgs, "mag.ready")
   assert_true(ready ~= nil, "run-tool emits ready")
@@ -128,9 +128,11 @@ end
 
 do
   local msgs, emit = capture()
-  local policy = { allow = { "ls", "grep" }, deny = { "rm", "sudo" } }
+  local policy = { grep = "allow", rm = "deny" }
   local allowlist = { "fs/read", "grep" }
-  local inst = run_tool.construct("rt", { tool_approval_policy = policy, allowlist = allowlist }, emit)
+  local inst = run_tool.construct("rt", {
+    tool_approval_policy = { rules = policy }, allowlist = allowlist,
+  }, emit)
 
   local pending = inst.deliver(single("llm", "generic-tool.ToolCalls", {
     calls = {
@@ -190,12 +192,33 @@ do
 end
 
 -- ==================================================================
+-- run-tool: only normalized ToolApprovalRuntimeRules are accepted
+-- ==================================================================
+
+assert_eq(run_tool.declaration.params.tool_approval_policy, "table",
+  "declared policy is required, matching factory construction")
+
+for _, params in ipairs({
+  {},
+  {tool_approval_policy = {git = "read"}},
+  {tool_approval_policy = {constructor = "Default"}},
+  {tool_approval_policy = {rules = {git = true}}},
+}) do
+  local msgs, emit = capture()
+  local inst, err = run_tool.construct("rt", params, emit)
+  assert_eq(inst, nil, "only normalized string rules are accepted at the MAG boundary")
+  assert_true(err:find("normalized", 1, true) ~= nil,
+    "policy diagnostics identify the normalized runtime contract")
+  assert_eq(#msgs, 0, "invalid runtime policy constructs no actor")
+end
+
+-- ==================================================================
 -- run-tool: a tool-error reply is aggregated (error carried, not dropped)
 -- ==================================================================
 
 do
   local msgs, emit = capture()
-  local inst = run_tool.construct("rt", {}, emit)
+  local inst = run_tool.construct("rt", {tool_approval_policy = {rules = {}}}, emit)
   inst.deliver(single("llm", "generic-tool.ToolCalls", {
     calls = { { id = "c1", name = "shell.script", args = { script = "false", cwd = ".", timeout = { present = false, milliseconds = 0 } } } },
   }))
@@ -216,7 +239,7 @@ end
 
 do
   local msgs, emit = capture()
-  local inst = run_tool.construct("rt", {}, emit)
+  local inst = run_tool.construct("rt", {tool_approval_policy = {rules = {}}}, emit)
   local c = inst.deliver(single("llm", "generic-tool.ToolCalls", { calls = {} }))
   assert_eq(c.status, "ok", "an empty batch completes synchronously, not pending")
   local handle = find_kind(msgs, "generic-tool.ToolHandle")
@@ -231,7 +254,7 @@ end
 
 do
   local msgs, emit = capture()
-  local inst = run_tool.construct("rt", {}, emit)
+  local inst = run_tool.construct("rt", {tool_approval_policy = {rules = {}}}, emit)
   inst.deliver(single("llm", "generic-tool.ToolCalls", {
     calls = { { id = "c1", name = "shell.script", args = { script = "sleep 1", cwd = ".", timeout = { present = false, milliseconds = 0 } } } },
   }))
@@ -449,7 +472,7 @@ end
 do
   local null = nefor.json.decode("null")
   local run_msgs, run_emit = capture()
-  local run = run_tool.construct("rt", {}, run_emit)
+  local run = run_tool.construct("rt", {tool_approval_policy = {rules = {}}}, run_emit)
   run.deliver(single("llm", "generic-tool.ToolCalls", {
     calls = { { id = "null-1", name = "nullable", args = {} } },
   }))
@@ -509,7 +532,7 @@ do
   -- Feed exactly that payload into run-tool: it must fan out per call, reading
   -- id/name/args directly (no name/tool or args/arguments fallbacks).
   local rm, remit = capture()
-  local rinst = run_tool.construct("dx.run-tool", {}, remit)
+  local rinst = run_tool.construct("dx.run-tool", {tool_approval_policy = {rules = {}}}, remit)
   local pending = rinst.deliver(single("dx.llm", "generic-tool.ToolCalls", toolcalls))
   assert_eq(pending.status, "pending", "run-tool defers on the round-tripped batch")
 

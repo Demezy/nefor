@@ -83,6 +83,8 @@ fn analysis_preserves_normalized_first_occurrence_and_flattening_order() {
     let artifact = run(
         "ordered-analysis",
         r#"
+type MessageContent {content: String}
+
 import core.validated.{}
 import nefor.graph.{}
 import nefor.contracts.{}
@@ -106,9 +108,9 @@ let validation_message: fn(core.validated.Validated<String, nefor.graph.Graph>) 
     case Valid(accepted) => "valid",
     case Invalid(rejected) => first(get(rejected, "errors")),
   }
-let start_base = nefor.graph.source("z-start", nefor.contracts.Text {content: "start"})
-let middle_base = nefor.graph.identity<nefor.contracts.Text>("m-middle")
-let result = nefor.graph.output<nefor.contracts.Text>("a-result")
+let start_base = nefor.graph.source("z-start", MessageContent {content: "start"})
+let middle_base = nefor.graph.identity<MessageContent>("m-middle")
+let result = nefor.graph.output<MessageContent>("a-result")
 let middle = nefor.graph.with_operation(
   nefor.graph.with_operation(middle_base, test_operation("middle-1", get(middle_base, "output"))),
   test_operation("middle-2", get(middle_base, "output")),
@@ -166,21 +168,23 @@ fn route_assignment_sorts_product_buckets_but_lowers_original_route_order() {
     let artifact = run(
         "route-order",
         r#"
+type MessageContent {content: String}
+
 import nefor.graph.{}
 import nefor.contracts.{}
 import core.map.{}
 
-let start = nefor.graph.source("start", nefor.contracts.Text {content: "start"})
-let emitter_input = nefor.graph.port("emitter", type_tag<nefor.contracts.Text>(), "test.Value")
-let emitter_output = nefor.graph.port("emitter", type_tag<nefor.contracts.Text>(), "test.Value")
-let join_input = nefor.graph.port("join", type_tag<(nefor.contracts.Text, nefor.contracts.Text)>(), "test.Value")
-let join_output = nefor.graph.port("join", type_tag<nefor.contracts.Text>(), "test.Value")
-let emitter = nefor.graph.actor("emitter", "test.actor", [type_evidence(type_tag<nefor.contracts.Text>())], (), nefor.graph.store_port(emitter_input), [nefor.graph.store_port(emitter_output)])
-let join = nefor.graph.actor("join", "test.actor", [type_evidence(type_tag<nefor.contracts.Text>())], (), nefor.graph.store_port(join_input), [nefor.graph.store_port(join_output)])
+let start = nefor.graph.source("start", MessageContent {content: "start"})
+let emitter_input = nefor.graph.port("emitter", type_tag<MessageContent>(), "test.Value")
+let emitter_output = nefor.graph.port("emitter", type_tag<MessageContent>(), "test.Value")
+let join_input = nefor.graph.port("join", type_tag<(MessageContent, MessageContent)>(), "test.Value")
+let join_output = nefor.graph.port("join", type_tag<MessageContent>(), "test.Value")
+let emitter = nefor.graph.actor("emitter", "test.actor", [type_evidence(type_tag<MessageContent>())], (), nefor.graph.store_port(emitter_input), [nefor.graph.store_port(emitter_output)])
+let join = nefor.graph.actor("join", "test.actor", [type_evidence(type_tag<MessageContent>())], (), nefor.graph.store_port(join_input), [nefor.graph.store_port(join_output)])
 let route_z = nefor.graph.StoredRoute {id: "z-route", from: nefor.graph.store_port(emitter_output), to: nefor.graph.store_port(join_input)}
 let route_a = nefor.graph.StoredRoute {id: "a-route", from: nefor.graph.store_port(emitter_output), to: nefor.graph.store_port(join_input)}
 let composite = nefor.graph.node("composite", "ordinary", [emitter, join], [route_z, route_a], ([]: List<nefor.graph.Message>), emitter_input, join_output)
-let result = nefor.graph.output<nefor.contracts.Text>("result")
+let result = nefor.graph.output<MessageContent>("result")
 let topology = nefor.graph.graph([nefor.graph.edge(start, composite), nefor.graph.edge(composite, result)])
 let analysis = nefor.graph.analyze_graph(topology)
 let input_key = nefor.graph.port_address_key(nefor.graph.store_port(join_input))
@@ -268,6 +272,8 @@ fn indexed_reachability_handles_cycles_and_preserves_dead_path_diagnostics() {
     let artifact = run(
         "reachability",
         r#"
+type MessageContent {content: String}
+
 import core.validated.{}
 import nefor.graph.{}
 import nefor.contracts.{}
@@ -288,18 +294,18 @@ let validation_message: fn(core.validated.Validated<String, nefor.graph.Graph>) 
     case Invalid(rejected) => first(get(rejected, "errors")),
   }
 let contracts = host_input("factory_contracts", type_tag<List<nefor.graph.FactoryContract>>())
-let start = nefor.graph.source("start", nefor.contracts.Text {content: "start"})
-let cycle_input = nefor.graph.port("cycle-a", type_tag<(nefor.contracts.Text, nefor.contracts.Text)>(), "test.Value")
-let cycle_output = nefor.graph.port("cycle-a", type_tag<nefor.contracts.Text>(), "test.Value")
-let cycle_actor = nefor.graph.actor("cycle-a", "test.cycle", [type_evidence(type_tag<nefor.contracts.Text>())], (), nefor.graph.store_port(cycle_input), [nefor.graph.store_port(cycle_output)])
+let start = nefor.graph.source("start", MessageContent {content: "start"})
+let cycle_input = nefor.graph.port("cycle-a", type_tag<(MessageContent, MessageContent)>(), "test.Value")
+let cycle_output = nefor.graph.port("cycle-a", type_tag<MessageContent>(), "test.Value")
+let cycle_actor = nefor.graph.actor("cycle-a", "test.cycle", [type_evidence(type_tag<MessageContent>())], (), nefor.graph.store_port(cycle_input), [nefor.graph.store_port(cycle_output)])
 let cycle_a = nefor.graph.node("cycle-a", "ordinary", [cycle_actor], ([]: List<nefor.graph.StoredRoute>), ([]: List<nefor.graph.Message>), cycle_input, cycle_output)
-let cycle_b = nefor.graph.identity<nefor.contracts.Text>("cycle-b")
-let result = nefor.graph.output<nefor.contracts.Text>("result")
+let cycle_b = nefor.graph.identity<MessageContent>("cycle-b")
+let result = nefor.graph.output<MessageContent>("result")
 let reachable_cycle = nefor.graph.graph([nefor.graph.edge(start, cycle_a), nefor.graph.edge(cycle_a, cycle_b), nefor.graph.edge(cycle_b, cycle_a), nefor.graph.edge(cycle_b, result)])
-let orphan_a = nefor.graph.identity<nefor.contracts.Text>("orphan-a")
-let orphan_b = nefor.graph.identity<nefor.contracts.Text>("orphan-b")
+let orphan_a = nefor.graph.identity<MessageContent>("orphan-a")
+let orphan_b = nefor.graph.identity<MessageContent>("orphan-b")
 let disconnected_cycle = nefor.graph.graph([nefor.graph.edge(start, result), nefor.graph.edge(orphan_a, orphan_b), nefor.graph.edge(orphan_b, orphan_a)])
-let branch_base = nefor.graph.identity<nefor.contracts.Text>("branch")
+let branch_base = nefor.graph.identity<MessageContent>("branch")
 let branch = nefor.graph.with_operation(branch_base, test_operation("observe-branch", get(branch_base, "output")))
 let dead_branch = nefor.graph.graph([nefor.graph.edge(start, result), nefor.graph.edge(start, branch)])
 artifact {
@@ -335,6 +341,8 @@ fn duplicate_precedence_contract_selection_and_sequence_order_are_stable() {
     let artifact = run(
         "duplicates-and-sequence",
         r#"
+type MessageContent {content: String}
+
 import core.validated.{}
 import nefor.graph.{}
 import nefor.contracts.{}
@@ -346,17 +354,17 @@ let validation_message: fn(core.validated.Validated<String, nefor.graph.Graph>) 
     case Valid(accepted) => "valid",
     case Invalid(rejected) => first(get(rejected, "errors")),
   }
-let start = nefor.graph.source("start", nefor.contracts.Text {content: "start"})
-let result = nefor.graph.output<nefor.contracts.Text>("result")
+let start = nefor.graph.source("start", MessageContent {content: "start"})
+let result = nefor.graph.output<MessageContent>("result")
 let duplicated_result = nefor.graph.node("result", "output", concat(get(start, "actors"), get(result, "actors")), get(result, "routes"), get(result, "messages"), get(result, "input"), get(result, "output"))
 let duplicate_actor_graph = nefor.graph.graph([nefor.graph.edge(start, duplicated_result)])
-let no_output = nefor.graph.graph([nefor.graph.edge(start, nefor.graph.identity<nefor.contracts.Text>("ordinary"))])
+let no_output = nefor.graph.graph([nefor.graph.edge(start, nefor.graph.identity<MessageContent>("ordinary"))])
 let first_contract = nefor.graph.FactoryContract {identity: "nefor.factory.source", type_scheme: nefor.graph.FactoryTypeScheme {input_tags: ["wrong"], outputs: ["nefor.graph.Value"]}}
 let second_contract = nefor.graph.FactoryContract {identity: "nefor.factory.source", type_scheme: nefor.graph.FactoryTypeScheme {input_tags: ["mag.Unit"], outputs: ["nefor.graph.Value"]}}
 let output_contract = nefor.graph.FactoryContract {identity: "nefor.factory.output", type_scheme: nefor.graph.FactoryTypeScheme {input_tags: ["nefor.graph.Value"], outputs: ["nefor.graph.Value"]}}
 let valid_graph = nefor.graph.graph([nefor.graph.edge(start, result)])
-let first_child = nefor.graph.source("first-child", nefor.contracts.Text {content: "first"})
-let second_child = nefor.graph.source("second-child", nefor.contracts.Text {content: "second"})
+let first_child = nefor.graph.source("first-child", MessageContent {content: "first"})
+let second_child = nefor.graph.source("second-child", MessageContent {content: "second"})
 let sequence = nefor.node.sequence([first_child, second_child])
 let is_collector: fn(nefor.graph.Actor) -> Bool = |candidate| => (=)(get(candidate, "id"), str(get(sequence, "id"), ".collector"))
 let collector = first(filter(is_collector, get(sequence, "actors")))
@@ -406,12 +414,14 @@ fn nefor_artifact_emits_exact_versioned_program_and_delta_envelopes() {
     let program = run(
         "program-envelope",
         r#"
+type MessageContent {content: String}
+
 import nefor.artifact.{}
 import nefor.graph.{}
 import nefor.contracts.{}
 import core.map.{}
-let start = nefor.graph.source("start", nefor.contracts.Text {content: "hello"})
-let result = nefor.graph.output<nefor.contracts.Text>("result")
+let start = nefor.graph.source("start", MessageContent {content: "hello"})
+let result = nefor.graph.output<MessageContent>("result")
 let close: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, result)])
 nefor.artifact.compile(close)
 "#,
@@ -515,7 +525,7 @@ fn nefor_facade_supports_one_import_shell_and_map_error() {
         "nefor-facade-shell",
         r#"
 import nefor
-compile_graph(script("hello", ShellScriptParams {script: "printf 'hello\\n'", cwd: ".", timeout: timeout_ms(30000)}))
+compile_graph(script("hello", ShellScriptParams {script: "printf 'hello\\n'", cwd: ".", timeout: named(Timeout, Milliseconds, 30000)}))
 "#,
         contracts(json!([
             {"identity": "nefor.factory.shell-script", "type_scheme": {"input_tags": ["nefor.process.Input"], "outputs": ["nefor.process.Result"]}},
@@ -800,6 +810,7 @@ fn core_nefor_api_uses_inferred_evidence_explicit_ids_and_unit_sequences() {
 import core.map.{}
 import core.types.{}
 import nefor.actors.{}
+import nefor.human.{}
 import nefor.contracts.{}
 import nefor.dynamic.{}
 import nefor.graph.{}
@@ -845,12 +856,12 @@ let operator_bound = nefor.result.`>=>`(result_input, lifted)
 let colliding_left = nefor.node.composite_id("a&&&b", "&&&", "c")
 let colliding_right = nefor.node.composite_id("a", "&&&", "b&&&c")
 
-let policy = nefor.contracts.tool_approval_policy(core.map.insert((core.map.empty<String, String>(): Map<String, String>), "bash", "deny"))
-let no_policy = nefor.contracts.no_tool_approval_policy()
+let policy = named(nefor.contracts.ToolApprovalPolicy, DaRules, core.map.insert((core.map.empty<String, String>(): Map<String, String>), "bash", "deny"))
+let no_policy = named(nefor.contracts.ToolApprovalPolicy, Default, nil)
 let resolve_model: fn(String) -> nefor.actors.AuthoredModel = |model| => named(nefor.actors.AuthoredModel, ResolvedModel, nefor.actors.ResolvedModel {provider: "test", model: model, reasoning_effort: nefor.actors.no_reasoning_effort})
 let agent = nefor.actors.agent<String, Input, Output>("agent", resolve_model, nefor.actors.AgentConfig<String> {model: "mock", system: "test", tools: [], tool_approval_policy: policy, max_corrections: 1})
 let dynamic_agent = nefor.actors.agent<String, Input, nefor.dynamic.DynamicList<Output>>("dynamic-agent", resolve_model, nefor.actors.AgentConfig<String> {model: "mock", system: "test", tools: [], tool_approval_policy: no_policy, max_corrections: 1})
-let approval = nefor.actors.approval_gate("approval", nefor.actors.ApprovalConfig {prompt: "Approve?"})
+let approval = nefor.human.approval_gate("approval", nefor.human.ApprovalConfig {prompt: "Approve?"})
 let retry = nefor.actors.retry_gate<Input>("retry", nefor.actors.RetryGateConfig {max_retries: 2})
 let agent_actors: List<nefor.graph.Actor> = get(agent, "actors")
 let run_tool_actor = first(filter(((|candidate| => (=)(get(candidate, "id"), "agent.run-tool")): fn(nefor.graph.Actor) -> Bool), agent_actors))
@@ -935,7 +946,7 @@ artifact {
     );
     assert_eq!(
         artifact["tool_approval_policy"],
-        json!({"rules": {"bash": "deny"}})
+        json!({"constructor": "DaRules", "value": {"bash": "deny"}})
     );
     assert_eq!(
         artifact["run_tool_params"]["value"]["tool_approval_policy"],
@@ -951,6 +962,8 @@ fn generic_list_inference_supports_unit_sequence_with_error_union() {
         ("annotated", "([runtime, configs]: List<nefor.graph.Node<Unit, core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>>)"),
     ] {
         let source = format!(r#"
+type InvestigationInput {{prompt: String}}
+
 import core.types.{{}}
 import nefor.contracts.{{}}
 import nefor.graph.{{}}
@@ -962,7 +975,7 @@ let agent_shaped: fn(String) -> nefor.graph.Node<Unit, core.types.Result<nefor.c
 let runtime = agent_shaped("runtime")
 let configs = agent_shaped("configs")
 let workers = [runtime, configs]
-let task = nefor.graph.source("task", nefor.contracts.Task {{prompt: "Investigate"}})
+let task = nefor.graph.source("task", InvestigationInput {{prompt: "Investigate"}})
 let work = nefor.node.then("task-traces", task, nefor.node.sequence({nodes}))
 let actual_id = str(type_id(type_evidence(get(get(work, "output"), "type"))))
 let expected_id = str(type_id(type_evidence(type_tag<List<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>>())))
@@ -980,6 +993,7 @@ fn agent_output_contract_recognizes_only_nefor_dynamic_list_and_preserves_other_
         r#"
 import core.types.{}
 import nefor.actors.{}
+import nefor.human.{}
 import nefor.contracts.{}
 import nefor.dynamic.{}
 import nefor.graph.{}
@@ -990,7 +1004,7 @@ type RecordAlias = Record
 type DynamicList<T> {value: T}
 
 let resolve: fn(String) -> nefor.actors.AuthoredModel = |model| => named(nefor.actors.AuthoredModel, ResolvedModel, nefor.actors.ResolvedModel {provider: "test", model: model, reasoning_effort: nefor.actors.no_reasoning_effort})
-let config = nefor.actors.AgentConfig<String> {model: "mock", system: "test", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 1}
+let config = nefor.actors.AgentConfig<String> {model: "mock", system: "test", tools: [], tool_approval_policy: named(nefor.contracts.ToolApprovalPolicy, Default, nil), max_corrections: 1}
 let dynamic = nefor.actors.agent<String, Unit, nefor.dynamic.DynamicList<RecordAlias>>("dynamic", resolve, config)
 let lookalike = nefor.actors.agent<String, Unit, DynamicList<Record>>("lookalike", resolve, config)
 let ordinary = nefor.actors.agent<String, Unit, Record>("ordinary", resolve, config)
@@ -1052,6 +1066,7 @@ fn traverse_converts_ordinary_node_compositions_into_closed_templates() {
         "traverse-ordinary-compositions",
         r#"
 import nefor.actors.{}
+import nefor.human.{}
 import nefor.contracts.{}
 import nefor.dynamic.{}
 import nefor.graph.{}
@@ -1061,7 +1076,7 @@ import nefor.node.{}
 type Input {value: String}
 type Output {value: String}
 let resolve: fn(String) -> nefor.actors.AuthoredModel = |model| => named(nefor.actors.AuthoredModel, ResolvedModel, nefor.actors.ResolvedModel {provider: "test", model: model, reasoning_effort: nefor.actors.no_reasoning_effort})
-let config = nefor.actors.AgentConfig<String> {model: "mock", system: "test", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 1}
+let config = nefor.actors.AgentConfig<String> {model: "mock", system: "test", tools: [], tool_approval_policy: named(nefor.contracts.ToolApprovalPolicy, Default, nil), max_corrections: 1}
 let identity = nefor.dynamic.traverse("identity-traverse", nefor.graph.identity<Input>("identity"))
 let composition = nefor.dynamic.traverse("composition-traverse", nefor.node.compose("composition", nefor.graph.identity<Input>("composition-left"), nefor.graph.identity<Input>("composition-right")))
 let fanout = nefor.dynamic.traverse("fanout-traverse", nefor.node.fanout("fanout", nefor.graph.identity<Input>("fanout-left"), nefor.graph.identity<Input>("fanout-right")))
@@ -1205,6 +1220,7 @@ fn traverse_rejects_workers_outside_the_closed_ordinary_subset() {
             "retry-gate",
             r#"
 import nefor.actors.{}
+import nefor.human.{}
 import nefor.dynamic.{}
 artifact(nefor.dynamic.traverse("bad", nefor.actors.retry_gate<String>("worker", nefor.actors.RetryGateConfig {max_retries: 2})))
 "#,
@@ -1214,8 +1230,9 @@ artifact(nefor.dynamic.traverse("bad", nefor.actors.retry_gate<String>("worker",
             "approval-gate",
             r#"
 import nefor.actors.{}
+import nefor.human.{}
 import nefor.dynamic.{}
-artifact(nefor.dynamic.traverse("bad", nefor.actors.approval_gate("worker", nefor.actors.ApprovalConfig {prompt: "Approve?"})))
+artifact(nefor.dynamic.traverse("bad", nefor.human.approval_gate("worker", nefor.human.ApprovalConfig {prompt: "Approve?"})))
 "#,
             "human approval requires interactive lifecycle",
         ),
@@ -1223,10 +1240,11 @@ artifact(nefor.dynamic.traverse("bad", nefor.actors.approval_gate("worker", nefo
             "dynamic-producer",
             r#"
 import nefor.actors.{}
+import nefor.human.{}
 import nefor.contracts.{}
 import nefor.dynamic.{}
 let resolve: fn(String) -> nefor.actors.AuthoredModel = |model| => nefor.actors.AuthoredModel.ModelProfile(nefor.actors.model_profile(model))
-let worker = nefor.actors.agent<String, String, nefor.dynamic.DynamicList<String>>("worker", resolve, nefor.actors.AgentConfig<String> {model: "test", system: "Return items", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 0})
+let worker = nefor.actors.agent<String, String, nefor.dynamic.DynamicList<String>>("worker", resolve, nefor.actors.AgentConfig<String> {model: "test", system: "Return items", tools: [], tool_approval_policy: named(nefor.contracts.ToolApprovalPolicy, Default, nil), max_corrections: 0})
 artifact(nefor.dynamic.traverse("bad", worker))
 "#,
             "dynamic producers are streaming workers",
@@ -1260,12 +1278,13 @@ artifact(nefor.dynamic.traverse("bad", nefor.graph.with_operation(worker, operat
             "external-reference",
             r#"
 import nefor.actors.{}
+import nefor.human.{}
 import nefor.contracts.{}
 import nefor.dynamic.{}
 import nefor.graph.{}
 let input = nefor.graph.port("worker", type_tag<nefor.contracts.ToolCalls>(), "generic-tool.ToolCalls")
 let output = nefor.graph.port("worker", type_tag<nefor.contracts.ToolHandle>(), "generic-tool.ToolHandle")
-let actor = nefor.graph.closed_actor("worker", "nefor.factory.run-tool", [], nefor.actors.RunToolParams {model: "", provider: "", model_profile: nefor.actors.no_model_profile, conversation_peer: "external", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy()}, nefor.graph.store_port(input), [nefor.graph.store_port(output)], [nefor.graph.Relocation {path: ["conversation_peer"], shape: "actor_id"}])
+let actor = nefor.graph.closed_actor("worker", "nefor.factory.run-tool", [], nefor.actors.RunToolParams {model: "", provider: "", model_profile: nefor.actors.no_model_profile, conversation_peer: "external", tools: [], tool_approval_policy: nefor.contracts.normalize_tool_approval_policy(named(nefor.contracts.ToolApprovalPolicy, Default, nil))}, nefor.graph.store_port(input), [nefor.graph.store_port(output)], [nefor.graph.Relocation {path: ["conversation_peer"], shape: "actor_id"}])
 let worker = nefor.graph.node("worker", "ordinary", [actor], [], [], input, output)
 artifact(nefor.dynamic.traverse("bad", worker))
 "#,
@@ -1286,13 +1305,14 @@ artifact(nefor.dynamic.traverse("bad", worker))
             "malformed-relocations",
             r#"
 import nefor.actors.{}
+import nefor.human.{}
 import nefor.contracts.{}
 import nefor.dynamic.{}
 import nefor.graph.{}
 let input = nefor.graph.port("worker", type_tag<nefor.contracts.ToolCalls>(), "generic-tool.ToolCalls")
 let output = nefor.graph.port("worker", type_tag<nefor.contracts.ToolHandle>(), "generic-tool.ToolHandle")
 let relocation = nefor.graph.Relocation {path: ["conversation_peer"], shape: "actor_id"}
-let actor = nefor.graph.closed_actor("worker", "nefor.factory.run-tool", [], nefor.actors.RunToolParams {model: "", provider: "", model_profile: nefor.actors.no_model_profile, conversation_peer: "worker", tools: [], tool_approval_policy: nefor.contracts.no_tool_approval_policy()}, nefor.graph.store_port(input), [nefor.graph.store_port(output)], [relocation, relocation])
+let actor = nefor.graph.closed_actor("worker", "nefor.factory.run-tool", [], nefor.actors.RunToolParams {model: "", provider: "", model_profile: nefor.actors.no_model_profile, conversation_peer: "worker", tools: [], tool_approval_policy: nefor.contracts.normalize_tool_approval_policy(named(nefor.contracts.ToolApprovalPolicy, Default, nil))}, nefor.graph.store_port(input), [nefor.graph.store_port(output)], [relocation, relocation])
 let worker = nefor.graph.node("worker", "ordinary", [actor], [], [], input, output)
 artifact(nefor.dynamic.traverse("bad", worker))
 "#,
@@ -1304,4 +1324,319 @@ artifact(nefor.dynamic.traverse("bad", worker))
         let error = run_error(&format!("traverse-rejects-{name}"), source);
         assert!(error.contains(expected), "{name}: {error}");
     }
+}
+
+#[test]
+fn authored_timeouts_normalize_at_both_node_boundaries() {
+    for (index, (variant, payload, expected)) in [
+        (
+            "Unlimited",
+            "nil",
+            json!({"present": false, "milliseconds": 0}),
+        ),
+        (
+            "Milliseconds",
+            "1",
+            json!({"present": true, "milliseconds": 1}),
+        ),
+        (
+            "Seconds",
+            "2",
+            json!({"present": true, "milliseconds": 2000}),
+        ),
+        (
+            "Minutes",
+            "3",
+            json!({"present": true, "milliseconds": 180000}),
+        ),
+        (
+            "Milliseconds",
+            "9223372036854775807",
+            json!({"present": true, "milliseconds": i64::MAX}),
+        ),
+        (
+            "Seconds",
+            "9223372036854775",
+            json!({"present": true, "milliseconds": 9223372036854775000_i64}),
+        ),
+        (
+            "Minutes",
+            "153722867280912",
+            json!({"present": true, "milliseconds": 9223372036854720000_i64}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result = run(
+            &format!("timeout-{index}"),
+            &format!(
+                r#"
+import nefor
+let duration = named(Timeout, {variant}, {payload})
+let process = exec("process", ProcessExecParams {{argv: ["true"], cwd: ".", timeout: duration}})
+let shell = script("shell", ShellScriptParams {{script: "true", cwd: ".", timeout: duration}})
+artifact([get(first(get(process, "actors")), "params"), get(first(get(shell, "actors")), "params")])
+"#
+            ),
+            json!({}),
+        );
+        for params in result.as_array().unwrap() {
+            assert_eq!(params["value"]["timeout"], expected, "{variant}({payload})");
+        }
+    }
+}
+
+#[test]
+fn authored_timeouts_reject_nonpositive_overflowing_and_wrong_payloads() {
+    for (variant, payload, diagnostic) in [
+        ("Milliseconds", "0", "strictly positive"),
+        ("Milliseconds", "-1", "strictly positive"),
+        ("Seconds", "0", "strictly positive"),
+        ("Seconds", "-1", "strictly positive"),
+        ("Minutes", "0", "strictly positive"),
+        ("Minutes", "-1", "strictly positive"),
+        ("Seconds", "9223372036854776", "int_mul overflow"),
+        ("Minutes", "153722867280913", "int_mul overflow"),
+        ("Milliseconds", "1.5", "Int"),
+        ("Seconds", "\"2\"", "Int"),
+        ("Unlimited", "1", "Unit"),
+    ] {
+        for (module, function, params) in [
+            (
+                "process",
+                "exec",
+                "ProcessExecParams {argv: [\"true\"], cwd: \".\", timeout: duration}",
+            ),
+            (
+                "shell",
+                "script",
+                "ShellScriptParams {script: \"true\", cwd: \".\", timeout: duration}",
+            ),
+        ] {
+            let error = run_error(
+                &format!("invalid-timeout-{module}-{variant}-{}", payload.len()),
+                &format!(
+                    r#"
+import nefor
+let duration = named(Timeout, {variant}, {payload})
+artifact({function}("operation", {params}))
+"#
+                ),
+            );
+            assert!(error.contains(diagnostic), "{variant}({payload}): {error}");
+        }
+    }
+}
+
+#[test]
+fn file_input_timeout_values_cannot_bypass_node_normalization() {
+    let root = workspace("timeout-file-input");
+    let mag_lib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
+    fs::write(root.join("main.mag"), r#"
+import nefor.contracts.{}
+import nefor.shell.{}
+let duration = named(nefor.contracts.Timeout, Seconds, (get(read_json("duration.json"), "seconds"): Int))
+artifact(nefor.shell.script("script", nefor.shell.ShellScriptParams {script: "true", cwd: ".", timeout: duration}))
+"#).unwrap();
+    for (seconds, expected_error) in [
+        (1_i64, None),
+        (0, Some("strictly positive")),
+        (-1, Some("strictly positive")),
+        (9223372036854776, Some("int_mul overflow")),
+    ] {
+        fs::write(
+            root.join("duration.json"),
+            json!({"seconds": seconds}).to_string(),
+        )
+        .unwrap();
+        let result = compile_file_with_inputs_and_module_roots_and_options_and_syntax(
+            &root,
+            "main.mag",
+            json!({}),
+            &[root.clone(), mag_lib.clone()],
+            CompilerOptions::default(),
+            SyntaxMode::New,
+        );
+        if let Some(expected) = expected_error {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+        } else {
+            let node = result.unwrap();
+            assert_eq!(
+                node["actors"][0]["params"]["value"]["timeout"],
+                json!({"present": true, "milliseconds": 1000})
+            );
+        }
+    }
+}
+
+#[test]
+fn authored_tool_policies_lower_without_changing_agent_configuration() {
+    let result = run("policy-alternatives", r#"
+import nefor
+import core.map.{}
+let resolver: fn(String) -> AuthoredModel = |model| => named(AuthoredModel, ResolvedModel, ResolvedModel {provider: "test", model: model, reasoning_effort: no_reasoning_effort})
+let policies = [named(ToolApprovalPolicy, Default, nil), named(ToolApprovalPolicy, DaRules, core.map.insert(core.map.empty<String, String>(), "cargo build", "deny"))]
+let config: fn(ToolApprovalPolicy) -> AgentConfig<String> = |policy| => AgentConfig<String> {model: "test", system: "", tools: [], tool_approval_policy: policy, max_corrections: 0}
+let configs = map(config, policies)
+let nodes = map(((|settings| => agent<String, String, TextAnswer>("worker", resolver, settings)): fn(AgentConfig<String>) -> Node<String, core.types.Result<AgentError, TextAnswer>>), configs)
+artifact {configs: configs, actors: map(((|node| => get(node, "actors")): fn(Node<String, core.types.Result<AgentError, TextAnswer>>) -> List<nefor.graph.Actor>), nodes)}
+"#.replace("import core.map.{}", "import core.map.{}\nimport core.types.{}\nimport nefor.graph.{}").as_str(), json!({}));
+    assert_eq!(
+        result["configs"][0]["tool_approval_policy"],
+        json!({"constructor": "Default", "value": null})
+    );
+    assert_eq!(
+        result["configs"][1]["tool_approval_policy"],
+        json!({"constructor": "DaRules", "value": {"cargo build": "deny"}})
+    );
+    for (index, rules) in [json!({}), json!({"cargo build": "deny"})]
+        .into_iter()
+        .enumerate()
+    {
+        let run_tool = result["actors"][index]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|actor| actor["factory"] == "nefor.factory.run-tool")
+            .unwrap();
+        assert_eq!(
+            run_tool["params"]["value"]["tool_approval_policy"],
+            json!({"rules": rules})
+        );
+    }
+}
+
+#[test]
+fn human_workflow_has_purpose_owned_nominal_decisions() {
+    let result = run(
+        "human-workflow-decision",
+        r#"
+import nefor
+let gate = approval_gate("review", ApprovalConfig {prompt: "Accept this workflow result?"})
+artifact {gate: gate, approved: named(HumanWorkflowDecision, Approved, HumanWorkflowApproval {content: "accepted"}), rejected: named(HumanWorkflowDecision, Rejected, HumanWorkflowRejection {reason: "revise"})}
+"#,
+        json!({}),
+    );
+    assert_eq!(
+        result["gate"]["output"]["type"]["name"],
+        "nefor.human.HumanWorkflowDecision"
+    );
+    assert_eq!(
+        result["gate"]["input"]["wire"],
+        "generic-provider.TextAnswer"
+    );
+    assert_eq!(result["gate"]["output"]["wire"], "human.Decision");
+    assert_eq!(
+        result["approved"],
+        json!({"constructor": "Approved", "value": {"content": "accepted"}})
+    );
+    assert_eq!(
+        result["rejected"],
+        json!({"constructor": "Rejected", "value": {"reason": "revise"}})
+    );
+}
+
+#[test]
+fn nefor_facade_exports_exact_authoring_allowlist() {
+    let source = fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib/nefor.mag"),
+    )
+    .unwrap();
+    let actual: std::collections::BTreeSet<_> = source
+        .lines()
+        .filter_map(|line| {
+            let declaration = line
+                .strip_prefix("let ")
+                .or_else(|| line.strip_prefix("type "))?;
+            let name = if let Some(operator) = declaration.strip_prefix('`') {
+                operator.split('`').next().unwrap()
+            } else {
+                declaration.split([' ', '<']).next().unwrap()
+            };
+            Some(name.to_owned())
+        })
+        .collect();
+    let expected: std::collections::BTreeSet<_> = "Node source identity compile_graph AgentConfig agent AuthoredModel ResolvedModel ModelProfile model_profile OptionalReasoningEffort reasoning_effort no_reasoning_effort read_only_tools general_tools ToolApprovalPolicy ProviderInput TextAnswer OutputViolation ProviderError OutputValidationError AgentErrorReason AgentError ApprovalConfig approval_gate HumanWorkflowApproval HumanWorkflowRejection HumanWorkflowDecision RetryGateConfig retry_gate RetryDecision node_named rename compose >>> discard then *> keep_left before <* fanout &&& parallel *** choose +++ sequence lift and_then >=> result_map_named result_map map_error_named map_error DynamicList Indexed traverse context Timeout ProcessExecParams exec ShellScriptParams script ProcessExited ProcessSignaled ProcessTermination ProcessResult cwd CreateSpec OpenSpec Worktree WorktreeError create open join".split_whitespace().map(str::to_owned).collect();
+    assert_eq!(actual, expected);
+    for name in [
+        "Task",
+        "Text",
+        "ToolResult",
+        "Approved",
+        "ApprovalDecision",
+        "Graph",
+        "RunToolParams",
+        "RuntimeTimeout",
+        "ToolApprovalRuntimeRules",
+        "OptionalIdentifier",
+        "ProcessFailure",
+        "timeout_ms",
+        "no_timeout",
+        "tool_approval_policy",
+        "no_tool_approval_policy",
+        "pack_adt",
+        "sequence_empty",
+        "capture_ref",
+        "manifest",
+        "compile",
+        "adapter_factory",
+    ] {
+        let error = run_error(
+            &format!("facade-hidden-{name}"),
+            &format!("import nefor.{{{name}}}\nartifact(nil)"),
+        );
+        assert!(error.contains(name), "{name}: {error}");
+    }
+}
+
+#[test]
+fn nefor_facade_imports_specialize_and_construct() {
+    let lib = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mag/lib");
+    let facade = fs::read_to_string(lib.join("nefor.mag")).unwrap();
+    let mut source = String::from("import nefor.graph.{}\nimport nefor.contracts.{}\n");
+    // Exercise every exported alias as an imported value or concrete type.
+    // Calls below additionally check generic forwarding and constructor access.
+    for (index, line) in facade.lines().enumerate() {
+        if let Some(declaration) = line.strip_prefix("type ") {
+            let name = declaration.split(" = ").next().unwrap();
+            source.push_str(&format!(
+                "import nefor.{{{}}}\n",
+                name.split('<').next().unwrap()
+            ));
+            let concrete = if let Some((name, parameters)) = name.split_once('<') {
+                format!(
+                    "{name}<{}>",
+                    vec!["Int"; parameters.split(',').count()].join(", ")
+                )
+            } else {
+                name.to_owned()
+            };
+            source.push_str(&format!(
+                "let witness_{index}: fn({concrete}) -> {concrete} = |value| => value\n"
+            ));
+        } else if let Some(declaration) = line.strip_prefix("let ") {
+            let (name, _) = declaration.split_once(" = ").unwrap();
+            source.push_str(&format!("import nefor.{{{name}}}\n"));
+            source.push_str(&format!("let export_{index} = {name}\n"));
+        }
+    }
+    source.push_str(r#"
+let timeout = named(Timeout, Seconds, 1)
+let policy = named(ToolApprovalPolicy, Default, nil)
+let decision = named(HumanWorkflowDecision, Approved, HumanWorkflowApproval {content: "yes"})
+let retry = named(RetryDecision<Int>, Continue, 1)
+let process = exec("process", ProcessExecParams {argv: ["true"], cwd: ".", timeout: timeout})
+let shell = script("shell", ShellScriptParams {script: "true", cwd: ".", timeout: named(Timeout, Unlimited, nil)})
+let value = source("value", 1)
+let next = identity<Int>("next")
+let composed = value >>> next
+let lifted = lift<Unit, String, Int>("lifted", composed)
+let mapped = result_map(lifted, identity<Int>("mapped"))
+let direct = nefor.graph.identity<Int>("direct")
+let runtime_policy = nefor.contracts.normalize_tool_approval_policy(policy)
+artifact(get(runtime_policy, "rules"))
+"#);
+    assert_eq!(run("facade-import-smoke", &source, json!({})), json!({}));
 }

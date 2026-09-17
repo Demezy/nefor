@@ -1,3 +1,5 @@
+type LeadTurnInput {prompt: String}
+
 import core.types.{}
 // Each user message executes one short-lived lead constellation over the
 // persistent canonical chat history. Model selection is resolved by the
@@ -7,8 +9,8 @@ import nefor.artifact.{}
 import nefor.contracts.{}
 import nefor.graph.{}
 
-let start = nefor.graph.source("lead-task", nefor.contracts.Task {prompt: "<initial task text>"})
-let lead = agents.agent<nefor.contracts.Task, nefor.contracts.TextAnswer>("lead", agents.AgentConfig {model: agents.standard, system: "", tools: ["read_file", "read_image", "instructions", "mag-status", "mag-await", "mag-terminate", "write-review", "mag-write-file", "mag-preview", "mag-apply"], tool_approval_policy: nefor.contracts.no_tool_approval_policy(), max_corrections: 2})
+let start = nefor.graph.source("lead-task", LeadTurnInput {prompt: "<initial task text>"})
+let lead = agents.agent<LeadTurnInput, nefor.contracts.TextAnswer>("lead", agents.AgentConfig {model: agents.standard, system: "", tools: ["read_file", "read_image", "instructions", "mag-status", "mag-await", "mag-terminate", "write-review", "mag-write-file", "mag-preview", "mag-apply"], tool_approval_policy: named(nefor.contracts.ToolApprovalPolicy, Default, nil), max_corrections: 2})
 let result = nefor.graph.output<core.types.Result<nefor.contracts.AgentError, nefor.contracts.TextAnswer>>("lead-output")
 let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, lead), nefor.graph.edge(lead, result)])
 nefor.artifact.compile(topology)

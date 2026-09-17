@@ -207,7 +207,8 @@ do
     "reply resolves the gate to an approved decision")
   assert_eq(approved.from, "gate", "approved output is id-signed")
   assert_eq(approved.value.value.content, "plan ok", "approved output carries the human's content")
-  assert_eq(approved.subject.text, "proposed plan", "approved output carries the subject")
+  assert_eq(approved.value.value.subject, nil, "typed decision payload excludes the approval subject")
+  assert_eq(approved.subject.text, "proposed plan", "envelope metadata retains the subject")
   local complete = find_kind(msgs, "mag.complete")
   assert_true(complete ~= nil and complete.from == "gate",
     "the resolved gate signals async success with an id-signed mag.complete")

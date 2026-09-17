@@ -68,7 +68,7 @@ The agent requests correction up to `max_corrections`. When the budget is exhaus
 
 ## Shell failures and hangs
 
-Process and shell nodes are unbounded when their required timeout record uses `no_timeout`. A process that never exits keeps its run nonterminal, so `mag-await` also waits indefinitely. Use `timeout_ms` in the `process.exec` or `shell.script` parameter record when an operation needs a wall-clock bound. Never launch a persistent foreground server or watcher as a normal awaited run.
+Process and shell nodes are unbounded when their authored timeout is `named(Timeout, Unlimited, nil)`. A process that never exits keeps its run nonterminal, so `mag-await` also waits indefinitely. Use `named(Timeout, Milliseconds, N)`, `named(Timeout, Seconds, N)`, or `named(Timeout, Minutes, N)` in the `process.exec` or `shell.script` parameter record when an operation needs a wall-clock bound. Never launch a persistent foreground server or watcher as a normal awaited run.
 
 A compile success proves the command node is well-formed, not that its executable, working directory, permissions, or exit status will succeed. Handle routeable command outcomes where the library exposes them; otherwise an unhandled runtime failure fails the run.
 

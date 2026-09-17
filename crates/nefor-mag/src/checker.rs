@@ -987,6 +987,19 @@ fn infer_builtin(
                 .map_err(MagError::Type)?;
             Ok(MagType::Bool)
         }
+        "int_mul" | "int_gt" => {
+            exact(2)?;
+            for argument in args {
+                let actual = infer(env, locals, argument)?;
+                compatible(env, &actual, &MagType::Int, &mut HashMap::new())
+                    .map_err(MagError::Type)?;
+            }
+            if name == "int_mul" {
+                Ok(MagType::Int)
+            } else {
+                Ok(MagType::Bool)
+            }
+        }
         "host_input" => {
             exact(2)?;
             let key = infer(env, locals, &args[0])?;
@@ -1465,6 +1478,8 @@ pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "conforms",
     "or",
     "not",
+    "int_mul",
+    "int_gt",
     "=",
     "fail",
     "type_evidence",
@@ -1576,6 +1591,8 @@ fn builtin_overload_types(name: &str, candidate: Option<&MagType>) -> Vec<MagTyp
             function(vec![MagType::String, MagType::String], MagType::String),
         ],
         "not" => vec![function(vec![MagType::Bool], MagType::Bool)],
+        "int_mul" => vec![function(vec![MagType::Int, MagType::Int], MagType::Int)],
+        "int_gt" => vec![function(vec![MagType::Int, MagType::Int], MagType::Bool)],
         "=" => vec![function(vec![var("value"), var("value")], MagType::Bool)],
         "host_input" => vec![function(
             vec![MagType::String, tag(var("value"))],

@@ -39,7 +39,8 @@
 --   reply  in   : graph activation carrying { tag="mag.ApprovalReply",
 --                   message = { approved=<bool>, content=<approved value?>,
 --                               reason=<rejection reason?> } }
---   output      : human.Approved { subject, content } | human.Rejected { subject, reason }
+--   output      : human.Decision carrying Approved { content } or Rejected { reason };
+--                 subject remains envelope metadata, outside the typed value
 --
 -- drain handler: a human gate CAN hold pending external work — an
 -- outstanding request a person hasn't answered. So per actor-model.md ("an
