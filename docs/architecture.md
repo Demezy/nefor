@@ -32,10 +32,11 @@ authorization belongs to tool-gate/tool-validator and prelaunch write-plan
 review belongs to lead-workflow. These are three independent boundaries.
 
 An authored `ToolApprovalPolicy` selects `Default` (no per-agent override, not
-an approval bypass) or `DaRules`. Agent lowering normalizes that selection into
-`ToolApprovalRuntimeRules`. The current `da-policy` map is transported metadata:
-tool-gate does not consume or enforce it. Authorization still follows its gate
-policy and configured validator; a deny entry alone does not prevent execution.
+an approval bypass) or `Rules(ToolApprovalRules)`. Agent lowering normalizes
+that selection into the private `ToolApprovalRuntimeRules` transport record.
+The current rule map is metadata: tool-gate does not consume or enforce it.
+Authorization still follows its gate policy and configured validator; a deny
+entry alone does not prevent execution.
 
 Authored `Timeout` units normalize once in `nefor.timeout`, shared by process
 and shell constructors. The library owns positivity and unit factors; MAG's
