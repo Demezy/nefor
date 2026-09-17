@@ -1,3 +1,87 @@
+use std::fmt;
+
+/// A lexically authored name path. Segments are retained so punctuation inside
+/// a quoted name remains one segment rather than being reinterpreted as qualification.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NamePath {
+    segments: Vec<String>,
+    qualified: String,
+}
+
+impl NamePath {
+    pub fn single(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            qualified: name.clone(),
+            segments: vec![name],
+        }
+    }
+
+    pub fn from_segments(segments: Vec<String>) -> Self {
+        debug_assert!(!segments.is_empty());
+        let qualified = segments.join(".");
+        Self {
+            segments,
+            qualified,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.qualified
+    }
+
+    pub fn segments(&self) -> &[String] {
+        &self.segments
+    }
+
+    pub fn last(&self) -> &str {
+        self.segments.last().map(String::as_str).unwrap_or("")
+    }
+
+    pub fn owner(&self) -> Option<Self> {
+        (self.segments.len() > 1)
+            .then(|| Self::from_segments(self.segments[..self.segments.len() - 1].to_vec()))
+    }
+}
+
+impl fmt::Display for NamePath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.qualified)
+    }
+}
+
+impl std::ops::Deref for NamePath {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl PartialEq<str> for NamePath {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for NamePath {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl From<String> for NamePath {
+    fn from(name: String) -> Self {
+        Self::single(name)
+    }
+}
+
+impl From<&str> for NamePath {
+    fn from(name: &str) -> Self {
+        Self::single(name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub forms: Vec<Form>,
@@ -67,7 +151,7 @@ pub enum Expr {
     Float(f64),
     Bool(bool),
     Keyword(String),
-    Name(String),
+    Name(NamePath),
     Vector(Vec<Expr>),
     Fields(Vec<(String, Expr)>),
     If {
@@ -110,7 +194,7 @@ pub enum TypeArgument {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
-    pub constructor: String,
+    pub pattern: NamePath,
     pub binding: String,
     pub body: Box<Expr>,
 }
@@ -131,7 +215,7 @@ pub struct Parameter {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
-    Name(String),
+    Name(NamePath),
     Product(Vec<Type>),
     Tag(Box<Type>),
     Function {
@@ -139,7 +223,7 @@ pub enum Type {
         result: Box<Type>,
     },
     Apply {
-        constructor: String,
+        constructor: NamePath,
         arguments: Vec<Type>,
     },
     Invalid(String),

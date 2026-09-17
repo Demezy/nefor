@@ -95,10 +95,14 @@ async fn structured_request_has_object_root_and_decodes_successful_response() {
             schema["type"], "object",
             "provider rejects absent root type"
         );
-        assert_eq!(schema["required"], serde_json::json!(["content"]));
+        assert_eq!(schema["required"], serde_json::json!(["value"]));
         assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["value"]["required"],
+            serde_json::json!(["content"])
+        );
 
-        let events = "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"content\\\":\\\"done\\\"}\"}}]}\n\n\
+        let events = "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"value\\\":{\\\"content\\\":\\\"done\\\"}}\"}}]}\n\n\
                       data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n\
                       data: [DONE]\n\n";
         let response = format!(
@@ -153,7 +157,7 @@ async fn structured_request_has_object_root_and_decodes_successful_response() {
     .await
     .expect("structured response");
     server.await.expect("server");
-    assert_eq!(outcome.full_text, r#"{"content":"done"}"#);
+    assert_eq!(outcome.full_text, r#"{"value":{"content":"done"}}"#);
     let decoded = mag_schema.validate_provider_json(&outcome.full_text);
     assert!(decoded.ok, "{:?}", decoded.violations);
     assert_eq!(decoded.value, Some(serde_json::json!({"content": "done"})));

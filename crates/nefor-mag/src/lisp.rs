@@ -184,7 +184,7 @@ fn lower_expr(expression: &ast::Expr) -> authored::Expr {
         ast::Expr::Float(value) => authored::Expr::Float(*value),
         ast::Expr::Bool(value) => authored::Expr::Bool(*value),
         ast::Expr::Keyword(value) => authored::Expr::Keyword(value.clone()),
-        ast::Expr::Symbol(value) => authored::Expr::Name(value.clone()),
+        ast::Expr::Symbol(value) => authored::Expr::Name(value.clone().into()),
         ast::Expr::Vector(items) => authored::Expr::Vector(items.iter().map(lower_expr).collect()),
         ast::Expr::Map(fields) => {
             let mut lowered = Vec::with_capacity(fields.len());
@@ -282,7 +282,7 @@ fn lower_match(items: &[ast::Expr]) -> authored::Expr {
             ));
         };
         arms.push(authored::MatchArm {
-            constructor: constructor.to_owned(),
+            pattern: authored::NamePath::single(constructor.to_owned()),
             binding: binding.to_owned(),
             body: Box::new(lower_expr(body)),
         });
@@ -390,7 +390,7 @@ fn lower_function(items: &[ast::Expr]) -> authored::Expr {
 
 fn lower_type(expression: &ast::Expr) -> authored::Type {
     match expression {
-        ast::Expr::Symbol(name) => authored::Type::Name(name.clone()),
+        ast::Expr::Symbol(name) => authored::Type::Name(name.clone().into()),
         ast::Expr::Map(_) => authored::Type::Invalid(
             "anonymous record types are unsupported; declare a named type".into(),
         ),
@@ -415,7 +415,7 @@ fn lower_type(expression: &ast::Expr) -> authored::Type {
                     }
                 }
                 _ => authored::Type::Apply {
-                    constructor: head.to_owned(),
+                    constructor: head.to_owned().into(),
                     arguments: items[1..].iter().map(lower_type).collect(),
                 },
             }
@@ -434,6 +434,15 @@ fn record_key(expression: &ast::Expr) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lisp_names_use_the_same_segment_preserving_path_representation() {
+        let lowered = lower_expr(&ast::Expr::Symbol("call.with.dots".into()));
+        let authored::Expr::Name(path) = lowered else {
+            panic!("name")
+        };
+        assert_eq!(path.segments(), ["call.with.dots"]);
+    }
 
     #[test]
     fn lowers_lisp_conventions_to_semantic_authored_forms() {

@@ -19,7 +19,6 @@ pub struct TypeSchema {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderSchema {
     pub schema: Value,
-    pub wrapped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,23 +184,15 @@ impl TypeSchema {
     /// `validate_provider_json`; types without a faithful representation fail
     /// before a provider request is made.
     pub fn to_provider_schema(&self) -> Result<ProviderSchema, MagError> {
-        let schema = provider_schema_at(&self.root)?;
-        if schema_root_is_record(&self.root) {
-            Ok(ProviderSchema {
-                schema,
-                wrapped: false,
-            })
-        } else {
-            Ok(ProviderSchema {
-                schema: serde_json::json!({
-                    "type": "object",
-                    "properties": { "value": schema },
-                    "required": ["value"],
-                    "additionalProperties": false,
-                }),
-                wrapped: true,
-            })
-        }
+        let value_schema = provider_schema_at(&self.root)?;
+        Ok(ProviderSchema {
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": { "value": value_schema },
+                "required": ["value"],
+                "additionalProperties": false,
+            }),
+        })
     }
 
     pub fn validate_provider_json(&self, source: &str) -> JsonValidation {
@@ -209,34 +200,29 @@ impl TypeSchema {
             Ok(value) => value,
             Err(error) => return validation_error("malformed_json", error.to_string()),
         };
-        let provider = match self.to_provider_schema() {
-            Ok(provider) => provider,
-            Err(error) => {
-                return validation_error("unsupported_provider_schema", error.to_string())
+        if let Err(error) = self.to_provider_schema() {
+            return validation_error("unsupported_provider_schema", error.to_string());
+        }
+        let encoded = match value {
+            Value::Object(mut fields) if fields.len() == 1 && fields.contains_key("value") => {
+                fields.remove("value").unwrap_or(Value::Null)
             }
-        };
-        let encoded = if provider.wrapped {
-            match value {
-                Value::Object(mut fields) if fields.len() == 1 && fields.contains_key("value") => {
-                    fields.remove("value").unwrap_or(Value::Null)
-                }
-                value => {
-                    return JsonValidation {
-                        ok: false,
-                        value: None,
-                        error: None,
-                        violations: vec![Violation {
-                            path: "$".into(),
-                            code: "invalid_provider_envelope".into(),
-                            expected: "object containing only required field 'value'".into(),
-                            actual: json_kind(&value).into(),
-                            message: "provider response did not match the structured-output root envelope".into(),
-                        }],
-                    };
-                }
+            value => {
+                return JsonValidation {
+                    ok: false,
+                    value: None,
+                    error: None,
+                    violations: vec![Violation {
+                        path: "$".into(),
+                        code: "invalid_provider_envelope".into(),
+                        expected: "object containing only required field 'value'".into(),
+                        actual: json_kind(&value).into(),
+                        message:
+                            "provider response did not match the structured-output root envelope"
+                                .into(),
+                    }],
+                };
             }
-        } else {
-            value
         };
         match decode_provider_value(&self.root, encoded, "$") {
             Ok(value) => self.validate_value(value),
@@ -259,14 +245,6 @@ fn validation_error(kind: &str, message: String) -> JsonValidation {
             message,
         }),
         violations: vec![],
-    }
-}
-
-fn schema_root_is_record(schema: &SchemaType) -> bool {
-    match schema {
-        SchemaType::Fields { .. } | SchemaType::Adt { .. } => true,
-        SchemaType::Named { body, .. } => schema_root_is_record(body),
-        _ => false,
     }
 }
 
@@ -1390,12 +1368,12 @@ mod tests {
             assert!(!schema.validate_json(invalid).ok, "{invalid}");
         }
         let provider = schema.to_provider_schema().unwrap();
-        assert!(!provider.wrapped);
         assert_eq!(
-            provider.schema["anyOf"][1]["properties"]["constructor"]["enum"],
+            provider.schema["properties"]["value"]["anyOf"][1]["properties"]["constructor"]["enum"],
             serde_json::json!(["Ok"])
         );
-        let decoded = schema.validate_provider_json(r#"{"constructor":"Ok","value":42.0}"#);
+        let decoded =
+            schema.validate_provider_json(r#"{"value":{"constructor":"Ok","value":42.0}}"#);
         assert!(decoded.ok, "{:?}", decoded.violations);
         assert_eq!(
             decoded.value.unwrap(),
@@ -1527,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_schema_wraps_non_object_roots_and_decodes_without_semantic_loss() {
+    fn provider_schema_wraps_union_roots_and_decodes_without_semantic_loss() {
         let union = TypeSchema {
             version: SCHEMA_VERSION,
             root: SchemaType::Union {
@@ -1546,7 +1524,6 @@ mod tests {
             },
         };
         let provider = union.to_provider_schema().unwrap();
-        assert!(provider.wrapped);
         assert_eq!(provider.schema["type"], "object");
         assert_eq!(provider.schema["required"], serde_json::json!(["value"]));
         assert_eq!(provider.schema["additionalProperties"], false);
@@ -1559,6 +1536,91 @@ mod tests {
         );
         assert!(decoded.ok, "{:?}", decoded.violations);
         assert_eq!(decoded.value.unwrap()["value"]["content"], "done");
+    }
+
+    #[test]
+    fn provider_schema_wraps_records_once_even_when_the_record_has_a_value_field() {
+        let schema = TypeSchema {
+            version: SCHEMA_VERSION,
+            root: SchemaType::Named {
+                name: "ValueRecord".into(),
+                body: Box::new(SchemaType::Fields {
+                    fields: vec![SchemaField {
+                        name: "value".into(),
+                        schema: SchemaType::String,
+                    }],
+                }),
+            },
+        };
+        let authored_schema = schema.clone();
+
+        let provider = schema.to_provider_schema().unwrap();
+        assert_eq!(schema, authored_schema);
+        assert_eq!(schema.version, SCHEMA_VERSION);
+        assert_eq!(provider.schema["required"], serde_json::json!(["value"]));
+        assert_eq!(
+            provider.schema["properties"]["value"]["required"],
+            serde_json::json!(["value"])
+        );
+        assert_eq!(
+            provider.schema["properties"]["value"]["properties"]["value"]["type"],
+            "string"
+        );
+
+        let decoded = schema.validate_provider_json(r#"{"value":{"value":"nested"}}"#);
+        assert!(decoded.ok, "{:?}", decoded.violations);
+        assert_eq!(decoded.value, Some(serde_json::json!({"value": "nested"})));
+    }
+
+    #[test]
+    fn provider_envelope_is_exact_and_inner_errors_use_semantic_root_paths() {
+        let schema = TypeSchema {
+            version: SCHEMA_VERSION,
+            root: SchemaType::Fields {
+                fields: vec![SchemaField {
+                    name: "name".into(),
+                    schema: SchemaType::String,
+                }],
+            },
+        };
+
+        for source in [
+            r#"{"name":"direct"}"#,
+            r#"{"value":{"name":"nested"},"extra":true}"#,
+            r#"[]"#,
+            r#"null"#,
+        ] {
+            let validation = schema.validate_provider_json(source);
+            assert_eq!(validation.violations.len(), 1, "{source}: {validation:?}");
+            let violation = &validation.violations[0];
+            assert_eq!(violation.path, "$", "{source}");
+            assert_eq!(violation.code, "invalid_provider_envelope", "{source}");
+        }
+
+        let inner = schema.validate_provider_json(r#"{"value":{"name":42}}"#);
+        assert_eq!(inner.violations.len(), 1, "{inner:?}");
+        assert_eq!(inner.violations[0].path, "$.name");
+        assert_eq!(inner.violations[0].code, "wrong_type");
+    }
+
+    #[test]
+    fn provider_schema_wraps_unit_and_removes_exactly_one_envelope() {
+        let schema = TypeSchema {
+            version: SCHEMA_VERSION,
+            root: SchemaType::Unit,
+        };
+        let provider = schema.to_provider_schema().unwrap();
+        assert_eq!(provider.schema["properties"]["value"]["type"], "null");
+        assert_eq!(
+            schema.validate_provider_json(r#"{"value":null}"#).value,
+            Some(Value::Null)
+        );
+        assert!(!schema.validate_provider_json("null").ok);
+        assert!(
+            !schema
+                .validate_provider_json(r#"{"value":{"value":null}}"#)
+                .ok
+        );
     }
 
     #[test]
@@ -1603,19 +1665,17 @@ mod tests {
             },
         };
         let provider = schema.to_provider_schema().unwrap();
-        assert!(!provider.wrapped);
         assert_eq!(provider.schema["type"], "object");
         assert_eq!(provider.schema["additionalProperties"], false);
+        assert_eq!(provider.schema["required"], serde_json::json!(["value"]));
+        let record = &provider.schema["properties"]["value"];
+        assert_eq!(record["required"], serde_json::json!(["items", "optional"]));
         assert_eq!(
-            provider.schema["required"],
-            serde_json::json!(["items", "optional"])
-        );
-        assert_eq!(
-            provider.schema["properties"]["items"]["items"]["properties"]["1"]["type"],
+            record["properties"]["items"]["items"]["properties"]["1"]["type"],
             "integer"
         );
         assert_eq!(
-            provider.schema["properties"]["optional"]["anyOf"][1]["properties"]["value"]["type"],
+            record["properties"]["optional"]["anyOf"][1]["properties"]["value"]["type"],
             "null"
         );
     }
@@ -1630,7 +1690,6 @@ mod tests {
             },
         };
         let provider = map.to_provider_schema().unwrap();
-        assert!(provider.wrapped);
         assert_eq!(provider.schema["properties"]["value"]["type"], "array");
         assert_eq!(
             provider.schema["properties"]["value"]["items"]["additionalProperties"],

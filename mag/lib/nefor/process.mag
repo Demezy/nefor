@@ -17,5 +17,5 @@ type ProcessExecActorParams {argv: List<String>, cwd: String, timeout: nefor.tim
 let exec: fn(String, ProcessExecParams) -> nefor.graph.Node<Unit, nefor.contracts.ProcessResult> = |name, params| => {
   let input = nefor.graph.port(name, type_tag<Unit>(), "nefor.process.Input")
   let output = nefor.graph.port(name, type_tag<nefor.contracts.ProcessResult>(), "nefor.process.Result")
-  nefor.graph.Node<Unit, nefor.contracts.ProcessResult> {id: name, role: "ordinary", actors: [nefor.graph.closed_actor(name, factory, [], ProcessExecActorParams {argv: get(params, "argv"), cwd: get(params, "cwd"), timeout: nefor.timeout.normalize(get(params, "timeout"))}, nefor.graph.store_port(input), [nefor.graph.store_port(output)], [])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.logical_node([name], [name])], input: input, output: output}
+  nefor.graph.node_with_operations_and_nodes(name, "ordinary", [nefor.graph.closed_actor(name, factory, [], ProcessExecActorParams {argv: get(params, "argv"), cwd: get(params, "cwd"), timeout: nefor.timeout.normalize(get(params, "timeout"))}, nefor.graph.store_port(input), [nefor.graph.store_port(output)], [])], ([]: List<nefor.graph.StoredRoute>), [], [], [nefor.graph.logical_node([name], [name])], input, output)
 }

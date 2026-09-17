@@ -66,12 +66,10 @@ local function diagnostic(validation)
 end
 
 local function correction(validation, provider_schema)
-  local shape = provider_schema.wrapped
-    and 'The required root envelope is {"value": <corrected value>}.'
-    or "The response root must match the schema directly."
   return "Correct the previous response to the exact expected JSON Schema: "
     .. json_encode(provider_schema.schema) .. ". Failure: " .. diagnostic(validation) .. ". "
-    .. shape .. " Return JSON only: no prose, Markdown, or code fences. "
+    .. 'The required root envelope is {"value": <corrected value>}. '
+    .. "Return JSON only: no prose, Markdown, or code fences. "
     .. "Use valid JSON escaping: encode newlines as \\n and all control characters with JSON escapes."
 end
 

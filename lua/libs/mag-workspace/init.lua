@@ -366,16 +366,34 @@ local function unpack(value, context)
   return copy(value.value)
 end
 
-local function unpack_modification(modification, context)
+local function unpack_template_payload(payload, context)
+  local ok, err = exact_fields(payload, { constructor = true, value = true }, context)
+  if not ok then return nil, err end
+  if payload.constructor == "Static" then
+    local value, unpack_error = unpack(payload.value, context .. ".value")
+    if unpack_error then return nil, unpack_error end
+    return { constructor = "Static", value = value }
+  end
+  if payload.constructor == "Expression" then
+    if type(payload.value) ~= "string" then
+      return nil, context .. ".value must be an expression reference string"
+    end
+    return copy(payload)
+  end
+  return nil, context .. " has unknown TemplatePayload constructor " .. tostring(payload.constructor)
+end
+
+local function unpack_modification(modification, context, decode_content)
+  decode_content = decode_content or unpack
   local materialized = copy(modification)
   for index, actor in ipairs(materialized.actors or {}) do
     local value, err = unpack(actor.params, context .. ".actors[" .. index .. "].params")
-    if not value then return nil, err end
+    if err then return nil, err end
     actor.params = value
   end
   for index, message in ipairs(materialized.messages or {}) do
-    local value, err = unpack(message.content, context .. ".messages[" .. index .. "].content")
-    if not value then return nil, err end
+    local value, err = decode_content(message.content, context .. ".messages[" .. index .. "].content")
+    if err then return nil, err end
     message.content = value
   end
   return materialized
@@ -392,11 +410,11 @@ local function unpack_operations(operations)
     for capture_id, capture in pairs(operation.captures or {}) do
       local value, err = unpack(capture.value, "program.operations[" .. operation_index
         .. "].captures." .. tostring(capture_id) .. ".value")
-      if not value then return nil, err end
+      if err then return nil, err end
       capture.value = value
     end
     local template, err = unpack_modification(operation.template or {},
-      "program.operations[" .. operation_index .. "].template")
+      "program.operations[" .. operation_index .. "].template", unpack_template_payload)
     if not template then return nil, err end
     operation.template = template
   end

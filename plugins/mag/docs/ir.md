@@ -70,8 +70,19 @@ schema-opaque.
 Fields typed as MAG `PackedValue` cross this immutable boundary as
 `{"$mag":"packed-value","value":...}`. The plugin removes exactly that outer
 compiler-owned envelope at the declared actor-param, message-content, capture,
-and template positions. It never recursively interprets the payload, so an
+and template positions. It never recursively interprets the payload, so a
 packed nominal value with fields such as `{"type":"sha256:...","value":...}` remains data.
+
+Template message content has the separate nominal `TemplatePayload` boundary:
+`{"constructor":"Static","value":{"$mag":"packed-value","value":...}}`
+retains `Static` and unpacks only its payload;
+`{"constructor":"Expression","value":"expression-id"}` retains the reference
+without unpacking or evaluating it. Unknown constructors, extra wrapper fields,
+and malformed payloads are rejected with the indexed operation/message location.
+Control-plane decoding, preview and actor-overlay inventory follow the same rule
+as execution. They operate on a copy, leaving the immutable program intact.
+Ordinary initial/delta messages still decode only their `PackedValue` boundary;
+user data resembling a constructor or another packed envelope remains data.
 
 `factory` is the qualified registry identity and `type_arguments` supplies its
 concrete generic specialization. The plugin passes both fields through

@@ -731,14 +731,16 @@ nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edg
         Some("mag.error"),
         "duplicate logical paths must fail while the graph compiles: {duplicate_path:#?}"
     );
-    assert!(
-        duplicate_path
-            .get("message")
-            .and_then(Value::as_str)
-            .is_some_and(
-                |message| message.contains("logical node paths must be non-empty and unique")
-            )
-    );
+    assert!(duplicate_path
+        .get("message")
+        .and_then(Value::as_str)
+        .is_some_and(|message| {
+            message.contains("identity conflict")
+                && message.contains(r#"\"entity\":\"logical node\""#)
+                && message.contains(r#"\"field\":\"members\""#)
+                && message.contains("first")
+                && message.contains("second")
+        }));
 
     fs::write(
         temp_root.join("node-choice.mag"),
@@ -1070,7 +1072,7 @@ import nefor.mag.{}
 let input = nefor.graph.port("x", type_tag<Unit>(), "nefor.process.Input")
 let output = nefor.graph.port("x", type_tag<nefor.contracts.ProcessResult>(), "mag.Unknown")
 let actor = nefor.graph.actor("x", "nefor.factory.shell-script", [], nefor.shell.ShellScriptParams {script: "true", cwd: ".", timeout: named(nefor.contracts.Timeout, Unlimited, nil)}, nefor.graph.store_port(input), [nefor.graph.store_port(output)])
-let operation = nefor.graph.Node<Unit, nefor.contracts.ProcessResult> {id: "x", role: "ordinary", actors: [actor], routes: ([]: List<nefor.graph.StoredRoute>), messages: ([]: List<nefor.graph.Message>), operations: ([]: List<nefor.mag.ProgramOperation>), nodes: [nefor.graph.logical_node(["x"], ["x"])], input: input, output: output}
+let operation = nefor.graph.node("x", "ordinary", [actor], ([]: List<nefor.graph.StoredRoute>), ([]: List<nefor.graph.Message>), input, output)
 let start = nefor.graph.source("start", nil)
 let result = nefor.graph.output_for("result", operation)
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, operation), nefor.graph.edge(operation, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#,
@@ -1113,7 +1115,7 @@ import nefor.mag.{}
 let input = nefor.graph.port("x", type_tag<Unit>(), "mag.Unknown")
 let output = nefor.graph.port("x", type_tag<nefor.contracts.ProcessResult>(), "nefor.process.Result")
 let actor = nefor.graph.actor("x", "nefor.factory.shell-script", [], nefor.shell.ShellScriptParams {script: "true", cwd: ".", timeout: named(nefor.contracts.Timeout, Unlimited, nil)}, nefor.graph.store_port(input), [nefor.graph.store_port(output)])
-let operation = nefor.graph.Node<Unit, nefor.contracts.ProcessResult> {id: "x", role: "ordinary", actors: [actor], routes: ([]: List<nefor.graph.StoredRoute>), messages: ([]: List<nefor.graph.Message>), operations: ([]: List<nefor.mag.ProgramOperation>), nodes: [nefor.graph.logical_node(["x"], ["x"])], input: input, output: output}
+let operation = nefor.graph.node("x", "ordinary", [actor], ([]: List<nefor.graph.StoredRoute>), ([]: List<nefor.graph.Message>), input, output)
 let start = nefor.graph.source("start", nil)
 let result = nefor.graph.output_for("result", operation)
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, operation), nefor.graph.edge(operation, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#,
@@ -1156,7 +1158,7 @@ import nefor.mag.{}
 let input = nefor.graph.port("x", type_tag<Unit>(), "nefor.process.Input")
 let output = nefor.graph.port("x", type_tag<nefor.contracts.ProcessResult>(), "nefor.process.Result")
 let actor = nefor.graph.actor("x", "missing.factory", [], nefor.shell.ShellScriptParams {script: "true", cwd: ".", timeout: named(nefor.contracts.Timeout, Unlimited, nil)}, nefor.graph.store_port(input), [nefor.graph.store_port(output)])
-let operation = nefor.graph.Node<Unit, nefor.contracts.ProcessResult> {id: "x", role: "ordinary", actors: [actor], routes: ([]: List<nefor.graph.StoredRoute>), messages: ([]: List<nefor.graph.Message>), operations: ([]: List<nefor.mag.ProgramOperation>), nodes: [nefor.graph.logical_node(["x"], ["x"])], input: input, output: output}
+let operation = nefor.graph.node("x", "ordinary", [actor], ([]: List<nefor.graph.StoredRoute>), ([]: List<nefor.graph.Message>), input, output)
 let start = nefor.graph.source("start", nil)
 let result = nefor.graph.output_for("result", operation)
 nefor.artifact.compile((|graph| => nefor.graph.add_edges(graph, [nefor.graph.edge(start, operation), nefor.graph.edge(operation, result)])): fn(nefor.graph.Graph) -> nefor.graph.Graph)"#,

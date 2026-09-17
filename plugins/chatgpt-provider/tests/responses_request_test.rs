@@ -176,12 +176,16 @@ async fn structured_request_reaches_local_responses_server_with_explicit_object_
                     schema["type"], "object",
                     "backend rejects a missing root type"
                 );
-                assert_eq!(schema["required"], json!(["content"]));
+                assert_eq!(schema["required"], json!(["value"]));
                 assert_eq!(schema["additionalProperties"], false);
+                assert_eq!(
+                    schema["properties"]["value"]["required"],
+                    json!(["content"])
+                );
                 break;
             }
         }
-        let body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"content\\\":\\\"done\\\"}\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\ndata: [DONE]\n\n";
+        let body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"{\\\"value\\\":{\\\"content\\\":\\\"done\\\"}}\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\ndata: [DONE]\n\n";
         let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
         stream
             .write_all(response.as_bytes())
@@ -250,7 +254,7 @@ async fn structured_request_reaches_local_responses_server_with_explicit_object_
         }
     }
     server.await.expect("server");
-    assert_eq!(delta, r#"{"content":"done"}"#);
+    assert_eq!(delta, r#"{"value":{"content":"done"}}"#);
     let decoded = mag_schema.validate_provider_json(&delta);
     assert!(decoded.ok, "{:?}", decoded.violations);
     assert_eq!(decoded.value, Some(json!({"content": "done"})));

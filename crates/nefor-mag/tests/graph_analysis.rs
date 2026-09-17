@@ -79,7 +79,7 @@ fn run_error(name: &str, source: &str) -> String {
 }
 
 #[test]
-fn analysis_preserves_normalized_first_occurrence_and_flattening_order() {
+fn analysis_preserves_order_and_rejects_changed_node_execution_definition() {
     let artifact = run(
         "ordered-analysis",
         r#"
@@ -121,7 +121,13 @@ let second_edge = nefor.graph.edge(middle, result)
 let topology = nefor.graph.graph([first_edge, second_edge, first_edge])
 let analysis = nefor.graph.analyze_graph(topology)
 let changed_middle = nefor.graph.with_operation(middle, test_operation("changed", get(middle, "output")))
-let conflict = nefor.graph.graph([first_edge, nefor.graph.edge(start, changed_middle), second_edge])
+let changed_definition = nefor.graph.graph([first_edge, nefor.graph.edge(start, changed_middle), second_edge])
+let changed_analysis = nefor.graph.analyze_graph(changed_definition)
+let reordered_middle = nefor.graph.with_operation(
+  nefor.graph.with_operation(middle_base, test_operation("middle-2", get(middle_base, "output"))),
+  test_operation("middle-1", get(middle_base, "output")),
+)
+let reordered_definition = nefor.graph.graph([first_edge, nefor.graph.edge(start, reordered_middle), second_edge])
 let plain = nefor.graph.graph([first_edge, second_edge])
 let stored_node_id: fn(nefor.graph.StoredNode) -> String = |candidate| => get(candidate, "id")
 let actor_id: fn(nefor.graph.Actor) -> String = |candidate| => get(candidate, "id")
@@ -135,7 +141,9 @@ artifact {
   message_targets: map(message_target, get(analysis, "messages")),
   rule_ids: map(operation_id, get(analysis, "graph_operations")),
   duplicate_lowers_identically: (=)(canonical(nefor.graph.lower(topology)), canonical(nefor.graph.lower(plain))),
-  conflict_error: validation_message(nefor.graph.validate(conflict, host_input("factory_contracts", type_tag<List<nefor.graph.FactoryContract>>())))
+  reordered_definition: validation_message(nefor.graph.validate(reordered_definition, host_input("factory_contracts", type_tag<List<nefor.graph.FactoryContract>>()))),
+  changed_rule_ids: map(operation_id, get(changed_analysis, "graph_operations")),
+  changed_definition: validation_message(nefor.graph.validate(changed_definition, host_input("factory_contracts", type_tag<List<nefor.graph.FactoryContract>>())))
 }
 "#,
         contracts(json!([])),
@@ -157,10 +165,271 @@ artifact {
         json!(["start-1", "middle-1", "middle-2"])
     );
     assert_eq!(artifact["duplicate_lowers_identically"], true);
+    assert_eq!(artifact["reordered_definition"], "valid");
     assert_eq!(
-        artifact["conflict_error"],
-        "one node id must denote one immutable node definition"
+        artifact["changed_rule_ids"],
+        json!(["start-1", "middle-1", "middle-2"])
     );
+    let conflict = artifact["changed_definition"].as_str().unwrap();
+    assert!(conflict.contains(r#""entity":"stored node""#), "{conflict}");
+    assert!(conflict.contains(r#""field":"operations""#), "{conflict}");
+    assert!(conflict.contains("changed"), "{conflict}");
+}
+
+#[test]
+fn shared_node_definitions_union_without_extra_activation() {
+    let artifact = run(
+        "shared-node-union",
+        r#"
+import nefor.graph.{}
+import nefor.node.{}
+
+let shared = nefor.graph.source("shared", 7)
+let left = nefor.node.compose("left", shared, nefor.graph.identity<Int>("left-value"))
+let right = nefor.node.compose("right", shared, nefor.graph.identity<Int>("right-value"))
+let branched = nefor.node.fanout("branched", left, right)
+let result = nefor.graph.output<(Int, Int)>("result")
+let topology = nefor.graph.graph([nefor.graph.edge(branched, result)])
+let analysis = nefor.graph.analyze_graph(topology)
+let actor_id: fn(nefor.graph.Actor) -> String = |candidate| => get(candidate, "id")
+let route_from_shared: fn(nefor.graph.StoredRoute) -> Bool = |candidate| => (=)(get(get(candidate, "from"), "actor"), "shared")
+let shared_logical: fn(nefor.graph.LogicalNode) -> Bool = |candidate| => (=)(get(candidate, "path"), ["branched", "shared"])
+artifact {
+  actor_ids: map(actor_id, get(analysis, "actors")),
+  shared_actor_count: count(filter(((|candidate| => (=)(get(candidate, "id"), "shared")) : fn(nefor.graph.Actor) -> Bool), get(analysis, "actors"))),
+  shared_routes: count(filter(route_from_shared, get(analysis, "routes"))),
+  shared_logical_count: count(filter(shared_logical, nefor.graph.graph_logical_nodes(topology))),
+  messages: count(get(analysis, "messages")),
+  conflicts: get(analysis, "identity_conflicts")
+}
+"#,
+        json!({}),
+    );
+
+    assert_eq!(artifact["shared_actor_count"], 1);
+    assert_eq!(artifact["shared_routes"], 2);
+    assert_eq!(artifact["shared_logical_count"], 1);
+    assert_eq!(artifact["messages"], 1);
+    assert_eq!(artifact["conflicts"], json!([]));
+    let actor_ids = artifact["actor_ids"].as_array().unwrap();
+    let distinct = actor_ids.iter().collect::<std::collections::HashSet<_>>();
+    assert_eq!(actor_ids.len(), distinct.len());
+}
+
+#[test]
+fn nested_conflicts_preserve_independent_child_provenance() {
+    let artifact = run(
+        "nested-identity-conflict-provenance",
+        r#"
+import nefor.contracts.{}
+import nefor.graph.{}
+import nefor.node.{}
+import nefor.shell.{}
+
+let first_base = nefor.shell.script("operation", nefor.shell.ShellScriptParams {script: "printf first", cwd: ".", timeout: named(nefor.contracts.Timeout, Unlimited, nil)})
+let second_base = nefor.shell.script("operation", nefor.shell.ShellScriptParams {script: "printf second", cwd: ".", timeout: named(nefor.contracts.Timeout, Unlimited, nil)})
+let first = nefor.graph.node_with_operations_and_nodes("left-child", "ordinary", get(first_base, "actors"), get(first_base, "routes"), get(first_base, "messages"), get(first_base, "operations"), [nefor.graph.logical_node(["left-child"], ["operation"])], get(first_base, "input"), get(first_base, "output"))
+let second = nefor.graph.node_with_operations_and_nodes("right-child", "ordinary", get(second_base, "actors"), get(second_base, "routes"), get(second_base, "messages"), get(second_base, "operations"), [nefor.graph.logical_node(["right-child"], ["operation"])], get(second_base, "input"), get(second_base, "output"))
+let left_peer = nefor.shell.script("left-peer", nefor.shell.ShellScriptParams {script: "printf peer", cwd: ".", timeout: named(nefor.contracts.Timeout, Unlimited, nil)})
+let right_peer = nefor.shell.script("right-peer", nefor.shell.ShellScriptParams {script: "printf peer", cwd: ".", timeout: named(nefor.contracts.Timeout, Unlimited, nil)})
+let left = nefor.node.fanout("left-wrapper", first, left_peer)
+let right = nefor.node.fanout("right-wrapper", second, right_peer)
+let conflicting = nefor.node.fanout("outer", left, right)
+artifact(nefor.graph.node_identity_conflicts(conflicting))
+"#,
+        json!({}),
+    );
+
+    let errors = artifact.as_array().unwrap();
+    let actor_error = errors
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|error| error.contains(r#""entity":"actor""#))
+        .expect("actor conflict");
+    let description: Value = serde_json::from_str(
+        actor_error
+            .strip_prefix("identity conflict: ")
+            .expect("conflict prefix"),
+    )
+    .unwrap();
+    assert_eq!(description["identity"], "operation");
+    assert_eq!(
+        description["first_provenance"]["containing_node"],
+        "left-child"
+    );
+    assert_eq!(
+        description["conflicting_provenance"]["containing_node"],
+        "right-child"
+    );
+    assert_eq!(
+        description["first_provenance"]["logical_paths"],
+        json!([["outer", "left-wrapper", "left-child"]])
+    );
+    assert_eq!(
+        description["conflicting_provenance"]["logical_paths"],
+        json!([["outer", "right-wrapper", "right-child"]])
+    );
+    assert_eq!(
+        description["first_provenance"]["composition_path"],
+        json!([
+            {"node": "outer", "position": 0},
+            {"node": "left-wrapper", "position": 0}
+        ])
+    );
+    assert_eq!(
+        description["conflicting_provenance"]["composition_path"],
+        json!([
+            {"node": "outer", "position": 1},
+            {"node": "right-wrapper", "position": 0}
+        ])
+    );
+}
+
+#[test]
+fn every_identity_class_unions_exact_repeats_and_rejects_divergence() {
+    let artifact = run(
+        "identity-class-conflicts",
+        r#"
+import core.map.{}
+import nefor.graph.{}
+import nefor.mag.{}
+
+let empty_template = nefor.mag.DeltaTemplate {types: (core.map.empty<String, TypeDescriptor>(): Map<String, TypeDescriptor>), actors: [], routes: [], messages: [], nodes: [], actor_reference_relocations: []}
+let a = nefor.graph.port("a", type_tag<Int>(), "test.Value")
+let b = nefor.graph.port("b", type_tag<Int>(), "test.Value")
+let c = nefor.graph.port("c", type_tag<Int>(), "test.Value")
+let route_first = nefor.graph.StoredRoute {id: "same-route", from: nefor.graph.store_port(a), to: nefor.graph.store_port(b)}
+let route_second = nefor.graph.StoredRoute {id: "same-route", from: nefor.graph.store_port(a), to: nefor.graph.store_port(c)}
+let operation_first = nefor.graph.instantiate_delta_template("same-operation", a, (core.map.empty<String, nefor.mag.TypedCapture>(): Map<String, nefor.mag.TypedCapture>), [], empty_template)
+let operation_second = nefor.graph.instantiate_delta_template("same-operation", b, (core.map.empty<String, nefor.mag.TypedCapture>(): Map<String, nefor.mag.TypedCapture>), [], empty_template)
+let route_node = nefor.graph.node_with_operations_and_nodes("route-node", "ordinary", [], [route_first, route_second], [], [], [], a, b)
+let operation_node = nefor.graph.node_with_operations_and_nodes("operation-node", "ordinary", [], [], [], [operation_first, operation_second], [], a, b)
+let logical_node = nefor.graph.node_with_operations_and_nodes("logical-node", "ordinary", [], [], [], [], [nefor.graph.logical_node(["same-path"], ["a"]), nefor.graph.logical_node(["same-path"], ["b"])], a, b)
+let message = nefor.graph.typed_message(a, 1)
+let other_message = nefor.graph.typed_message(a, 2)
+let message_node = nefor.graph.node_with_operations_and_nodes("message-node", "ordinary", [], [], [message, message, other_message], [], [], a, b)
+let boundary = nefor.graph.identity<Int>("boundary")
+let changed_boundary = nefor.graph.node_with_operations_and_nodes("boundary", "source", get(boundary, "actors"), get(boundary, "routes"), get(boundary, "messages"), get(boundary, "operations"), get(boundary, "nodes"), get(boundary, "input"), get(boundary, "output"))
+let start = nefor.graph.source("start", 1)
+let result = nefor.graph.output<Int>("result")
+let topology = nefor.graph.graph([nefor.graph.edge(start, boundary), nefor.graph.edge(start, changed_boundary), nefor.graph.edge(boundary, result)])
+artifact {
+  route: nefor.graph.node_identity_conflicts(route_node),
+  operation: nefor.graph.node_identity_conflicts(operation_node),
+  logical: nefor.graph.node_identity_conflicts(logical_node),
+  node: get(nefor.graph.analyze_graph(topology), "identity_conflicts"),
+  message_count: count(get(message_node, "messages"))
+}
+"#,
+        json!({}),
+    );
+
+    for (field, entity, differing_field) in [
+        ("route", "route", "to"),
+        ("operation", "operation", "on_actor"),
+        ("logical", "logical node", "members"),
+        ("node", "stored node", "role"),
+    ] {
+        let errors = artifact[field].as_array().unwrap();
+        assert_eq!(errors.len(), 1, "{field}: {errors:?}");
+        let error = errors[0].as_str().unwrap();
+        assert!(
+            error.contains(&format!(r#""entity":"{entity}""#)),
+            "{field}: {error}"
+        );
+        assert!(
+            error.contains(&format!(r#""field":"{differing_field}""#)),
+            "{field}: {error}"
+        );
+    }
+    assert_eq!(artifact["message_count"], 2);
+}
+
+#[test]
+fn compound_identity_cannot_shadow_a_divergent_child_identity() {
+    let artifact = run(
+        "compound-shadows-child",
+        r#"
+import nefor.graph.{}
+import nefor.node.{}
+let child = nefor.graph.source("same-id", 1)
+let next = nefor.graph.identity<Int>("next")
+let compound = nefor.node.compose("same-id", child, next)
+artifact(nefor.graph.node_identity_conflicts(compound))
+"#,
+        json!({}),
+    );
+    let errors = artifact.as_array().unwrap();
+    assert!(
+        errors.iter().any(|error| error
+            .as_str()
+            .unwrap()
+            .contains(r#""entity":"stored node""#)),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn actor_identity_checks_every_execution_contract_field() {
+    let artifact = run(
+        "actor-contract-fields",
+        r#"
+import nefor.graph.{}
+let input = nefor.graph.port("actor", type_tag<Int>(), "input")
+let output = nefor.graph.port("actor", type_tag<Int>(), "output")
+let base = nefor.graph.closed_actor("actor", "test.identity", [], 1, nefor.graph.store_port(input), [nefor.graph.store_port(output)], [])
+let input_port = get(base, "input")
+let output_port = first(get(base, "outputs"))
+let string_type = type_evidence(type_tag<String>())
+let variants: List<nefor.graph.Actor> = [
+  (assoc(base, "factory", "test.other"): nefor.graph.Actor),
+  (assoc(base, "type_arguments", [string_type]): nefor.graph.Actor),
+  (assoc(base, "params", pack(2)): nefor.graph.Actor),
+  (assoc(base, "input", (assoc(input_port, "type", string_type): nefor.graph.StoredPort)): nefor.graph.Actor),
+  (assoc(base, "input", (assoc(input_port, "type_id", type_id(string_type)): nefor.graph.StoredPort)): nefor.graph.Actor),
+  (assoc(base, "input", (assoc(input_port, "wire", "other"): nefor.graph.StoredPort)): nefor.graph.Actor),
+  (assoc(base, "outputs", [(assoc(output_port, "type", string_type): nefor.graph.StoredPort)]): nefor.graph.Actor),
+  (assoc(base, "outputs", [(assoc(output_port, "type_id", type_id(string_type)): nefor.graph.StoredPort)]): nefor.graph.Actor),
+  (assoc(base, "outputs", [(assoc(output_port, "wire", "other"): nefor.graph.StoredPort)]): nefor.graph.Actor),
+  (assoc(base, "templateability", named(nefor.graph.Templateability, Unsupported, "not closed")): nefor.graph.Actor),
+  (assoc(base, "templateability", named(nefor.graph.Templateability, Closed, [nefor.graph.Relocation {path: ["peer"], shape: "actor_id"}])): nefor.graph.Actor),
+]
+let errors: fn(nefor.graph.Actor) -> List<String> = |variant| => nefor.graph.node_identity_conflicts(nefor.graph.node("container", "ordinary", [base, variant], [], [], input, output))
+artifact(map(errors, variants))
+"#,
+        json!({}),
+    );
+    for (errors, field) in artifact.as_array().unwrap().iter().zip([
+        "factory",
+        "type_arguments",
+        "params",
+        "input",
+        "input",
+        "input",
+        "outputs",
+        "outputs",
+        "outputs",
+        "templateability",
+        "templateability",
+    ]) {
+        let errors = errors.as_array().unwrap();
+        assert_eq!(errors.len(), 1, "{field}: {errors:?}");
+        let diagnostic: Value = serde_json::from_str(
+            errors[0]
+                .as_str()
+                .unwrap()
+                .strip_prefix("identity conflict: ")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(diagnostic["entity"], "actor");
+        assert_eq!(diagnostic["identity"], "actor");
+        assert_eq!(diagnostic["differences"][0]["field"], field);
+        assert_ne!(
+            diagnostic["differences"][0]["first_value"],
+            diagnostic["differences"][0]["conflicting_value"]
+        );
+    }
 }
 
 #[test]
@@ -383,7 +652,7 @@ artifact {
 
     assert_eq!(
         artifact["duplicate_actor"],
-        "runtime actor ids must be unique across graph nodes"
+        "every runtime actor must belong to exactly one logical node"
     );
     assert_eq!(
         artifact["no_output"],
@@ -1081,6 +1350,10 @@ let identity = nefor.dynamic.traverse("identity-traverse", nefor.graph.identity<
 let composition = nefor.dynamic.traverse("composition-traverse", nefor.node.compose("composition", nefor.graph.identity<Input>("composition-left"), nefor.graph.identity<Input>("composition-right")))
 let fanout = nefor.dynamic.traverse("fanout-traverse", nefor.node.fanout("fanout", nefor.graph.identity<Input>("fanout-left"), nefor.graph.identity<Input>("fanout-right")))
 let sequence = nefor.dynamic.traverse("sequence-traverse", nefor.node.sequence([nefor.graph.identity<Input>("sequence-left"), nefor.graph.identity<Input>("sequence-right")]))
+let shared = nefor.graph.source("reuse-shared", Input {value: "shared"})
+let reuse_left = nefor.node.compose("reuse-left", shared, nefor.graph.identity<Input>("reuse-left-value"))
+let reuse_right = nefor.node.compose("reuse-right", shared, nefor.graph.identity<Input>("reuse-right-value"))
+let reuse = nefor.dynamic.traverse("reuse-traverse", nefor.node.fanout("reuse-worker", reuse_left, reuse_right))
 let agent = nefor.dynamic.traverse("agent-traverse", nefor.actors.agent<String, Input, Output>("agent", resolve, config))
 let only_operation<I, O>: fn(nefor.graph.Node<nefor.dynamic.DynamicList<I>, nefor.dynamic.DynamicList<O>>) -> nefor.mag.ProgramOperation = |node| => first(get(node, "operations"))
 artifact {
@@ -1088,13 +1361,21 @@ artifact {
   composition: only_operation(composition),
   fanout: only_operation(fanout),
   sequence: only_operation(sequence),
+  reuse: only_operation(reuse),
   agent: only_operation(agent)
 }
 "#,
         json!({}),
     );
 
-    for name in ["identity", "composition", "fanout", "sequence", "agent"] {
+    for name in [
+        "identity",
+        "composition",
+        "fanout",
+        "sequence",
+        "reuse",
+        "agent",
+    ] {
         let operation = &artifact[name];
         assert_eq!(operation["id"], format!("{name}-traverse.expand"));
         assert_eq!(operation["on_wire"], "nefor.dynamic.Indexed");
@@ -1158,6 +1439,26 @@ artifact {
         .map(|route| route["product_position"].as_i64().unwrap())
         .collect();
     assert_eq!(sequence_positions, vec![-1, -1]);
+
+    let reuse = &artifact["reuse"]["template"];
+    let reuse_slots: Vec<&str> = reuse["actors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|actor| actor["slot"].as_str())
+        .collect();
+    assert_eq!(
+        reuse_slots
+            .iter()
+            .filter(|slot| **slot == "reuse-shared")
+            .count(),
+        1
+    );
+    let unique_reuse_slots = reuse_slots
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(reuse_slots.len(), unique_reuse_slots.len());
 
     let agent = &artifact["agent"]["template"];
     assert_eq!(agent["actors"].as_array().unwrap().len(), 5);
@@ -1291,15 +1592,18 @@ artifact(nefor.dynamic.traverse("bad", worker))
             "references an actor outside the closed worker",
         ),
         (
-            "duplicate-actor-id",
+            "divergent-actor-id",
             r#"
+import nefor.contracts.{}
 import nefor.dynamic.{}
-import nefor.graph.{}
 import nefor.node.{}
-let worker = nefor.node.compose("worker", nefor.graph.identity<String>("duplicate"), nefor.graph.identity<String>("duplicate"))
+import nefor.shell.{}
+let first = nefor.shell.script("duplicate", nefor.shell.ShellScriptParams {script: "printf first", cwd: ".", timeout: named(nefor.contracts.Timeout, Unlimited, nil)})
+let second = nefor.shell.script("duplicate", nefor.shell.ShellScriptParams {script: "printf second", cwd: ".", timeout: named(nefor.contracts.Timeout, Unlimited, nil)})
+let worker = nefor.node.fanout("worker", first, second)
 artifact(nefor.dynamic.traverse("bad", worker))
 "#,
-            "duplicate actor IDs",
+            "identity conflict",
         ),
         (
             "malformed-relocations",

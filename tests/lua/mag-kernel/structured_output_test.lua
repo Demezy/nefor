@@ -52,7 +52,7 @@ end
 
 local validations = {}
 nefor.typed_json = {
-  provider_schema = function(_) return { schema = { type = "object" }, wrapped = true } end,
+  provider_schema = function(_) return { schema = { type = "object" } } end,
   validate_provider = function(_, _)
     local next_validation = table.remove(validations, 1)
     assert_true(next_validation ~= nil, "test supplied a validation result")
@@ -117,7 +117,7 @@ do
     "the correction prompt is model context, never an ordinary transcript message")
 
   instance.deliver({ kind = "reply", ref = correction.ref,
-    result = { text = '{"content":"validated"}' } })
+    result = { text = '{"value":{"content":"validated"}}' } })
   local result = find_last(messages, "nefor.agent.Result")
   assert_eq(result.semantic_type_id, nil, "raw factory emission has no routed identity")
   assert_eq(result.value.constructor, "Ok", "validated result selects Ok")
@@ -158,7 +158,7 @@ do
 
   local correction = find_last(messages, "capability.invoke")
   instance.deliver({ kind = "reply", ref = correction.ref,
-    result = { text = '{"content":"second try"}' } })
+    result = { text = '{"value":{"content":"second try"}}' } })
   local accepted = 0
   for _, message in ipairs(conversation_messages(facts)) do
     if message.role == "assistant" and message.visibility == "transcript" then
@@ -217,7 +217,7 @@ do
     result = { text = '{"value":{"unvalidated":"candidate"}}' } })
   local correction = find_last(messages, "capability.invoke")
   instance.deliver({ kind = "reply", ref = correction.ref,
-    result = { text = '{"value":{"content":"union ok"}}' } })
+    result = { text = '{"value":{"constructor":"NamedBranch","value":{"content":"union ok"}}}' } })
 
   assert_true(diagnostics[1].output == nil,
     "union rejection also omits candidate diagnostic data")

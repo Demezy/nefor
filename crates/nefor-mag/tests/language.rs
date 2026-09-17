@@ -721,7 +721,7 @@ let entry<Key, Value>: fn(Key, Value) -> Entry<Key, Value> = |key, value| => Ent
     .unwrap();
     fs::write(
         root.join("helpers/direct.mag"),
-        "let identity<T>: fn(T) -> T = |value| => value",
+        "let identity<T>: fn(T) -> T = |value| => value\nlet `identity.with.dots`<T>: fn(T) -> T = |value| => value",
     )
     .unwrap();
     fs::write(
@@ -736,7 +736,7 @@ let ignore<T>: fn(Int) -> Int = |value| => value
 let exact = generic.entry<String, Int>("exact", 1)
 let hole = make<String, _>("hole", 2)
 let inferred = make("inferred", 3)
-artifact {exact: exact, hole: hole, inferred: inferred, qualified: helpers.direct.identity<String>("qualified"), one: select<Int>(4), two: select<Int, String>(5, "ignored"), unused: ignore<String>(6)}
+artifact {exact: exact, field: exact.value, hole: hole, inferred: inferred, qualified: helpers.direct.identity<String>("qualified"), quoted: helpers.direct.`identity.with.dots`<String>("quoted"), one: select<Int>(4), two: select<Int, String>(5, "ignored"), unused: ignore<String>(6)}
         "#,
     )
     .unwrap();
@@ -752,14 +752,209 @@ artifact {exact: exact, hole: hole, inferred: inferred, qualified: helpers.direc
         artifact,
         json!({
             "exact": {"key": "exact", "value": 1},
+            "field": 1,
             "hole": {"key": "hole", "value": 2},
             "inferred": {"key": "inferred", "value": 3},
             "qualified": "qualified",
+            "quoted": "quoted",
             "one": 4,
             "two": 5,
             "unused": 6,
         })
     );
+}
+
+#[test]
+fn qualified_match_patterns_resolve_and_validate_the_scrutinee_owner() {
+    let root = workspace("qualified-match-patterns");
+    fs::create_dir_all(root.join("helpers")).unwrap();
+    fs::write(
+        root.join("helpers/outcome.mag"),
+        "type Outcome<T> = Ok(T) | Error(String)",
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("main.mag"),
+        r#"
+import helpers.outcome as outcome
+let value: outcome.Outcome<Int> = outcome.Outcome<Int>.Ok(42)
+artifact(match value { case outcome.Outcome.Ok(answer) => answer, case outcome.Outcome.Error(message) => 0 })
+"#,
+    )
+    .unwrap();
+    let artifact = compile_file_with_inputs_and_module_roots(
+        &root,
+        "main.mag",
+        json!({}),
+        std::slice::from_ref(&root),
+    )
+    .unwrap();
+    assert_eq!(artifact, json!(42));
+
+    fs::write(
+        root.join("main.mag"),
+        r#"
+import helpers.outcome.{Outcome as Choice}
+let value: Choice<Int> = Choice<Int>.Error("no")
+artifact(match value { case Choice.Ok(answer) => answer, case Error(message) => 0 })
+"#,
+    )
+    .unwrap();
+    let artifact = compile_file_with_inputs_and_module_roots(
+        &root,
+        "main.mag",
+        json!({}),
+        std::slice::from_ref(&root),
+    )
+    .unwrap();
+    assert_eq!(artifact, json!(0));
+
+    let error = compile(
+        r#"
+type Outcome = Ok(Int) | Error(String)
+type Other = Ok(Int) | Error(String)
+let value: Outcome = Outcome.Ok(1)
+artifact(match value { case Other.Ok(answer) => answer, case Outcome.Error(message) => 0 })
+"#,
+        &root,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("pattern owner main.Other does not match scrutinee owner main.Outcome"),
+        "{error}"
+    );
+
+    for (arms, expected) in [
+        (
+            "case Outcome.Ok(answer) => answer, case Ok(other) => other, case Outcome.Error(message) => 0",
+            "duplicate match arm for Ok",
+        ),
+        (
+            "case Outcome.Ok(answer) => answer",
+            "non-exhaustive match; missing Error",
+        ),
+    ] {
+        let source = format!(
+            "type Outcome = Ok(Int) | Error(String)\nlet value: Outcome = Outcome.Ok(1)\nartifact(match value {{ {arms} }})"
+        );
+        let error = compile(&source, &root).unwrap_err().to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn call_rejections_report_original_argument_positions_and_candidate_structure() {
+    let root = workspace("call-rejection-structure");
+    let declarations = r#"
+let choose: fn(Int, String, Bool) -> Int = |first, middle, last| => first
+let choose: fn(String, Int, Bool) -> String = |first, middle, last| => first
+"#;
+    for (arguments, position, parameter) in [
+        ("\"wrong\", \"ok\", true", "argument 1", "'first'"),
+        ("1, 2, true", "argument 2", "'middle'"),
+        ("1, \"ok\", 3", "argument 3", "'last'"),
+    ] {
+        let source = format!("{declarations}\nartifact(choose({arguments}))");
+        let error = compile(&source, &root).unwrap_err().to_string();
+        assert!(error.contains("closest candidates"), "{error}");
+        assert!(error.contains(position), "{error}");
+        assert!(error.contains(parameter), "{error}");
+        assert!(error.contains("candidate #"), "{error}");
+        assert!(error.contains("3 value args"), "{error}");
+    }
+
+    let generic = compile(
+        r#"
+let same<T>: fn(T, T, T) -> T = |first, middle, last| => first
+artifact(same<_>(1, 2, "wrong"))
+"#,
+        &root,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(generic.contains("1 explicit type args"), "{generic}");
+    assert!(generic.contains("argument 3 'last'"), "{generic}");
+    assert!(generic.contains("conflicting inference"), "{generic}");
+
+    let result = compile(
+        r#"
+let produce<T>: fn() -> T = | | => ("value": T)
+artifact((produce<String>(): Int))
+"#,
+        &root,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        result.contains("result expected Int, got String"),
+        "{result}"
+    );
+
+    let higher_order = compile(
+        r#"
+let apply: fn(fn(Int) -> String, Int, Bool) -> String = |callback, value, enabled| => callback(value)
+artifact(apply(((|value| => value): fn(Int) -> Int), 1, true))
+"#,
+        &root,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        higher_order.contains("argument 1 'callback'") && higher_order.contains("(Fn Int String)"),
+        "{higher_order}"
+    );
+
+    let fixed_after_hole = compile(
+        r#"
+let accept<T, U>: fn(T, U, Bool) -> T = |first, second, enabled| => first
+artifact(accept<_, String>(1, "ok", 3))
+"#,
+        &root,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        fixed_after_hole.contains("argument 3 'enabled' expected Bool, got Int"),
+        "{fixed_after_hole}"
+    );
+    assert!(
+        !fixed_after_hole.contains("conflicting inference for explicit type argument hole"),
+        "{fixed_after_hole}"
+    );
+
+    let reordered = compile(
+        r#"
+let rank<T>: fn(T, T, Int) -> T = |first, second, last| => first
+let rank<U>: fn(U, U, Bool) -> U = |first, second, last| => first
+artifact(rank("value", true, 1))
+"#,
+        &root,
+    )
+    .unwrap_err()
+    .to_string();
+    let first_candidate = reordered.lines().nth(1).unwrap_or_default();
+    assert!(
+        first_candidate.contains("last: Int") && first_candidate.contains("argument 2 'second'"),
+        "{reordered}"
+    );
+}
+
+#[test]
+fn nominal_ascription_accepts_compatible_function_call_results() {
+    let root = workspace("nominal-ascription-call");
+    let artifact = compile(
+        r#"
+newtype UserId = String
+let raw: fn() -> String = | | => "u-1"
+let already_wrapped: fn() -> UserId = | | => ("u-2": UserId)
+artifact {introduced: (raw(): UserId), retained: (already_wrapped(): UserId)}
+"#,
+        &root,
+    )
+    .unwrap();
+    assert_eq!(artifact, json!({"introduced": "u-1", "retained": "u-2"}));
 }
 
 #[test]

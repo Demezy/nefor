@@ -50,6 +50,55 @@ impl ProviderKind {
     }
 }
 
+#[derive(Clone, Copy)]
+enum AnswerCase {
+    Text,
+    Record,
+    Adt,
+}
+
+impl AnswerCase {
+    fn semantic_value(self) -> Value {
+        match self {
+            Self::Text => json!("done"),
+            Self::Record => json!({"value": "done"}),
+            Self::Adt => json!({"constructor": "Accepted", "value": {"value": "done"}}),
+        }
+    }
+
+    fn provider_text(self) -> String {
+        match self {
+            Self::Text => "done".into(),
+            _ => json!({"value": self.semantic_value()}).to_string(),
+        }
+    }
+
+    fn type_name(self) -> &'static str {
+        match self {
+            Self::Text => "nefor.contracts.TextAnswer",
+            Self::Record | Self::Adt => "main.Reply",
+        }
+    }
+
+    fn assert_schema(self, schema: Option<&Value>) {
+        if matches!(self, Self::Text) {
+            assert!(schema.is_none(), "TextAnswer has no structured schema");
+            return;
+        }
+        let schema = schema.expect("structured provider schema");
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["required"], json!(["value"]));
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"].as_object().unwrap().len(), 1);
+        let inner = &schema["properties"]["value"];
+        match self {
+            Self::Record => assert_eq!(inner["properties"]["value"]["type"], "string"),
+            Self::Adt => assert!(inner["anyOf"].is_array()),
+            Self::Text => unreachable!(),
+        }
+    }
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -421,7 +470,7 @@ async fn write_sse(stream: &mut TcpStream, body: &str) {
         .expect("write SSE response");
 }
 
-async fn fake_server(kind: ProviderKind, listener: TcpListener) {
+async fn fake_server(kind: ProviderKind, listener: TcpListener, answer: AnswerCase) {
     loop {
         let (mut stream, _) = listener.accept().await.expect("accept HTTP request");
         let (request_line, request) = read_http_json(&mut stream).await;
@@ -447,32 +496,28 @@ async fn fake_server(kind: ProviderKind, listener: TcpListener) {
         match kind {
             ProviderKind::OpenAi => {
                 assert!(request_line.contains(" /v1/chat/completions "));
-                assert!(request.get("response_format").is_none());
-                write_sse(
-                    &mut stream,
-                    "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
-                )
-                .await;
+                answer.assert_schema(request.pointer("/response_format/json_schema/schema"));
+                let event = json!({"choices": [{"delta": {"content": answer.provider_text()}}]});
+                write_sse(&mut stream, &format!("data: {event}\n\ndata: {{\"choices\":[{{\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n")).await;
             }
             ProviderKind::ChatGpt => {
                 assert!(request_line.contains(" /responses "));
                 assert_eq!(request["tools"], json!([]));
-                assert!(request["text"].get("format").is_none());
-                write_sse(
-                    &mut stream,
-                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\ndata: [DONE]\n\n",
-                )
-                .await;
+                answer.assert_schema(request.pointer("/text/format/schema"));
+                let event =
+                    json!({"type": "response.output_text.delta", "delta": answer.provider_text()});
+                write_sse(&mut stream, &format!("data: {event}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"r\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}}}\n\ndata: [DONE]\n\n")).await;
             }
         }
         break;
     }
 }
 
-async fn load_text_answer_program(
+async fn load_answer_program(
     reader: &mut BufReader<ChildStdout>,
     stdin: &mut ChildStdin,
     source_dir: &Path,
+    answer: AnswerCase,
 ) -> Value {
     let source = r#"
 import core.types.{}
@@ -493,6 +538,14 @@ let topology: fn(nefor.graph.Graph) -> nefor.graph.Graph = |graph| => nefor.grap
 ])
 nefor.artifact.compile(topology)
 "#;
+    let source = match answer {
+        AnswerCase::Text => source.to_owned(),
+        AnswerCase::Record => {
+            source.replace("nefor.contracts.TextAnswer", "Reply") + "\ntype Reply {value: String}\n"
+        }
+        AnswerCase::Adt => source.replace("nefor.contracts.TextAnswer", "Reply")
+            + "\ntype Payload {value: String}\ntype Reply = Accepted(Payload) | Rejected(String)\n",
+    };
     tokio::fs::write(source_dir.join("final-answer.mag"), source)
         .await
         .expect("write MAG fixture");
@@ -511,13 +564,13 @@ nefor.artifact.compile(topology)
     next_event_of_kind(reader, "mag.loaded").await["artifact"].clone()
 }
 
-async fn run_case(kind: ProviderKind) {
+async fn run_case(kind: ProviderKind, answer: AnswerCase) {
     let temp = tempfile::tempdir().expect("tempdir");
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fake server");
     let base_url = format!("http://{}", listener.local_addr().expect("server address"));
-    let server = tokio::spawn(fake_server(kind, listener));
+    let server = tokio::spawn(fake_server(kind, listener, answer));
 
     let mut mag = spawn_mag(temp.path()).await;
     let mut mag_in = mag.stdin.take().expect("mag stdin");
@@ -537,15 +590,15 @@ async fn run_case(kind: ProviderKind) {
         .await;
     }
 
-    let artifact = load_text_answer_program(&mut mag_out, &mut mag_in, temp.path()).await;
+    let artifact = load_answer_program(&mut mag_out, &mut mag_in, temp.path(), answer).await;
     let constructor_id = artifact
         .pointer("/program/initial/actors")
         .and_then(Value::as_array)
         .expect("program artifact actors")
         .iter()
-        .find(|actor| actor["factory"] == "nefor.factory.llm")
+        .find(|actor| actor["id"] == "answer.llm")
         .and_then(|actor| actor["params"]["value"]["output_type"].as_str())
-        .expect("compiler-derived TextAnswer constructor identity")
+        .expect("compiler-derived output identity")
         .to_owned();
 
     send_event(
@@ -565,7 +618,7 @@ async fn run_case(kind: ProviderKind) {
     .await;
 
     let (invocation, facts) = next_provider_request_with_facts(&mut mag_out, kind.name()).await;
-    assert!(invocation.get("output_schema").is_none());
+    answer.assert_schema(invocation.get("output_schema"));
     let request_id = invocation["request_id"]
         .as_str()
         .expect("provider request id")
@@ -592,7 +645,7 @@ async fn run_case(kind: ProviderKind) {
             Some(request_id.as_str())
         );
         if body.get("event").and_then(Value::as_str) == Some("text_delta") {
-            assert_eq!(body.get("text"), Some(&json!("done")));
+            assert_eq!(body.get("text"), Some(&json!(answer.provider_text())));
             continue;
         }
         if body.get("event").and_then(Value::as_str) == Some("completed") {
@@ -604,7 +657,7 @@ async fn run_case(kind: ProviderKind) {
             .get("result")
             .and_then(|result| result.get("text"))
             .or_else(|| completed.get("text")),
-        Some(&json!("done"))
+        Some(&json!(answer.provider_text()))
     );
     assert!(completed.get("chat_id").is_none());
     send_event(
@@ -617,7 +670,7 @@ async fn run_case(kind: ProviderKind) {
     let result = next_event_of_kind(&mut mag_out, "mag.run_result").await;
     assert_eq!(result["status"], "completed");
     assert_eq!(result["result"]["value"]["constructor"], "Ok");
-    assert_eq!(result["result"]["value"]["value"], "done");
+    assert_eq!(result["result"]["value"]["value"], answer.semantic_value());
     let terminal = &result["result"];
     let descriptor = &terminal["semantic_type"];
     assert_eq!(descriptor["name"], "core.types.Result");
@@ -625,10 +678,9 @@ async fn run_case(kind: ProviderKind) {
         descriptor["arguments"][0]["name"],
         "nefor.contracts.AgentError"
     );
-    assert_eq!(
-        descriptor["arguments"][1]["name"],
-        "nefor.contracts.TextAnswer"
-    );
+    assert_eq!(descriptor["arguments"][1]["name"], answer.type_name());
+    let output_type = concrete_type_from_json(&descriptor["arguments"][1]).unwrap();
+    assert_eq!(output_type.stable_id().as_str(), constructor_id);
     let semantic_type = concrete_type_from_json(descriptor).expect("valid Result descriptor");
     assert_eq!(
         terminal["semantic_type_id"],
@@ -652,10 +704,30 @@ async fn run_case(kind: ProviderKind) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_answer_through_openai_chat_completions_dispatcher() {
-    run_case(ProviderKind::OpenAi).await;
+    run_case(ProviderKind::OpenAi, AnswerCase::Text).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_answer_through_chatgpt_responses_dispatcher() {
-    run_case(ProviderKind::ChatGpt).await;
+    run_case(ProviderKind::ChatGpt, AnswerCase::Text).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_envelope_through_openai_dispatcher_preserves_nested_value() {
+    run_case(ProviderKind::OpenAi, AnswerCase::Record).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn record_envelope_through_chatgpt_dispatcher_preserves_nested_value() {
+    run_case(ProviderKind::ChatGpt, AnswerCase::Record).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adt_envelope_through_openai_dispatcher_preserves_nominal_value() {
+    run_case(ProviderKind::OpenAi, AnswerCase::Adt).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adt_envelope_through_chatgpt_dispatcher_preserves_nominal_value() {
+    run_case(ProviderKind::ChatGpt, AnswerCase::Adt).await;
 }

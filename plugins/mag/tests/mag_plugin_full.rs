@@ -471,6 +471,50 @@ nefor.artifact.compile_graph(contextual)
         }
 
         #[test]
+        fn shared_source_union_executes_once_and_fans_out_to_distinct_consumers() {
+            let host = shipped_host();
+            let source = r#"
+    import nefor.artifact.{}
+    import nefor.graph.{}
+    import nefor.node.{}
+    let shared = nefor.graph.source("shared", 7)
+    let left = nefor.node.compose("left", shared, nefor.graph.identity<Int>("left-value"))
+    let right = nefor.node.compose("right", shared, nefor.graph.identity<Int>("right-value"))
+    nefor.artifact.compile_graph(nefor.node.fanout("branched", left, right))
+    "#;
+            let modification = compile_mag_source(&host, "shared-source-union", source);
+            assert_eq!(
+                modification["actors"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|actor| actor["id"] == "shared")
+                    .count(),
+                1
+            );
+            assert!(
+                host.begin_run("shared-source-union", "shared-source-union", None)
+                    .expect("begin shared source run")
+                    .ok
+            );
+            host.drain_emits().expect("drain begin events");
+            let started = host
+                .start_program("shared-source-union", &modification, &[])
+                .expect("start shared source program");
+            assert!(started.ok, "shared source start: {:?}", started.error);
+            let completion = host
+                .take_run_complete("shared-source-union")
+                .expect("read shared source completion")
+                .expect("shared source completed");
+            assert_eq!(
+                completion.result.unwrap()["value"],
+                serde_json::json!([7, 7])
+            );
+            host.end_run("shared-source-union", TeardownReason::RunComplete)
+                .expect("end shared source run");
+        }
+
+        #[test]
         fn run_model_snapshot_overrides_llm_factories_without_mutating_specs() {
             let host = shipped_host();
             let direct = r#"

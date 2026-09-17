@@ -2,7 +2,7 @@ use crate::ast::{
     BindingId, CheckedBinding, CheckedBlock, CheckedExpr, CheckedExprKind, CheckedFn,
     CheckedMatchArm, CheckedParam, ConstructorDecl, ConstructorDeclarationId, TypeDeclBody, Value,
 };
-use crate::authored::{BlockItem, Expr, Function, Type, TypeArgument};
+use crate::authored::{BlockItem, Expr, Function, NamePath, Type, TypeArgument};
 use crate::env::Env;
 use crate::error::MagError;
 use crate::types::MagType;
@@ -73,6 +73,7 @@ pub(crate) fn compile_resolved_function(
                 id: BindingId(u64::MAX),
                 ty: MagType::Product(type_params.iter().cloned().map(MagType::Var).collect()),
                 generic_binders: vec![],
+                parameter_names: None,
                 contributes_type_vars: true,
             }],
         );
@@ -89,6 +90,7 @@ pub(crate) fn compile_resolved_function(
                 id,
                 ty: ty.clone(),
                 generic_binders: vec![],
+                parameter_names: None,
                 contributes_type_vars: false,
             },
         )?;
@@ -153,6 +155,23 @@ fn function_type_params(expression: &Expr) -> Result<Vec<String>, MagError> {
         Expr::Invalid(error) => Err(error.clone().into_mag_error()),
         _ => Ok(vec![]),
     }
+}
+
+fn function_parameter_names(expression: &Expr) -> Option<Vec<String>> {
+    let function = match expression {
+        Expr::Function(function) => function,
+        Expr::Ascribe { value, .. } | Expr::Annotate { value, .. } => {
+            return function_parameter_names(value)
+        }
+        _ => return None,
+    };
+    Some(
+        function
+            .params
+            .iter()
+            .map(|parameter| parameter.name.clone())
+            .collect(),
+    )
 }
 
 fn infer_fn_signature(env: &Env, outer: &Locals, expression: &Expr) -> Result<MagType, MagError> {
@@ -284,7 +303,7 @@ fn infer(env: &Env, locals: &mut Locals, expr: &Expr) -> Result<MagType, MagErro
         Expr::Int(_) => Ok(MagType::Int),
         Expr::Float(_) => Ok(MagType::Float),
         Expr::Str(_) | Expr::Keyword(_) => Ok(MagType::String),
-        Expr::Name(name) => match locals.get(name).map(Vec::as_slice) {
+        Expr::Name(name) => match locals.get(name.as_str()).map(Vec::as_slice) {
             Some([candidate]) => Ok(candidate.ty.clone()),
             Some(candidates) => {
                 let data = candidates
@@ -307,7 +326,7 @@ fn infer(env: &Env, locals: &mut Locals, expr: &Expr) -> Result<MagType, MagErro
                 .lookup(name)
                 .ok()
                 .and_then(|value| value_type(&value))
-                .ok_or_else(|| MagError::Unresolved(name.clone())),
+                .ok_or_else(|| MagError::Unresolved(name.to_string())),
         },
         Expr::Vector(items) => infer_list(env, locals, items),
         Expr::Fields(_) => Err(MagError::Type(
@@ -353,8 +372,12 @@ fn infer(env: &Env, locals: &mut Locals, expr: &Expr) -> Result<MagType, MagErro
             }
             let target = resolve_type(env, target, &vars)?;
             match value.as_ref() {
-                Expr::Name(name) if locals.get(name).is_some_and(|types| types.len() > 1) => {
-                    let matches = locals[name]
+                Expr::Name(name)
+                    if locals
+                        .get(name.as_str())
+                        .is_some_and(|types| types.len() > 1) =>
+                {
+                    let matches = locals[name.as_str()]
                         .iter()
                         .filter(|candidate| {
                             compatible(env, &candidate.ty, &target, &mut HashMap::new()).is_ok()
@@ -471,7 +494,7 @@ fn infer_call(
             .iter()
             .any(|candidate| matches!(candidate, Value::BuiltinFn(_)));
         let mut signatures = locals
-            .get(name)
+            .get(name.as_str())
             .into_iter()
             .flatten()
             .filter_map(|candidate| match &candidate.ty {
@@ -643,11 +666,22 @@ fn infer_match(
     let mut seen = HashSet::new();
     let mut result = None;
     for arm in arms {
-        let (constructor, payload_type) = instantiated_constructor(env, &owner, &arm.constructor)?;
+        let resolved_pattern_owner = if let Some(pattern_owner) = arm.pattern.owner() {
+            let mut vars = HashSet::new();
+            for candidate in locals.values().flatten() {
+                collect_vars(&candidate.ty, &mut vars);
+            }
+            Some(resolve_type(env, &Type::Name(pattern_owner), &vars)?)
+        } else {
+            None
+        };
+        let constructor_name =
+            match_constructor_name(&owner, resolved_pattern_owner.as_ref(), &arm.pattern)?;
+        let (constructor, payload_type) = instantiated_constructor(env, &owner, constructor_name)?;
         if !seen.insert(constructor.clone()) {
             return Err(MagError::Type(format!(
                 "duplicate match arm for {}",
-                arm.constructor
+                arm.pattern
             )));
         }
         let mut arm_locals = locals.clone();
@@ -1437,6 +1471,7 @@ struct CheckedCandidate {
     id: BindingId,
     ty: MagType,
     generic_binders: Vec<String>,
+    parameter_names: Option<Vec<String>>,
     contributes_type_vars: bool,
 }
 
@@ -2059,6 +2094,7 @@ fn compile_block_in(
                     id: *id,
                     ty,
                     generic_binders: function_type_params(initializer)?,
+                    parameter_names: function_parameter_names(initializer),
                     contributes_type_vars: false,
                 },
             )?;
@@ -2097,6 +2133,7 @@ fn compile_block_in(
                             id,
                             ty,
                             generic_binders: vec![],
+                            parameter_names: function_parameter_names(initializer),
                             contributes_type_vars: false,
                         },
                     )?;
@@ -2208,14 +2245,17 @@ fn env_candidates(env: &Env, name: &str) -> Vec<CheckedCandidate> {
             env.binding_metadata(id)
                 .and_then(|metadata| metadata.ty)
                 .map(|ty| {
-                    let generic_binders = match env.ready_binding(id) {
-                        Ok(Value::Fn(function)) => function.type_params.clone(),
-                        _ => vec![],
+                    let (generic_binders, parameter_names) = match env.ready_binding(id) {
+                        Ok(Value::Fn(function)) => {
+                            (function.type_params.clone(), Some(function.params.clone()))
+                        }
+                        _ => (vec![], None),
                     };
                     CheckedCandidate {
                         id,
                         ty,
                         generic_binders,
+                        parameter_names,
                         contributes_type_vars: false,
                     }
                 })
@@ -2629,12 +2669,22 @@ fn compile_match(
     let mut arms = Vec::with_capacity(arm_expressions.len());
     let mut result = expected.cloned();
     for arm_expression in arm_expressions {
+        let resolved_pattern_owner = arm_expression
+            .pattern
+            .owner()
+            .map(|owner| parse_checked_type(env, scopes, &Type::Name(owner)))
+            .transpose()?;
+        let constructor_name = match_constructor_name(
+            &value.ty,
+            resolved_pattern_owner.as_ref(),
+            &arm_expression.pattern,
+        )?;
         let (constructor, payload_type) =
-            instantiated_constructor(env, &value.ty, &arm_expression.constructor)?;
+            instantiated_constructor(env, &value.ty, constructor_name)?;
         if !seen.insert(constructor.clone()) {
             return Err(MagError::Type(format!(
                 "duplicate match arm for {}",
-                arm_expression.constructor
+                arm_expression.pattern
             )));
         }
         let binding_name = &arm_expression.binding;
@@ -2649,6 +2699,7 @@ fn compile_match(
                 id: binding_id,
                 ty: payload_type.clone(),
                 generic_binders: vec![],
+                parameter_names: None,
                 contributes_type_vars: false,
             },
         )?;
@@ -2722,6 +2773,25 @@ fn adt_constructors(env: &Env, owner: &MagType) -> Result<Vec<ConstructorDecl>, 
             payload: substitute(&constructor.payload, &substitutions),
         })
         .collect())
+}
+
+fn match_constructor_name<'a>(
+    owner: &MagType,
+    resolved_pattern_owner: Option<&MagType>,
+    pattern: &'a NamePath,
+) -> Result<&'a str, MagError> {
+    if let Some(pattern_owner) = resolved_pattern_owner {
+        let same_owner = matches!(
+            (owner, pattern_owner),
+            (MagType::Named(actual, _), MagType::Named(authored, _)) if actual == authored
+        );
+        if !same_owner {
+            return Err(MagError::Type(format!(
+                "pattern owner {pattern_owner} does not match scrutinee owner {owner}"
+            )));
+        }
+    }
+    Ok(pattern.last())
 }
 
 fn instantiated_constructor(
@@ -2819,15 +2889,28 @@ fn compile_ascribe(
             let underlying = newtype_underlying(env, &target).ok_or_else(|| {
                 MagError::Type(format!("missing newtype target for ascription to {target}"))
             })?;
-            compile_call(
+            match compile_call(
                 env,
                 scopes,
                 callee,
                 type_args.as_deref(),
                 args,
                 Some(&underlying),
-            )
-            .or_else(|_| compile_call(env, scopes, callee, type_args.as_deref(), args, None))?
+            ) {
+                Ok(value) => value,
+                Err(context_error) => {
+                    match compile_call(env, scopes, callee, type_args.as_deref(), args, None) {
+                        Ok(value)
+                            if compatible_static(env, &value.ty, &target, &mut HashMap::new())
+                                .is_ok()
+                                || is_newtype_boundary(env, &value.ty, &target) =>
+                        {
+                            value
+                        }
+                        _ => return Err(context_error),
+                    }
+                }
+            }
         }
         Expr::Call {
             callee,
@@ -2847,8 +2930,7 @@ fn compile_ascribe(
             type_args.as_deref(),
             args,
             Some(&target),
-        )
-        .or_else(|_| compile_call(env, scopes, callee, type_args.as_deref(), args, None))?,
+        )?,
         source => compile_expr(env, scopes, source, source_expected)?,
     };
     if (contains_newtype(env, &value.ty) || contains_newtype(env, &target))
@@ -2952,6 +3034,166 @@ fn compile_type_tag(
     ))
 }
 
+#[derive(Clone)]
+struct CallCandidateRejection {
+    candidate: CheckedCandidate,
+    value_arity: usize,
+    explicit_type_arity: Option<usize>,
+    checked_arguments: usize,
+    reason: CallRejectionReason,
+    declaration_order: usize,
+}
+
+#[derive(Clone)]
+enum CallRejectionReason {
+    TypeArguments {
+        error: String,
+    },
+    ValueArity {
+        expected: usize,
+        actual: usize,
+    },
+    Argument {
+        index: usize,
+        name: Option<String>,
+        expected: MagType,
+        actual: Option<MagType>,
+        error: String,
+    },
+    ResultMismatch {
+        expected: MagType,
+        actual: MagType,
+        error: String,
+    },
+    SubstitutionConflict {
+        index: usize,
+        name: Option<String>,
+        hole_index: usize,
+        hole_binder: String,
+        expected: MagType,
+        actual: MagType,
+        error: String,
+    },
+    HoleConflict {
+        error: String,
+    },
+    Equality {
+        error: String,
+    },
+}
+
+impl CallCandidateRejection {
+    fn closeness(&self) -> (usize, usize, usize) {
+        let stage = match self.reason {
+            CallRejectionReason::TypeArguments { .. } => 0,
+            CallRejectionReason::ValueArity { .. } => 1,
+            CallRejectionReason::Argument { .. }
+            | CallRejectionReason::SubstitutionConflict { .. } => 2,
+            CallRejectionReason::ResultMismatch { .. } => 3,
+            CallRejectionReason::HoleConflict { .. } => 4,
+            CallRejectionReason::Equality { .. } => 5,
+        };
+        (
+            self.checked_arguments,
+            stage,
+            usize::MAX - self.declaration_order,
+        )
+    }
+}
+
+fn render_call_rejections(name: &str, mut rejections: Vec<CallCandidateRejection>) -> MagError {
+    rejections.sort_by_key(|rejection| std::cmp::Reverse(rejection.closeness()));
+    let mut lines = vec![format!(
+        "no overload {name} matches call; closest candidates:"
+    )];
+    for rejection in rejections {
+        let candidate = &rejection.candidate;
+        let signature = match &candidate.ty {
+            MagType::Function(params, result) => {
+                let params = params
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ty)| {
+                        candidate
+                            .parameter_names
+                            .as_ref()
+                            .and_then(|names| names.get(index))
+                            .map_or_else(
+                                || ty.to_string(),
+                                |parameter| format!("{parameter}: {ty}"),
+                            )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let binders = (!candidate.generic_binders.is_empty())
+                    .then(|| format!("<{}>", candidate.generic_binders.join(", ")))
+                    .unwrap_or_default();
+                format!("{name}{binders}({params}) -> {result}")
+            }
+            ty => format!("{name}: {ty}"),
+        };
+        let type_arity = rejection.explicit_type_arity.map_or_else(
+            || "type args inferred".into(),
+            |arity| format!("{arity} explicit type args"),
+        );
+        let arities = format!(
+            "candidate #{}; {} value args; {type_arity}",
+            candidate.id.0, rejection.value_arity,
+        );
+        let reason = match rejection.reason {
+            CallRejectionReason::TypeArguments { error }
+            | CallRejectionReason::HoleConflict { error }
+            | CallRejectionReason::Equality { error } => error,
+            CallRejectionReason::ValueArity { expected, actual } => {
+                format!("expects {expected} value arguments, got {actual}")
+            }
+            CallRejectionReason::Argument {
+                index,
+                name,
+                expected,
+                actual,
+                error,
+            } => {
+                let label = name.map_or_else(
+                    || format!("argument {}", index + 1),
+                    |name| format!("argument {} '{name}'", index + 1),
+                );
+                let actual = actual
+                    .map(|actual| format!(", got {actual}"))
+                    .unwrap_or_default();
+                format!("{label} expected {expected}{actual}: {error}")
+            }
+            CallRejectionReason::SubstitutionConflict {
+                index,
+                name: parameter_name,
+                hole_index,
+                hole_binder,
+                expected,
+                actual,
+                error,
+            } => {
+                let label = parameter_name.map_or_else(
+                    || format!("argument {}", index + 1),
+                    |parameter_name| format!("argument {} '{parameter_name}'", index + 1),
+                );
+                format!(
+                    "{label} expected {expected}, got {actual}: conflicting inference for explicit type argument hole in {name} at position {} ({hole_binder}): {error}",
+                    hole_index + 1,
+                )
+            }
+            CallRejectionReason::ResultMismatch {
+                expected,
+                actual,
+                error,
+            } => {
+                format!("result expected {expected}, got {actual}: {error}")
+            }
+        };
+        lines.push(format!("- {signature} [{arities}]: {reason}"));
+    }
+    MagError::Type(lines.join("\n"))
+}
+
 fn compile_overloaded_call(
     env: &Env,
     scopes: &[CheckedScope],
@@ -2997,84 +3239,48 @@ fn compile_overloaded_call(
     } else {
         candidates
     };
-    if let [candidate] = candidates {
-        let (candidate_type, bindable, holes, type_bindings) =
-            instantiate_call_candidate(env, scopes, name, candidate, explicit_type_args)?;
-        let MagType::Function(params, result) = &candidate_type else {
-            unreachable!()
-        };
-        if params.len() != expressions.len() {
-            return Err(MagError::Arity {
-                expected: params.len(),
-                got: expressions.len(),
-            });
-        }
-        let (args, mut substitution) =
-            compile_call_args(env, scopes, expressions, params, &bindable).map_err(|error| {
-                if holes.is_empty() {
-                    error
-                } else {
-                    MagError::Type(format!(
-                        "conflicting inference for explicit type argument hole in {name} at {}: {error}",
-                        holes
-                            .iter()
-                            .map(|(index, binder, _)| format!("position {} ({binder})", index + 1))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ))
-                }
-            })?;
-        let output = substitute(result, &substitution);
-        if let Some(expected) = expected_result {
-            constrain_result(env, &output, expected, &mut substitution, &bindable)?;
-        }
-        validate_inferred_holes(name, &holes, &substitution)?;
-        validate_equality_requirements(
-            env,
-            &instantiated_equality_requirements(env, candidate),
-            &substitution,
-        )?;
-        let output = substitute(result, &substitution);
-        let callee_type = MagType::Function(
-            params
-                .iter()
-                .map(|parameter| substitute(parameter, &substitution))
-                .collect(),
-            Box::new(output.clone()),
-        );
-        let type_bindings: BTreeMap<String, MagType> = type_bindings
-            .into_iter()
-            .map(|(name, ty)| (name, substitute(&ty, &substitution)))
-            .collect();
-        return Ok(checked(
-            output,
-            CheckedExprKind::Call {
-                callee: Box::new(checked(
-                    callee_type,
-                    CheckedExprKind::BindingRef(candidate.id),
-                )),
-                args,
-                type_bindings,
-            },
-        ));
-    }
+
     let mut matches = Vec::new();
-    let mut explicit_failures = Vec::new();
-    for candidate in candidates {
+    let mut rejections = Vec::new();
+    for (declaration_order, candidate) in candidates.iter().enumerate() {
+        let reject = |checked_arguments, reason| CallCandidateRejection {
+            candidate: candidate.clone(),
+            value_arity: expressions.len(),
+            explicit_type_arity: explicit_type_args.map(<[TypeArgument]>::len),
+            checked_arguments,
+            reason,
+            declaration_order,
+        };
         let (candidate_type, bindable, holes, type_bindings) =
             match instantiate_call_candidate(env, scopes, name, candidate, explicit_type_args) {
                 Ok(instantiated) => instantiated,
                 Err(error) => {
-                    if explicit_type_args.is_some() {
-                        explicit_failures.push(error);
-                    }
+                    rejections.push(reject(
+                        0,
+                        CallRejectionReason::TypeArguments {
+                            error: error.to_string(),
+                        },
+                    ));
                     continue;
                 }
             };
         let MagType::Function(params, result) = &candidate_type else {
+            rejections.push(reject(
+                0,
+                CallRejectionReason::TypeArguments {
+                    error: format!("candidate is not callable: {candidate_type}"),
+                },
+            ));
             continue;
         };
         if params.len() != expressions.len() {
+            rejections.push(reject(
+                0,
+                CallRejectionReason::ValueArity {
+                    expected: params.len(),
+                    actual: expressions.len(),
+                },
+            ));
             continue;
         }
         let (args, mut substitution) = match compile_call_args(
@@ -3082,42 +3288,72 @@ fn compile_overloaded_call(
             scopes,
             expressions,
             params,
+            candidate.parameter_names.as_deref(),
             &bindable,
+            &holes,
         ) {
             Ok(checked) => checked,
-            Err(error) => {
-                if !holes.is_empty() {
-                    explicit_failures.push(MagError::Type(format!(
-                            "conflicting inference for explicit type argument hole in {name} at {}: {error}",
-                            holes
-                                .iter()
-                                .map(|(index, binder, _)| {
-                                    format!("position {} ({binder})", index + 1)
-                                })
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )));
-                }
+            Err(failure) => {
+                let reason = match failure.conflicting_hole {
+                    Some((hole_index, hole_binder, actual)) => {
+                        CallRejectionReason::SubstitutionConflict {
+                            index: failure.index,
+                            name: failure.name,
+                            hole_index,
+                            hole_binder,
+                            expected: failure.expected,
+                            actual,
+                            error: failure.error,
+                        }
+                    }
+                    None => CallRejectionReason::Argument {
+                        index: failure.index,
+                        name: failure.name,
+                        expected: failure.expected,
+                        actual: failure.actual,
+                        error: failure.error,
+                    },
+                };
+                rejections.push(reject(failure.checked_arguments, reason));
                 continue;
             }
         };
         let output = substitute(result, &substitution);
         if let Some(expected) = expected_result {
-            if constrain_result(env, &output, expected, &mut substitution, &bindable).is_err() {
+            if let Err(error) =
+                constrain_result(env, &output, expected, &mut substitution, &bindable)
+            {
+                rejections.push(reject(
+                    expressions.len(),
+                    CallRejectionReason::ResultMismatch {
+                        expected: expected.clone(),
+                        actual: output,
+                        error: error.to_string(),
+                    },
+                ));
                 continue;
             }
         }
         if let Err(error) = validate_inferred_holes(name, &holes, &substitution) {
-            explicit_failures.push(error);
+            rejections.push(reject(
+                expressions.len(),
+                CallRejectionReason::HoleConflict {
+                    error: error.to_string(),
+                },
+            ));
             continue;
         }
-        if validate_equality_requirements(
+        if let Err(error) = validate_equality_requirements(
             env,
             &instantiated_equality_requirements(env, candidate),
             &substitution,
-        )
-        .is_err()
-        {
+        ) {
+            rejections.push(reject(
+                expressions.len(),
+                CallRejectionReason::Equality {
+                    error: error.to_string(),
+                },
+            ));
             continue;
         }
         let output = substitute(result, &substitution);
@@ -3158,10 +3394,7 @@ fn compile_overloaded_call(
                 },
             ))
         }
-        [] => match explicit_failures.into_iter().next() {
-            Some(error) => Err(error),
-            None => Err(MagError::Type(format!("no overload {name} matches call"))),
-        },
+        [] => Err(render_call_rejections(name, rejections)),
         _ => Err(MagError::Type(format!(
             "ambiguous overload {name} for call"
         ))),
@@ -3184,39 +3417,139 @@ fn constrain_result(
     }
 }
 
+struct CallArgumentFailure {
+    index: usize,
+    name: Option<String>,
+    checked_arguments: usize,
+    expected: MagType,
+    actual: Option<MagType>,
+    conflicting_hole: Option<(usize, String, MagType)>,
+    error: String,
+}
+
 fn compile_call_args(
     env: &Env,
     scopes: &[CheckedScope],
     expressions: &[Expr],
     params: &[MagType],
+    parameter_names: Option<&[String]>,
     bindable: &HashSet<String>,
-) -> Result<(Vec<CheckedExpr>, HashMap<String, MagType>), MagError> {
+    holes: &[InferredTypeArgumentHole],
+) -> Result<(Vec<CheckedExpr>, HashMap<String, MagType>), CallArgumentFailure> {
     let mut substitution = HashMap::new();
     let mut args = vec![None; params.len()];
+    let mut checked_arguments = 0;
     let mut order = (0..params.len()).collect::<Vec<_>>();
     order.sort_by_key(|index| contains_union(&params[*index]));
     for index in order {
         let expression = &expressions[index];
-        let parameter = &params[index];
-        let parameter = substitute(parameter, &substitution);
-        let argument = compile_expr(env, scopes, expression, Some(&parameter))?;
+        let parameter = substitute(&params[index], &substitution);
+        let name = parameter_names.and_then(|names| names.get(index)).cloned();
+        let argument =
+            compile_expr(env, scopes, expression, Some(&parameter)).map_err(|error| {
+                let mut locals = visible_types(env, scopes, &CheckedScope::new());
+                let actual = infer(env, &mut locals, expression).ok();
+                let conflicting_hole = actual.as_ref().and_then(|actual| {
+                    conflicting_explicit_hole(
+                        env,
+                        actual,
+                        &params[index],
+                        &substitution,
+                        bindable,
+                        holes,
+                    )
+                    .map(|(hole_index, binder)| (hole_index, binder, actual.clone()))
+                });
+                CallArgumentFailure {
+                    index,
+                    name: name.clone(),
+                    checked_arguments,
+                    expected: parameter.clone(),
+                    actual,
+                    conflicting_hole,
+                    error: error.to_string(),
+                }
+            })?;
         compatible_with_bindable(env, &argument.ty, &parameter, &mut substitution, bindable)
-            .map_err(MagError::Type)?;
+            .map_err(|error| CallArgumentFailure {
+                index,
+                name,
+                checked_arguments,
+                expected: parameter,
+                actual: Some(argument.ty.clone()),
+                conflicting_hole: conflicting_explicit_hole(
+                    env,
+                    &argument.ty,
+                    &params[index],
+                    &substitution,
+                    bindable,
+                    holes,
+                )
+                .map(|(hole_index, binder)| (hole_index, binder, argument.ty.clone())),
+                error,
+            })?;
         args[index] = Some(argument);
+        checked_arguments += 1;
     }
     let args = args
         .into_iter()
         .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| MagError::Type("internal error: unchecked call argument".into()))?;
-    for (argument, parameter) in args.iter().zip(params) {
-        check_equality_specialization(
-            env,
-            argument,
-            &substitute(parameter, &substitution),
-            &substitution,
+        .ok_or_else(|| CallArgumentFailure {
+            index: 0,
+            name: parameter_names.and_then(|names| names.first()).cloned(),
+            checked_arguments,
+            expected: params.first().cloned().unwrap_or(MagType::Unit),
+            actual: None,
+            conflicting_hole: None,
+            error: "internal error: unchecked call argument".into(),
+        })?;
+    for (index, (argument, parameter)) in args.iter().zip(params).enumerate() {
+        let expected = substitute(parameter, &substitution);
+        check_equality_specialization(env, argument, &expected, &substitution).map_err(
+            |error| CallArgumentFailure {
+                index,
+                name: parameter_names.and_then(|names| names.get(index)).cloned(),
+                checked_arguments,
+                expected,
+                actual: Some(argument.ty.clone()),
+                conflicting_hole: None,
+                error: error.to_string(),
+            },
         )?;
     }
     Ok((args, substitution))
+}
+
+fn conflicting_explicit_hole(
+    env: &Env,
+    actual: &MagType,
+    parameter: &MagType,
+    substitution: &HashMap<String, MagType>,
+    bindable: &HashSet<String>,
+    holes: &[InferredTypeArgumentHole],
+) -> Option<(usize, String)> {
+    let parameter_variables = {
+        let mut variables = HashSet::new();
+        collect_vars(parameter, &mut variables);
+        variables
+    };
+    let relevant = holes
+        .iter()
+        .filter(|(_, _, variable)| {
+            parameter_variables.contains(variable) && substitution.contains_key(variable)
+        })
+        .collect::<Vec<_>>();
+    if relevant.is_empty() {
+        return None;
+    }
+    let mut without_hole_bindings = substitution.clone();
+    for (_, _, variable) in &relevant {
+        without_hole_bindings.remove(variable);
+    }
+    compatible_with_bindable(env, actual, parameter, &mut without_hole_bindings, bindable).ok()?;
+    relevant
+        .first()
+        .map(|(index, binder, _)| (*index, binder.clone()))
 }
 
 fn compile_artifact_expr(
@@ -3574,6 +3907,7 @@ fn compile_function(
                         .collect(),
                 ),
                 generic_binders: vec![],
+                parameter_names: None,
                 contributes_type_vars: true,
             }],
         );
@@ -3590,6 +3924,7 @@ fn compile_function(
                 id,
                 ty: ty.clone(),
                 generic_binders: vec![],
+                parameter_names: None,
                 contributes_type_vars: false,
             },
         )?;
@@ -3678,7 +4013,7 @@ pub(crate) fn resolve_type(
     vars: &HashSet<String>,
 ) -> Result<MagType, MagError> {
     match authored {
-        Type::Name(name) if vars.contains(name) => Ok(MagType::Var(name.clone())),
+        Type::Name(name) if vars.contains(name.as_str()) => Ok(MagType::Var(name.to_string())),
         Type::Name(name) => {
             let candidates = env.lookup_candidates(name);
             let types = candidates
@@ -3691,7 +4026,7 @@ pub(crate) fn resolve_type(
                 .collect::<Vec<_>>();
             match types.as_slice() {
                 [ty] => expand_transparent_alias(env, ty),
-                [] if candidates.is_empty() => Err(MagError::Unresolved(name.clone())),
+                [] if candidates.is_empty() => Err(MagError::Unresolved(name.to_string())),
                 [] => Err(MagError::Type(format!("{name} is not a type"))),
                 _ => Err(MagError::Type(format!("ambiguous type name {name}"))),
             }
@@ -3794,6 +4129,7 @@ fn has_type_variables(ty: &MagType) -> bool {
 
 fn contains_union(ty: &MagType) -> bool {
     match ty {
+        MagType::Var(_) => true,
         MagType::Named(_, arguments) | MagType::Product(arguments) => {
             arguments.iter().any(contains_union)
         }

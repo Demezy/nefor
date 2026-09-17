@@ -447,9 +447,16 @@ Every public agent uses the `structured-output` provider boundary. Its params
 include a versioned MAG type descriptor produced by
 <code>`type_schema`(type_tag&lt;T&gt;())</code> and `max_corrections`. The bridge converts the
 descriptor to provider-neutral JSON Schema; each provider chooses its own
-realization. The OpenAI-compatible provider uses `response_format`, while the
-ChatGPT provider uses the Responses API's `text.format`. MAG does not branch on
-that choice and still performs the authoritative Rust-owned validation.
+realization. Every structured provider schema has one exact object envelope,
+`{"value": encoding(T)}`, including records, ADTs, collections, scalars, and
+Unit. The boundary removes exactly that outer envelope before validating and
+emitting the unchanged semantic `T`; a record whose own field is named `value`
+therefore uses `{"value":{"value":...}}`. Envelope failures are reported at
+`$`, while validation paths inside `T` are relative to the decoded inner value.
+The OpenAI-compatible provider uses `response_format`, while the ChatGPT
+provider uses the Responses API's `text.format`. MAG does not branch on that
+choice and still performs the authoritative Rust-owned validation. `TextAnswer`
+keeps its direct terminal-text factory path and does not use this contract.
 
 Tool calls take the ordinary `generic-tool.ToolCalls` path and consume no
 corrections. An invalid candidate becomes a diagnostic user turn while budget

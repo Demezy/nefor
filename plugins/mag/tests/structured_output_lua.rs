@@ -130,9 +130,13 @@ fn structured_output_retries_and_preserves_tool_rounds() {
         assert(emitted[#emitted].kind == "capability.invoke")
         local first_request = emitted[#emitted].request
         assert(first_request.output_schema.type == "object")
-        assert(first_request.output_schema.properties.task.type == "string")
-        assert(first_request.output_schema.required[1] == "task")
+        assert(first_request.output_schema.required[1] == "value")
         assert(first_request.output_schema.additionalProperties == false)
+        local record_schema = first_request.output_schema.properties.value
+        assert(record_schema.type == "object")
+        assert(record_schema.properties.task.type == "string")
+        assert(record_schema.required[1] == "task")
+        assert(record_schema.additionalProperties == false)
         assert(first_request.max_corrections == 2)
         assert(first_request.input == nil)
         assert(first_request.system == nil)
@@ -164,12 +168,12 @@ fn structured_output_retries_and_preserves_tool_rounds() {
         assert(correction:find("newlines as \\n", 1, true), correction)
         assert(correction:find("control characters", 1, true), correction)
 
-        actor.deliver({ kind = "reply", result = { text = [[{"task":4}]] } })
+        actor.deliver({ kind = "reply", result = { text = [[{"value":{"task":4}}]] } })
         assert(emitted[#emitted].kind == "capability.invoke")
         assert(emitted[#emitted].request.input == nil)
         assert(last_text():find("%$%.task"))
 
-        actor.deliver({ kind = "reply", result = { text = [[{"task":"build"}]] } })
+        actor.deliver({ kind = "reply", result = { text = [[{"value":{"task":"build"}}]] } })
         assert(emitted[#emitted - 1].kind == "nefor.agent.Result")
         assert(emitted[#emitted - 1].value.constructor == "Ok")
         assert(emitted[#emitted - 1].value.value.task == "build")
@@ -560,6 +564,22 @@ fn dynamic_structured_output_emits_indexed_items_and_explicit_completion() {
         assert(second.dynamic.collection == complete.dynamic.collection)
         assert(emitted[#emitted].kind == "mag.complete")
 
+        emitted = {}
+        actor.deliver({ messages = {{ tag = "generic-provider.ProviderOut", message = {
+          messages = {{ role = "user", content = "no follow-ups" }}
+        }}}})
+        actor.deliver({ kind = "reply", result = { text = [=[{"value":[]}]=] }})
+        local dynamic_count = 0
+        for _, message in ipairs(emitted) do
+          if message.dynamic then
+            dynamic_count = dynamic_count + 1
+            assert(message.dynamic.kind == "complete" and message.dynamic.count == 0,
+              "an empty validated collection emits one completion and no items")
+          end
+        end
+        assert(dynamic_count == 1)
+        assert(emitted[#emitted].kind == "mag.complete")
+
         local malformed = factory.construct("malformed", {
           schema = { version = 2, root = { kind = "list", item = { kind = "string" } } },
           max_corrections = 0,
@@ -569,6 +589,56 @@ fn dynamic_structured_output_emits_indexed_items_and_explicit_completion() {
           dynamic = true, dynamic_item_type = "item-tag"
         }, function() end, { conversation = { emit = function() end } })
         assert(malformed == nil)
+        "#,
+    )
+    .exec()
+    .unwrap();
+}
+
+#[test]
+fn dynamic_structured_output_validates_the_whole_envelope_before_emitting_items() {
+    let lua = harness();
+    lua.load(
+        r#"
+        local factory = require("factories.structured-output")
+        local emitted = {}
+        local actor = assert(factory.construct("atomic-planner", {
+          provider = "mock-provider",
+          schema = { version = 2, root = { kind = "list", item = {
+            kind = "record", fields = {{ name = "task", schema = { kind = "string" } }}
+          }}},
+          max_corrections = 0,
+          output_type = "dynamic-list-tag",
+          error_type = "agent-error-tag",
+          provider_error_type = "provider-error-tag",
+          validation_error_type = "validation-error-tag",
+          dynamic = true,
+          dynamic_item_type = "task-tag",
+          dynamic_item_descriptor = { kind = "record", fields = {
+            { name = "task", type = { kind = "primitive", name = "String" } }
+          }}
+        }, function(message) emitted[#emitted + 1] = message end,
+          { conversation = { id = "atomic-planner:conversation", turn_id = "atomic-planner:turn",
+            emit = function(_) end } }))
+
+        actor.deliver({ messages = {{ tag = "generic-provider.ProviderOut", message = {
+          messages = {{ role = "user", content = "split the work" }}
+        }}}})
+        actor.deliver({ kind = "reply", result = {
+          text = [=[{"value":[{"task":"valid"},{"task":42}]}]=]
+        }})
+
+        local result
+        local dynamic_messages = 0
+        for _, message in ipairs(emitted) do
+          if message.dynamic ~= nil then dynamic_messages = dynamic_messages + 1 end
+          if message.kind == "nefor.agent.Result" then result = message end
+        end
+        assert(dynamic_messages == 0, "invalid collection must emit no item or completion")
+        assert(result.value.constructor == "Error")
+        local violation = result.value.value.reason.value.violations[1]
+        assert(violation.path == "$[1].task")
+        assert(violation.code == "wrong_type")
         "#,
     )
     .exec()

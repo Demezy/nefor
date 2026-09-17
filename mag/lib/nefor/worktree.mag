@@ -15,11 +15,11 @@ let open_factory = "nefor.factory.worktree-open"
 let create: fn(String, CreateSpec) -> nefor.graph.Node<Unit, Worktree> = |id, spec| => {
   let input = nefor.graph.port(id, type_tag<Unit>(), "mag.Unit")
   let output = nefor.graph.port(id, type_tag<Worktree>(), "nefor.worktree.Ready")
-  nefor.graph.Node<Unit, Worktree> {id: id, role: "ordinary", actors: [nefor.graph.closed_actor(id, create_factory, [], spec, nefor.graph.store_port(input), [nefor.graph.store_port(output)], [])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.logical_node([id], [id])], input: input, output: output}
+  nefor.graph.node_with_operations_and_nodes(id, "ordinary", [nefor.graph.closed_actor(id, create_factory, [], spec, nefor.graph.store_port(input), [nefor.graph.store_port(output)], [])], ([]: List<nefor.graph.StoredRoute>), [], [], [nefor.graph.logical_node([id], [id])], input, output)
 }
 
 let open: fn(String, OpenSpec) -> nefor.graph.Node<Unit, Worktree> = |id, spec| => {
   let input = nefor.graph.port(id, type_tag<Unit>(), "mag.Unit")
   let output = nefor.graph.port(id, type_tag<Worktree>(), "nefor.worktree.Ready")
-  nefor.graph.Node<Unit, Worktree> {id: id, role: "ordinary", actors: [nefor.graph.closed_actor(id, open_factory, [], spec, nefor.graph.store_port(input), [nefor.graph.store_port(output)], [])], routes: ([]: List<nefor.graph.StoredRoute>), messages: [], operations: [], nodes: [nefor.graph.logical_node([id], [id])], input: input, output: output}
+  nefor.graph.node_with_operations_and_nodes(id, "ordinary", [nefor.graph.closed_actor(id, open_factory, [], spec, nefor.graph.store_port(input), [nefor.graph.store_port(output)], [])], ([]: List<nefor.graph.StoredRoute>), [], [], [nefor.graph.logical_node([id], [id])], input, output)
 }

@@ -711,6 +711,69 @@ do
     "program operation rejects unknown fields")
 end
 
+-- Template payloads are a sum outside the packed-value boundary. Only Static
+-- crosses that boundary; Expression remains an unevaluated reference.
+do
+  local workspace = require("libs.mag-workspace")
+  local authored = { constructor = "Expression", value = { ["$mag"] = "packed-value", value = 42 } }
+  local function artifact_for(payload)
+    return {
+      format = "nefor.mag", version = 2, kind = "program", program = {
+        initial = { actors = {}, messages = {}, nodes = {}, kills = {}, types = {}, result = {} },
+        operations = { {
+          id = "expand", on_actor = "source", on_wire = "result",
+          trigger_type = {}, trigger_type_id = "type", captures = {}, expressions = {},
+          template = { actors = {}, routes = {}, messages = { {
+            to = { actor = { constructor = "LocalActorRef", value = { slot = "worker" } }, wire = "input" },
+            content = payload,
+          } } },
+        } },
+      },
+    }
+  end
+  for _, payload in ipairs({
+    { constructor = "Static", value = { ["$mag"] = "packed-value", value = authored } },
+    { constructor = "Static", value = { ["$mag"] = "packed-value", value = false } },
+    { constructor = "Expression", value = "trigger.expression" },
+  }) do
+    local artifact = artifact_for(payload)
+    local before = nefor.json.encode(artifact)
+    local decoded = assert(workspace.decode_artifact(artifact))
+    local content = decoded.operations[1].template.messages[1].content
+    assert_eq(content.constructor, payload.constructor, "template constructor survives decoding")
+    if payload.constructor == "Expression" then
+      assert_eq(content.value, "trigger.expression", "expression is not unpacked or evaluated")
+    elseif payload.value.value == false then
+      assert_eq(content.value, false, "false is a valid packed semantic value")
+    else
+      assert_eq(content.value.constructor, "Expression", "Static user data is not decoded recursively")
+      assert_eq(content.value.value["$mag"], "packed-value", "nested user envelope remains user data")
+    end
+    assert_true(workspace.preview(artifact, "sha256:template", KERNEL_FACTORIES)
+      :find("message -> slot:worker/input", 1, true) ~= nil, "preview accepts both template payload variants")
+    assert_eq(nefor.json.encode(artifact), before, "decode and preview preserve the immutable artifact")
+  end
+  for _, payload in ipairs({
+    false, "not-a-payload", {}, { constructor = "Unknown", value = "x" },
+    { constructor = "Static" }, { constructor = "Expression" },
+    { constructor = "Expression", value = 42 },
+    { constructor = "Expression", value = "x", extra = true },
+    { constructor = "Static", value = authored },
+  }) do
+    local decoded, err = workspace.decode_artifact(artifact_for(payload))
+    assert_eq(decoded, nil, "malformed template payload is rejected")
+    assert_true(err:find("program.operations[1].template.messages[1].content", 1, true) ~= nil,
+      "template failure includes indexed occurrence context")
+  end
+  local delta = { format = "nefor.mag", version = 2, kind = "delta", delta = {
+    actors = {}, messages = { { to = "worker", content = { ["$mag"] = "packed-value", value = authored } } },
+    nodes = {}, kills = {}, types = {},
+  } }
+  local decoded = assert(workspace.decode_artifact(delta))
+  assert_eq(decoded.modification.messages[1].content.constructor, "Expression",
+    "ordinary delta payload stays data, not a template expression")
+end
+
 -- Template definitions participate in validation and overlays, but mag-status
 -- contains only concrete runtime actors. Each materialization enters through
 -- its own lifecycle identity.
@@ -743,7 +806,12 @@ do
               system = "template authored system", tools = { "read_file" },
             } }, routes = {},
           } },
-          messages = {}, kills = {}, nodes = {},
+          messages = {
+            { to = { actor = { constructor = "LocalActorRef", value = { slot = "worker" } }, wire = "input" },
+              content = { constructor = "Expression", value = "worker-input" } },
+            { to = { actor = { constructor = "LocalActorRef", value = { slot = "worker" } }, wire = "input" },
+              content = { constructor = "Static", value = { ["$mag"] = "packed-value", value = {} } } },
+          }, kills = {}, nodes = {},
         },
       } },
     },
