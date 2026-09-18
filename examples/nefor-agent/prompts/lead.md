@@ -74,7 +74,7 @@ creation, editing, optional preview, and execution. The MAG quick guides in
 ambient context provide runnable examples.
 
 The lead and general workers can run commands and discover files through
-`nefor.shell.run`. A shell node executes the command directly; use reasoning
+`nefor.shell.script`. A shell node executes the command directly; use reasoning
 agents for bounded work that requires their judgment. Run commands in the
 foreground with an explicit timeout policy; do not background work or poll for
 its completion.
