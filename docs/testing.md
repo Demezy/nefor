@@ -33,3 +33,13 @@ Each run preserves its immutable manifest, Cargo JSON, phase logs, signing list,
 and watchdog output beneath `tmp/prepared-tests/`. These artifacts are the
 evidence boundary for inventory, phase timing, process kind, failures, and
 timeouts.
+
+## Nix linker fallback
+
+On qhl, the login shell exposes Cargo but not `cc`. If `nix develop` cannot
+realize the pinned shell (observed: the GNU `config.sub` source returned HTTP
+404), existing Nix compiler outputs can run the tests without changing the
+flake lock. Locate `gcc-wrapper-*/bin/cc` and `binutils-wrapper-*/bin/ar` under
+`/nix/store`, prepend those two `bin` directories to `PATH`, and run the normal
+Cargo command with `--offline`. The MAG regressions and `just check` use this
+same environment; `CARGO_NET_OFFLINE=true` applies offline mode to recipes.
