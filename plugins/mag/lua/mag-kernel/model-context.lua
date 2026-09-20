@@ -18,7 +18,8 @@ local function utf8_head(value, limit)
     if byte < 128 or byte >= 192 then
       if byte >= 192 then
         local width = byte < 224 and 2 or (byte < 240 and 3 or 4)
-        if finish + width - 1 > limit then finish = finish - 1 end
+        local last = finish + width - 1
+        finish = last <= limit and last or finish - 1
       end
       break
     end

@@ -337,7 +337,12 @@ function M:on_emit(id, message, generation)
     -- plane reads outputs by path) before routing it downstream. Kernel-
     -- synthesized status types (mag.Unit / failures) go out via apply_completion,
     -- not here, so only real actor outputs are persisted.
-    local arrival, arrival_error = self:factory_arrival(id, kind, message)
+    local ok, arrival, arrival_error = pcall(self.factory_arrival, self, id, kind, message)
+    if not ok then
+      arrival_error = string.format("actor '%s' output '%s' validation failed: %s",
+        tostring(id), tostring(kind), tostring(arrival))
+      arrival = nil
+    end
     if not arrival then
       self.log.error(arrival_error)
       self.events({
