@@ -156,6 +156,7 @@ function M.new(opts)
     -- unit-testable; init.lua wires the real emitter and an output-persistence-
     -- backed writer, tests pass capturing stubs.
     events = opts.events or noop,
+    is_failed = opts.is_failed or function() return false end,
     persist_output = opts.persist_output or noop,
     observe_output = opts.observe_output or noop,
     settle_result = opts.settle_result or function(id, result, persist_result, persisted)
@@ -280,6 +281,12 @@ function M:on_emit(id, message, generation)
     and kind ~= CAP_INVOKE and kind ~= COMPLETE and kind ~= FAILED
     and kind ~= RUN_COMPLETE and kind ~= APPROVAL_REQUEST
     and kind ~= APPROVAL_CANCEL
+  if self.is_failed() and not signal_bus_envelope
+      and not (self.signaling[id] and kind == APPROVAL_CANCEL) then
+    self.events({ kind = EVT_EMISSION_IGNORED, from = id,
+      message_kind = kind, reason = "run_failed" })
+    return false
+  end
   local terminal_control_signal = kind == RUN_COMPLETE
     or (self.signaling[id] and kind == APPROVAL_CANCEL)
   if generation ~= nil and not terminal_control_signal
@@ -647,6 +654,7 @@ end
 -- machine buffers partial product inputs, and an assembled activation
 -- constructs the instance on demand (activate).
 function M:deliver(dest_id, arrival, legacy_tag, legacy_message)
+  if self.is_failed() then return end
   if not typed_value.is_trusted(arrival) then
     local from = arrival
     local dest = self.inventory.get(dest_id)
@@ -673,6 +681,7 @@ function M:deliver(dest_id, arrival, legacy_tag, legacy_message)
 end
 
 function M:deliver_initial(dest_id, from, message)
+  if self.is_failed() then return end
   local dest = self.inventory.get(dest_id)
   if not dest or type(dest.input) ~= "table" then
     local content = message.content or {}
@@ -931,7 +940,9 @@ end
 -- they are already routed by the time deliver returns); the kernel then emits
 -- the reserved status type for the completion (docs/ir.md, Firing).
 function M:activate(id, activation)
+  if self.is_failed() then return end
   local instance = self.instances[id] or self:construct_instance(id)
+  if self.is_failed() then return end
   if not instance or type(instance.deliver) ~= "function" then
     self.log.warn(string.format("actor '%s' has no deliver entry point", tostring(id)))
     return
@@ -1004,6 +1015,10 @@ end
 -- (mag.run_failed) carrying the failure detail. `nil`/"pending" defers (async
 -- capability path).
 function M:apply_completion(id, completion)
+  if self.is_failed() then
+    self:mark_idle(id)
+    return
+  end
   if completion == nil then
     return
   end
@@ -1076,6 +1091,7 @@ function M:bus_observation(response)
   response = response or {}
   local entry = self.correlation:peek(response.id)
   if not entry then return false end
+  if self.is_failed() then return true end
   local instance = self.instances[entry.requester]
   if instance and type(instance.handle_observation) == "function" then
     instance.handle_observation(response)
@@ -1089,6 +1105,7 @@ function M:bus_response(response)
   if not entry then
     return false
   end
+  if self.is_failed() then return true end
   local dest = self.inventory.get(entry.requester)
   if not dest or dest.state == "dead" then
     self.log.info(string.format("capability reply dropped: requester '%s' is dead", tostring(entry.requester)))

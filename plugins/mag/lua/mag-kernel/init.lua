@@ -257,6 +257,10 @@ local function new_run_context(meta)
     logical_actors = {},
   }
 
+  local function is_failed()
+    return ctx.terminal_settlement ~= nil and ctx.terminal_settlement.status == "failed"
+  end
+
   -- Injected lifecycle-event sink (observer.lua's EVENTS set, plus routing's
   -- ready/run-complete). Every lifecycle event is broadcast on the NCP bus as
   -- a Body::Event (via the host's nefor.emit queue, drained by the plugin
@@ -268,6 +272,14 @@ local function new_run_context(meta)
   local function emit_event(event)
     if type(event) ~= "table" then
       return
+    end
+    if event.kind == observer.EVENTS.run_failed and ctx.terminal_settlement then
+      event = {
+        kind = "mag.terminal_settlement_ignored",
+        from = event.from,
+        accepted_from = ctx.terminal_settlement.from,
+        reason = "already_settled",
+      }
     end
     event.run_id = ctx.run_id
     ctx.observation_seq = ctx.observation_seq + 1
@@ -285,14 +297,16 @@ local function new_run_context(meta)
       -- Terminal acceptance is owned by settle_result below; event
       -- publication cannot replace or repopulate the accepted value.
     elseif event.kind == observer.EVENTS.run_failed then
-      -- An unhandled actor failure (routing.lua apply_completion). Stash it
-      -- for take_run_failed so the host fails the run with the detail
-      -- surfaced.
+      -- Latch before returning to the actor: later output must not turn this
+      -- failure into success, even after the host consumes the failure detail.
       ctx.run_failed = {
         error = event.error,
         failure = event.failure,
         from = event.from,
       }
+      ctx.terminal_settlement = { status = "failed", from = event.from, failure = ctx.run_failed }
+      ctx.pending_completion = nil
+      ctx.operation_queue = {}
     end
     nefor.emit(event)
   end
@@ -323,8 +337,8 @@ local function new_run_context(meta)
     return nil
   end
 
-  -- The sole terminal linearization point. Persistence and completion become
-  -- visible together, and the accepted value remains latched after host take.
+  -- Persistence and completion become visible together. The accepted
+  -- terminal outcome remains latched after the host takes its result.
   local function publish_completion(settlement)
     persist_output(settlement.from, settlement.persisted_result or settlement.result)
     local completion = {
@@ -332,6 +346,7 @@ local function new_run_context(meta)
       persisted = ctx.last_output_path ~= nil,
       result = settlement.result,
     }
+    settlement.status = "completed"
     settlement.completion = completion
     ctx.terminal_settlement = settlement
     ctx.run_complete = completion
@@ -369,7 +384,7 @@ local function new_run_context(meta)
   end
 
   ctx.settle_quiescent = function()
-    if ctx.operation_failed then
+    if ctx.operation_failed or is_failed() then
       ctx.pending_completion = nil
       ctx.run_complete = nil
       return false
@@ -426,10 +441,11 @@ local function new_run_context(meta)
       return provenance
     end,
     events = emit_event,
+    is_failed = is_failed,
     persist_output = persist_output,
     settle_result = settle_result,
     observe_output = function(actor, wire, output)
-      if ctx.operation_failed then return false end
+      if ctx.operation_failed or is_failed() then return false end
       ctx.emission_seq = ctx.emission_seq + 1
       local emission_seq = ctx.emission_seq
       local function fail_payload(kind, id)
@@ -439,7 +455,8 @@ local function new_run_context(meta)
         ctx.operation_queue = {}
         ctx.pending_completion = nil
         ctx.run_complete = nil
-        ctx.run_failed = { error = ctx.operation_error, failure = kind .. "_payload", from = actor }
+        emit_event({ kind = observer.EVENTS.run_failed,
+          error = ctx.operation_error, failure = kind .. "_payload", from = actor })
         return false
       end
       for _, operation in ipairs(ctx.operations) do
@@ -600,9 +617,11 @@ local function new_run_context(meta)
   ctx.modlog = mlog
   ctx.observer = obs
   ctx.drain_operations = function()
-    if ctx.operation_draining or ctx.operation_failed then return not ctx.operation_failed end
+    if ctx.operation_draining or ctx.operation_failed or is_failed() then
+      return not (ctx.operation_failed or is_failed())
+    end
     ctx.operation_draining = true
-    while not ctx.operation_failed and #ctx.operation_queue > 0 do
+    while not ctx.operation_failed and not is_failed() and #ctx.operation_queue > 0 do
       local trigger = table.remove(ctx.operation_queue, 1)
       local delta, materialize_error = operations.materialize(trigger.operation, trigger.value)
       if not delta then
@@ -620,12 +639,13 @@ local function new_run_context(meta)
         ctx.operation_queue = {}
         ctx.pending_completion = nil
         ctx.run_complete = nil
-        ctx.run_failed = { error = ctx.operation_error, failure = "operation", from = "mag.operation" }
+        emit_event({ kind = observer.EVENTS.run_failed,
+          error = ctx.operation_error, failure = "operation", from = "mag.operation" })
       end
     end
     ctx.operation_draining = false
     ctx.settle_quiescent()
-    return not ctx.operation_failed
+    return not ctx.operation_failed and not is_failed()
   end
   -- Exposed so init-level control ops (interrupt_run) can emit run-scoped
   -- lifecycle events through the same run_id-stamping sink the observer uses.
